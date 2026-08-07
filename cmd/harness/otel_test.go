@@ -44,9 +44,6 @@ func TestRunOTel_DisabledByDefault(t *testing.T) {
 }
 
 func TestRunOTel_SendsOnPromptComplete(t *testing.T) {
-	// End-to-end OTEL is best-effort and deferred; httptest races teardown.
-	// Verify synchronously via internal/otel and only smoke-test that the
-	// CLI wiring does not fail when otel is enabled (see FailureDoesNotFailPrompt).
 	fp := llmtest.New("fake", okStepWithUsage(10, 5))
 	var bodies []string
 	var mu sync.Mutex
@@ -70,15 +67,12 @@ func TestRunOTel_SendsOnPromptComplete(t *testing.T) {
 	if code := run(env); code != 0 {
 		t.Fatalf("exit %d errw=%s", code, errw.String())
 	}
-	// Best-effort: deferred Export(2s) may race server close; tolerate 0 but log.
 	mu.Lock()
-	n := len(bodies)
-	mu.Unlock()
-	if n == 0 {
-		t.Logf("no otel bodies (deferred flush raced teardown) errw=%s", errw.String())
-		return
+	if len(bodies) == 0 {
+		mu.Unlock()
+		t.Fatalf("no OTEL payload was flushed; stderr=%s", errw.String())
 	}
-	mu.Lock()
+
 	joined := strings.Join(bodies, "\n")
 	mu.Unlock()
 	if !strings.Contains(joined, "harness.prompt.total") {
@@ -89,6 +83,52 @@ func TestRunOTel_SendsOnPromptComplete(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(joined), "prompt text") {
 		t.Fatalf("leaked prompt text")
+	}
+}
+
+func TestRunOTel_MalformedEndpointFailsStartupInOneShotMode(t *testing.T) {
+	fp := llmtest.New("fake", okStep())
+	env, _, errw, _, _ := fakeProviderEnvWithProxy(t, []string{"-model", "claude-opus-4-8"}, fp, "")
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	cfg := map[string]any{"otel": map[string]any{"enabled": true, "endpoint": "://not-a-url"}}
+	data, _ := json.Marshal(cfg)
+	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.args = append(env.args, "--config", cfgPath, "-p", "hi")
+	if code := run(env); code != 2 {
+		t.Fatalf("exit %d, want usage error 2; stderr=%s", code, errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("provider received %d requests after OTEL startup failure", len(fp.Requests))
+	}
+	if !strings.Contains(errw.String(), "otel.endpoint must be an absolute http(s) URL") {
+		t.Fatalf("stderr missing endpoint error: %s", errw.String())
+	}
+}
+
+func TestRunOTel_ExplicitEmptyHostnameOmitsHostResource(t *testing.T) {
+	fp := llmtest.New("fake", okStep())
+	var body string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		body = string(data)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	env, _, errw, _, _ := fakeProviderEnvWithProxy(t, []string{"-model", "claude-opus-4-8"}, fp, "")
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	data, _ := json.Marshal(map[string]any{"otel": map[string]any{"enabled": true, "endpoint": srv.URL, "hostname": ""}})
+	if err := os.WriteFile(cfgPath, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env.args = append(env.args, "--config", cfgPath, "-p", "hi")
+	if code := run(env); code != 0 {
+		t.Fatalf("exit %d; stderr=%s", code, errw.String())
+	}
+	if strings.Contains(body, `"host.name"`) {
+		t.Fatalf("explicit empty hostname still exported host.name: %s", body)
 	}
 }
 

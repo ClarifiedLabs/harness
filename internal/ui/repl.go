@@ -26,6 +26,7 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
+	"harness/internal/otel"
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
 	"harness/internal/replprompt"
@@ -36,7 +37,6 @@ import (
 	"harness/internal/term"
 	"harness/internal/todo"
 	"harness/internal/tools"
-
 )
 
 const (
@@ -230,7 +230,8 @@ type App struct {
 	// names none. Empty falls back to the built-in default agent.
 	HandoffAgent string
 
-	otelForwarder otelForwarder
+	otelSink            *otel.Sink
+	otelRecordedSession string
 
 	SessionPath    string // current save path; /clear rotates it
 	SessionTree    *session.Tree
@@ -3146,6 +3147,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.Provider = selection.Provider
 	app.Model = selection.Model
 	app.RegistryModel = selection.RegistryModel
+	app.refreshOTelIdentity()
 	if app.Hooks != nil {
 		app.Hooks.SetModel(app.Model)
 	}
@@ -3750,6 +3752,7 @@ func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
 	if selection.Model != "" {
 		app.Model = selection.Model
 	}
+	app.refreshOTelIdentity()
 	if app.Hooks != nil {
 		app.Hooks.SetModel(app.Model)
 	}
@@ -4032,6 +4035,7 @@ func (app *App) refreshMCP(ctx context.Context) error {
 // clear resets the conversation and rotates to a fresh auto-save file (design
 // §10, §11). Cumulative usage resets with the conversation.
 func (app *App) clear() {
+	app.RecordOTelSession()
 	if app.Background != nil {
 		app.Background.Clear()
 	}
@@ -4060,6 +4064,7 @@ func (app *App) clear() {
 	app.todoPromptStatusBeforeUsage = false
 	app.todoPromptStatusBeforeUsagePrompt = 0
 	app.SessionPath = session.DefaultPath(app.StateDir, app.Created)
+	app.refreshOTelIdentity()
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)
 	}
@@ -5301,13 +5306,14 @@ type accumulatingSink struct {
 	r                           *Renderer
 	app                         *App
 	rec                         *sessionrec.Recorder
-	otel                        otelForwarder
+	otel                        *otel.Sink
 	prompt                      int
 	printTodoPromptBeforeUsage  bool
 	reasoningOutput             bool
 	promptUsage                 agent.PromptUsage // last PromptComplete, priced; JSON run modes report it in prompt_end
 	pendingNames                map[string]string
 	pendingOTel                 map[string]pendingOTelTool
+	otelToolNames               []string
 	todoTurn                    int
 	turn                        int
 	attempt                     int
@@ -5318,53 +5324,119 @@ type accumulatingSink struct {
 	finalText                   string
 }
 
-type otelForwarder = any
-
-// Ensure otelSinkIface matches otel.Sink; compile-time check via blank var if we could import otel here.
-// We avoid the import and instead verify at vet time via the otelCall type assert.
-
-type otelSinkIface interface {
-	ToolResultWithName(toolName string, result llm.ToolResult, durationMS int64, activity tools.Activity)
-	TurnProgress(p agent.TurnProgress)
-	TurnComplete(usage agent.TurnUsage)
-	PromptComplete(usage agent.PromptUsage, duration time.Duration)
-	MaintenanceComplete(usage agent.MaintenanceUsage)
-	RetentionApplied(event agent.RetentionEvent)
-	ModelRequestEvent(event llm.ModelRequestEvent)
-	RecordCommands(input []byte)
-	RecordSearch(tool, display string, metrics map[string]int)
-	RecordSkill(source, status string)
-	RecordTurnSummary(toolNames []string)
-	RecordParallel(batches [][]string)
-	RecordSession(costUSD float64, totalTokens int)
-	RecordDelegate(agentName, status, terminationReason string, turns int, usage interface{}, compactions int)
+// SetOTel installs the concrete OTEL sink before prompts begin. Keeping this
+// typed prevents optional-interface drift from silently disabling telemetry.
+func (app *App) SetOTel(sink *otel.Sink) {
+	app.otelSink = sink
+	app.refreshOTelIdentity()
 }
 
-func otelCall(fwd any, fn func(otelSinkIface)) {
-	if fwd == nil {
+func (app *App) refreshOTelIdentity() {
+	if app == nil || app.otelSink == nil {
 		return
 	}
-	sink, ok := fwd.(otelSinkIface)
-	if !ok || sink == nil {
+	app.otelSink.SetIdentity(filepath.Base(app.SessionPath), app.Provider, app.Model, app.AgentName)
+}
+
+// RecordOTelSession emits one final lifecycle snapshot for the current session.
+// It is safe to call from both /clear and process shutdown.
+func (app *App) RecordOTelSession() {
+	if app == nil || app.otelSink == nil || app.SessionPath == "" || app.otelRecordedSession == app.SessionPath {
 		return
 	}
-	fn(sink)
+	app.refreshOTelIdentity()
+	app.otelRecordedSession = app.SessionPath
+	usage := app.usage.Usage
+	totalTokens := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheWriteTokens + usage.CacheWrite1hTokens + usage.ReasoningTokens
+	app.otelSink.RecordSession(app.usage.CostUSD, totalTokens)
+	if app.Agent != nil {
+		app.otelSink.RecordContext(otelContextComposition(app.Agent.Transcript()))
+	}
+	if app.Background == nil {
+		return
+	}
+	for _, job := range app.Background.List() {
+		if job.Kind != "delegate" {
+			continue
+		}
+		status, terminationReason := job.Status, job.Status
+		agentName := job.Agent
+		usage := job.Result.Usage
+		turns, compactions := 0, 0
+		if progress, ok := job.Progress.(func() agent.DelegateProgressSnapshot); ok {
+			turns = progress().Turn
+		}
+		if job.Result.TranscriptPath != "" {
+			if raw, err := os.ReadFile(filepath.Join(job.Result.TranscriptPath, "meta.json")); err == nil {
+				var meta session.ChildMeta
+				if json.Unmarshal(raw, &meta) == nil {
+					status, terminationReason, turns, usage = meta.Status, meta.TerminationReason, meta.TurnsUsed, meta.Usage
+					if meta.Agent != "" {
+						agentName = meta.Agent
+					}
+				}
+			}
+			if child, err := session.Load(job.Result.TranscriptPath); err == nil {
+				compactions = child.Usage.Compactions
+			}
+		}
+		if status == "" || status == "running" {
+			status, terminationReason = "abandoned", "abandoned"
+		} else if terminationReason == "" {
+			terminationReason = status
+		}
+		if job.Error != "" && terminationReason == status {
+			terminationReason = "error"
+		}
+		app.otelSink.RecordDelegate(agentName, status, terminationReason, turns, usage, compactions)
+	}
 }
 
-// SetOTel installs the OTEL forwarder on the App. It is called once per App
-// after the Exporter is created, before any prompt runs.
-func (app *App) SetOTel(f otelForwarder) {
-	app.otelForwarder = f
-}
-
-func (s *accumulatingSink) otelSink() otelForwarder {
-	if s.otel != nil {
-		return s.otel
+func otelContextComposition(messages []llm.Message) otel.ContextComposition {
+	composition := otel.ContextComposition{Messages: len(messages)}
+	var addBlock func(llm.Role, llm.ContentBlock)
+	addBlock = func(role llm.Role, block llm.ContentBlock) {
+		composition.Blocks++
+		switch block.Kind {
+		case llm.BlockText:
+			if role == llm.RoleAssistant {
+				composition.AssistantTextBytes += len(block.Text)
+			} else {
+				composition.UserTextBytes += len(block.Text)
+			}
+		case llm.BlockImage:
+			if block.ImageEncodedBytes > 0 {
+				composition.ImageEncodedBytes += block.ImageEncodedBytes
+			} else {
+				composition.ImageEncodedBytes += len(block.ImageData)
+			}
+		case llm.BlockToolUse:
+			composition.ToolInputBytes += len(block.ToolInput)
+		case llm.BlockToolResult:
+			composition.ToolResultBytes += len(block.ResultText)
+			for _, nested := range block.ResultContent {
+				addBlock(role, nested)
+			}
+		case llm.BlockThinking:
+			composition.ReasoningTextBytes += len(block.Thinking)
+			composition.ReasoningOpaqueBytes += len(block.ThinkingSignature)
+		case llm.BlockRedactedThinking:
+			composition.ReasoningOpaqueBytes += len(block.RedactedData)
+		case llm.BlockReasoning:
+			composition.ReasoningOpaqueBytes += len(block.ReasoningID) + len(block.ReasoningEncrypted)
+		case llm.BlockInteractionThought:
+			composition.ReasoningTextBytes += len(block.InteractionThoughtSummary)
+			composition.ReasoningOpaqueBytes += len(block.InteractionThoughtSignature)
+		case llm.BlockInteractionStep:
+			composition.ReasoningOpaqueBytes += len(block.InteractionStep)
+		}
 	}
-	if s.app != nil {
-		return s.app.otelForwarder
+	for _, message := range messages {
+		for _, block := range message.Content {
+			addBlock(message.Role, block)
+		}
 	}
-	return nil
+	return composition
 }
 
 type pendingOTelTool struct {
@@ -5393,7 +5465,7 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 		s.promptStart = time.Now()
 	}
 	if app != nil {
-		s.otel = app.otelForwarder
+		s.otel = app.otelSink
 		var mirror func(session.Event)
 		if app.RunStream != nil {
 			mirror = app.RunStream.Mirror
@@ -5491,6 +5563,7 @@ func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.Context
 		s.todoTurn = turn
 	}
 	s.attemptText.Reset()
+	s.otelToolNames = nil
 	s.turn = turn
 	s.attempt = attempt
 	s.r.TurnAttemptStart(turn, attempt, ctx)
@@ -5512,8 +5585,8 @@ func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 	if line != "" && event.Outcome == llm.ModelRequestOutcomeTerminal {
 		s.terminalModelErrorDisplayed = true
 	}
-	if fwd := s.otel; fwd != nil {
-		otelCall(fwd, func(sink otelSinkIface) { sink.ModelRequestEvent(event) })
+	if s.otel != nil {
+		s.otel.ModelRequestEvent(event)
 	}
 	s.rec.ModelRequestEvent(event)
 	if s.app.DiagnosticLogger == nil {
@@ -5573,6 +5646,7 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pendingNames[c.ID] = c.Name
+	s.otelToolNames = append(s.otelToolNames, c.Name)
 	if s.otel != nil || (s.app != nil && s.app.Agent != nil) {
 		activity := tools.Activity{Class: tools.ActivityOther, OperationCount: 1}
 		if s.app != nil && s.app.Agent != nil {
@@ -5589,27 +5663,24 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	delete(s.pendingNames, res.ForID)
 	pendingOTel := s.pendingOTel[res.ForID]
 	delete(s.pendingOTel, res.ForID)
-	if fwd := s.otel; fwd != nil {
+	if s.otel != nil {
 		input := append(json.RawMessage(nil), pendingOTel.input...)
 		timeSince := time.Since(pendingOTel.started).Milliseconds()
-		isZero := pendingOTel.started.IsZero()
-		otelCall(fwd, func(sink otelSinkIface) {
-			durMS := int64(-1)
-			if !isZero {
-				durMS = timeSince
-			}
-			toolName := name
-			if toolName == "" {
-				toolName = pendingOTel.name
-			}
-			sink.ToolResultWithName(toolName, res, durMS, pendingOTel.activity)
-			if toolName == "run_command" && len(input) > 0 {
-				sink.RecordCommands(input)
-			}
-			if toolName == "search" || toolName == "rg" || toolName == "grep" {
-				sink.RecordSearch(toolName, res.Text, res.Metrics)
-			}
-		})
+		durMS := int64(-1)
+		if !pendingOTel.started.IsZero() {
+			durMS = timeSince
+		}
+		toolName := name
+		if toolName == "" {
+			toolName = pendingOTel.name
+		}
+		s.otel.ToolResultWithName(toolName, res, durMS, pendingOTel.activity)
+		if toolName == "run_command" && len(input) > 0 {
+			s.otel.RecordCommands(input)
+		}
+		if toolName == "search" || toolName == "rg" || toolName == "grep" {
+			s.otel.RecordSearch(toolName, res.Text, res.Metrics)
+		}
 	}
 	s.r.ToolResult(res)
 	s.rec.ToolResult(res)
@@ -5692,11 +5763,9 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	if !u.Usage.CostKnown {
 		u.Usage.CostUSD, u.Usage.CostKnown = s.app.Registry.Cost(s.app.usageKey(), u.Usage)
 	}
-	// Emit solo_todo / single_inspect via otel when this turn had exactly one tool.
-	// Tool name is not in TurnUsage, so we rely on TurnProgress already handling
-	// batched_operation / single_lookup; solo_todo remains best-effort via RecordTurnSummary if caller knows name.
-	if fwd := s.otel; fwd != nil {
-		otelCall(fwd, func(sink otelSinkIface) { sink.TurnComplete(u) })
+	if s.otel != nil {
+		s.otel.RecordTurnSummary(s.otelToolNames)
+		s.otel.TurnComplete(u)
 	}
 	s.r.TurnComplete(u)
 	s.rec.TurnComplete(u)
@@ -5712,8 +5781,8 @@ func (s *accumulatingSink) FinalText() string {
 }
 
 func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
-	if fwd := s.otel; fwd != nil {
-		otelCall(fwd, func(sink otelSinkIface) { sink.MaintenanceComplete(u) })
+	if s.otel != nil {
+		s.otel.MaintenanceComplete(u)
 	}
 	s.rec.MaintenanceComplete(u)
 }
@@ -5764,8 +5833,8 @@ func (s *accumulatingSink) ClosureStarted(event agent.ClosureEvent) {
 }
 
 func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
-	if fwd := s.otel; fwd != nil {
-		otelCall(fwd, func(sink otelSinkIface) { sink.TurnProgress(progress) })
+	if s.otel != nil {
+		s.otel.TurnProgress(progress)
 	}
 	s.rec.TurnProgress(progress)
 }
@@ -5782,8 +5851,8 @@ func (s *accumulatingSink) WorkflowStatus() agent.WorkflowStatus {
 }
 
 func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
-	if fwd := s.otel; fwd != nil {
-		otelCall(fwd, func(sink otelSinkIface) { sink.RetentionApplied(event) })
+	if s.otel != nil {
+		s.otel.RetentionApplied(event)
 	}
 	s.recordEvent(session.Event{
 		Type:      session.EventRetention,
@@ -5794,8 +5863,8 @@ func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
 }
 
 func (s *accumulatingSink) SkillActivated(event agent.SkillActivationEvent) {
-	if fwd := s.otel; fwd != nil {
-		otelCall(fwd, func(sink otelSinkIface) { sink.RecordSkill(event.Source, event.Status) })
+	if s.otel != nil {
+		s.otel.RecordSkill(event.Source, event.Status)
 	}
 	s.recordEvent(session.Event{
 		Type:    session.EventSkillActivation,
@@ -5906,23 +5975,20 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 		}
 	}
 	s.r.SetPromptCost(cost, costKnown)
-	if fwd := s.otel; fwd != nil {
-		dur := time.Since(s.promptStart)
-		otelCall(fwd, func(sink otelSinkIface) {
-			sink.PromptComplete(u, dur)
-			if s.app != nil && s.app.Agent != nil {
-				all := s.app.Agent.Transcript()
-				var batches [][]string
-				for _, m := range all {
-					for _, b := range m.ParallelToolBatches {
-						if len(b.ToolUseIDs) >= 2 {
-							batches = append(batches, append([]string(nil), b.ToolUseIDs...))
-						}
+	if s.otel != nil {
+		s.otel.PromptComplete(u, time.Since(s.promptStart))
+		if s.app != nil && s.app.Agent != nil {
+			all := s.app.Agent.Transcript()
+			var batches [][]string
+			for _, m := range all {
+				for _, b := range m.ParallelToolBatches {
+					if len(b.ToolUseIDs) >= 2 {
+						batches = append(batches, append([]string(nil), b.ToolUseIDs...))
 					}
 				}
-				sink.RecordParallel(batches)
 			}
-		})
+			s.otel.RecordParallel(batches)
+		}
 	}
 	s.r.PromptComplete(u)
 	s.app.addUsage(u)

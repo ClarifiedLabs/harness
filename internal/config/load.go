@@ -155,6 +155,7 @@ func LoadParsed(options LoadOptions, values cli.Values) (Result, error) {
 	}
 	result.Config.MCP.Local.EnableSet = result.Sources["mcp.local.enable"].Kind != configmeta.SourceDefault
 	result.Config.LSP.Serena.EnableSet = result.Sources["lsp.serena.enable"].Kind != configmeta.SourceDefault
+	result.Config.OTel.HostnameSet = result.Sources["otel.hostname"].Kind != configmeta.SourceDefault
 	if err := validateResolved(result.Config); err != nil {
 		return Result{}, err
 	}
@@ -344,6 +345,7 @@ func resolveSerenaEnv(context *resolveContext) error {
 }
 
 func resolveOTelHeaders(context *resolveContext) error {
+	context.defaultSource("otel.headers")
 	if context.file.OTel.Set && context.file.OTel.Value.Headers.Set {
 		values, err := expandStringMap(context.file.OTel.Value.Headers.Value, context.lookup, "otel.headers")
 		if err != nil {
@@ -351,34 +353,22 @@ func resolveOTelHeaders(context *resolveContext) error {
 		}
 		context.result.Config.OTel.Headers = values
 		context.fileSource("otel.headers")
-	} else {
-		if raw, present := context.lookup("HARNESS_OTEL_HEADERS"); present {
-			parsed, err := parseOTelHeadersEnv(raw)
-			if err != nil {
-				return fmt.Errorf("environment HARNESS_OTEL_HEADERS for otel.headers: %w", err)
-			}
-			expanded, err := expandStringMap(parsed, context.lookup, "otel.headers")
-			if err != nil {
-				return fmt.Errorf("environment HARNESS_OTEL_HEADERS for otel.headers: %w", err)
-			}
-			context.result.Config.OTel.Headers = expanded
-			context.result.Sources["otel.headers"] = configmeta.Source{Kind: configmeta.SourceEnvironment, Name: "HARNESS_OTEL_HEADERS"}
-			return nil
+	}
+	for _, name := range []string{"OTEL_EXPORTER_OTLP_HEADERS", "HARNESS_OTEL_HEADERS"} {
+		raw, present := context.lookup(name)
+		if !present {
+			continue
 		}
-		if raw, present := context.lookup("OTEL_EXPORTER_OTLP_HEADERS"); present {
-			parsed, err := parseOTelHeadersEnv(raw)
-			if err != nil {
-				return fmt.Errorf("environment OTEL_EXPORTER_OTLP_HEADERS for otel.headers: %w", err)
-			}
-			expanded, err := expandStringMap(parsed, context.lookup, "otel.headers")
-			if err != nil {
-				return fmt.Errorf("environment OTEL_EXPORTER_OTLP_HEADERS for otel.headers: %w", err)
-			}
-			context.result.Config.OTel.Headers = expanded
-			context.result.Sources["otel.headers"] = configmeta.Source{Kind: configmeta.SourceEnvironment, Name: "OTEL_EXPORTER_OTLP_HEADERS"}
-			return nil
+		parsed, err := parseOTelHeadersEnv(raw)
+		if err != nil {
+			return fmt.Errorf("environment %s for otel.headers: %w", name, err)
 		}
-		context.defaultSource("otel.headers")
+		expanded, err := expandStringMap(parsed, context.lookup, "otel.headers")
+		if err != nil {
+			return fmt.Errorf("environment %s for otel.headers: %w", name, err)
+		}
+		context.result.Config.OTel.Headers = expanded
+		context.result.Sources["otel.headers"] = configmeta.Source{Kind: configmeta.SourceEnvironment, Name: name}
 	}
 	return nil
 }

@@ -17,7 +17,6 @@ type Config struct {
 	Hostname           string
 	Headers            map[string]string
 	ResourceAttributes map[string]string
-	TracesEnabled      bool
 }
 
 func (c Config) Validate() error {
@@ -49,28 +48,11 @@ func normalizeEndpoint(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("otel endpoint must not be empty")
 	}
-	if strings.HasSuffix(strings.TrimSuffix(raw, "/"), "/v1/metrics") {
-		endpoint := strings.TrimSuffix(raw, "/")
-		if _, err := url.Parse(endpoint); err != nil {
-			return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL: %w", err)
-		}
-		parsed, err := url.Parse(endpoint)
-		if err != nil {
-			return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL: %w", err)
-		}
-		if parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
-			return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL")
-		}
-		return endpoint, nil
-	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
 		return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL: %w", err)
 	}
-	if parsed.Scheme != "http" && parsed.Scheme != "https" {
-		return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL")
-	}
-	if parsed.Host == "" {
+	if parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
 		return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL")
 	}
 	if parsed.User != nil {
@@ -79,8 +61,18 @@ func normalizeEndpoint(raw string) (string, error) {
 	if parsed.Fragment != "" {
 		return "", fmt.Errorf("otel endpoint must not contain a fragment")
 	}
-	base := fmt.Sprintf("%s://%s", parsed.Scheme, parsed.Host)
-	return base + "/v1/metrics", nil
+
+	path := strings.TrimRight(parsed.EscapedPath(), "/")
+	if !strings.HasSuffix(path, "/v1/metrics") {
+		path += "/v1/metrics"
+	}
+	decodedPath, err := url.PathUnescape(path)
+	if err != nil {
+		return "", fmt.Errorf("otel endpoint has an invalid path: %w", err)
+	}
+	parsed.Path = decodedPath
+	parsed.RawPath = path
+	return parsed.String(), nil
 }
 
 func truncate(s string, n int) string {

@@ -43,6 +43,7 @@ import (
 	"harness/internal/mcptools"
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/otel"
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
 	"harness/internal/runstream"
@@ -54,7 +55,6 @@ import (
 	"harness/internal/tmux"
 	"harness/internal/todo"
 	"harness/internal/tools"
-	"harness/internal/otel"
 	"harness/internal/tracing"
 	"harness/internal/ui"
 )
@@ -1433,10 +1433,10 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 		return ref, nil
 	})
-	// OTEL exporter: opt-in, best-effort. Disabled by default or when endpoint is empty.
-	// Hostname defaults to short OS hostname (host.name) but can be overridden via otel.hostname.
+	// OTEL exporter: opt-in. Hostname defaults to the short OS hostname;
+	// an explicitly empty otel.hostname disables host.name.
 	hostname := cfg.OTel.Hostname
-	if cfg.OTel.Enabled && cfg.OTel.Hostname == "" {
+	if cfg.OTel.Enabled && !cfg.OTel.HostnameSet {
 		if h, err := os.Hostname(); err == nil {
 			h = strings.TrimSpace(h)
 			if h != "" {
@@ -1447,8 +1447,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			}
 		}
 	}
-	var otelExp *otel.Exporter
-	if cfg.OTel.Enabled && cfg.OTel.Endpoint != "" {
+	if cfg.OTel.Enabled {
 		otelCfg := otel.Config{
 			Enabled:            cfg.OTel.Enabled,
 			Endpoint:           cfg.OTel.Endpoint,
@@ -1458,7 +1457,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			Hostname:           hostname,
 			Headers:            cfg.OTel.Headers,
 			ResourceAttributes: cfg.OTel.ResourceAttributes,
-			TracesEnabled:      cfg.OTel.TracesEnabled,
 		}
 		if otelCfg.Protocol == "" {
 			otelCfg.Protocol = "http/json"
@@ -1475,20 +1473,22 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 		exp, err := otel.NewExporter(otelCfg, buildinfo.Current(), sessionID, cfg.Provider, cfg.Model, agentName, cfg.OTel.ResourceAttributes)
 		if err != nil {
-			logger.Warn(fmt.Sprintf("otel: invalid config: %v", err), logging.Category("otel"))
-		} else {
-			otelExp = exp
-			otelSink := otel.NewSink(exp, toolRegistry, cfg.Provider, cfg.Model, agentName, false)
-			app.SetOTel(otelSink)
-			_ = otelExp
-			defer func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer cancel()
-				_ = exp.Export(ctx)
-			}()
+			fmt.Fprintf(stderr, "harness: otel: %v\n", err)
+			return ui.ExitUsage
 		}
+		otelSink := otel.NewSink(exp, toolRegistry, cfg.Provider, cfg.Model, agentName, false)
+		otelSink.SetIdentity(sessionID, cfg.Provider, cfg.Model, agentName)
+		app.SetOTel(otelSink)
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = exp.Export(ctx)
+		}()
+		periodicCtx, cancelPeriodic := context.WithCancel(context.Background())
+		defer cancelPeriodic()
+		exp.SetPeriodic(periodicCtx)
+		defer app.RecordOTelSession()
 	}
-	_ = otelExp
 
 	app.SetUsage(totals)
 	app.SetUsageByModel(resumedUsageByModel)
@@ -1698,29 +1698,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		// Re-warm after cache-invalidating events (agent/model/provider switch,
 		// compaction); the REPL captures a fresh snapshot at call time (r43).
 		app.Prewarm = prewarm
-	}
-
-	// Session-exit OTEL summary: emit gauges once before REPL entry so one-shot and REPL both get a final flush even if REPL never starts due to early exit.
-	// The actual gauges are emitted on PromptComplete; session.* is best-effort via exporter deferred above.
-	// Periodic flush for long REPL sessions (30s) without blocking prompt path.
-	if otelExp != nil {
-		go func(exp *otel.Exporter) {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ticker.C:
-					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-					_ = exp.Export(ctx)
-					cancel()
-				case <-exitCh:
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-					_ = exp.Export(ctx)
-					cancel()
-					return
-				}
-			}
-		}(otelExp)
 	}
 
 	// Interactive REPL. ui.Run owns the session save in every exit path,

@@ -518,6 +518,17 @@ built-in prompt or materialize built-in agents. `config check` strictly decodes 
 semantic dependencies such as agents, hooks, and `@file` references, then names
 the checked path on success. Explicitly selected missing files are errors.
 
+OTLP/HTTP JSON metrics are opt-in through `otel.enabled`; enabling them requires
+an absolute HTTP(S) `otel.endpoint`. A base endpoint has `/v1/metrics` appended,
+while an endpoint already ending in `/v1/metrics` is used as-is. Harness exports
+cumulative metrics every 30 seconds in every run mode and once more at shutdown;
+collector failures are retried on bounded transient errors and never fail a
+prompt. `otel.headers` may come from JSON, `OTEL_EXPORTER_OTLP_HEADERS`, or
+`HARNESS_OTEL_HEADERS` (in increasing precedence), and `${NAME}` references are
+expanded before use. Header values are always redacted from config output. The
+`host.name` resource defaults to the short OS hostname; explicitly setting
+`otel.hostname` to an empty string disables it.
+
 `HARNESS_RESUME` and `HARNESS_SESSION` are invocation-only counterparts to
 `-resume` and `-session`, not persistent settings. `HARNESS_REPL_INPUT_TRACE` is
 a diagnostic knob that appends timestamped terminal-input events to its path
@@ -615,7 +626,6 @@ environment variables, JSON paths, types, and defaults. The concise
 | `otel.timeout_seconds` | `integer` | - | `-otel-timeout` | `HARNESS_OTEL_TIMEOUT` | `otel.timeout_seconds` | 5 (seconds) | no | Harness otel.timeout seconds setting. |
 | `otel.service_name` | `string` | - | `-otel-service-name` | `OTEL_SERVICE_NAME`, `HARNESS_OTEL_SERVICE_NAME` | `otel.service_name` | "harness" | no | Harness otel.service name setting. |
 | `otel.hostname` | `string` | - | `-otel-hostname` | `HARNESS_OTEL_HOSTNAME`, `OTEL_HOSTNAME` | `otel.hostname` | short hostname (empty disables host.name) | no | Harness otel.hostname setting. |
-| `otel.traces.enabled` | `boolean` | `true`, `false` | `-otel-traces` | `HARNESS_OTEL_TRACES_ENABLED` | `otel.traces.enabled` | false | no | Harness otel.traces.enabled setting. |
 | `agents` | `object` | - | - | - | `agents` | unset | no | Structured agents settings. |
 | `mcp.headers` | `object` | - | - | - | `mcp.headers` | unset | yes | Structured mcp.headers settings. |
 | `mcp.disabled_servers` | `string[]` | - | - | - | `mcp.disabled_servers` | unset | no | Structured mcp.disabled_servers settings. |
@@ -627,7 +637,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `lsp.serena.env` | `object` | - | - | - | `lsp.serena.env` | unset | yes | Structured lsp.serena.env settings. |
 | `hooks` | `object` | - | `-hooks` | - | `hooks` | unset | no | Structured hooks settings. |
 | `hook_configs` | `string[]` | - | - | - | `hook_configs` | unset | no | Structured hook_configs settings. |
-| `otel.headers` | `object` | - | - | - | `otel.headers` | unset | yes | Structured otel.headers settings. |
+| `otel.headers` | `object` | - | - | `OTEL_EXPORTER_OTLP_HEADERS`, `HARNESS_OTEL_HEADERS` | `otel.headers` | unset | yes | Structured otel.headers settings. |
 | `otel.resource_attributes` | `object` | - | - | - | `otel.resource_attributes` | unset | no | Structured otel.resource_attributes settings. |
 <!-- harness-config-parameters:end -->
 

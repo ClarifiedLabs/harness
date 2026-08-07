@@ -25,6 +25,11 @@ func TestExporter_NormalizesEndpoint(t *testing.T) {
 		{"https://collector:4318/", "https://collector:4318/v1/metrics"},
 		{"https://collector:4318/v1/metrics", "https://collector:4318/v1/metrics"},
 		{"https://collector:4318/v1/metrics/", "https://collector:4318/v1/metrics"},
+		{"https://collector:4318/tenant/acme", "https://collector:4318/tenant/acme/v1/metrics"},
+		{"https://collector:4318/tenant/acme/", "https://collector:4318/tenant/acme/v1/metrics"},
+		{"https://collector:4318/tenant/acme/v1/metrics?key=value%20with%20spaces", "https://collector:4318/tenant/acme/v1/metrics?key=value%20with%20spaces"},
+		{"https://collector:4318/tenant/acme?key=value%20with%20spaces&enabled=true", "https://collector:4318/tenant/acme/v1/metrics?key=value%20with%20spaces&enabled=true"},
+		{"https://collector:4318/a%2Fb?x=1", "https://collector:4318/a%2Fb/v1/metrics?x=1"},
 	}
 	for _, tc := range tests {
 		got, err := normalizeEndpoint(tc.in)
@@ -87,6 +92,8 @@ func TestExporter_RetryAfter(t *testing.T) {
 		t.Fatal(err)
 	}
 	exp.RecordSum("harness.test", "{test}", 1, nil)
+	exp.retryJitter = func(time.Duration) time.Duration { return 0 }
+	exp.waitRetry = func(context.Context, time.Duration) error { return nil }
 	if err := exp.Export(context.Background()); err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -262,5 +269,3 @@ func TestHostNameResource(t *testing.T) {
 		}
 	}
 }
-
-

@@ -142,10 +142,6 @@ type fileSerenaConfig struct {
 	Env     optional[map[string]string] `json:"env"`
 }
 
-type fileOTelTracesConfig struct {
-	Enabled optional[bool] `json:"enabled"`
-}
-
 type fileOTelConfig struct {
 	Enabled            optional[bool]              `json:"enabled"`
 	Endpoint           optional[string]            `json:"endpoint"`
@@ -155,7 +151,6 @@ type fileOTelConfig struct {
 	Hostname           optional[string]            `json:"hostname"`
 	Headers            optional[map[string]string] `json:"headers"`
 	ResourceAttributes optional[map[string]string] `json:"resource_attributes"`
-	Traces             optional[fileOTelTracesConfig] `json:"traces"`
 }
 
 func decodeConfigFile(path string) (fileConfig, error) {

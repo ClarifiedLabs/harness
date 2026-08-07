@@ -3,6 +3,7 @@ package otel
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -14,18 +15,21 @@ import (
 
 var jsonUnmarshal = json.Unmarshal
 
-// Sink is a decorator that observes agent events and records OTLP metrics.
-// It implements the minimal agent sink interfaces via type-asserted optional methods.
+// Sink observes agent and UI lifecycle events and records OTLP metrics.
 
 type Sink struct {
-	exp          *Exporter
-	delegate     bool
-	registry     *tools.Registry
-	provider     string
-	model        string
-	agentName    string
-	parallelSeen map[string]struct{}
-	mu           sync.Mutex
+	exp                 *Exporter
+	delegate            bool
+	registry            *tools.Registry
+	sessionID           string
+	provider            string
+	model               string
+	agentName           string
+	parallelSeen        map[string]struct{}
+	parallelLargest     int
+	maintenanceAccepted map[string]int
+	maintenanceRequests map[string]int
+	mu                  sync.Mutex
 }
 
 func NewSink(exp *Exporter, registry *tools.Registry, provider, model, agentName string, delegate bool) *Sink {
@@ -42,12 +46,47 @@ func (s *Sink) delegateLabel() string {
 	return "false"
 }
 
+// SetIdentity updates the dynamic metric-point identity used after REPL
+// model/agent switches and /clear session rotation. Identity-local dedup and
+// maximum state resets so the new series starts independently.
+func (s *Sink) SetIdentity(sessionID, provider, model, agentName string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.sessionID == sessionID && s.provider == provider && s.model == model && s.agentName == agentName {
+		return
+	}
+	sessionChanged := s.sessionID != sessionID
+	s.sessionID = sessionID
+	s.provider = provider
+	s.model = model
+	s.agentName = agentName
+	if sessionChanged {
+		s.parallelSeen = nil
+	}
+	s.parallelLargest = 0
+	s.maintenanceAccepted = nil
+	s.maintenanceRequests = nil
+}
+
 func (s *Sink) baseAttrs(extra map[string]string) map[string]string {
-	m := map[string]string{
-		"provider": truncate(s.provider, 64),
-		"model":    truncate(s.model, 128),
-		"agent":    truncate(s.agentName, 64),
-		"delegate": s.delegateLabel(),
+	s.mu.Lock()
+	sessionID, provider, model, agentName := s.sessionID, s.provider, s.model, s.agentName
+	s.mu.Unlock()
+	m := map[string]string{"delegate": s.delegateLabel()}
+	if sessionID != "" {
+		m["session_id"] = truncate(sessionID, 64)
+	}
+	if provider != "" {
+		m["provider"] = truncate(provider, 64)
+	}
+	if model != "" {
+		m["model"] = truncate(model, 128)
+	}
+	if agentName != "" {
+		m["agent"] = truncate(agentName, 64)
 	}
 	for k, v := range extra {
 		m[k] = v
@@ -274,12 +313,21 @@ func (s *Sink) PromptComplete(usage agent.PromptUsage, duration time.Duration) {
 	}
 }
 
-// MaintenanceComplete records a maintenance model call (compaction etc).
+// MaintenanceComplete records a maintenance model call when no accepted
+// lifecycle event already accounted for it.
 func (s *Sink) MaintenanceComplete(usage agent.MaintenanceUsage) {
 	if s == nil || s.exp == nil {
 		return
 	}
-	s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(string(llm.NormalizeRequestPurpose(llm.RequestPurpose(usage.Purpose))), 32)}))
+	purpose := string(llm.NormalizeRequestPurpose(llm.RequestPurpose(usage.Purpose)))
+	s.mu.Lock()
+	if s.maintenanceRequests[purpose] > 0 {
+		s.maintenanceRequests[purpose]--
+		s.mu.Unlock()
+		return
+	}
+	s.mu.Unlock()
+	s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(purpose, 32)}))
 }
 
 func (s *Sink) RecordParallel(batches [][]string) {
@@ -291,6 +339,7 @@ func (s *Sink) RecordParallel(batches [][]string) {
 		s.parallelSeen = make(map[string]struct{})
 	}
 	var toRecord [][]string
+	largest := s.parallelLargest
 	for _, ids := range batches {
 		if len(ids) < 2 {
 			continue
@@ -301,6 +350,13 @@ func (s *Sink) RecordParallel(batches [][]string) {
 		}
 		s.parallelSeen[key] = struct{}{}
 		toRecord = append(toRecord, ids)
+		if len(ids) > largest {
+			largest = len(ids)
+		}
+	}
+	largestChanged := largest > s.parallelLargest
+	if largestChanged {
+		s.parallelLargest = largest
 	}
 	s.mu.Unlock()
 	for _, ids := range toRecord {
@@ -308,7 +364,9 @@ func (s *Sink) RecordParallel(batches [][]string) {
 		s.exp.RecordSum("harness.parallel.batches", "{batch}", 1, s.baseAttrs(nil))
 		s.exp.RecordSum("harness.parallel.calls", "{call}", int64(size), s.baseAttrs(nil))
 		s.exp.RecordHistogram("harness.parallel.batch_size", "{call}", float64(size), s.baseAttrs(nil), []float64{2, 3, 4, 6, 8, 12})
-		s.exp.RecordGauge("harness.parallel.largest_batch", "{call}", int64(size), s.baseAttrs(nil))
+	}
+	if largestChanged {
+		s.exp.RecordGauge("harness.parallel.largest_batch", "{call}", int64(largest), s.baseAttrs(nil))
 	}
 }
 
@@ -411,7 +469,7 @@ func (s *Sink) RecordSession(costUSD float64, totalTokens int) {
 }
 
 // RecordDelegate records harness.delegate.* for one ChildMeta.
-func (s *Sink) RecordDelegate(agentName, status, terminationReason string, turns int, usage inputsUsage, compactions int) {
+func (s *Sink) RecordDelegate(agentName, status, terminationReason string, turns int, usage llm.Usage, compactions int) {
 	if s == nil || s.exp == nil {
 		return
 	}
@@ -421,15 +479,19 @@ func (s *Sink) RecordDelegate(agentName, status, terminationReason string, turns
 	}
 	status = sanitizeStatus(status)
 	term := sanitizeTerminationReason(terminationReason)
-	attrs := map[string]string{"agent": agentName, "status": status, "termination_reason": term}
+	attrs := map[string]string{"agent": agentName, "delegate": "true", "status": status, "termination_reason": term}
 	s.exp.RecordSum("harness.delegate.sessions", "{session}", 1, s.baseAttrs(attrs))
-	s.exp.RecordHistogram("harness.delegate.turns", "{turn}", float64(turns), s.baseAttrs(map[string]string{"agent": agentName, "status": status}), []float64{1, 2, 5, 10, 20})
-	s.exp.RecordSum("harness.delegate.tokens", "{token}", int64(usage.TotalTokens()), s.baseAttrs(map[string]string{"agent": agentName, "status": status}))
-	if usage.Known() {
-		s.exp.RecordSumFloat("harness.delegate.cost", "USD", usage.CostUSDVal(), s.baseAttrs(map[string]string{"agent": agentName, "status": status, "cost_known": "true"}))
+	delegateAttrs := map[string]string{"agent": agentName, "delegate": "true", "status": status}
+	s.exp.RecordHistogram("harness.delegate.turns", "{turn}", float64(turns), s.baseAttrs(delegateAttrs), []float64{1, 2, 5, 10, 20})
+	totalTokens := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheWriteTokens + usage.CacheWrite1hTokens + usage.ReasoningTokens
+	s.exp.RecordSum("harness.delegate.tokens", "{token}", int64(totalTokens), s.baseAttrs(delegateAttrs))
+	if usage.CostKnown {
+		costAttrs := maps.Clone(delegateAttrs)
+		costAttrs["cost_known"] = "true"
+		s.exp.RecordSumFloat("harness.delegate.cost", "USD", usage.CostUSD, s.baseAttrs(costAttrs))
 	}
 	if compactions > 0 {
-		s.exp.RecordSum("harness.delegate.compactions", "{compaction}", int64(compactions), s.baseAttrs(map[string]string{"agent": agentName}))
+		s.exp.RecordSum("harness.delegate.compactions", "{compaction}", int64(compactions), s.baseAttrs(map[string]string{"agent": agentName, "delegate": "true"}))
 	}
 }
 
@@ -461,21 +523,6 @@ func (s *Sink) RecordContext(c ContextComposition) {
 	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ImageEncodedBytes), s.baseAttrs(map[string]string{"component": "image"}))
 }
 
-type inputsUsage interface {
-	TotalTokens() int
-	CostUSDVal() float64
-	Known() bool
-}
-
-type usageAdapter struct{ u llm.Usage }
-
-func (a usageAdapter) TotalTokens() int { return a.u.InputTokens + a.u.OutputTokens + a.u.CacheReadTokens + a.u.CacheWriteTokens + a.u.CacheWrite1hTokens + a.u.ReasoningTokens }
-func (a usageAdapter) CostUSDVal() float64 { return a.u.CostUSD }
-func (a usageAdapter) Known() bool { return a.u.CostKnown }
-
-// WrapUsage creates an inputsUsage from llm.Usage for RecordDelegate.
-func WrapUsage(u llm.Usage) inputsUsage { return usageAdapter{u: u} }
-
 // RetentionApplied records retention epochs.
 func (s *Sink) RetentionApplied(event agent.RetentionEvent) {
 	if s == nil || s.exp == nil {
@@ -492,15 +539,47 @@ func (s *Sink) RetentionApplied(event agent.RetentionEvent) {
 	s.exp.RecordSum("harness.retention.epochs", "{epoch}", 1, s.baseAttrs(map[string]string{"policy": truncate(policy, 32), "trigger": truncate(trigger, 32)}))
 }
 
-// ModelRequestEvent records request mix and errors.
+// ModelRequestEvent records each request once at acceptance and records only
+// terminal lifecycle failures as request errors.
 func (s *Sink) ModelRequestEvent(event llm.ModelRequestEvent) {
 	if s == nil || s.exp == nil {
 		return
 	}
 	purpose := string(llm.NormalizeRequestPurpose(event.Purpose))
-	s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(purpose, 32), "api_type": truncate(event.APIType, 32)}))
-	if event.State == llm.ModelRequestFailed {
-		s.exp.RecordSum("harness.model.request.errors", "{error}", 1, s.baseAttrs(map[string]string{"stage": truncate(string(event.Stage), 32), "code": truncate(event.Code, 64)}))
+	maintenancePurpose := purpose != string(llm.RequestPurposeTurn)
+	if event.State == llm.ModelRequestAccepted {
+		if maintenancePurpose {
+			s.mu.Lock()
+			if s.maintenanceAccepted == nil {
+				s.maintenanceAccepted = make(map[string]int)
+			}
+			s.maintenanceAccepted[purpose]++
+			s.mu.Unlock()
+		}
+		s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(purpose, 32), "api_type": truncate(event.APIType, 32)}))
+	}
+
+	terminalError := event.State == llm.ModelRequestFailed || event.State == llm.ModelRequestCancelled ||
+		(event.State == llm.ModelRequestUpstreamAttemptFailed && event.Outcome == llm.ModelRequestOutcomeTerminal)
+	if maintenancePurpose && (event.State == llm.ModelRequestCompleted || terminalError) {
+		s.mu.Lock()
+		if s.maintenanceAccepted[purpose] > 0 {
+			s.maintenanceAccepted[purpose]--
+			if event.State == llm.ModelRequestCompleted {
+				if s.maintenanceRequests == nil {
+					s.maintenanceRequests = make(map[string]int)
+				}
+				s.maintenanceRequests[purpose]++
+			}
+		}
+		s.mu.Unlock()
+	}
+	if terminalError {
+		s.exp.RecordSum("harness.model.request.errors", "{error}", 1, s.baseAttrs(map[string]string{
+			"stage": truncate(string(event.Stage), 32),
+			"code":  truncate(event.Code, 64),
+			"state": truncate(string(event.State), 32),
+		}))
 	}
 }
 

@@ -12,7 +12,7 @@ type exportMetricsServiceRequest struct {
 }
 
 type resourceMetrics struct {
-	Resource     resource     `json:"resource"`
+	Resource     resource       `json:"resource"`
 	ScopeMetrics []scopeMetrics `json:"scopeMetrics"`
 }
 
@@ -73,13 +73,13 @@ type histogramDataPoint struct {
 }
 
 type keyValue struct {
-	Key   string  `json:"key"`
+	Key   string   `json:"key"`
 	Value anyValue `json:"value"`
 }
 
 type anyValue struct {
-	StringValue string `json:"stringValue,omitempty"`
-	IntValue    string `json:"intValue,omitempty"`
+	StringValue string   `json:"stringValue,omitempty"`
+	IntValue    string   `json:"intValue,omitempty"`
 	DoubleValue *float64 `json:"doubleValue,omitempty"`
 	BoolValue   *bool    `json:"boolValue,omitempty"`
 }

@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"sort"
 	"strconv"
@@ -21,16 +23,21 @@ import (
 // concurrent Record calls; Export is called on a best-effort background path and
 // never blocks prompt completion.
 type Exporter struct {
-	cfg           Config
-	client        *http.Client
-	endpoint      string
-	buildVersion  string
-	resourceAttrs []keyValue
-	startNano     string
-	mu            sync.Mutex
-	metrics       map[string]*aggregatedMetric
-	dropped       int
-	approxBytes   int
+	cfg              Config
+	client           *http.Client
+	endpoint         string
+	buildVersion     string
+	resourceAttrs    []keyValue
+	startNano        string
+	mu               sync.Mutex
+	metrics          map[string]*aggregatedMetric
+	pointCount       int
+	dropped          int
+	approxBytes      int
+	waitRetry        func(context.Context, time.Duration) error
+	retryJitter      func(time.Duration) time.Duration
+	periodicOnce     sync.Once
+	periodicInterval time.Duration
 }
 
 type aggregatedMetric struct {
@@ -38,23 +45,24 @@ type aggregatedMetric struct {
 	unit        string
 	kind        string // sum, gauge, histogram
 	monotonic   bool
-	temporality int // 2 = cumulative
+	temporality int                     // 2 = cumulative
 	points      map[string]*numberPoint // keyed by attribute fingerprint
 	histPoints  map[string]*histPoint
+	histBounds  []float64
 }
 
 type numberPoint struct {
-	attrs     []keyValue
-	intValue  int64
+	attrs      []keyValue
+	intValue   int64
 	floatValue *float64
-	hasFloat  bool
+	hasFloat   bool
 }
 
 type histPoint struct {
-	attrs  []keyValue
-	count  uint64
-	sum    float64
-	bounds []float64
+	attrs   []keyValue
+	count   uint64
+	sum     float64
+	bounds  []float64
 	buckets []uint64
 }
 
@@ -62,6 +70,9 @@ const (
 	aggTemporalityCumulative = 2
 	maxQueuePoints           = 1024
 	maxPayloadBytes          = 64 * 1024
+	maxExportAttempts        = 3
+	baseRetryDelay           = 100 * time.Millisecond
+	maxRetryDelay            = 5 * time.Second
 )
 
 func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, model, agent string, resourceAttrs map[string]string) (*Exporter, error) {
@@ -78,42 +89,68 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 5 * time.Second
 	}
-	ra := []keyValue{
-		stringAttr("service.name", truncate(cfg.ServiceName, 64)),
-		stringAttr("service.version", truncate(build.Version, 64)),
-	}
-	if sessionID != "" {
-		ra = append(ra, stringAttr("service.instance.id", truncate(sessionID, 64)))
-		ra = append(ra, stringAttr("harness.session_id", truncate(sessionID, 64)))
-	}
-	if agent != "" {
-		ra = append(ra, stringAttr("harness.agent", truncate(agent, 64)))
-	}
-	if provider != "" {
-		ra = append(ra, stringAttr("harness.provider", truncate(provider, 64)))
-	}
-	if model != "" {
-		ra = append(ra, stringAttr("harness.model", truncate(model, 128)))
-	}
-	if cfg.Hostname != "" {
-		ra = append(ra, stringAttr("host.name", truncate(cfg.Hostname, 64)))
-	}
+	// Provider, model, agent, and session identity can change inside a long-lived
+	// REPL. Keep the OTLP resource process-stable and put dynamic identity on
+	// metric points in Sink.baseAttrs instead of relabeling cumulative data.
+	ra := make([]keyValue, 0, len(resourceAttrs)+3)
 	for k, v := range resourceAttrs {
-		if k == "host.name" {
+		switch k {
+		case "service.name", "service.version", "host.name":
 			continue
 		}
 		ra = append(ra, stringAttr(k, truncate(v, 128)))
 	}
+	ra = append(ra,
+		stringAttr("service.name", truncate(cfg.ServiceName, 64)),
+		stringAttr("service.version", truncate(build.Version, 64)),
+	)
+	if cfg.Hostname != "" {
+		ra = append(ra, stringAttr("host.name", truncate(cfg.Hostname, 64)))
+	}
 	ra = sortedAttrs(ra)
 	return &Exporter{
 		cfg:           cfg,
-		client:        &http.Client{Timeout: cfg.Timeout},
+		client:        &http.Client{},
 		endpoint:      normalized,
 		buildVersion:  build.Version,
 		resourceAttrs: ra,
 		startNano:     strconv.FormatInt(time.Now().UnixNano(), 10),
 		metrics:       make(map[string]*aggregatedMetric),
+		waitRetry:     waitForRetry,
+		retryJitter:   randomJitter,
 	}, nil
+}
+
+// SetPeriodic starts one process-lifetime 30-second export loop. Callers own
+// cancellation and still perform the final synchronous Export during shutdown.
+func (e *Exporter) SetPeriodic(ctx context.Context) {
+	if e == nil {
+		return
+	}
+	e.periodicOnce.Do(func() {
+		go func() {
+			interval := e.periodicInterval
+			if interval <= 0 {
+				interval = 30 * time.Second
+			}
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					timeout := e.cfg.Timeout
+					if timeout <= 0 {
+						timeout = 5 * time.Second
+					}
+					exportCtx, cancel := context.WithTimeout(ctx, timeout)
+					_ = e.Export(exportCtx)
+					cancel()
+				}
+			}
+		}()
+	})
 }
 
 // Record helpers -----------------------------------------------------------
@@ -158,18 +195,27 @@ func (e *Exporter) recordNumber(name, unit, kind string, monotonic bool, intVal 
 	fp := fingerprint(kv)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.approxBytes += len(name) + len(fp) + 16
-	if e.approxBytes > maxPayloadBytes {
-		e.dropped++
-		e.approxBytes -= len(name) + len(fp) + 16
-		return
+
+	m, metricExists := e.metrics[name]
+	if metricExists && m.kind != kind {
+		return // Kind mismatch: keep the first kind.
 	}
-	m, ok := e.metrics[name]
-	if !ok {
-		if len(e.metrics) >= maxQueuePoints {
-			e.dropped++
+	if metricExists {
+		if pt, ok := m.points[fp]; ok {
+			e.updateNumberPoint(pt, kind, intVal, floatVal, hasFloat)
 			return
 		}
+	}
+
+	charge := pointApproxBytes(fp)
+	if !metricExists {
+		charge += metricApproxBytes(name, unit)
+	}
+	if e.pointCount >= maxQueuePoints || e.approxBytes+charge > maxPayloadBytes {
+		e.dropped++
+		return
+	}
+	if !metricExists {
 		m = &aggregatedMetric{
 			name:        name,
 			unit:        unit,
@@ -180,88 +226,97 @@ func (e *Exporter) recordNumber(name, unit, kind string, monotonic bool, intVal 
 		}
 		e.metrics[name] = m
 	}
-	// Kind mismatch: keep first kind.
-	if m.kind != kind {
+	pt := &numberPoint{attrs: append([]keyValue(nil), kv...)}
+	m.points[fp] = pt
+	e.pointCount++
+	e.approxBytes += charge
+	e.updateNumberPoint(pt, kind, intVal, floatVal, hasFloat)
+}
+
+func (e *Exporter) updateNumberPoint(pt *numberPoint, kind string, intVal int64, floatVal *float64, hasFloat bool) {
+	if kind == "gauge" {
+		pt.intValue = intVal
+		pt.floatValue = nil
+		pt.hasFloat = hasFloat
+		if hasFloat {
+			value := *floatVal
+			pt.floatValue = &value
+			pt.intValue = 0
+		}
 		return
-	}
-	pt, ok := m.points[fp]
-	if !ok {
-		// Deep copy attrs
-		cp := append([]keyValue(nil), kv...)
-		pt = &numberPoint{attrs: cp}
-		m.points[fp] = pt
 	}
 	if hasFloat {
 		if pt.hasFloat {
 			*pt.floatValue += *floatVal
 		} else if pt.intValue != 0 {
-			f := float64(pt.intValue) + *floatVal
-			pt.floatValue = &f
+			value := float64(pt.intValue) + *floatVal
+			pt.floatValue = &value
 			pt.hasFloat = true
 			pt.intValue = 0
 		} else {
-			v := *floatVal
-			pt.floatValue = &v
+			value := *floatVal
+			pt.floatValue = &value
 			pt.hasFloat = true
 		}
+		return
+	}
+	if pt.hasFloat {
+		*pt.floatValue += float64(intVal)
 	} else {
-		if pt.hasFloat {
-			*pt.floatValue += float64(intVal)
-		} else {
-			pt.intValue += intVal
-		}
+		pt.intValue += intVal
 	}
 }
+
+func metricApproxBytes(name, unit string) int { return len(name) + len(unit) + 32 }
+func pointApproxBytes(fp string) int          { return len(fp) + 16 }
 
 func (e *Exporter) recordHistogram(name, unit string, value float64, attrs map[string]string, bounds []float64) {
 	kv := attrsFromMap(sanitizeAttrs(attrs))
 	fp := fingerprint(kv)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.approxBytes += len(name) + len(fp) + 16
-	if e.approxBytes > maxPayloadBytes {
-		e.dropped++
-		e.approxBytes -= len(name) + len(fp) + 16
+
+	m, metricExists := e.metrics[name]
+	if metricExists && m.kind != "histogram" {
 		return
 	}
-	m, ok := e.metrics[name]
-	if !ok {
-		if len(e.metrics) >= maxQueuePoints {
-			e.dropped++
+	if metricExists {
+		if pt, ok := m.histPoints[fp]; ok {
+			updateHistogramPoint(pt, value)
 			return
 		}
+	}
+
+	charge := pointApproxBytes(fp)
+	if !metricExists {
+		charge += metricApproxBytes(name, unit)
+	}
+	if e.pointCount >= maxQueuePoints || e.approxBytes+charge > maxPayloadBytes {
+		e.dropped++
+		return
+	}
+	if !metricExists {
 		m = &aggregatedMetric{
 			name:       name,
 			unit:       unit,
 			kind:       "histogram",
 			histPoints: make(map[string]*histPoint),
+			histBounds: append([]float64(nil), bounds...),
 		}
-		// Store bounds on first point's template
-		m.histPoints["_bounds"] = &histPoint{bounds: append([]float64(nil), bounds...)}
 		e.metrics[name] = m
 	}
-	if m.kind != "histogram" {
-		return
+	pt := &histPoint{
+		attrs:   append([]keyValue(nil), kv...),
+		bounds:  append([]float64(nil), m.histBounds...),
+		buckets: make([]uint64, len(m.histBounds)+1),
 	}
-	// Resolve bounds template
-	templateBounds := bounds
-	if tmp, ok := m.histPoints["_bounds"]; ok && len(tmp.bounds) > 0 {
-		templateBounds = tmp.bounds
-		if len(bounds) > 0 && len(bounds) != len(templateBounds) {
-			// Mismatched bounds: use template
-			templateBounds = tmp.bounds
-		}
-	}
-	pt, ok := m.histPoints[fp]
-	if !ok {
-		cp := append([]keyValue(nil), kv...)
-		pt = &histPoint{
-			attrs:   cp,
-			bounds:  append([]float64(nil), templateBounds...),
-			buckets: make([]uint64, len(templateBounds)+1),
-		}
-		m.histPoints[fp] = pt
-	}
+	m.histPoints[fp] = pt
+	e.pointCount++
+	e.approxBytes += charge
+	updateHistogramPoint(pt, value)
+}
+
+func updateHistogramPoint(pt *histPoint, value float64) {
 	pt.count++
 	pt.sum += value
 	idx := bucketIndex(value, pt.bounds)
@@ -327,6 +382,9 @@ func (e *Exporter) Export(ctx context.Context) error {
 	if e == nil {
 		return nil
 	}
+	exportCtx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
+	defer cancel()
+
 	e.mu.Lock()
 	payload, err := e.buildPayloadLocked()
 	e.mu.Unlock()
@@ -336,7 +394,7 @@ func (e *Exporter) Export(ctx context.Context) error {
 	if len(payload) == 0 {
 		return nil
 	}
-	return e.post(ctx, payload)
+	return e.post(exportCtx, payload)
 }
 
 func (e *Exporter) BuildPayloadForTest() ([]byte, error) {
@@ -408,10 +466,7 @@ func (e *Exporter) buildPayloadLocked() ([]byte, error) {
 			})
 		case "histogram":
 			var dps []histogramDataPoint
-			for fp, pt := range m.histPoints {
-				if fp == "_bounds" {
-					continue
-				}
+			for _, pt := range m.histPoints {
 				bucketCounts := make([]string, len(pt.buckets))
 				for i, c := range pt.buckets {
 					bucketCounts[i] = strconv.FormatUint(c, 10)
@@ -452,59 +507,109 @@ func (e *Exporter) buildPayloadLocked() ([]byte, error) {
 }
 
 func (e *Exporter) post(ctx context.Context, payload []byte) error {
-	endpoint := e.endpoint
-	headers := e.cfg.Headers
-	// Per-request context timeout is already on e.client; honor ctx too.
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "harness/"+e.buildVersion)
-	for k, v := range headers {
-		req.Header.Set(k, v)
-	}
-	resp, err := e.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	// Retry once on 429/503 with Retry-After (or immediately if no header but retriable).
-	if resp.StatusCode == 429 || resp.StatusCode == 503 {
-		delay := retryAfter(resp.Header.Get("Retry-After"))
-		if delay <= 5*time.Second {
-			select {
-			case <-time.After(delay + time.Duration(rand.Intn(200))*time.Millisecond):
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-			// Single retry
-			req2, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
-			if err != nil {
-				return err
-			}
-			req2.Header.Set("Content-Type", "application/json")
-			req2.Header.Set("User-Agent", "harness/"+e.buildVersion)
-			for k, v := range headers {
-				req2.Header.Set(k, v)
-			}
-			resp2, err := e.client.Do(req2)
-			if err != nil {
-				return err
-			}
-			defer resp2.Body.Close()
-			io.Copy(io.Discard, io.LimitReader(resp2.Body, 4<<10))
-			if resp2.StatusCode >= 200 && resp2.StatusCode < 300 {
+	var lastErr error
+	for attempt := 0; attempt < maxExportAttempts; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.endpoint, bytes.NewReader(payload))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "harness/"+e.buildVersion)
+		for k, v := range e.cfg.Headers {
+			req.Header.Set(k, v)
+		}
+
+		resp, err := e.client.Do(req)
+		var retryHeader string
+		if err == nil {
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
+			_ = resp.Body.Close()
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				return nil
 			}
-			return fmt.Errorf("otel export failed: %s", resp2.Status)
+			lastErr = fmt.Errorf("otel export failed: %s", resp.Status)
+			if !isRetryableStatus(resp.StatusCode) {
+				return lastErr
+			}
+			retryHeader = resp.Header.Get("Retry-After")
+		} else {
+			lastErr = fmt.Errorf("otel export failed: %w", err)
+			if !isTransientTransportError(err) {
+				return lastErr
+			}
+		}
+		if attempt == maxExportAttempts-1 {
+			break
+		}
+
+		delay := retryDelay(attempt, retryAfter(retryHeader), e.retryJitter)
+		wait := e.waitRetry
+		if wait == nil {
+			wait = waitForRetry
+		}
+		if err := wait(ctx, delay); err != nil {
+			return err
 		}
 	}
-	return fmt.Errorf("otel export failed: %s", resp.Status)
+	return lastErr
+}
+
+func isRetryableStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func isTransientTransportError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+func retryDelay(attempt int, retryAfterDelay time.Duration, jitter func(time.Duration) time.Duration) time.Duration {
+	delay := baseRetryDelay << attempt
+	if delay > maxRetryDelay {
+		delay = maxRetryDelay
+	}
+	if retryAfterDelay > delay {
+		delay = retryAfterDelay
+	}
+	if delay > maxRetryDelay {
+		delay = maxRetryDelay
+	}
+	if jitter != nil {
+		delay += jitter(delay / 2)
+		if delay > maxRetryDelay {
+			delay = maxRetryDelay
+		}
+	}
+	return delay
+}
+
+func randomJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(max) + 1))
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func retryAfter(header string) time.Duration {

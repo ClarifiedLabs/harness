@@ -43,6 +43,7 @@ type scalarDefinition[T any] struct {
 	get          func(Config) T
 	parse        func(string) (T, error)
 	parseEnv     func(string, string) (T, error)
+	skipEnv      func(string, string) bool
 	normalize    func(T) (T, error)
 	boolFlag     bool
 	redact       func(T) any
@@ -70,6 +71,9 @@ func (definition scalarDefinition[T]) resolve(context *resolveContext) error {
 	}
 	for _, name := range definition.meta.Environment {
 		if raw, present := context.lookup(name); present {
+			if definition.skipEnv != nil && definition.skipEnv(name, raw) {
+				continue
+			}
 			var parsed T
 			var err error
 			if definition.parseEnv != nil {
@@ -293,12 +297,7 @@ var definitions = []parameterDefinition{
 		}
 		return optional[bool]{}
 	}, func(c *Config, v bool) { c.OTel.Enabled = v }, func(c Config) bool { return c.OTel.Enabled }),
-	strDef("otel.endpoint", "otel.endpoint", []string{"otel-endpoint"}, []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "HARNESS_OTEL_ENDPOINT"}, literal("", "unset", ""), func(f fileConfig) optional[string] {
-		if f.OTel.Set {
-			return f.OTel.Value.Endpoint
-		}
-		return optional[string]{}
-	}, func(c *Config, v string) { c.OTel.Endpoint = v }, func(c Config) string { return c.OTel.Endpoint }, canonicalOTelEndpoint, nil, false),
+	oTelEndpointDefinition(),
 	strDef("otel.protocol", "otel.protocol", []string{"otel-protocol"}, []string{"HARNESS_OTEL_PROTOCOL"}, literal("http/json", "", ""), func(f fileConfig) optional[string] {
 		if f.OTel.Set {
 			return f.OTel.Value.Protocol
@@ -323,12 +322,19 @@ var definitions = []parameterDefinition{
 		}
 		return optional[string]{}
 	}, func(c *Config, v string) { c.OTel.Hostname = v }, func(c Config) string { return c.OTel.Hostname }, canonicalOTelHostname, nil, false),
-	boolDef("otel.traces.enabled", "otel.traces.enabled", []string{"otel-traces"}, []string{"HARNESS_OTEL_TRACES_ENABLED"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
-		if f.OTel.Set && f.OTel.Value.Traces.Set {
-			return f.OTel.Value.Traces.Value.Enabled
+}
+
+func oTelEndpointDefinition() scalarDefinition[string] {
+	definition := strDef("otel.endpoint", "otel.endpoint", []string{"otel-endpoint"}, []string{"OTEL_EXPORTER_OTLP_ENDPOINT", "HARNESS_OTEL_ENDPOINT"}, literal("", "unset", ""), func(f fileConfig) optional[string] {
+		if f.OTel.Set {
+			return f.OTel.Value.Endpoint
 		}
-		return optional[bool]{}
-	}, func(c *Config, v bool) { c.OTel.TracesEnabled = v }, func(c Config) bool { return c.OTel.TracesEnabled }),
+		return optional[string]{}
+	}, func(c *Config, v string) { c.OTel.Endpoint = v }, func(c Config) string { return c.OTel.Endpoint }, canonicalOTelEndpoint, nil, false)
+	definition.skipEnv = func(name, value string) bool {
+		return name == "OTEL_EXPORTER_OTLP_ENDPOINT" && strings.TrimSpace(value) == ""
+	}
+	return definition
 }
 
 func canonicalNonEmptyFor(setting string) func(string) (string, error) {
@@ -394,8 +400,14 @@ var customDefinitions = []parameterDefinition{
 	custom("lsp.serena.env", "object", "lsp.serena.env", true, resolveSerenaEnv, func(c Config) any { return redactStringMap(c.LSP.Serena.Env) }),
 	hooksCustomDefinition(),
 	custom("hook_configs", "string[]", "hook_configs", false, func(*resolveContext) error { return nil }, func(c Config) any { return c.HookConfigs }),
-	custom("otel.headers", "object", "otel.headers", true, resolveOTelHeaders, func(c Config) any { return redactStringMap(c.OTel.Headers) }),
+	oTelHeadersDefinition(),
 	custom("otel.resource_attributes", "object", "otel.resource_attributes", false, resolveOTelResourceAttributes, func(c Config) any { return c.OTel.ResourceAttributes }),
+}
+
+func oTelHeadersDefinition() customDefinition {
+	definition := custom("otel.headers", "object", "otel.headers", true, resolveOTelHeaders, func(c Config) any { return redactStringMap(c.OTel.Headers) })
+	definition.meta.Environment = []string{"OTEL_EXPORTER_OTLP_HEADERS", "HARNESS_OTEL_HEADERS"}
+	return definition
 }
 
 func hooksCustomDefinition() customDefinition {

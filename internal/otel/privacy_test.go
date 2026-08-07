@@ -76,5 +76,3 @@ func TestPrivacy_NoTranscriptLeak(t *testing.T) {
 		}
 	}
 }
-
-

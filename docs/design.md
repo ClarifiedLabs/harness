@@ -126,7 +126,7 @@ internal/mcp             tools-only MCP slice: schema, client, server, stdio + s
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
 internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
-internal/otel            stdlib-only OTLP/HTTP JSON metrics exporter and live sink: `harness.prompt.*`, `harness.tokens.*`/`harness.cost.*`, `harness.tool.*`/`harness.tools_per_turn`/`harness.parallel.*`/`harness.commands.*`/`harness.search.*`/`harness.skill.*`/`harness.retention.*`/`harness.model.*`, plus `harness.session.*`/`harness.context.*`/`harness.delegate.*` at session exit (fleet + debug telemetry; see `internal/otel/sink.go`)
+internal/otel            stdlib-only cumulative OTLP/HTTP JSON metrics exporter and live sink: `harness.prompt.*`, `harness.tokens.*`/`harness.cost.*`, `harness.tool.*`/`harness.tools_per_turn`/`harness.parallel.*`/`harness.commands.*`/`harness.search.*`/`harness.skill.*`/`harness.retention.*`/`harness.model.*`, plus `harness.session.*`/`harness.context.*`/`harness.delegate.*` at session exit (fleet + debug telemetry; see `internal/otel/sink.go`)
 internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
 internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, agent-oriented code-intelligence tools (§15a)
 internal/lsptools        harness-side adapter exposing short `lsp_*` tools over the LSP manager (§15a)
@@ -1281,7 +1281,15 @@ does not embed prompts or materialize built-in agents. `check` additionally perf
 for agents, hooks, and `@file` references.
 
 `trace_proxy` / `HARNESS_TRACE_PROXY` / `-trace-proxy` opts in to W3C Trace
-Context headers for harness-to-proxy requests. OTEL metrics export is controlled by `otel.enabled`/`otel.endpoint` (`HARNESS_OTEL_*` / `OTEL_EXPORTER_*` fallbacks), `otel.hostname` → `host.name` resource (`HARNESS_OTEL_HOSTNAME`/`OTEL_HOSTNAME` override, defaults to short `os.Hostname()`), `otel.headers`/`otel.resource_attributes`, and `otel.traces.enabled`; see `internal/otel/` and the parameter matrix in [usage.md](usage.md#harness-configuration-parameters). `HARNESS_LOG_LEVEL` controls
+Context headers for harness-to-proxy requests. OTLP/HTTP JSON metrics export is
+controlled by `otel.enabled`/`otel.endpoint` (`HARNESS_OTEL_*` /
+`OTEL_EXPORTER_*` fallbacks), `otel.hostname` → the process-stable `host.name`
+resource (`HARNESS_OTEL_HOSTNAME`/`OTEL_HOSTNAME` override, defaults to short
+`os.Hostname()`; explicit empty disables it), and
+`otel.headers`/`otel.resource_attributes`. Session, provider, model, agent, and
+delegate identity are metric-point attributes so REPL switches and `/clear`
+cannot relabel cumulative resource series. See `internal/otel/` and the parameter
+matrix in [usage.md](usage.md#harness-configuration-parameters). `HARNESS_LOG_LEVEL` controls
 harness diagnostics; `HARNESS_TIMESTAMPS` accepts only `short`, `full`, or `none`.
 `HARNESS_NO_COLOR` is a strict boolean, while non-empty standard `NO_COLOR` is a
 presence-based override. Provider API keys and provider base URLs are resolved

@@ -254,9 +254,9 @@ type OTelConfig struct {
 	TimeoutSeconds     int               `json:"timeout_seconds"`
 	ServiceName        string            `json:"service_name"`
 	Hostname           string            `json:"hostname"`
+	HostnameSet        bool              `json:"-"` // false means the built-in default; true includes an explicitly empty value
 	Headers            map[string]string `json:"headers,omitempty"`
 	ResourceAttributes map[string]string `json:"resource_attributes,omitempty"`
-	TracesEnabled      bool              `json:"traces_enabled"`
 }
 
 func DefaultSerenaArgs() []string {

@@ -151,7 +151,7 @@ func TestGeneratedUsageParameterTableIsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	generated.WriteString(endMarker)
-	if got := string(usage[start:end]); got != generated.String() {
+	if documented := string(usage[start:end]); documented != generated.String() {
 		t.Fatalf("generated config reference in %s is stale; regenerate it with `harness config list -format markdown`", usagePath)
 	}
 }
@@ -232,6 +232,113 @@ func TestPrecedenceAndExactProvenance(t *testing.T) {
 	result = load(t, nil, nil, path)
 	if result.Config.MaxTurns != 3 || result.Sources["max_turns"] != (configmeta.Source{Kind: configmeta.SourceFile, Name: path}) {
 		t.Fatalf("file source=%+v", result.Sources["max_turns"])
+	}
+}
+
+func TestOTelHeadersPrecedenceExpansionAndRedaction(t *testing.T) {
+	path := writeConfig(t, `{"otel":{"headers":{"authorization":"file-${TOKEN}"}}}`)
+	tests := []struct {
+		name       string
+		env        map[string]string
+		wantValue  string
+		wantSource configmeta.Source
+	}{
+		{
+			name:       "file",
+			env:        map[string]string{"TOKEN": "secret"},
+			wantValue:  "file-secret",
+			wantSource: configmeta.Source{Kind: configmeta.SourceFile, Name: path},
+		},
+		{
+			name:       "standard environment overrides file",
+			env:        map[string]string{"TOKEN": "secret", "OTEL_EXPORTER_OTLP_HEADERS": "authorization=standard-${TOKEN}"},
+			wantValue:  "standard-secret",
+			wantSource: configmeta.Source{Kind: configmeta.SourceEnvironment, Name: "OTEL_EXPORTER_OTLP_HEADERS"},
+		},
+		{
+			name: "harness environment overrides standard environment and file",
+			env: map[string]string{
+				"TOKEN":                      "secret",
+				"OTEL_EXPORTER_OTLP_HEADERS": "authorization=standard-${TOKEN}",
+				"HARNESS_OTEL_HEADERS":       "authorization=harness-${TOKEN}",
+			},
+			wantValue:  "harness-secret",
+			wantSource: configmeta.Source{Kind: configmeta.SourceEnvironment, Name: "HARNESS_OTEL_HEADERS"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := load(t, nil, test.env, path)
+			if got := result.Config.OTel.Headers["authorization"]; got != test.wantValue {
+				t.Fatalf("authorization header = %q, want %q", got, test.wantValue)
+			}
+			if got := result.Sources["otel.headers"]; got != test.wantSource {
+				t.Fatalf("source = %+v, want %+v", got, test.wantSource)
+			}
+			projected, ok := Snapshot(result).Values["otel.headers"].(map[string]string)
+			if !ok || projected["authorization"] != redactedValue {
+				t.Fatalf("projected headers = %#v, want redacted authorization", projected)
+			}
+		})
+	}
+}
+
+func TestOTelHostnameSetDistinguishesDefaultFromExplicitEmpty(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		env        map[string]string
+		path       func(*testing.T) string
+		wantSet    bool
+		wantSource configmeta.SourceKind
+	}{
+		{name: "default", wantSource: configmeta.SourceDefault},
+		{name: "file empty", path: func(t *testing.T) string { return writeConfig(t, `{"otel":{"hostname":""}}`) }, wantSet: true, wantSource: configmeta.SourceFile},
+		{name: "environment empty", env: map[string]string{"HARNESS_OTEL_HOSTNAME": ""}, wantSet: true, wantSource: configmeta.SourceEnvironment},
+		{name: "flag empty", args: []string{"--otel-hostname="}, wantSet: true, wantSource: configmeta.SourceFlag},
+	}
+	var defaultProjection []byte
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := ""
+			if test.path != nil {
+				path = test.path(t)
+			}
+			result := load(t, test.args, test.env, path)
+			if result.Config.OTel.Hostname != "" || result.Config.OTel.HostnameSet != test.wantSet {
+				t.Fatalf("hostname = %q, HostnameSet = %t, want empty/%t", result.Config.OTel.Hostname, result.Config.OTel.HostnameSet, test.wantSet)
+			}
+			if got := result.Sources["otel.hostname"].Kind; got != test.wantSource {
+				t.Fatalf("source kind = %v, want %v", got, test.wantSource)
+			}
+			projection, err := json.Marshal(Project(result, false))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if test.name == "default" {
+				defaultProjection = projection
+			} else if !bytes.Equal(projection, defaultProjection) {
+				t.Fatalf("explicit marker changed config projection\ndefault:  %s\nexplicit: %s", defaultProjection, projection)
+			}
+			encoded, err := json.Marshal(result.Config.OTel)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(encoded), "HostnameSet") || strings.Contains(string(encoded), "hostname_set") {
+				t.Fatalf("HostnameSet was serialized: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestEmptyStandardOTelEndpointDoesNotOverrideFile(t *testing.T) {
+	path := writeConfig(t, `{"otel":{"endpoint":"https://collector.example/v1"}}`)
+	result := load(t, nil, map[string]string{"OTEL_EXPORTER_OTLP_ENDPOINT": ""}, path)
+	if result.Config.OTel.Endpoint != "https://collector.example/v1" {
+		t.Fatalf("endpoint = %q, want file endpoint", result.Config.OTel.Endpoint)
+	}
+	if got := result.Sources["otel.endpoint"]; got != (configmeta.Source{Kind: configmeta.SourceFile, Name: path}) {
+		t.Fatalf("source = %+v, want file %q", got, path)
 	}
 }
 
@@ -531,6 +638,26 @@ func TestProjectionPreservesProviderQualifiedModel(t *testing.T) {
 	values := Project(result, false).Values
 	if got := values["model"]; got != "openai:gpt-5" {
 		t.Fatalf("projected model = %#v, want provider-qualified setting", got)
+	}
+}
+
+func TestRemovedOTelTracesConfigurationIsUnavailable(t *testing.T) {
+	if _, ok := Catalog().Lookup("otel.traces.enabled"); ok {
+		t.Fatal("obsolete otel.traces.enabled remains in parameter catalog")
+	}
+	if _, ok := LookupCLIFlag("otel.traces.enabled"); ok {
+		t.Fatal("obsolete otel.traces.enabled remains in CLI catalog")
+	}
+	if flag := newFlagState().set.Lookup("otel-traces"); flag != nil {
+		t.Fatalf("obsolete -otel-traces flag remains available: %+v", flag)
+	}
+
+	path := writeConfig(t, `{"otel":{"traces":{"enabled":true}}}`)
+	if _, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: path}); err == nil || !strings.Contains(err.Error(), `unknown field "traces"`) {
+		t.Fatalf("obsolete file setting error = %v, want strict unknown-field rejection", err)
+	}
+	if _, err := Load(LoadOptions{Args: []string{"--otel-traces"}, LookupEnv: lookup(nil)}); err == nil {
+		t.Fatal("obsolete --otel-traces flag was accepted")
 	}
 }
 
