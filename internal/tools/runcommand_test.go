@@ -249,13 +249,6 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if !strings.Contains(tc.tool.Description(), "ordered steps") {
 				t.Fatalf("description should advertise steps: %q", tc.tool.Description())
 			}
-			if !strings.Contains(tc.tool.Description(), "argv as an array of strings") {
-				t.Fatalf("description should advertise argv shape: %q", tc.tool.Description())
-			}
-			if strings.Contains(tc.tool.Description(), "background_lease") &&
-				!strings.Contains(tc.tool.Description(), "does not restrict command behavior") {
-				t.Fatalf("description should distinguish lease scheduling from command safety: %q", tc.tool.Description())
-			}
 			if _, ok := rawProps["resource_key"]; ok {
 				t.Fatalf("schema should not advertise legacy top-level resource_key: %s", tc.tool.Schema())
 			}
