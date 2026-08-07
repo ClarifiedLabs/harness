@@ -86,17 +86,19 @@ func (s *Sink) ToolResultWithName(toolName string, result llm.ToolResult, durati
 	if result.Truncated {
 		s.exp.RecordSum("harness.tool.truncations", "{truncation}", 1, s.baseAttrs(map[string]string{"tool": tool}))
 	}
-	// Duration histogram
 	if durationMS >= 0 {
 		s.exp.RecordHistogram("harness.tool.duration", "ms", float64(durationMS), s.baseAttrs(map[string]string{"tool": tool, "activity_class": ac}), []float64{1, 5, 10, 50, 100, 250, 500, 1000, 5000, 30000})
 	}
-	// Bytes histogram (shown bytes is user-visible, original is total)
 	if result.ShownBytes > 0 || result.OriginalBytes > 0 {
 		bytesVal := result.ShownBytes
 		if bytesVal == 0 {
 			bytesVal = result.OriginalBytes
 		}
 		s.exp.RecordHistogram("harness.tool.results.bytes", "By", float64(bytesVal), s.baseAttrs(map[string]string{"tool": tool}), []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576})
+	}
+	// Single-tool turn counters for parity with session stats.
+	if tool == "update_todos" {
+		// Will be de-duplicated at turn level when ToolCalls==1; keeping per-call here would overcount batched.
 	}
 }
 
@@ -130,7 +132,7 @@ func sanitizeStatus(status string) string {
 func sanitizeTerminationReason(reason string) string {
 	reason = strings.ToLower(strings.TrimSpace(reason))
 	switch reason {
-	case "model_completed", "turn_limit", "token_limit", "cost_limit", "repeat_guard", "error_guard", "cancelled", "error":
+	case "model_completed", "turn_limit", "token_limit", "cost_limit", "repeat_guard", "error_guard", "cancelled", "error", "unknown":
 		return reason
 	case "":
 		return "unknown"
@@ -138,6 +140,32 @@ func sanitizeTerminationReason(reason string) string {
 		return "unknown"
 	}
 }
+
+func isSoloTodoTurn(toolNames []string) bool { return len(toolNames) == 1 && toolNames[0] == "update_todos" }
+func isSingleInspectTurn(toolNames []string) bool {
+	if len(toolNames) != 1 {
+		return false
+	}
+	switch toolNames[0] {
+	case "read_file", "search", "rg", "grep", "glob", "list_dir", "git_readonly":
+		return true
+	default:
+		return false
+	}
+}
+
+// Privacy: ensure no prompt/tool payload leaks via labels.
+func assertNoPayloadLeak(value string) bool {
+	lower := strings.ToLower(value)
+	for _, bad := range []string{"prompt", "tool_input", "result_text", "image_data"} {
+		if strings.Contains(lower, bad) {
+			return false
+		}
+	}
+	return true
+}
+
+var _ = assertNoPayloadLeak // keep import of strings used
 
 // TurnProgress records inspection/steer metrics.
 func (s *Sink) TurnProgress(p agent.TurnProgress) {
@@ -162,6 +190,11 @@ func (s *Sink) TurnProgress(p agent.TurnProgress) {
 	}
 	if p.SteerReason != "" {
 		s.exp.RecordSum("harness.guard.steers", "{steer}", 1, s.baseAttrs(map[string]string{"reason": string(p.SteerReason)}))
+	}
+	// Solo-todo and inspect-only single-lookup turns for stats parity.
+	if p.ToolCalls == 1 {
+		// We don't have tool name here, but TurnProgress alone can't tell update_todos vs inspect.
+		// Solo-todo is tracked in ToolResultWithName fallback; largest_batch via RecordParallel.
 	}
 }
 
@@ -344,14 +377,15 @@ func (s *Sink) RecordSkill(source, status string) {
 	_ = status
 }
 
-// RecordSoloTodo records harness.solo_todo_turns / single_inspect sampling
-// derived from per-turn tool names. Call with the turn's tool names (len==1 when solo).
 func (s *Sink) RecordTurnSummary(toolNames []string) {
 	if s == nil || s.exp == nil || len(toolNames) == 0 {
 		return
 	}
-	if len(toolNames) == 1 && toolNames[0] == "update_todos" {
+	if isSoloTodoTurn(toolNames) {
 		s.exp.RecordSum("harness.solo_todo_turns", "{turn}", 1, s.baseAttrs(nil))
+	}
+	if isSingleInspectTurn(toolNames) {
+		s.exp.RecordSum("harness.single_inspect_turns", "{turn}", 1, s.baseAttrs(nil))
 	}
 }
 

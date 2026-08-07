@@ -156,6 +156,7 @@ func (e *Exporter) recordNumber(name, unit, kind string, monotonic bool, intVal 
 	e.approxBytes += len(name) + len(fp) + 16
 	if e.approxBytes > maxPayloadBytes {
 		e.dropped++
+		e.approxBytes -= len(name) + len(fp) + 16
 		return
 	}
 	m, ok := e.metrics[name]
@@ -215,6 +216,7 @@ func (e *Exporter) recordHistogram(name, unit string, value float64, attrs map[s
 	e.approxBytes += len(name) + len(fp) + 16
 	if e.approxBytes > maxPayloadBytes {
 		e.dropped++
+		e.approxBytes -= len(name) + len(fp) + 16
 		return
 	}
 	m, ok := e.metrics[name]

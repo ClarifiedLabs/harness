@@ -5590,20 +5590,21 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	pendingOTel := s.pendingOTel[res.ForID]
 	delete(s.pendingOTel, res.ForID)
 	if fwd := s.otel; fwd != nil {
+		input := pendingOTel.input
+		timeSince := time.Since(pendingOTel.started).Milliseconds()
+		isZero := pendingOTel.started.IsZero()
 		otelCall(fwd, func(sink otelSinkIface) {
 			durMS := int64(-1)
-			if !pendingOTel.started.IsZero() {
-				durMS = time.Since(pendingOTel.started).Milliseconds()
+			if !isZero {
+				durMS = timeSince
 			}
 			toolName := name
 			if toolName == "" {
 				toolName = pendingOTel.name
 			}
 			sink.ToolResultWithName(toolName, res, durMS, pendingOTel.activity)
-			if toolName == "run_command" {
-				if input := s.pendingToolInputs(res.ForID); len(input) > 0 {
-					sink.RecordCommands(input)
-				}
+			if toolName == "run_command" && len(input) > 0 {
+				sink.RecordCommands(input)
 			}
 			if toolName == "search" || toolName == "rg" || toolName == "grep" {
 				sink.RecordSearch(toolName, res.Text, res.Metrics)

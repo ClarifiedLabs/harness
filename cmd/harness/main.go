@@ -1688,6 +1688,29 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		app.Prewarm = prewarm
 	}
 
+	// Session-exit OTEL summary: emit gauges once before REPL entry so one-shot and REPL both get a final flush even if REPL never starts due to early exit.
+	// The actual gauges are emitted on PromptComplete; session.* is best-effort via exporter deferred above.
+	// Periodic flush for long REPL sessions (30s) without blocking prompt path.
+	if otelExp != nil {
+		go func(exp *otel.Exporter) {
+			ticker := time.NewTicker(30 * time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					_ = exp.Export(ctx)
+					cancel()
+				case <-exitCh:
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					_ = exp.Export(ctx)
+					cancel()
+					return
+				}
+			}
+		}(otelExp)
+	}
+
 	// Interactive REPL. ui.Run owns the session save in every exit path,
 	// including SIGINT, so the exit-save never races an in-flight prompt's own save
 	// or usage update (design §8.4); main only forwards the exit request.
