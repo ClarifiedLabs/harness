@@ -18,11 +18,14 @@ var jsonUnmarshal = json.Unmarshal
 
 type Sink struct {
 	exp       *Exporter
-	delegate bool
+	delegate  bool
 	registry  *tools.Registry // optional, for activity class
 	provider  string
 	model     string
 	agentName string
+
+	// parallelDedup ensures RecordParallel is idempotent across duplicate promptComplete calls
+	parallelSeen map[string]struct{}
 }
 
 func NewSink(exp *Exporter, registry *tools.Registry, provider, model, agentName string, delegate bool) *Sink {
@@ -250,17 +253,24 @@ func (s *Sink) MaintenanceComplete(usage agent.MaintenanceUsage) {
 }
 
 // RecordParallel records harness.parallel.* metrics from the agent's
-// ParallelToolBatch. Call once per tool-result user message that carried
-// parallel batches (len 2+).
+// ParallelToolBatch.
 func (s *Sink) RecordParallel(batches [][]string) {
 	if s == nil || s.exp == nil || len(batches) == 0 {
 		return
+	}
+	if s.parallelSeen == nil {
+		s.parallelSeen = make(map[string]struct{})
 	}
 	for _, ids := range batches {
 		size := len(ids)
 		if size < 2 {
 			continue
 		}
+		key := strings.Join(ids, ",")
+		if _, ok := s.parallelSeen[key]; ok {
+			continue
+		}
+		s.parallelSeen[key] = struct{}{}
 		s.exp.RecordSum("harness.parallel.batches", "{batch}", 1, s.baseAttrs(nil))
 		s.exp.RecordSum("harness.parallel.calls", "{call}", int64(size), s.baseAttrs(nil))
 		s.exp.RecordHistogram("harness.parallel.batch_size", "{call}", float64(size), s.baseAttrs(nil), []float64{2, 3, 4, 6, 8, 12})
@@ -377,7 +387,6 @@ func (s *Sink) RecordDelegate(agentName, status, terminationReason string, turns
 	}
 }
 
-// RecordContext emits harness.context.* gauges at session-exit.
 type ContextComposition struct {
 	Messages             int
 	Blocks               int
@@ -396,7 +405,7 @@ func (s *Sink) RecordContext(c ContextComposition) {
 	}
 	s.exp.RecordGauge("harness.context.messages", "{message}", int64(c.Messages), s.baseAttrs(nil))
 	s.exp.RecordGauge("harness.context.blocks", "{block}", int64(c.Blocks), s.baseAttrs(nil))
-	by := func(v int) int64 { return int64(v) }
+	by := func(x int) int64 { return int64(x) }
 	s.exp.RecordGauge("harness.context.bytes", "By", by(c.UserTextBytes), s.baseAttrs(map[string]string{"component": "user_text"}))
 	s.exp.RecordGauge("harness.context.bytes", "By", by(c.AssistantTextBytes), s.baseAttrs(map[string]string{"component": "assistant_text"}))
 	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ToolInputBytes), s.baseAttrs(map[string]string{"component": "tool_input"}))

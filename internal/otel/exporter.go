@@ -28,9 +28,10 @@ type Exporter struct {
 	resourceAttrs []keyValue
 	startNano     string
 
-	mu      sync.Mutex
-	metrics map[string]*aggregatedMetric
-	dropped int
+	mu          sync.Mutex
+	metrics     map[string]*aggregatedMetric
+	dropped     int
+	approxBytes int
 }
 
 type aggregatedMetric struct {
@@ -61,6 +62,7 @@ type histPoint struct {
 const (
 	aggTemporalityCumulative = 2
 	maxQueuePoints           = 1024
+	maxPayloadBytes          = 64 * 1024
 )
 
 func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, model, agent string, resourceAttrs map[string]string) (*Exporter, error) {
@@ -151,6 +153,11 @@ func (e *Exporter) recordNumber(name, unit, kind string, monotonic bool, intVal 
 	fp := fingerprint(kv)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.approxBytes += len(name) + len(fp) + 16
+	if e.approxBytes > maxPayloadBytes {
+		e.dropped++
+		return
+	}
 	m, ok := e.metrics[name]
 	if !ok {
 		if len(e.metrics) >= maxQueuePoints {
@@ -205,6 +212,11 @@ func (e *Exporter) recordHistogram(name, unit string, value float64, attrs map[s
 	fp := fingerprint(kv)
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.approxBytes += len(name) + len(fp) + 16
+	if e.approxBytes > maxPayloadBytes {
+		e.dropped++
+		return
+	}
 	m, ok := e.metrics[name]
 	if !ok {
 		if len(e.metrics) >= maxQueuePoints {
@@ -303,13 +315,14 @@ func sanitizeAttrs(in map[string]string) map[string]string {
 	return out
 }
 
-// Export builds an OTLP payload from aggregated points and POSTs it. It is
-// best-effort: caller should run in background and ignore errors.
+// Export builds an OTLP payload from aggregated points and POSTs it.
 func (e *Exporter) Export(ctx context.Context) error {
 	if e == nil {
 		return nil
 	}
-	payload, err := e.buildPayload()
+	e.mu.Lock()
+	payload, err := e.buildPayloadLocked()
+	e.mu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -319,9 +332,13 @@ func (e *Exporter) Export(ctx context.Context) error {
 	return e.post(ctx, payload)
 }
 
-func (e *Exporter) buildPayload() ([]byte, error) {
+func (e *Exporter) BuildPayloadForTest() ([]byte, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.buildPayloadLocked()
+}
+
+func (e *Exporter) buildPayloadLocked() ([]byte, error) {
 	if len(e.metrics) == 0 {
 		return nil, nil
 	}

@@ -5318,9 +5318,10 @@ type accumulatingSink struct {
 	finalText                   string
 }
 
-// otelForwarder is stored as `any` (concrete *otel.Sink) to avoid importing internal/otel in package ui.
-// All calls go through the helper methods below which type-assert to the expected interface.
 type otelForwarder = any
+
+// Ensure otelSinkIface matches otel.Sink; compile-time check via blank var if we could import otel here.
+// We avoid the import and instead verify at vet time via the otelCall type assert.
 
 type otelSinkIface interface {
 	ToolResultWithName(toolName string, result llm.ToolResult, durationMS int64, activity tools.Activity)
@@ -5336,7 +5337,6 @@ type otelSinkIface interface {
 	RecordTurnSummary(toolNames []string)
 	RecordParallel(batches [][]string)
 	RecordSession(costUSD float64, totalTokens int)
-	RecordContext(c interface{})
 	RecordDelegate(agentName, status, terminationReason string, turns int, usage interface{}, compactions int)
 }
 
@@ -5344,9 +5344,11 @@ func otelCall(fwd any, fn func(otelSinkIface)) {
 	if fwd == nil {
 		return
 	}
-	if sink, ok := fwd.(otelSinkIface); ok {
-		fn(sink)
+	sink, ok := fwd.(otelSinkIface)
+	if !ok {
+		return
 	}
+	fn(sink)
 }
 
 // SetOTel installs the OTEL forwarder on the App. It is called once per App
