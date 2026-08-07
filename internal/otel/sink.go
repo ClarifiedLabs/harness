@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	"harness/internal/agent"
@@ -17,15 +18,14 @@ var jsonUnmarshal = json.Unmarshal
 // It implements the minimal agent sink interfaces via type-asserted optional methods.
 
 type Sink struct {
-	exp       *Exporter
-	delegate  bool
-	registry  *tools.Registry // optional, for activity class
-	provider  string
-	model     string
-	agentName string
-
-	// parallelDedup ensures RecordParallel is idempotent across duplicate promptComplete calls
+	exp          *Exporter
+	delegate     bool
+	registry     *tools.Registry
+	provider     string
+	model        string
+	agentName    string
 	parallelSeen map[string]struct{}
+	mu           sync.Mutex
 }
 
 func NewSink(exp *Exporter, registry *tools.Registry, provider, model, agentName string, delegate bool) *Sink {
@@ -272,18 +272,17 @@ func (s *Sink) MaintenanceComplete(usage agent.MaintenanceUsage) {
 	s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(string(llm.NormalizeRequestPurpose(llm.RequestPurpose(usage.Purpose))), 32)}))
 }
 
-// RecordParallel records harness.parallel.* metrics from the agent's
-// ParallelToolBatch.
 func (s *Sink) RecordParallel(batches [][]string) {
 	if s == nil || s.exp == nil || len(batches) == 0 {
 		return
 	}
+	s.mu.Lock()
 	if s.parallelSeen == nil {
 		s.parallelSeen = make(map[string]struct{})
 	}
+	var toRecord [][]string
 	for _, ids := range batches {
-		size := len(ids)
-		if size < 2 {
+		if len(ids) < 2 {
 			continue
 		}
 		key := strings.Join(ids, ",")
@@ -291,6 +290,11 @@ func (s *Sink) RecordParallel(batches [][]string) {
 			continue
 		}
 		s.parallelSeen[key] = struct{}{}
+		toRecord = append(toRecord, ids)
+	}
+	s.mu.Unlock()
+	for _, ids := range toRecord {
+		size := len(ids)
 		s.exp.RecordSum("harness.parallel.batches", "{batch}", 1, s.baseAttrs(nil))
 		s.exp.RecordSum("harness.parallel.calls", "{call}", int64(size), s.baseAttrs(nil))
 		s.exp.RecordHistogram("harness.parallel.batch_size", "{call}", float64(size), s.baseAttrs(nil), []float64{2, 3, 4, 6, 8, 12})

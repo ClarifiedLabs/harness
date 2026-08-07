@@ -27,11 +27,10 @@ type Exporter struct {
 	buildVersion  string
 	resourceAttrs []keyValue
 	startNano     string
-
-	mu          sync.Mutex
-	metrics     map[string]*aggregatedMetric
-	dropped     int
-	approxBytes int
+	mu            sync.Mutex
+	metrics       map[string]*aggregatedMetric
+	dropped       int
+	approxBytes   int
 }
 
 type aggregatedMetric struct {
