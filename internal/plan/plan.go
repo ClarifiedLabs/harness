@@ -151,11 +151,36 @@ func Render(p Plan) string {
 	return fmt.Sprintf("# %s\n\n%s\n", strings.TrimSpace(p.Title), strings.TrimSpace(p.Body))
 }
 
+// DisplayState describes how the latest plan relates to the current prompt.
+// It is display-only metadata and is never persisted with a Plan.
+type DisplayState int
+
+const (
+	DisplayCurrent DisplayState = iota
+	DisplayRecorded
+	DisplayUpdated
+)
+
 func RenderLatest(p *Plan) string {
+	return RenderLatestWithState(p, DisplayRecorded)
+}
+
+// RenderLatestWithState renders a short user-facing status line naming the most
+// recently recorded plan's file, or "" when no plan with a path has been
+// recorded. The label reflects whether the current prompt left the plan
+// unchanged, recorded the first plan, or updated an existing plan.
+func RenderLatestWithState(p *Plan, state DisplayState) string {
 	if p == nil || p.Path == "" {
 		return ""
 	}
-	return "Plan recorded: " + p.Path
+	label := "Plan"
+	switch state {
+	case DisplayRecorded:
+		label = "Plan recorded"
+	case DisplayUpdated:
+		label = "Plan updated"
+	}
+	return fmt.Sprintf("%s: %s", label, p.Path)
 }
 
 func nextIndex(base string) (int, error) {

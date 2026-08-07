@@ -208,6 +208,8 @@ type App struct {
 
 	todoPromptStatusBeforeUsage       bool
 	todoPromptStatusBeforeUsagePrompt int
+	planPromptStatusBeforeUsage       bool
+	planPromptStatusBeforeUsagePrompt int
 	Todos                             *todo.Store
 	Plans                             *plan.Store
 	// Goal holds the /goal command's session state, persisted in state.json and
@@ -1532,6 +1534,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			app.pollBackgroundNotices()
 			if !app.todoPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
 				app.printTodoStatus(false)
+			}
+			if !app.planPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
+				app.printPlanStatus(plan.DisplayCurrent)
 			}
 			if !usePromptEditor || plainPromptRead {
 				fmt.Fprint(app.Errw, prompt)
@@ -4063,6 +4068,8 @@ func (app *App) clear() {
 	app.PromptNumber = 0
 	app.todoPromptStatusBeforeUsage = false
 	app.todoPromptStatusBeforeUsagePrompt = 0
+	app.planPromptStatusBeforeUsage = false
+	app.planPromptStatusBeforeUsagePrompt = 0
 	app.SessionPath = session.DefaultPath(app.StateDir, app.Created)
 	app.refreshOTelIdentity()
 	if app.OnSessionPathChanged != nil {
@@ -4825,6 +4832,31 @@ func (app *App) todoPromptStatusPrintedBeforeUsageForPrompt(prompt int) bool {
 	return app.todoPromptStatusBeforeUsage && app.todoPromptStatusBeforeUsagePrompt == prompt
 }
 
+func (app *App) printPlanStatus(state plan.DisplayState) bool {
+	if app.Plans == nil || !app.agentHasTool("record_plan") {
+		return false
+	}
+	latest, ok := app.Plans.Latest()
+	if !ok || latest.Path == "" {
+		return false
+	}
+	line := plan.RenderLatestWithState(&latest, state)
+	if line == "" {
+		return false
+	}
+	fmt.Fprintln(app.Errw, line)
+	return true
+}
+
+func (app *App) markPlanPromptStatusPrintedBeforeUsage(prompt int) {
+	app.planPromptStatusBeforeUsage = true
+	app.planPromptStatusBeforeUsagePrompt = prompt
+}
+
+func (app *App) planPromptStatusPrintedBeforeUsageForPrompt(prompt int) bool {
+	return app.planPromptStatusBeforeUsage && app.planPromptStatusBeforeUsagePrompt == prompt
+}
+
 func (app *App) stopBackgroundJobs() {
 	if app.Background != nil {
 		app.Background.Shutdown()
@@ -5309,6 +5341,9 @@ type accumulatingSink struct {
 	otel                        *otel.Sink
 	prompt                      int
 	printTodoPromptBeforeUsage  bool
+	printPlanPromptBeforeUsage  bool
+	planHadPlanAtStart          bool
+	planPathAtStart             string
 	reasoningOutput             bool
 	promptUsage                 agent.PromptUsage // last PromptComplete, priced; JSON run modes report it in prompt_end
 	pendingNames                map[string]string
@@ -5502,8 +5537,32 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := newAccumulatingSink(r, app, prompt)
 	s.printTodoPromptBeforeUsage = true
+	s.printPlanPromptBeforeUsage = true
+	if app.Plans != nil {
+		if latest, ok := app.Plans.Latest(); ok && latest.Path != "" {
+			s.planHadPlanAtStart = true
+			s.planPathAtStart = latest.Path
+		}
+	}
 	s.reasoningOutput = true
 	return s
+}
+
+func (s *accumulatingSink) planDisplayState() plan.DisplayState {
+	if s.app.Plans == nil {
+		return plan.DisplayCurrent
+	}
+	latest, ok := s.app.Plans.Latest()
+	if !ok || latest.Path == "" {
+		return plan.DisplayCurrent
+	}
+	if !s.planHadPlanAtStart {
+		return plan.DisplayRecorded
+	}
+	if latest.Path != s.planPathAtStart {
+		return plan.DisplayUpdated
+	}
+	return plan.DisplayCurrent
 }
 
 func (s *accumulatingSink) recordEvent(ev session.Event) {
@@ -5688,9 +5747,7 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 		s.app.printTodoStatus(true)
 	}
 	if name == "record_plan" && !res.IsError {
-		if latest := s.app.planSnapshot(); latest != nil {
-			fmt.Fprintln(s.app.Errw, plan.RenderLatest(latest))
-		}
+		s.app.printPlanStatus(s.planDisplayState())
 	}
 }
 
@@ -5972,6 +6029,14 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 		s.r.finishAssistantLine()
 		if s.app.printTodoStatus(false) {
 			s.app.markTodoPromptStatusPrintedBeforeUsage(s.prompt)
+		}
+	}
+	if s.printPlanPromptBeforeUsage {
+		s.r.StopProgress()
+		s.r.flushToolUseStarts()
+		s.r.finishAssistantLine()
+		if s.app.printPlanStatus(s.planDisplayState()) {
+			s.app.markPlanPromptStatusPrintedBeforeUsage(s.prompt)
 		}
 	}
 	s.r.SetPromptCost(cost, costKnown)
