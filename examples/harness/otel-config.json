@@ -1,0 +1,20 @@
+{
+  "otel": {
+    "enabled": true,
+    "endpoint": "https://otel.example.test:4318",
+    "protocol": "http/json",
+    "timeout_seconds": 5,
+    "service_name": "harness",
+    "hostname": "myhost",
+    "headers": {
+      "authorization": "Bearer ${OTEL_TOKEN}"
+    },
+    "resource_attributes": {
+      "deployment.environment": "prod",
+      "fleet": "harness"
+    },
+    "traces": {
+      "enabled": false
+    }
+  }
+}
