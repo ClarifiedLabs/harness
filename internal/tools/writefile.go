@@ -23,7 +23,7 @@ type writeFile struct{}
 func (writeFile) Name() string { return "write_file" }
 
 func (writeFile) Description() string {
-	return "Create or overwrite path with content, creating parent directories."
+	return "Create a new file or fully replace an existing file with complete content, creating parent directories; for targeted edits to existing files, prefer edit."
 }
 
 func (writeFile) Schema() json.RawMessage { return json.RawMessage(writeFileSchema) }

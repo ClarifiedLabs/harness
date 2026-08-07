@@ -180,7 +180,7 @@ type runCommand struct {
 func (runCommand) Name() string { return "run_command" }
 
 func (runCommand) Description() string {
-	return "Run commands or ordered steps. Prefer argv as an array of strings; use command only for shell syntax. Steps support compact or full output. Background supports one command; background_lease coordinates scheduling and does not restrict command behavior."
+	return "Run shell commands or ordered steps (builds, tests, linters) via argv (preferred) or command for shell syntax. Steps support compact or full output. Background supports one command; background_lease coordinates scheduling. Prefer git tool for version control."
 }
 
 func (t runCommand) Schema() json.RawMessage {

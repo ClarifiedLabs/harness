@@ -80,7 +80,7 @@ func NewTool(store *Store) *Tool { return &Tool{store: store} }
 func (*Tool) Name() string { return "update_todos" }
 
 func (*Tool) Description() string {
-	return "Replace the complete advisory TODO list for nontrivial work."
+	return "Replace the complete advisory TODO list for nontrivial work; replace whole list, at most one in_progress, never a bookkeeping-only turn; status never substitutes for verification."
 }
 
 func (*Tool) Schema() json.RawMessage {
