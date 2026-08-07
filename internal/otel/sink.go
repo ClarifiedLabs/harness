@@ -154,19 +154,6 @@ func isSingleInspectTurn(toolNames []string) bool {
 	}
 }
 
-// Privacy: ensure no prompt/tool payload leaks via labels.
-func assertNoPayloadLeak(value string) bool {
-	lower := strings.ToLower(value)
-	for _, bad := range []string{"prompt", "tool_input", "result_text", "image_data"} {
-		if strings.Contains(lower, bad) {
-			return false
-		}
-	}
-	return true
-}
-
-var _ = assertNoPayloadLeak // keep import of strings used
-
 // TurnProgress records inspection/steer metrics.
 func (s *Sink) TurnProgress(p agent.TurnProgress) {
 	if s == nil || s.exp == nil {

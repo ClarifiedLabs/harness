@@ -5345,7 +5345,7 @@ func otelCall(fwd any, fn func(otelSinkIface)) {
 		return
 	}
 	sink, ok := fwd.(otelSinkIface)
-	if !ok {
+	if !ok || sink == nil {
 		return
 	}
 	fn(sink)
@@ -5590,7 +5590,7 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	pendingOTel := s.pendingOTel[res.ForID]
 	delete(s.pendingOTel, res.ForID)
 	if fwd := s.otel; fwd != nil {
-		input := pendingOTel.input
+		input := append(json.RawMessage(nil), pendingOTel.input...)
 		timeSince := time.Since(pendingOTel.started).Milliseconds()
 		isZero := pendingOTel.started.IsZero()
 		otelCall(fwd, func(sink otelSinkIface) {
