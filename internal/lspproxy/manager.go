@@ -870,14 +870,14 @@ const prewarmScanMaxEntries = 20000
 // each installed configured server it detects the root from the server's root
 // markers and scans (bounded) for a matching file extension before acquiring a
 // client. Servers with undetectable languages, no detected root, or no file
-// evidence are skipped. Failures are logged only. It returns the number of
-// servers successfully warmed.
-func (m *Manager) Prewarm(ctx context.Context) int {
+// evidence are skipped. Failures are logged only. It returns the sorted unique
+// languages whose servers were successfully warmed.
+func (m *Manager) Prewarm(ctx context.Context) []string {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return 0
+		return nil
 	}
-	warmed := 0
+	warmed := map[string]bool{}
 	for _, s := range m.cfg.Servers {
 		m.mu.Lock()
 		present := m.present[s.Name]
@@ -905,9 +905,11 @@ func (m *Manager) Prewarm(ctx context.Context) int {
 				slog.String("server", s.Name), slog.String("root", root), slog.Any("error", err))
 			continue
 		}
-		warmed++
+		for _, language := range s.Languages {
+			warmed[language] = true
+		}
 	}
-	return warmed
+	return slices.Sorted(maps.Keys(warmed))
 }
 
 // prepareDoc reads abs from disk and syncs it with the server: didOpen on first

@@ -395,8 +395,8 @@ func TestPrewarmAcquiresServersWithFileEvidence(t *testing.T) {
 		return nil, nil
 	}
 
-	if got := m.Prewarm(context.Background()); got != 1 {
-		t.Fatalf("Prewarm = %d, want 1", got)
+	if got := m.Prewarm(context.Background()); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("Prewarm = %v, want [go]", got)
 	}
 	if len(calls) != 1 || calls[0].server != "gopls" || calls[0].root != root {
 		t.Fatalf("acquire calls = %+v, want one for (gopls, %s)", calls, root)
@@ -419,8 +419,8 @@ func TestPrewarmSkipsWithoutEvidence(t *testing.T) {
 		t.Fatal("acquire must not be called without file evidence")
 		return nil, nil
 	}
-	if got := m.Prewarm(context.Background()); got != 0 {
-		t.Fatalf("Prewarm = %d, want 0", got)
+	if got := m.Prewarm(context.Background()); len(got) != 0 {
+		t.Fatalf("Prewarm = %v, want []", got)
 	}
 }
 
@@ -439,8 +439,8 @@ func TestPrewarmSkipsAbsentBinary(t *testing.T) {
 		t.Fatal("acquire must not be called for an absent binary")
 		return nil, nil
 	}
-	if got := m.Prewarm(context.Background()); got != 0 {
-		t.Fatalf("Prewarm = %d, want 0", got)
+	if got := m.Prewarm(context.Background()); len(got) != 0 {
+		t.Fatalf("Prewarm = %v, want []", got)
 	}
 }
 
@@ -463,8 +463,8 @@ func TestPrewarmSkipsWithoutRootMarker(t *testing.T) {
 		t.Fatal("acquire must not be called without a detected root")
 		return nil, nil
 	}
-	if got := m.Prewarm(context.Background()); got != 0 {
-		t.Fatalf("Prewarm = %d, want 0", got)
+	if got := m.Prewarm(context.Background()); len(got) != 0 {
+		t.Fatalf("Prewarm = %v, want []", got)
 	}
 }
 
@@ -492,11 +492,35 @@ func TestPrewarmOnlyWarmsServersWithEvidence(t *testing.T) {
 		warmed = append(warmed, s.Name)
 		return nil, nil
 	}
-	if got := m.Prewarm(context.Background()); got != 1 {
-		t.Fatalf("Prewarm = %d, want 1", got)
+	if got := m.Prewarm(context.Background()); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("Prewarm = %v, want [go]", got)
 	}
 	if len(warmed) != 1 || warmed[0] != "gopls" {
 		t.Fatalf("warmed = %v, want [gopls]", warmed)
+	}
+}
+
+func TestPrewarmReturnsSortedLanguages(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "main.go"))
+	mustWrite(t, filepath.Join(root, "lib.rs"))
+
+	cfg := Config{Servers: []ResolvedServer{
+		{Name: "gopls", Languages: []string{"go", "gomod"}, RootMarkers: []string{".git"}, Command: []string{"gopls"}},
+		{Name: "rust-analyzer", Languages: []string{"rust"}, RootMarkers: []string{".git"}, Command: []string{"rust-analyzer"}},
+	}}
+	m := NewManager(cfg, "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/installed", nil }
+	m.computeAvailable()
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, r string) (*lspClient, error) {
+		return nil, nil
+	}
+	if got := m.Prewarm(context.Background()); len(got) != 3 || got[0] != "go" || got[1] != "gomod" || got[2] != "rust" {
+		t.Fatalf("Prewarm = %v, want [go gomod rust]", got)
 	}
 }
 
@@ -522,7 +546,7 @@ func TestPrewarmUndetectableLanguagesSkipped(t *testing.T) {
 		t.Fatal("acquire must not be called for undetectable languages")
 		return nil, nil
 	}
-	if got := m.Prewarm(context.Background()); got != 0 {
-		t.Fatalf("Prewarm = %d, want 0", got)
+	if got := m.Prewarm(context.Background()); len(got) != 0 {
+		t.Fatalf("Prewarm = %v, want []", got)
 	}
 }

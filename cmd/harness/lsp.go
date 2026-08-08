@@ -82,8 +82,8 @@ func (r *lspRuntime) startPrewarm() {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
-		warmed := r.mgr.Prewarm(ctx)
-		r.logger.Info("lsp: prewarmed language servers", logging.Category("lsp"), slog.Int("warmed", warmed))
+		languages := r.mgr.Prewarm(ctx)
+		r.logger.Info("lsp: prewarmed language servers", logging.Category("lsp"), slog.Any("languages", languages))
 	}()
 }
 
