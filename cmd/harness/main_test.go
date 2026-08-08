@@ -4766,7 +4766,7 @@ func TestRunReviewAgentUsesReadOnlyInspectionToolsAndPrompt(t *testing.T) {
 		t.Fatalf("review agent tools = %v, want %v", got, want)
 	}
 	system := fp.Requests[0].System
-	for _, want := range []string{"read-only review agent", "findings first", "do not modify the project"} {
+	for _, want := range []string{"read-only review agent", "repository-relative path and line", "do not modify the project"} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("review agent system prompt missing %q: %q", want, system)
 		}

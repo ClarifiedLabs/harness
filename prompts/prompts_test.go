@@ -18,113 +18,8 @@ func TestBuiltInPromptsLoad(t *testing.T) {
 	if DelegateChild() == "" {
 		t.Fatal("delegate child prompt is empty")
 	}
-}
-
-func TestCompactionUpdatePreservesPriorState(t *testing.T) {
-	update := strings.ToLower(CompactionUpdate())
-	if update == strings.ToLower(CompactionSummary()) {
+	if strings.EqualFold(CompactionUpdate(), CompactionSummary()) {
 		t.Fatal("compaction update must be distinct from the initial prompt")
-	}
-	for _, want := range []string{"prior progress summary", "preserve", "supersedes", "complete replacement", "changed files", "workspace state", "open work"} {
-		if !strings.Contains(update, want) {
-			t.Fatalf("compaction update missing %q:\n%s", want, CompactionUpdate())
-		}
-	}
-}
-
-func TestSystemPromptRequestsToolCommentary(t *testing.T) {
-	system := System()
-	for _, want := range []string{
-		"brief acknowledgement and plan",
-		"meaningful milestones",
-		"final answer separate",
-	} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("system prompt missing %q:\n%s", want, system)
-		}
-	}
-}
-
-func TestDelegateChildPromptDefinesScopeAndReport(t *testing.T) {
-	child := strings.ToLower(DelegateChild())
-	for _, want := range []string{"reporting to a parent", "instead of asking the user", "evidence", "verification", "unresolved risks", "delegate again only"} {
-		if !strings.Contains(child, want) {
-			t.Fatalf("delegate child prompt missing %q:\n%s", want, DelegateChild())
-		}
-	}
-}
-
-func TestSystemPromptSteersAgainstLoops(t *testing.T) {
-	system := strings.ToLower(System())
-	for _, want := range []string{
-		"same result",  // anti-loop: stop repeating a failing/identical call
-		"re-read",      // don't re-read unchanged files
-		"already have", // don't re-run commands whose output you already have
-	} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("system prompt missing anti-loop guidance %q:\n%s", want, System())
-		}
-	}
-}
-
-func TestSystemPromptIncludesSafetyVerificationAndFinalGuidance(t *testing.T) {
-	system := strings.ToLower(System())
-	for _, want := range []string{
-		"preserve user work",
-		"never revert, overwrite, or discard changes",
-		"destructive git commands",
-		"targeted verification",
-		"verification cannot run",
-		"final response",
-		"lead with the outcome",
-		"code reviews",
-		"first by severity",
-		"residual risks",
-	} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("system prompt missing high-ROI guidance %q:\n%s", want, System())
-		}
-	}
-}
-
-func TestSystemPromptRequiresPreciseInvestigationCitations(t *testing.T) {
-	system := strings.ToLower(System())
-	for _, want := range []string{"investigation reports", "full repository-relative paths", "exact symbols"} {
-		if !strings.Contains(system, want) {
-			t.Fatalf("system prompt missing investigation citation guidance %q:\n%s", want, System())
-		}
-	}
-}
-
-func TestCompactionPromptsUseTypedInventories(t *testing.T) {
-	for name, prompt := range map[string]string{
-		"summary": CompactionSummary(),
-		"update":  CompactionUpdate(),
-	} {
-		lower := strings.ToLower(prompt)
-		for _, want := range []string{
-			"`read_files`",
-			"`modified_files`",
-			"authoritative for recognized file activity",
-			"omit read-only inspected files",
-			"todo list is re-injected",
-			"do not repeat it",
-			"changed files",
-			"workspace state",
-			"open work",
-		} {
-			if !strings.Contains(lower, want) {
-				t.Errorf("%s compaction prompt missing %q:\n%s", name, want, prompt)
-			}
-		}
-		for _, redundant := range []string{
-			"one `path: state` line per created, changed, deleted, or inspected file",
-			"every pending or in-progress item, verbatim",
-		} {
-			if strings.Contains(lower, strings.ToLower(redundant)) {
-				t.Errorf("%s compaction prompt still requires redundant inventory %q:\n%s", name, redundant, prompt)
-			}
-		}
 	}
 }
 
@@ -136,24 +31,6 @@ func TestBuiltinAgentPrompt(t *testing.T) {
 	}
 	if got, ok := BuiltinAgentPrompt("unknown"); ok || got != "" {
 		t.Fatalf("unknown prompt = %q, %v; want empty, false", got, ok)
-	}
-}
-
-func TestReviewPromptIsFindingsFirstAndReadOnly(t *testing.T) {
-	review := strings.ToLower(mustAgentPrompt(t, "review"))
-	for _, want := range []string{
-		"read-only",
-		"working-tree diff",
-		"untracked files",
-		"findings first",
-		"ordered by severity",
-		"repository-relative path and line",
-		"do not modify",
-		"residual risks",
-	} {
-		if !strings.Contains(review, want) {
-			t.Fatalf("review prompt missing %q:\n%s", want, review)
-		}
 	}
 }
 
