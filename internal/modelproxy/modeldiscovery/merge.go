@@ -181,7 +181,7 @@ func mergeModel(base modelcatalog.Model, direct Model, codex bool) modelcatalog.
 	}
 	if direct.ServiceTiers != nil {
 		if codex {
-			out.ServiceTiers = modelcatalog.NormalizeOpenAIFastServiceTiers(direct.ServiceTiers)
+			out.ServiceTiers = modelcatalog.NormalizeCodexFastServiceTiers(direct.ServiceTiers)
 		} else {
 			out.ServiceTiers = llm.NormalizeServiceTiers(direct.ServiceTiers)
 		}

@@ -238,7 +238,7 @@ func codexServiceTiers(model codexModel) []llm.ServiceTier {
 			Request: llm.ServiceTierRequest{ServiceTier: additional},
 		})
 	}
-	return NormalizeOpenAIFastServiceTiers(tiers)
+	return NormalizeCodexFastServiceTiers(tiers)
 }
 
 func codexModelVisible(model codexModel) bool {

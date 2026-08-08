@@ -289,7 +289,7 @@ func TestManagedCodexLegacyFastSnapshotExposesFastTarget(t *testing.T) {
 		t.Fatalf("Fast stream status = %d", resp.StatusCode)
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
-	if len(fp.Requests) != 1 || fp.Requests[0].ServiceTier != "fast" {
+	if len(fp.Requests) != 1 || fp.Requests[0].ServiceTier != "priority" {
 		t.Fatalf("Fast provider requests = %+v", fp.Requests)
 	}
 }

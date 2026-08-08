@@ -243,7 +243,7 @@ func TestCodexDiscoveryUsesAccountCatalogVisibility(t *testing.T) {
 		t.Fatalf("models = %+v", snapshot.Models)
 	}
 	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
-	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" {
+	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
 		t.Fatalf("Codex fast tiers = %+v", model.ServiceTiers)
 	}
 }
@@ -333,7 +333,7 @@ func TestMergeCodexProviderCanonicalizesLegacyPriorityTier(t *testing.T) {
 			merged := merge.fn(baseline, snapshot)
 			tiers := merged.Models["gpt"].ServiceTiers
 			fast, ok := llm.ResolveServiceTier("fast", tiers)
-			if len(tiers) != 1 || !ok || fast.ID != "fast" || fast.Name != "Fast" || fast.Request.ServiceTier != "fast" {
+			if len(tiers) != 1 || !ok || fast.ID != "fast" || fast.Name != "Fast" || fast.Request.ServiceTier != "priority" {
 				t.Fatalf("merged Codex tiers = %+v, want canonical Fast tier", tiers)
 			}
 		})

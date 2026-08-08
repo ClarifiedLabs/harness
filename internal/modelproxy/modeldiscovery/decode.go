@@ -510,7 +510,7 @@ func decodeCodex(data []byte, spec Spec) (map[string]Model, string, error) {
 			}
 			model.ServiceTiers = append(model.ServiceTiers, llm.ServiceTier{ID: speed, Name: name, Request: llm.ServiceTierRequest{ServiceTier: speed}})
 		}
-		model.ServiceTiers = modelcatalog.NormalizeOpenAIFastServiceTiers(model.ServiceTiers)
+		model.ServiceTiers = modelcatalog.NormalizeCodexFastServiceTiers(model.ServiceTiers)
 		out[id] = model
 	}
 	return out, "", nil

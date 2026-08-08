@@ -38,7 +38,7 @@ func TestDecodeCodexModelsUsesListVisibleModels(t *testing.T) {
 		t.Fatalf("gpt-5.5 reasoning summary support = %v, want true", model.ReasoningSummarySupported)
 	}
 	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
-	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "fast" {
+	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
 		t.Fatalf("gpt-5.5 fast tier = %+v, %v", fast, ok)
 	}
 	if _, ok := provider.Models["codex-auto-review"]; ok {
