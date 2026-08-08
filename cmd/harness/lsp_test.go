@@ -15,6 +15,16 @@ func TestLSPSystemHint(t *testing.T) {
 	}
 }
 
+func TestLSPDescriptionSuffixFitsBudget(t *testing.T) {
+	if len(lspPreferSuffix) > 26 {
+		t.Errorf("lspPreferSuffix = %d bytes, budget 26: %q", len(lspPreferSuffix), lspPreferSuffix)
+	}
+	base := "Search contents by RE2 regex; escape punctuation."
+	if got := len(base) + len(lspPreferSuffix); got > 80 {
+		t.Errorf("suffixed search description = %d bytes, budget 80: base %q + suffix %q", got, base, lspPreferSuffix)
+	}
+}
+
 func TestLSPDescriptionSuffix(t *testing.T) {
 	enabled := &lspRuntime{enabled: true, summary: mcptools.Summary{Names: []string{"lsp_definition"}}}
 	disabled := &lspRuntime{enabled: false, summary: mcptools.Summary{Names: []string{"lsp_definition"}}}

@@ -65,9 +65,7 @@ type readFileArgs struct {
 
 func (readFile) Name() string { return "read_file" }
 
-func (readFile) Description() string {
-	return "Read one file with optional offset/limit, or batch paths[]; directories return a bounded non-recursive listing."
-}
+func (readFile) Description() string { return "Read a file; use paths[] to batch; a directory lists entries." }
 
 func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema) }
 

@@ -68,31 +68,31 @@ const positionSchema = `{
 var toolSpecs = []toolSpec{
 	{
 		name:        "declaration",
-		description: "Find the declaration of a symbol at a file position; use symbol with a 1-based line when possible.",
+		description: "Find where a symbol is declared.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "definition",
-		description: "Find the definition of a symbol at a file position; use symbol with a 1-based line when possible.",
+		description: "Find where a symbol is defined.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "type_definition",
-		description: "Find the type definition of a symbol at a file position.",
+		description: "Find where a symbol's type is defined.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "implementation",
-		description: "Find implementations of an interface, abstract member, or symbol at a file position.",
+		description: "Find implementations of an interface or abstract member.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "references",
-		description: "Find cross-file references to a symbol at a file position.",
+		description: "Find references to a symbol across files.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -109,19 +109,19 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "hover",
-		description: "Show language-server type, signature, and documentation for a symbol at a file position.",
+		description: "Show a symbol's type, signature, and docs.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "signature_help",
-		description: "Show callable signatures and the active parameter at a file position.",
+		description: "Show callable signatures and the active parameter.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "completion",
-		description: "Ask the language server for completion candidates at a file position.",
+		description: "List completion candidates at a position.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -137,13 +137,13 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "document_highlights",
-		description: "Find read, write, and textual occurrences of a symbol in the current file.",
+		description: "Find occurrences of a symbol in one file.",
 		schema:      positionSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "document_symbols",
-		description: "Return the language-server symbol outline for a file.",
+		description: "Outline one file's symbols.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -155,7 +155,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "workspace_symbols",
-		description: "Search symbols by name across one language-server workspace.",
+		description: "Find workspace symbols by name.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -169,7 +169,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "diagnostics",
-		description: "Open or refresh a file and return language-server diagnostics published for it.",
+		description: "Report a file's language-server diagnostics.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -182,7 +182,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "call_hierarchy",
-		description: "Find incoming callers or outgoing callees for a symbol at a file position.",
+		description: "Find a symbol's callers or callees.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -199,7 +199,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "type_hierarchy",
-		description: "Find direct supertypes or subtypes for a type at a file position.",
+		description: "Find a type's supertypes or subtypes.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -216,7 +216,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "inlay_hints",
-		description: "Return inferred type and parameter hints for a file or inclusive 1-based line range.",
+		description: "Show inferred type and parameter hints for a file or line range.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -231,29 +231,29 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "code_actions",
-		description: "List language-server quick fixes and refactors for a file or inclusive 1-based line range; does not edit files.",
+		description: "List quick fixes and refactors; does not edit.",
 		schema:      codeActionSchema(false),
 		readOnly:    true,
 	},
 	{
 		name:        "code_action",
-		description: "Apply one language-server code action selected by its exact title; text edits only, never server commands or file operations.",
+		description: "Apply one code action by exact title; text edits only.",
 		schema:      codeActionSchema(true),
 	},
 	{
 		name:        "format_document_plan",
-		description: "Preview language-server formatting edits for a document or inclusive 1-based line range without writing files.",
+		description: "Preview formatting edits without writing.",
 		schema:      formattingSchema,
 		readOnly:    true,
 	},
 	{
 		name:        "format_document",
-		description: "Apply language-server formatting text edits to a document or inclusive 1-based line range.",
+		description: "Apply formatting edits to a file or line range.",
 		schema:      formattingSchema,
 	},
 	{
 		name:        "rename_plan",
-		description: "Plan a safe cross-file rename; does not edit files.",
+		description: "Plan a cross-file rename; does not edit.",
 		schema: `{
   "type": "object",
   "properties": {
@@ -269,7 +269,7 @@ var toolSpecs = []toolSpec{
 	},
 	{
 		name:        "rename",
-		description: "Apply a safe cross-file rename using language-server text edits.",
+		description: "Apply a cross-file rename via language-server edits.",
 		schema: `{
   "type": "object",
   "properties": {

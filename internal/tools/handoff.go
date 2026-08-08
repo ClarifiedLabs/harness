@@ -39,9 +39,7 @@ func NewHandoff(pending *handoff.Pending, plans *plan.Store, interactive bool, a
 
 func (*handoffTool) Name() string { return "handoff" }
 
-func (*handoffTool) Description() string {
-	return "Handoff a recorded plan for implementation — requires a plan recorded with record_plan; prompts for user approval and starts a clean implementation context with the complete plan."
-}
+func (*handoffTool) Description() string { return "Give the recorded plan to an implementation agent; needs approval." }
 
 func (t *handoffTool) Schema() json.RawMessage {
 	return handoffSchema(t.agentNames)

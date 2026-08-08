@@ -117,9 +117,7 @@ type matchedEdit struct {
 
 func (edit) Name() string { return "edit" }
 
-func (edit) Description() string {
-	return "Apply targeted replacements to existing files: {files:[{path,edits:[{oldText,newText,replaceAll?}]}]}; file must exist (use write_file to create). Keep oldText short and unique."
-}
+func (edit) Description() string { return "Replace exact unique oldText; the file must already exist." }
 
 func (edit) Schema() json.RawMessage { return json.RawMessage(editSchema) }
 

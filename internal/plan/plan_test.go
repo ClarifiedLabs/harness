@@ -80,6 +80,12 @@ func TestRecordPlanValidatesRequiredInputAndSession(t *testing.T) {
 	}
 }
 
+func TestRecordPlanDescriptionFitsBudget(t *testing.T) {
+	if got := len((&Tool{}).Description()); got > 80 {
+		t.Fatalf("record_plan description = %d bytes, budget 80", got)
+	}
+}
+
 func TestStoreReplaceCopiesLatestPlan(t *testing.T) {
 	store := NewStore()
 	p := &Plan{Title: "original", Path: "/tmp/plan"}

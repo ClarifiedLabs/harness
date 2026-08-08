@@ -43,9 +43,7 @@ func RipgrepAvailable() bool {
 
 func (ripgrep) Name() string { return "rg" }
 
-func (ripgrep) Description() string {
-	return "Run raw rg for behavior not covered by search; prefer search for ordinary lookup and batching."
-}
+func (ripgrep) Description() string { return "Raw rg, no shell." }
 
 func (r ripgrep) Schema() json.RawMessage {
 	if r.background != nil {

@@ -62,6 +62,12 @@ func TestUpdateTodosRejectsInvalidListWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestUpdateTodosDescriptionFitsBudget(t *testing.T) {
+	if got := len((&Tool{store: NewStore()}).Description()); got > 80 {
+		t.Fatalf("update_todos description = %d bytes, budget 80", got)
+	}
+}
+
 func TestStoreRecoveryContextIsOneShotAndOnlyForUnresolvedItems(t *testing.T) {
 	store := NewStore()
 	store.Restore([]Item{{Step: "Implement", Status: StatusInProgress}})

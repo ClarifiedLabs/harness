@@ -50,9 +50,7 @@ type webFetch struct {
 
 func (webFetch) Name() string { return "web_fetch" }
 
-func (webFetch) Description() string {
-	return "Fetch HTTP(S) text, reducing HTML to readable text; supports optional limits and background jobs."
-}
+func (webFetch) Description() string { return "Fetch a URL as readable text." }
 
 func (t webFetch) Schema() json.RawMessage {
 	if t.background != nil {

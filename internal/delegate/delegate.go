@@ -337,9 +337,7 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 
 func (*Tool) Name() string { return "delegate" }
 
-func (*Tool) Description() string {
-	return "Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together; mutating siblings need distinct scope paths."
-}
+func (*Tool) Description() string { return "Run a child agent on separable work; keep coupled work local." }
 
 func (t *Tool) Schema() json.RawMessage {
 	if t == nil || t.runner == nil {

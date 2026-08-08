@@ -229,19 +229,15 @@ func TestRegistrySpecsPreserverStillDropsOtherAnnotations(t *testing.T) {
 	}
 }
 
-func TestBuiltInToolDescriptionsStayConcise(t *testing.T) {
-	toolList := []Tool{
-		readFile{}, listDir{}, glob{}, grep{}, ripgrep{}, edit{}, writeFile{},
-		runCommand{}, gitTool{}, gitReadonly{}, webFetch{}, applyPatch{}, newWriteTmpFile(),
-		NewHandoff(nil, nil, true, nil),
-	}
-	for _, tool := range toolList {
-		desc := tool.Description()
-		if len(desc) > 300 {
-			t.Errorf("%s description = %d bytes, budget 300", tool.Name(), len(desc))
+func TestBuiltInToolDescriptionsFitBudget(t *testing.T) {
+	catalog, _ := CatalogWithOptions(Options{})
+	catalog.Register(NewHandoff(nil, nil, true, nil))
+	for _, spec := range catalog.Specs() {
+		if len(spec.Description) > 80 {
+			t.Errorf("%s description = %d bytes, budget 80: %q", spec.Name, len(spec.Description), spec.Description)
 		}
-		if strings.Contains(desc, "\n") {
-			t.Errorf("%s description is not one line: %q", tool.Name(), desc)
+		if strings.Contains(spec.Description, "\n") {
+			t.Errorf("%s description is not one line: %q", spec.Name, spec.Description)
 		}
 	}
 }

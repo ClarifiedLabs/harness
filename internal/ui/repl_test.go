@@ -1754,8 +1754,8 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 			t.Errorf("/tools output missing %q:\n%s", want, got)
 		}
 	}
-	readFileCol := toolSummaryDescriptionColumn(t, got, "read_file", "Read one file with optional offset/limit, or batch paths[]; directories return a bounded non-recursive listing.")
-	listDirCol := toolSummaryDescriptionColumn(t, got, "list_dir", "List one directory with an optional base-name glob; non-recursive.")
+	readFileCol := toolSummaryDescriptionColumn(t, got, "read_file", "Read a file; use paths[] to batch; a directory lists entries.")
+	listDirCol := toolSummaryDescriptionColumn(t, got, "list_dir", "List one directory, non-recursive; glob filters base names.")
 	if readFileCol != listDirCol {
 		t.Errorf("built-in description separators not aligned:\n%s", got)
 	}

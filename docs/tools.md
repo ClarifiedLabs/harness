@@ -12,7 +12,7 @@ This page is the operational overview.
 | `view_image` | attach a local PNG, JPEG, WebP, or non-animated GIF to the next model request |
 | `list_dir` | list directory entries with type and size, non-recursive |
 | `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
-| `search` | search one file or directory and return host-bounded matching context |
+| `search` | search contents by RE2 regex |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
 | `run_command` | run a shell command or direct argv program |

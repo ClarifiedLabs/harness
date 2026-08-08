@@ -34,9 +34,7 @@ func newWriteTmpFile() *writeTmpFile { return &writeTmpFile{} }
 
 func (*writeTmpFile) Name() string { return "write_tmp_file" }
 
-func (*writeTmpFile) Description() string {
-	return "Write a retained scratch file in this run's private temp directory; returns its absolute path."
-}
+func (*writeTmpFile) Description() string { return "Write a scratch file in this run's temp dir; returns its path." }
 
 func (*writeTmpFile) Schema() json.RawMessage { return json.RawMessage(writeTmpFileSchema) }
 

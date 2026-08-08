@@ -27,9 +27,7 @@ type viewImageArgs struct {
 
 func (viewImage) Name() string { return "view_image" }
 
-func (viewImage) Description() string {
-	return "Attach one validated local image so the model can inspect it."
-}
+func (viewImage) Description() string { return "Attach a local PNG, JPEG, WebP, or GIF image to inspect." }
 
 func (viewImage) Schema() json.RawMessage { return json.RawMessage(viewImageSchema) }
 

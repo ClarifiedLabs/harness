@@ -39,6 +39,12 @@ type fakeBackgroundStarter struct {
 	req tools.BackgroundJobRequest
 }
 
+func TestDelegateToolDescriptionFitsBudget(t *testing.T) {
+	if got := len((&Tool{}).Description()); got > 80 {
+		t.Fatalf("delegate description = %d bytes, budget 80", got)
+	}
+}
+
 func (f *fakeBackgroundStarter) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
 	f.req = req
 	return tools.BackgroundJobInfo{ID: "bg_delegate", Status: "running"}, nil

@@ -58,9 +58,7 @@ func NewTool(store *Store, sessionDir func() string) *Tool {
 
 func (*Tool) Name() string { return "record_plan" }
 
-func (*Tool) Description() string {
-	return "Write a self-contained Markdown implementation plan to the session; persists as plans/NNNN-<slug>.plan.md and becomes the handoff artifact."
-}
+func (*Tool) Description() string { return "Record the self-contained implementation plan handoff requires." }
 
 func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{

@@ -179,9 +179,7 @@ type runCommand struct {
 
 func (runCommand) Name() string { return "run_command" }
 
-func (runCommand) Description() string {
-	return "Run commands or ordered steps via argv (preferred) or command for shell syntax. Background runs one command; background_lease coordinates scheduling. Prefer git tool for version control."
-}
+func (runCommand) Description() string { return "Run a command or ordered steps; prefer argv; git tool for git." }
 
 func (t runCommand) Schema() json.RawMessage {
 	fg := t.foregroundTimeout

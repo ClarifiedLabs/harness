@@ -30,9 +30,7 @@ type glob struct{}
 
 func (glob) Name() string { return "glob" }
 
-func (glob) Description() string {
-	return "Recursively list sorted files and directories matching pattern under optional root; ** crosses directories."
-}
+func (glob) Description() string { return "Find paths by glob; ** crosses directories." }
 
 func (glob) Schema() json.RawMessage { return json.RawMessage(globSchema) }
 

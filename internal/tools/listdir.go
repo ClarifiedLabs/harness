@@ -26,9 +26,7 @@ type listDir struct{}
 
 func (listDir) Name() string { return "list_dir" }
 
-func (listDir) Description() string {
-	return "List one directory with an optional base-name glob; non-recursive."
-}
+func (listDir) Description() string { return "List one directory, non-recursive; glob filters base names." }
 
 func (listDir) Schema() json.RawMessage { return json.RawMessage(listDirSchema) }
 

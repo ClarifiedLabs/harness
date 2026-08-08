@@ -936,9 +936,7 @@ func NewJobsTool(manager *Manager) *JobsTool {
 
 func (*JobsTool) Name() string { return "background_jobs" }
 
-func (*JobsTool) Description() string {
-	return "List, inspect, wait for, or cancel background jobs. Use one action=wait instead of polling; ids with until=all joins a group."
-}
+func (*JobsTool) Description() string { return "Inspect, wait for, or cancel background jobs; wait once, never poll." }
 
 func (*JobsTool) Schema() json.RawMessage {
 	return json.RawMessage(`{

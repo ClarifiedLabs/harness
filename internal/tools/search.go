@@ -96,9 +96,7 @@ type rgJSONEvent struct {
 
 func (searchTool) Name() string { return "search" }
 
-func (searchTool) Description() string {
-	return "Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally; patterns containing \\n automatically match across lines."
-}
+func (searchTool) Description() string { return "Search contents by RE2 regex; escape punctuation." }
 
 func (searchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema) }
 

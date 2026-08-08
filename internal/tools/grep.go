@@ -20,9 +20,7 @@ type grep struct {
 
 func (grep) Name() string { return "grep" }
 
-func (t grep) Description() string {
-	return "Run raw grep without a shell for behavior not covered by search. Skips binary files unless overridden; background returns a job id."
-}
+func (t grep) Description() string { return "Raw grep, no shell; skips binaries." }
 
 func (t grep) Schema() json.RawMessage {
 	if t.background != nil {

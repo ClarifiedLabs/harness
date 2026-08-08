@@ -1936,7 +1936,7 @@ func (r *Registry) Specs() []llm.ToolSchema
 func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResult
 ```
 
-- **Schemas are hand-written JSON Schema constants.** `Tool.Schema` remains the
+- **Model-facing descriptions are a single 80-byte functional minimum** (suffix-inclusive via `Registry.Specs`); operational detail lives in schemas, tool errors, and this document. **Schemas are hand-written JSON Schema constants.** `Tool.Schema` remains the
   full implementation contract. `Registry.Specs` removes annotation keywords
   (`description`, `title`, `$comment`, `example`, `examples`) from actual schema
   nodes before sending them to the model, while preserving validation keywords
@@ -1959,7 +1959,7 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 
 ### 9.1 `read_file`
 
-> Read one file with optional offset/limit, or batch paths[]; directories return a bounded non-recursive listing.
+> Read a file; use paths[] to batch; a directory lists entries.
 
 | param | type | notes |
 |---|---|---|
@@ -2004,7 +2004,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.1a `view_image`
 
-> Attach a local image file to the next model request for visual inspection.
+> Attach a local PNG, JPEG, WebP, or GIF image to inspect.
 
 | param | type | notes |
 |---|---|---|
@@ -2026,7 +2026,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.2 `list_dir`
 
-> List one directory with an optional base-name glob; non-recursive.
+> List one directory, non-recursive; glob filters base names.
 
 | param | type | notes |
 |---|---|---|
@@ -2042,7 +2042,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.2a `glob`
 
-> Recursively list sorted files and directories matching pattern under optional root; ** crosses directories.
+> Find paths by glob; ** crosses directories.
 
 | param | type | notes |
 |---|---|---|
@@ -2064,7 +2064,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.3 `search` and raw search commands
 
-> `search`: Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally; patterns containing \n automatically match across lines.
+> Search contents by RE2 regex; escape punctuation.
 
 - `search` is the only content-search tool in built-in agent definitions. Its
   flat input requires `pattern`; singular `path` defaults to `"."`; optional
@@ -2127,7 +2127,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.4 `edit`
 
-> Apply targeted replacements with `{files:[{path,edits:[{oldText,newText,replaceAll?}]}]}`; use short, recently read, unique text.
+> Replace exact unique oldText; the file must already exist.
 
 | param | type | notes |
 |---|---|---|
@@ -2177,7 +2177,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.5 `write_file`
 
-> Create or overwrite path with content, creating parent directories.
+> Write a whole file, creating parents; edit for partial changes.
 
 | param | type | notes |
 |---|---|---|
@@ -2193,7 +2193,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.6 `apply_patch`
 
-> Apply a Codex-format add/delete/update/move patch; prefer edit or write_file for ordinary changes.
+> Apply a Codex-format patch; prefer edit or write_file.
 
 | param | type | notes |
 |---|---|---|
@@ -2228,7 +2228,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.7 `run_command`
 
-> Run one command or ordered steps using a shell command or argv array. Steps accept a batch name and `output_mode:full` for the combined transcript; auto/receipt stay compact.
+> Run a command or ordered steps; prefer argv; git tool for git.
 
 | param | type | notes |
 |---|---|---|
@@ -2364,7 +2364,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.9 `git`
 
-> Run git without a shell or pager: workflow=workspace_summary for compact status, workflow=commit with paths[] and message; otherwise args is a string array.
+> Run git without a shell or pager; args[] or a workflow.
 
 | param | type | notes |
 |---|---|---|
@@ -2408,7 +2408,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.10 `web_fetch`
 
-> Fetch HTTP(S) text, reducing HTML to readable text; supports optional limits and background jobs.
+> Fetch a URL as readable text.
 
 | param | type | notes |
 |---|---|---|
@@ -2436,7 +2436,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.11 `git_readonly`
 
-> Run read-only git queries (status, diff, log, rev-parse, merge-base, …) without a shell or pager; args is a string array.
+> Read-only git queries only; no shell or pager.
 
 | param | type | notes |
 |---|---|---|
@@ -2468,7 +2468,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.12 `write_tmp_file`
 
-> Write a retained scratch file in this run's private temp directory; returns its absolute path.
+> Write a scratch file in this run's temp dir; returns its path.
 
 | param | type | notes |
 |---|---|---|
@@ -2483,7 +2483,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.13 `update_todos` (`internal/todo`)
 
-> Replace the complete advisory TODO list for nontrivial work.
+> Replace the whole advisory TODO list; one in_progress at most.
 
 | param | type | notes |
 |---|---|---|
@@ -2507,7 +2507,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.14 `delegate`
 
-> Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together; mutating siblings need distinct scope paths.
+> Run a child agent on separable work; keep coupled work local.
 
 | param | type | notes |
 |---|---|---|
@@ -2864,10 +2864,10 @@ immediately after `search` (chaining each new tool after the previous one), so
 the LSP block sits adjacent to the navigation tools it complements instead of
 trailing the whole catalog; a missing anchor falls back to append.
 
-The per-tool "Prefer over search." phrase was removed from every LSP tool
+The per-tool " Symbols: prefer lsp_*." phrase was removed from every LSP tool
 description for context economy. The cross-reference moved to the navigation
 tools instead: when LSP tools are enabled and registered, the catalog's
-description-suffix hook appends a conditional "prefer lsp_* tools" instruction
+description-suffix hook appends a conditional " Symbols: prefer lsp_*." instruction
 to `search`, `glob`, `grep`, and `rg` at `Specs()` time (byte-identical
 descriptions when disabled or empty). The per-tool phrase removal also applies
 to the `harness lsp serve` shim surface, since both paths share the same static

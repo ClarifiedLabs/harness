@@ -51,6 +51,12 @@ func TestManagerStartBackgroundJobCompletesAndDrainsContext(t *testing.T) {
 	}
 }
 
+func TestBackgroundJobsToolDescriptionFitsBudget(t *testing.T) {
+	if got := len((&JobsTool{}).Description()); got > 80 {
+		t.Fatalf("background_jobs description = %d bytes, budget 80", got)
+	}
+}
+
 type recordingArchiver struct {
 	result llm.ToolResult
 }
