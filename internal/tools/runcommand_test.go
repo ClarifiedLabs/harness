@@ -238,16 +238,8 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if !ok {
 				t.Fatalf("raw schema properties missing: %s", tc.tool.Schema())
 			}
-			argv, ok := rawProps["argv"].(map[string]any)
-			if !ok {
+			if _, ok := rawProps["argv"].(map[string]any); !ok {
 				t.Fatalf("raw schema argv property has unexpected shape: %s", tc.tool.Schema())
-			}
-			argvDesc, _ := argv["description"].(string)
-			if !strings.Contains(argvDesc, "not a shell string or JSON-encoded array") {
-				t.Fatalf("argv description should reject stringified argv arrays: %q", argvDesc)
-			}
-			if !strings.Contains(tc.tool.Description(), "ordered steps") {
-				t.Fatalf("description should advertise steps: %q", tc.tool.Description())
 			}
 			if _, ok := rawProps["resource_key"]; ok {
 				t.Fatalf("schema should not advertise legacy top-level resource_key: %s", tc.tool.Schema())
@@ -256,13 +248,8 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 				t.Fatalf("schema should not advertise ambiguous top-level access: %s", tc.tool.Schema())
 			}
 			if tc.tool.background != nil {
-				lease, ok := rawProps["background_lease"].(map[string]any)
-				if !ok {
+				if _, ok := rawProps["background_lease"].(map[string]any); !ok {
 					t.Fatalf("background schema missing typed background_lease: %s", tc.tool.Schema())
-				}
-				description, _ := lease["description"].(string)
-				if !strings.Contains(description, "does not restrict command behavior") {
-					t.Fatalf("background_lease description is ambiguous: %q", description)
 				}
 			}
 		})

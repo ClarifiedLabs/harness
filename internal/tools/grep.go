@@ -21,7 +21,7 @@ type grep struct {
 func (grep) Name() string { return "grep" }
 
 func (t grep) Description() string {
-	return "Run raw grep without a shell for specialized command-line behavior not covered by search. Input is an object; args must be an array of strings, not a string. Skips binary files unless overridden; background returns a job id."
+	return "Run raw grep without a shell for behavior not covered by search. Skips binary files unless overridden; background returns a job id."
 }
 
 func (t grep) Schema() json.RawMessage {

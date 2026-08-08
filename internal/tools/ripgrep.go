@@ -44,7 +44,7 @@ func RipgrepAvailable() bool {
 func (ripgrep) Name() string { return "rg" }
 
 func (ripgrep) Description() string {
-	return "Run raw rg for specialized command-line behavior not covered by search. Prefer the typed search tool for ordinary repository lookup and batching. Input is an object; args must be an array of strings, not a string."
+	return "Run raw rg for behavior not covered by search; prefer search for ordinary lookup and batching."
 }
 
 func (r ripgrep) Schema() json.RawMessage {

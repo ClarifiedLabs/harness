@@ -70,7 +70,7 @@ func newGitReadonly() (gitReadonly, bool) {
 func (gitReadonly) Name() string { return "git_readonly" }
 
 func (gitReadonly) Description() string {
-	return "Run an audited query-only set of git commands (including status, diff, log, rev-parse, and merge-base) without shell, pager, hooks, text conversion, or external diff helpers. Input is an object; args must be an array of strings, not a string."
+	return "Run read-only git queries (status, diff, log, rev-parse, merge-base, …) without a shell or pager; args is a string array."
 }
 
 func (gitReadonly) Schema() json.RawMessage { return json.RawMessage(gitReadonlySchema) }

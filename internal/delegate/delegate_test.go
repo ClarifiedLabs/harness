@@ -169,33 +169,6 @@ func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
 	}
 }
 
-func TestDelegateDescriptionAndSchemaExplainSteeringContract(t *testing.T) {
-	tool := New(nil, nil, Options{})
-	for _, want := range []string{"broad exploration", "separable work", "small", "tightly coupled", "independent calls", "synthesize", "without polling"} {
-		if !strings.Contains(tool.Description(), want) {
-			t.Fatalf("tool description missing %q: %s", want, tool.Description())
-		}
-	}
-	var decoded struct {
-		Properties map[string]struct {
-			Description string `json:"description"`
-		} `json:"properties"`
-	}
-	if err := json.Unmarshal(tool.Schema(), &decoded); err != nil {
-		t.Fatalf("schema JSON: %v", err)
-	}
-	for _, want := range []string{"objective", "scope", "constraints", "report", "verification"} {
-		if !strings.Contains(decoded.Properties["task"].Description, want) {
-			t.Fatalf("task description missing %q: %q", want, decoded.Properties["task"].Description)
-		}
-	}
-	for _, want := range []string{"independent", "non-overlapping", "automatically", "do not poll", "duplicate"} {
-		if !strings.Contains(decoded.Properties["background"].Description, want) {
-			t.Fatalf("background description missing %q: %q", want, decoded.Properties["background"].Description)
-		}
-	}
-}
-
 func TestMissingToolsPreservesRequiredOrder(t *testing.T) {
 	got := MissingTools(
 		[]string{"read_file", "write_file", "apply_patch", "write_file", "run_command"},

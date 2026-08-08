@@ -66,7 +66,7 @@ func GitAvailable() bool {
 func (gitTool) Name() string { return "git" }
 
 func (gitTool) Description() string {
-	return "Run git without a shell or pager. Input is an object: use workspace_summary for compact status or workflow commit with an explicit paths[] list and message to stage, check, commit, and report in one call; otherwise args must be an array of strings, not a string."
+	return "Run git without a shell or pager: workflow=workspace_summary for compact status, workflow=commit with paths[] and message; otherwise args is a string array."
 }
 
 func (gitTool) Schema() json.RawMessage { return json.RawMessage(gitSchema) }

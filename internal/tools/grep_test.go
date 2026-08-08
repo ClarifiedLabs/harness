@@ -188,23 +188,6 @@ func TestDecodeSearchCommandArgsAcceptsObjectAndBareArray(t *testing.T) {
 	}
 }
 
-func TestSearchCommandDescriptionsSteerToObjectArgs(t *testing.T) {
-	for _, desc := range []string{grep{}.Description(), ripgrep{}.Description()} {
-		if !strings.Contains(desc, "Input is an object") {
-			t.Errorf("description should show object-shaped args, got %q", desc)
-		}
-		if !strings.Contains(desc, "array of strings, not a string") {
-			t.Errorf("description should reject stringified args arrays, got %q", desc)
-		}
-		if strings.Contains(desc, "Pass grep options") || strings.Contains(desc, "Pass ripgrep options") {
-			t.Errorf("description still encourages bare array args: %q", desc)
-		}
-	}
-	if desc := (ripgrep{}).Description(); strings.Contains(desc, "grep-style -r") || strings.Contains(desc, "replace") {
-		t.Errorf("rg description should leave -r correction to runtime validation, got %q", desc)
-	}
-}
-
 func TestRipgrepNotRegisteredWhenMissing(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 
@@ -532,12 +515,6 @@ func TestGrepClampsLongMatchedLine(t *testing.T) {
 	}
 	if !strings.Contains(out, "chars clamped]") {
 		t.Errorf("overlong matched line was not clamped (out len %d)", len(out))
-	}
-}
-
-func TestRawGrepDescriptionRoutesOrdinaryLookupToSearch(t *testing.T) {
-	if !strings.Contains((grep{}).Description(), "not covered by search") {
-		t.Errorf("raw grep description should distinguish typed search: %q", (grep{}).Description())
 	}
 }
 

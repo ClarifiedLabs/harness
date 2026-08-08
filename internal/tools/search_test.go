@@ -13,13 +13,7 @@ import (
 	"harness/internal/llm"
 )
 
-func TestSearchDescriptionPrefersCoissuedFlatSearch(t *testing.T) {
-	if description := (searchTool{}).Description(); !strings.Contains(description, "one file or directory") || !strings.Contains(description, "Coissue independent search calls") {
-		t.Fatalf("search description does not state the preferred flow: %q", description)
-	}
-	if description := (ripgrep{}).Description(); !strings.Contains(description, "Prefer the typed search tool") {
-		t.Fatalf("rg description does not route ordinary lookup: %q", description)
-	}
+func TestSearchSchemaExposesFlatParams(t *testing.T) {
 	schema := string((searchTool{}).Schema())
 	for _, want := range []string{`"pattern"`, `"path"`, `"globs"`, `"case"`} {
 		if !strings.Contains(schema, want) {

@@ -508,20 +508,6 @@ func TestGitDetachedFromControllingTTY(t *testing.T) {
 	}
 }
 
-func TestGitDescriptionsSteerToObjectArgs(t *testing.T) {
-	for _, desc := range []string{gitTool{}.Description(), gitReadonly{}.Description()} {
-		if !strings.Contains(desc, "Input is an object") {
-			t.Errorf("description should show object-shaped args, got %q", desc)
-		}
-		if !strings.Contains(desc, "array of strings, not a string") {
-			t.Errorf("description should reject stringified args arrays, got %q", desc)
-		}
-		if strings.Contains(desc, "Pass arguments as an array") {
-			t.Errorf("description still encourages bare array args: %q", desc)
-		}
-	}
-}
-
 // Env-inspection seam: the command builder must inject --no-pager as the first
 // arg and GIT_TERMINAL_PROMPT=0 into the environment, without running git.
 func TestGitCommandSeam(t *testing.T) {

@@ -338,7 +338,7 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 func (*Tool) Name() string { return "delegate" }
 
 func (*Tool) Description() string {
-	return "Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling. Read-only background agents share leases automatically; mutating siblings need distinct scope paths."
+	return "Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together; mutating siblings need distinct scope paths."
 }
 
 func (t *Tool) Schema() json.RawMessage {

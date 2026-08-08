@@ -2358,7 +2358,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.9 `git`
 
-> Run git without a shell or pager. Use workspace_summary for compact status or workflow commit with an explicit paths[] list and message to stage, check, commit, and report in one call; otherwise args must be an array of strings.
+> Run git without a shell or pager: workflow=workspace_summary for compact status, workflow=commit with paths[] and message; otherwise args is a string array.
 
 | param | type | notes |
 |---|---|---|
@@ -2430,7 +2430,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.11 `git_readonly`
 
-> Run an audited query-only set of git commands (including status, diff, log, rev-parse, and merge-base) without shell, pager, hooks, text conversion, or external diff helpers. Input is an object; args must be an array of strings, not a string.
+> Run read-only git queries (status, diff, log, rev-parse, merge-base, …) without a shell or pager; args is a string array.
 
 | param | type | notes |
 |---|---|---|
@@ -2501,7 +2501,7 @@ this subsection records the common runner those argv tools point at.
 
 ### 9.14 `delegate`
 
-> Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together, then synthesize without polling. Read-only background agents share leases automatically; mutating siblings need distinct scope paths.
+> Delegate broad exploration or separable work; keep small or tightly coupled tasks local. Launch independent calls together; mutating siblings need distinct scope paths.
 
 | param | type | notes |
 |---|---|---|

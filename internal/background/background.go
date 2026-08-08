@@ -937,7 +937,7 @@ func NewJobsTool(manager *Manager) *JobsTool {
 func (*JobsTool) Name() string { return "background_jobs" }
 
 func (*JobsTool) Description() string {
-	return "List, inspect, wait for, or cancel background jobs. If the next or final response depends on running work, call action=wait once instead of polling get/list; an accepted user steer can detach a wait while selected jobs continue and its final result arrives automatically. Use ids with until=all to join a group. Completions also arrive automatically as notices."
+	return "List, inspect, wait for, or cancel background jobs. Use one action=wait instead of polling; ids with until=all joins a group."
 }
 
 func (*JobsTool) Schema() json.RawMessage {
