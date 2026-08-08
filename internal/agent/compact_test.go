@@ -74,72 +74,33 @@ func turnLabel(i int) string {
 	return string(rune('A' + i))
 }
 
-func TestGenerateSummaryUsesGivenSystemPrompt(t *testing.T) {
-	fp := llmtest.New("fake", summaryStep("HANDOFF BRIEF", 100, 20))
-	a := newAgent(fp, tools.Default(), Options{Model: "claude-opus-4-8"})
-	a.SetSystem("plan agent system prompt")
-	a.SetTranscript(makeTurns(3))
-
-	const handoffPrompt = "WRITE A HANDOFF BRIEF FOR A FRESH AGENT"
-	summary, usage, err := a.GenerateSummary(context.Background(), handoffPrompt)
-	if err != nil {
-		t.Fatalf("GenerateSummary: %v", err)
-	}
-	if summary != "HANDOFF BRIEF" {
-		t.Errorf("summary = %q, want canned reply", summary)
-	}
-	if usage.InputTokens != 100 || usage.OutputTokens != 20 {
-		t.Errorf("usage = %+v, want 100/20", usage)
-	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("want 1 model call, got %d", len(fp.Requests))
-	}
-	if fp.Requests[0].System != handoffPrompt {
-		t.Errorf("summary call System = %q, want the handoff prompt (not compaction)", fp.Requests[0].System)
-	}
-	if fp.Requests[0].Purpose != llm.RequestPurposeHandoffSummary {
-		t.Errorf("summary call purpose = %q, want %q", fp.Requests[0].Purpose, llm.RequestPurposeHandoffSummary)
-	}
-	if fp.Requests[0].System == prompts.CompactionSummary() {
-		t.Error("GenerateSummary must not reuse the compaction prompt")
-	}
-}
-
 func TestMaintenanceRequestIdentitiesAreDeterministicAndPurposeScoped(t *testing.T) {
 	fp := llmtest.New("fake",
-		summaryStep("one", 1, 1),
-		summaryStep("two", 1, 1),
+		summaryStep("compaction", 1, 1),
 		summaryStep("branch", 1, 1),
 	)
 	a := newAgent(fp, tools.Default(), Options{Model: "model"})
-	a.SetTranscript(makeTurns(1))
+	a.SetTranscript(makeTurns(10))
 	a.SetProxySessionID("harness-session-main")
 	a.SetCacheAffinityID("harness-cache-main")
-	if _, _, err := a.GenerateSummary(context.Background(), "handoff"); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := a.GenerateSummary(context.Background(), "handoff again"); err != nil {
+	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := a.GenerateBranchSummary(context.Background(), a.Transcript(), ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(fp.Requests) != 3 {
-		t.Fatalf("requests = %d, want 3", len(fp.Requests))
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(fp.Requests))
 	}
-	first, second, branch := fp.Requests[0], fp.Requests[1], fp.Requests[2]
+	first, branch := fp.Requests[0], fp.Requests[1]
 	if first.ProxySessionID == "" ||
 		first.CacheAffinityID == "" ||
 		first.ProxySessionID == "harness-session-main" ||
 		first.CacheAffinityID == "harness-cache-main" {
-		t.Fatalf("handoff identities = proxy %q cache %q", first.ProxySessionID, first.CacheAffinityID)
-	}
-	if first.ProxySessionID != second.ProxySessionID || first.CacheAffinityID != second.CacheAffinityID {
-		t.Fatalf("same-purpose identities changed: first=%q/%q second=%q/%q",
-			first.ProxySessionID, first.CacheAffinityID, second.ProxySessionID, second.CacheAffinityID)
+		t.Fatalf("compaction identities = proxy %q cache %q", first.ProxySessionID, first.CacheAffinityID)
 	}
 	if branch.ProxySessionID == first.ProxySessionID || branch.CacheAffinityID == first.CacheAffinityID {
-		t.Fatalf("branch identities were not purpose-separated: branch=%q/%q handoff=%q/%q",
+		t.Fatalf("branch identities were not purpose-separated: branch=%q/%q compaction=%q/%q",
 			branch.ProxySessionID, branch.CacheAffinityID, first.ProxySessionID, first.CacheAffinityID)
 	}
 	for i, request := range fp.Requests {
@@ -1931,14 +1892,6 @@ func TestCompactionMaintenanceFiltersMismatchedOpaqueReasoning(t *testing.T) {
 			exactLive: true,
 		},
 		{
-			name: "GenerateSummary",
-			run: func(ctx context.Context, a *Agent, _ []llm.Message) ([]llm.Message, error) {
-				_, _, err := a.GenerateSummary(ctx, "handoff")
-				return a.Transcript(), err
-			},
-			exactLive: true,
-		},
-		{
 			name: "GenerateBranchSummary",
 			run: func(ctx context.Context, a *Agent, source []llm.Message) ([]llm.Message, error) {
 				_, _, err := a.GenerateBranchSummary(ctx, source, "")
@@ -2041,7 +1994,7 @@ func TestPrepareIdleCompactionSnapshotsReasoningReplayPolicy(t *testing.T) {
 	}
 }
 
-func TestGenerateSummaryInvalidEncryptedContentFallback(t *testing.T) {
+func TestGenerateBranchSummaryInvalidEncryptedContentFallback(t *testing.T) {
 	invalidEncrypted := func(in, out int) llmtest.Step {
 		return llmtest.Step{
 			Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: in, OutputTokens: out}}},
@@ -2070,9 +2023,9 @@ func TestGenerateSummaryInvalidEncryptedContentFallback(t *testing.T) {
 			a.SetTranscript(opaqueMaintenanceTranscript(2))
 			before := cloneMessages(a.Transcript())
 
-			summary, usage, err := a.GenerateSummary(context.Background(), "handoff")
+			summary, usage, err := a.GenerateBranchSummary(context.Background(), opaqueMaintenanceTranscript(2), "")
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("GenerateSummary error = %v, wantErr %t", err, tt.wantErr)
+				t.Fatalf("GenerateBranchSummary error = %v, wantErr %t", err, tt.wantErr)
 			}
 			if summary != tt.wantSummary {
 				t.Fatalf("summary = %q, want %q", summary, tt.wantSummary)
@@ -2096,7 +2049,7 @@ func TestGenerateSummaryInvalidEncryptedContentFallback(t *testing.T) {
 	}
 }
 
-func TestGenerateSummaryFiltersMismatchedOpaqueBeforeChunking(t *testing.T) {
+func TestGenerateBranchSummaryFiltersMismatchedOpaqueBeforeChunking(t *testing.T) {
 	const opaque = "LARGE-MISMATCH-"
 	fp := llmtest.New("fake", summaryStep("one pass", 10, 2))
 	a := newAgent(fp, tools.Default(), Options{
@@ -2109,9 +2062,9 @@ func TestGenerateSummaryFiltersMismatchedOpaqueBeforeChunking(t *testing.T) {
 	a.SetTranscript(transcript)
 	before := cloneMessages(a.Transcript())
 
-	summary, _, err := a.GenerateSummary(context.Background(), "handoff")
+	summary, _, err := a.GenerateBranchSummary(context.Background(), transcript, "")
 	if err != nil {
-		t.Fatalf("GenerateSummary: %v", err)
+		t.Fatalf("GenerateBranchSummary: %v", err)
 	}
 	if summary != "one pass" || len(fp.Requests) != 1 {
 		t.Fatalf("filtered summary = %q with %d requests, want one unchunked pass", summary, len(fp.Requests))

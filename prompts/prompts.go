@@ -28,14 +28,6 @@ func CompactionUpdate() string {
 	return mustText("compaction-update.txt")
 }
 
-// HandoffSummary returns the system instruction used to generate a
-// plan->implementation handoff brief. It is deliberately distinct from
-// CompactionSummary: compaction tells the same model to summarize so it can
-// continue, whereas a handoff briefs a different agent picking the work up cold.
-func HandoffSummary() string {
-	return mustText("handoff-summary.txt")
-}
-
 // BranchSummary returns the system instruction used to summarize the portion
 // of a conversation being left behind during tree navigation.
 func BranchSummary() string {

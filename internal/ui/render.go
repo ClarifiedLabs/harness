@@ -466,18 +466,6 @@ func (r *Renderer) PromptWorkWaitComplete() {
 	r.endWait()
 }
 
-// HandoffSummaryStart begins a transient live wait while /handoff generates the
-// planning brief shown for approval.
-func (r *Renderer) HandoffSummaryStart() {
-	r.beginWait("handoff: generating brief", agent.ContextEstimate{})
-}
-
-// HandoffSummaryComplete clears the handoff-summary wait before the brief or an
-// error is printed.
-func (r *Renderer) HandoffSummaryComplete() {
-	r.endWait()
-}
-
 func (r *Renderer) finishTurnAttempt(usage agent.TurnAttemptUsage) {
 	defer r.flushToolUseStarts()
 	if !usage.Usage.CostKnown {

@@ -64,19 +64,18 @@ type InputTokenCount struct {
 type RequestPurpose string
 
 const (
-	RequestPurposeUnknown        RequestPurpose = "unknown"
-	RequestPurposeTurn           RequestPurpose = "turn"
-	RequestPurposeCompaction     RequestPurpose = "compaction"
-	RequestPurposePrewarm        RequestPurpose = "prewarm"
-	RequestPurposeHandoffSummary RequestPurpose = "handoff_summary"
-	RequestPurposeBranchSummary  RequestPurpose = "branch_summary"
+	RequestPurposeUnknown       RequestPurpose = "unknown"
+	RequestPurposeTurn          RequestPurpose = "turn"
+	RequestPurposeCompaction    RequestPurpose = "compaction"
+	RequestPurposePrewarm       RequestPurpose = "prewarm"
+	RequestPurposeBranchSummary RequestPurpose = "branch_summary"
 )
 
 // NormalizeRequestPurpose maps missing or unrecognized values to unknown,
 // preventing external proxy clients from creating unbounded metric labels.
 func NormalizeRequestPurpose(purpose RequestPurpose) RequestPurpose {
 	switch purpose {
-	case RequestPurposeTurn, RequestPurposeCompaction, RequestPurposePrewarm, RequestPurposeHandoffSummary, RequestPurposeBranchSummary:
+	case RequestPurposeTurn, RequestPurposeCompaction, RequestPurposePrewarm, RequestPurposeBranchSummary:
 		return purpose
 	default:
 		return RequestPurposeUnknown

@@ -705,14 +705,6 @@ func cloneCompactionMetadata(meta *llm.CompactionMetadata) *llm.CompactionMetada
 	return &out
 }
 
-// GenerateSummary runs one tool-less summarization pass over the full current
-// transcript using the given system instruction, returning the summary text and
-// the call's usage. It backs the plan->implementation handoff (with the handoff
-// brief prompt) and is independent of the compaction trigger/keep-turn logic.
-func (a *Agent) GenerateSummary(ctx context.Context, system string) (string, llm.Usage, error) {
-	return a.summarize(ctx, system, a.transcript, llm.RequestPurposeHandoffSummary)
-}
-
 // GenerateBranchSummary summarizes only the conversation fragment that will
 // no longer be active after tree navigation. The current transcript is not
 // modified and tools/reasoning remain disabled for the maintenance call.

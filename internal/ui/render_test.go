@@ -1557,36 +1557,6 @@ func TestLiveCounterTracksAndCompletesPromptWorkWait(t *testing.T) {
 	}
 }
 
-func TestLiveCounterTracksAndCompletesHandoffSummary(t *testing.T) {
-	var out, errw bytes.Buffer
-	now := time.Date(2026, 7, 22, 11, 30, 0, 0, time.Local)
-	r := liveRenderer(&out, &errw, func() time.Time { return now })
-
-	r.HandoffSummaryStart()
-	now = now.Add(9 * time.Second)
-	r.tick()
-	defer r.StopProgress()
-
-	if out.Len() != 0 {
-		t.Fatalf("handoff progress must not touch stdout, got %q", out.String())
-	}
-	if got := errw.String(); !strings.Contains(got, "\r\x1b[2K[handoff: generating brief · 9s]") {
-		t.Fatalf("handoff summary should repaint an elapsed counter in place, got %q", got)
-	}
-
-	errw.Reset()
-	r.HandoffSummaryComplete()
-	if got := errw.String(); got != "\r\x1b[2K" {
-		t.Fatalf("completing handoff summary should erase its transient row, got %q", got)
-	}
-	r.renderMu.Lock()
-	active, drawn, label := r.statusActive, r.statusDrawn, r.statusLabel
-	r.renderMu.Unlock()
-	if active || drawn || label != "" {
-		t.Fatalf("completed handoff summary left stale status state: active=%t drawn=%t label=%q", active, drawn, label)
-	}
-}
-
 func TestLiveCounterShowsTotalElapsedSincePromptSubmission(t *testing.T) {
 	var out, errw bytes.Buffer
 	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)

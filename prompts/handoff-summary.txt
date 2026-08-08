@@ -1,3 +1,0 @@
-Brief a different engineer who will implement the recorded plan without this conversation. They will read the plan, so do not restate it.
-
-Include only context that prevents re-exploration: decision rationale and rejected alternatives; exact setup/build/test/run commands; relevant locations, tooling quirks, and gotchas; constraints or approaches to avoid; and verification details not already in the plan. State established facts directly and concisely; never refer to prior discussion or invent details.

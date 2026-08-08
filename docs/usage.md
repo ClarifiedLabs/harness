@@ -1320,7 +1320,7 @@ token charges remain included.
 
 The proxy exposes unauthenticated Prometheus metrics on a separate listener,
 `127.0.0.1:9090` by default. Metrics break usage down by `provider`, `model`,
-bounded `purpose` (`turn`, `compaction`, `prewarm`, `handoff_summary`,
+bounded `purpose` (`turn`, `compaction`, `prewarm`,
 `branch_summary`, or
 `unknown`), and `key` (the API key's stored name, or `anonymous` when
 authentication is disabled). `model_proxy_build_info` carries the build version.

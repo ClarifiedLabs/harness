@@ -18,9 +18,6 @@ func TestBuiltInPromptsLoad(t *testing.T) {
 	if DelegateChild() == "" {
 		t.Fatal("delegate child prompt is empty")
 	}
-	if HandoffSummary() == "" {
-		t.Fatal("handoff summary prompt is empty")
-	}
 }
 
 func TestCompactionUpdatePreservesPriorState(t *testing.T) {
@@ -32,17 +29,6 @@ func TestCompactionUpdatePreservesPriorState(t *testing.T) {
 		if !strings.Contains(update, want) {
 			t.Fatalf("compaction update missing %q:\n%s", want, CompactionUpdate())
 		}
-	}
-}
-
-func TestHandoffSummaryDistinctFromCompaction(t *testing.T) {
-	if HandoffSummary() == CompactionSummary() {
-		t.Fatal("handoff summary must be a distinct prompt from compaction")
-	}
-	// The handoff brief is written for a fresh agent that will read the plan;
-	// it must point at the recorded plan rather than restate it.
-	if !strings.Contains(strings.ToLower(HandoffSummary()), "plan") {
-		t.Fatal("handoff summary should reference the recorded plan")
 	}
 }
 
@@ -176,7 +162,6 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 		"system":             System(),
 		"compaction-summary": CompactionSummary(),
 		"compaction-update":  CompactionUpdate(),
-		"handoff-summary":    HandoffSummary(),
 		"delegate-child":     DelegateChild(),
 		"explore":            mustAgentPrompt(t, "explore"),
 		"independent":        mustAgentPrompt(t, "independent"),
@@ -197,7 +182,6 @@ func TestPromptByteBudgets(t *testing.T) {
 		"system":             {System(), 2600},
 		"compaction-summary": {CompactionSummary(), 700},
 		"compaction-update":  {CompactionUpdate(), 900},
-		"handoff-summary":    {HandoffSummary(), 700},
 		"delegate-child":     {DelegateChild(), 400},
 		"explore":            {mustAgentPrompt(t, "explore"), 300},
 		"independent":        {mustAgentPrompt(t, "independent"), 500},
@@ -211,8 +195,8 @@ func TestPromptByteBudgets(t *testing.T) {
 			t.Errorf("%s prompt = %d bytes, budget %d", name, len(item.text), item.max)
 		}
 	}
-	if total > 7000 {
-		t.Errorf("shipped prompt total = %d bytes, budget 7000", total)
+	if total > 6300 {
+		t.Errorf("shipped prompt total = %d bytes, budget 6300", total)
 	}
 }
 

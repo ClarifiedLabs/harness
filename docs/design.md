@@ -390,7 +390,7 @@ type InputTokenCounter interface {
 
 type Request struct {
     Model       string
-    Purpose     RequestPurpose // turn|compaction|prewarm|handoff_summary|branch_summary
+    Purpose     RequestPurpose // turn|compaction|prewarm|branch_summary
     System      string
     Messages    []Message
     Tools       []ToolSchema
@@ -1500,7 +1500,7 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   `model_proxy_request_duration_seconds_total` — are labeled by `provider`,
   `model`, bounded request `purpose`, and `key`, while the
   `model_proxy_build_info` gauge is labeled by `version` only.
-  `purpose` is `turn`, `compaction`, `prewarm`, `handoff_summary`,
+  `purpose` is `turn`, `compaction`, `prewarm`,
   `branch_summary`, or `unknown`;
   missing and unrecognized client values normalize to `unknown` to prevent label
   cardinality growth. The `key` label is the authorizing API key's stored `Name`
@@ -2885,8 +2885,7 @@ implementation agent's TODO list, and starts the implementation prompt.
 
 ### Rendering
 
-- Assistant text, reasoning summaries, and handoff briefs displayed for approval
-  use a small stdlib-only Markdown renderer on terminal output. Emphasis becomes
+- Assistant text and reasoning summaries use a small stdlib-only Markdown renderer on terminal output. Emphasis becomes
   ANSI bold/italic when color is enabled, inline code and links use cyan,
   headings keep their `#` markers and render bold (with H1 headings also
   underlined), thematic breaks render as `────────────────────`, lists normalize
@@ -2905,8 +2904,8 @@ implementation agent's TODO list, and starts the implementation prompt.
   delimiters do not consume columns and spans may cross a break. The wrapper
   tracks active SGR attributes, closes them before each newline, and reopens them
   after the continuation prefix so list indentation is never styled. Displayed
-  handoff briefs follow the same Markdown, color, and width policy, while their
-  archived and implementation-context copies retain the original Markdown
+  implementation plan follows the same Markdown, color, and width policy, while the
+  implementation-context copy retains the original Markdown
   source. Redirected one-shot stdout remains raw model text.
 - Recognized language tags on fenced code blocks use the stateful, stdlib-only,
   additive highlighter in `internal/term/highlight` when ANSI is enabled. Each
@@ -2978,12 +2977,11 @@ implementation agent's TODO list, and starts the implementation prompt.
   erase and continues to separate the prompt from streamed output after the
   counter is replaced.
 - **Live wait counter (TTY, non-quiet).** While a model request, a tool call, a
-  model-backed compaction or handoff summary, or a join-required background
+  model-backed compaction, or a join-required background
   delegate is outstanding, the static waiting line is replaced by a single in-place
   line painted with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker`
   goroutine (with a stop-and-drain handshake): `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`,
-  `[tool: grep args=["x"] · 3s]`, `[context: compacting · 3s]`,
-  `[handoff: generating brief · 3s]`, or
+  `[tool: grep args=["x"] · 3s]`, `[context: compacting · 3s]`, or
   `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
   arguments as the completed tool summary and the running context-window percentage
   and compact used/window token counts appended for model waits
