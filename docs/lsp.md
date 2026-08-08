@@ -162,10 +162,11 @@ allowlist (bare names, with or without the `lsp_` prefix):
 { "lsp": { "enable": true, "tools": ["definition", "references", "diagnostics"] } }
 ```
 
-An empty or unset `lsp.tools` registers the core set (≈12 high-value
-navigation and inspection tools). Use `["all"]` to register the full 21-tool
-surface, or list explicit names to add/trim the set. Unknown entries are warned
-about and ignored.
+An empty or unset `lsp.tools` registers the core set of six high-value
+navigation, outline, and diagnostics tools (`definition`, `references`,
+`diagnostics`, `document_symbols`, `workspace_symbols`, `implementation`).
+Use `["all"]` to register the full 21-tool surface, or list explicit names to
+add/trim the set. Unknown entries are warned about and ignored.
 
 ## Hosting Behind A Proxy
 

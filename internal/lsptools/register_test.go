@@ -65,7 +65,7 @@ func threeToolProvider() *fakeProvider {
 	return &fakeProvider{tools: []mcp.Tool{
 		{Name: "definition", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
 		{Name: "references", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
-		{Name: "hover", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "diagnostics", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
 	}}
 }
 
@@ -89,7 +89,7 @@ func TestRegisterInsertsAfterNavigationAnchor(t *testing.T) {
 	if _, err := Register(context.Background(), reg, threeToolProvider()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	want := []string{"glob", "search", "lsp_definition", "lsp_references", "lsp_hover", "grep"}
+	want := []string{"glob", "search", "lsp_definition", "lsp_references", "lsp_diagnostics", "grep"}
 	if !slices.Equal(reg.Names(), want) {
 		t.Fatalf("registry names = %v, want %v", reg.Names(), want)
 	}
@@ -97,14 +97,14 @@ func TestRegisterInsertsAfterNavigationAnchor(t *testing.T) {
 
 func TestRegisterAllowlistRegistersSubset(t *testing.T) {
 	reg := &tools.Registry{}
-	sum, err := Register(context.Background(), reg, threeToolProvider(), "definition", "hover")
+	sum, err := Register(context.Background(), reg, threeToolProvider(), "definition", "diagnostics")
 	if err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	if !slices.Equal(reg.Names(), []string{"lsp_definition", "lsp_hover"}) {
-		t.Fatalf("registry names = %v, want [lsp_definition lsp_hover]", reg.Names())
+	if !slices.Equal(reg.Names(), []string{"lsp_definition", "lsp_diagnostics"}) {
+		t.Fatalf("registry names = %v, want [lsp_definition lsp_diagnostics]", reg.Names())
 	}
-	if !slices.Equal(sum.Names, []string{"lsp_definition", "lsp_hover"}) {
+	if !slices.Equal(sum.Names, []string{"lsp_definition", "lsp_diagnostics"}) {
 		t.Fatalf("summary names = %v, want subset", sum.Names)
 	}
 	if sum.Total != 2 || sum.Servers["lsp"] != 2 {
@@ -125,7 +125,7 @@ func TestRegisterAllowlistToleratesLSPPrefix(t *testing.T) {
 func TestRegisterEmptyAllowlistRegistersAll(t *testing.T) {
 	reg := &tools.Registry{}
 	// All-blank entries behave like an unset allowlist: register the core set.
-	// threeToolProvider only has core tools (definition/references/hover), so all 3 remain.
+	// threeToolProvider only has core tools (definition/references/diagnostics), so all 3 remain.
 	if _, err := Register(context.Background(), reg, threeToolProvider(), "  ", ""); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
@@ -153,7 +153,9 @@ func TestToolCallsBareProviderNameAndIsReadOnly(t *testing.T) {
 		Annotations: json.RawMessage(`{"readOnlyHint":true}`),
 	}}}
 	reg := &tools.Registry{}
-	if _, err := Register(context.Background(), reg, provider); err != nil {
+	// hover is no longer in the default core set; pass an explicit allowlist
+	// so the bare-name dispatch test still exercises a real non-core tool.
+	if _, err := Register(context.Background(), reg, provider, "hover"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 

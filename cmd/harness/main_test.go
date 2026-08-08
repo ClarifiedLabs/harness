@@ -5107,7 +5107,7 @@ func TestRunREPLLSPToggleChangesModelToolSurfaceAndHint(t *testing.T) {
 		t.Fatalf("model requests = %d, want 2", len(fp.Requests))
 	}
 	firstNames := toolNames(fp.Requests[0])
-	if !slices.Contains(firstNames, "lsp_definition") || !slices.Contains(firstNames, "lsp_code_actions") {
+	if !slices.Contains(firstNames, "lsp_definition") || !slices.Contains(firstNames, "lsp_diagnostics") {
 		t.Fatalf("enabled request missing expanded LSP tools: %v", firstNames)
 	}
 	if secondNames := toolNames(fp.Requests[1]); slices.Contains(secondNames, "lsp_definition") {

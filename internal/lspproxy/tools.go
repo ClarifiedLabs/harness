@@ -8,37 +8,26 @@ const readOnlyToolAnnotations = `{"readOnlyHint":true,"openWorldHint":false}`
 const mutatingToolAnnotations = `{"readOnlyHint":false,"openWorldHint":false}`
 
 // CoreTools is the default trimmed set exposed when lsp.tools is empty or
-// unset. It contains high-value read-only navigation and inspection tools;
-// the full 21-tool surface is available via lsp.tools=["all"] or an
-// explicit allowlist.
+// unset. It contains high-value read-only navigation, outline, and
+// diagnostics tools; the full 21-tool surface (including hover, signature
+// help, highlights, hierarchies, rename, and formatting) is available via
+// lsp.tools=["all"] or an explicit allowlist.
 var CoreTools = []string{
-	"declaration",
 	"definition",
-	"type_definition",
-	"implementation",
 	"references",
-	"hover",
-	"signature_help",
+	"diagnostics",
 	"document_symbols",
 	"workspace_symbols",
-	"diagnostics",
-	"document_highlights",
-	"code_actions",
+	"implementation",
 }
 
 var coreToolSet = map[string]bool{
-	"declaration":         true,
-	"definition":          true,
-	"type_definition":     true,
-	"implementation":      true,
-	"references":          true,
-	"hover":               true,
-	"signature_help":      true,
-	"document_symbols":    true,
-	"workspace_symbols":   true,
-	"diagnostics":         true,
-	"document_highlights": true,
-	"code_actions":        true,
+	"definition":        true,
+	"references":        true,
+	"diagnostics":       true,
+	"document_symbols":  true,
+	"workspace_symbols": true,
+	"implementation":    true,
 }
 
 // IsCoreTool reports whether name (bare, without lsp_ prefix) is in the core set.
