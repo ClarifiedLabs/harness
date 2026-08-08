@@ -59,7 +59,7 @@ func NewTool(store *Store, sessionDir func() string) *Tool {
 func (*Tool) Name() string { return "record_plan" }
 
 func (*Tool) Description() string {
-	return "Write the latest self-contained Markdown implementation plan to the session."
+	return "Write a self-contained Markdown implementation plan to the session; persists as plans/NNNN-<slug>.plan.md and becomes the handoff artifact."
 }
 
 func (*Tool) Schema() json.RawMessage {

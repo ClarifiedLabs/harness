@@ -11,25 +11,25 @@ import (
 	"harness/internal/plan"
 )
 
-// requestImplementation is the model-callable tool the plan agent uses to ask
+// handoffTool is the model-callable tool the plan agent uses to ask
 // for a handoff to an implementation agent. It cannot perform the switch itself
 // (tools cannot prompt the user), so it records the request in the shared Pending
 // holder; the REPL approves it and performs the switch at the prompt boundary.
 // A recorded plan is required so the implementation agent receives a stable,
 // self-contained specification.
-type requestImplementation struct {
+type handoffTool struct {
 	pending     *handoff.Pending
 	plans       *plan.Store
 	interactive bool
 	agentNames  []string
 }
 
-// NewRequestImplementation returns the request_implementation tool. interactive
+// NewHandoff returns the handoff tool. interactive
 // is false in one-shot mode, where the handoff is unsupported. agentNames is the
 // set of configured agent names offered as handoff targets and feeds the
 // schema's enum so the model cannot invent one (e.g. "implementation").
-func NewRequestImplementation(pending *handoff.Pending, plans *plan.Store, interactive bool, agentNames []string) *requestImplementation {
-	return &requestImplementation{
+func NewHandoff(pending *handoff.Pending, plans *plan.Store, interactive bool, agentNames []string) *handoffTool {
+	return &handoffTool{
 		pending:     pending,
 		plans:       plans,
 		interactive: interactive,
@@ -37,30 +37,28 @@ func NewRequestImplementation(pending *handoff.Pending, plans *plan.Store, inter
 	}
 }
 
-func (*requestImplementation) Name() string { return "request_implementation" }
+func (*handoffTool) Name() string { return "handoff" }
 
-func (*requestImplementation) Description() string {
-	return "Request approval to hand off the latest plan created with record_plan; brief is optional supplementary context."
+func (*handoffTool) Description() string {
+	return "Handoff a recorded plan for implementation — requires a plan recorded with record_plan; prompts for user approval and starts a clean implementation context with the complete plan."
 }
 
-func (t *requestImplementation) Schema() json.RawMessage {
-	return requestImplementationSchema(t.agentNames)
+func (t *handoffTool) Schema() json.RawMessage {
+	return handoffSchema(t.agentNames)
 }
 
-func (*requestImplementation) ReadOnly(json.RawMessage) bool { return false }
+func (*handoffTool) ReadOnly(json.RawMessage) bool { return false }
 
-func (t *requestImplementation) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (t *handoffTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	if !t.interactive {
-		return "", fmt.Errorf("request_implementation requires interactive mode; it is unavailable for one-shot runs")
+		return "", fmt.Errorf("handoff requires interactive mode; it is unavailable for one-shot runs")
 	}
 	var args struct {
-		Brief string `json:"brief"`
 		Agent string `json:"agent"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
 	}
-	brief := strings.TrimSpace(args.Brief)
 	if t.plans == nil {
 		return "", fmt.Errorf("plan store is unavailable")
 	}
@@ -73,17 +71,16 @@ func (t *requestImplementation) Run(ctx context.Context, input json.RawMessage) 
 		return "", fmt.Errorf("agent must be one of: %s", strings.Join(t.agentNames, ", "))
 	}
 	t.pending.Request(handoff.Request{
-		Brief:    brief,
 		Agent:    agent,
 		PlanPath: current.Path,
 	})
 	return "handoff to implementation requested; awaiting your approval", nil
 }
 
-// requestImplementationSchema builds the tool's JSON schema. When configured
+// handoffSchema builds the tool's JSON schema. When configured
 // agent names are known, agent is constrained by an enum so the model cannot
 // invent a target. An omitted agent leaves target selection to the REPL.
-func requestImplementationSchema(agentNames []string) json.RawMessage {
+func handoffSchema(agentNames []string) json.RawMessage {
 	agent := map[string]any{"type": "string"}
 	if len(agentNames) > 0 {
 		agent["enum"] = slices.Clone(agentNames)
@@ -91,7 +88,6 @@ func requestImplementationSchema(agentNames []string) json.RawMessage {
 	body := map[string]any{
 		"type": "object",
 		"properties": map[string]any{
-			"brief": map[string]any{"type": "string", "maxLength": 2048},
 			"agent": agent,
 		},
 		"additionalProperties": false,

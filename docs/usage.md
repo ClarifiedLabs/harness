@@ -184,7 +184,7 @@ Additional output events beyond the one-shot vocabulary:
 |---|---|---|
 | `prompt_start` | `prompt` (server-assigned number), `id?`, `cause?`, `text`, `agent`, `model`, `has_images` | Before each prompt |
 | `prompt_end` | `prompt`, `id?`, `cause?`, `exit_code`, `termination_reason`, `usage`, `final_text` | After each prompt; the same optional `cause` as its start is repeated here |
-| `approval_request` | `id`, `kind:"implementation_handoff"`, `brief`, `plan_path`, `agent`, `model` | The plan agent's `request_implementation` tool proposed handing off the latest recorded plan; the driver waits for the matching `approval_response` (the input reader stays live, so `interrupt`/`shutdown` still work) |
+| `approval_request` | `id`, `kind:"implementation_handoff"`, `plan_path`, `agent`, `model` | The plan agent's `handoff` tool proposed handing off the latest recorded plan; the driver waits for the matching `approval_response` (the input reader stays live, so `interrupt`/`shutdown` still work) |
 | `input_error` | `id?`, `message` | Rejected input line |
 
 Before reading the first prompt and between completed prompts, interactive JSON
@@ -1649,7 +1649,7 @@ Five agents are built in:
 |---|---|---|
 | `auto` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
 | `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
-| `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `request_implementation` | collaborate on a self-contained implementation plan without modifying the project |
+| `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
 | `review` | the same read-only inspection and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
 | `independent` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
@@ -1697,8 +1697,7 @@ default to `exclusive`. Implementation-mode delegates are always exclusive.
 
 The `plan` agent investigates and designs without modifying the project. It uses
 `record_plan` to write a self-contained immutable Markdown artifact under the
-session, then may call `request_implementation` with optional supplementary
-context in an interactive root session. At the prompt boundary, Harness renders
+session, then may call `handoff` in an interactive root session. At the prompt boundary, Harness renders
 the complete latest plan and asks for approval before switching agents and
 starting implementation with a clean context seeded by that complete plan.
 Delegated plan agents have private plan stores and cannot request an interactive

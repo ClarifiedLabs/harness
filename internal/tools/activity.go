@@ -306,7 +306,7 @@ func builtinActivity(name string, input json.RawMessage) (Activity, bool) {
 		activity.Class = ActivityCoordinate
 		activity.ExplicitProgress = true
 		return activity, true
-	case "request_implementation":
+	case "handoff":
 		activity.Class = ActivityCoordinate
 		return activity, true
 	case "git_readonly", "glob", "list_dir", "grep", "view_image", "web_fetch":

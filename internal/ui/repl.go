@@ -220,13 +220,13 @@ type App struct {
 	// goal; 0 means unlimited. Reaching the cap auto-pauses the goal.
 	GoalMaxContinuations int
 	// GoalAutoContinue enables the REPL idle-boundary continuation loop. It is
-	// wired from the same interactive-session condition as request_implementation.
+	// wired from the same interactive-session condition as handoff.
 	GoalAutoContinue bool
 	// WorkflowStatusFunc optionally exposes authoritative bounded workflow state
 	// supplied by an embedding orchestrator. Harness does not infer it from text.
 	WorkflowStatusFunc func() agent.WorkflowStatus
 	// Handoff carries a pending plan->implementation handoff requested by the
-	// request_implementation tool, consumed at the prompt boundary. nil disables.
+	// handoff tool, consumed at the prompt boundary. nil disables.
 	Handoff *handoff.Pending
 	// HandoffAgent is the default agent a handoff switches to when the request
 	// names none. Empty falls back to the built-in default agent.
@@ -3846,7 +3846,7 @@ func splitHandoffCommandToken(s string) (token, rest string) {
 }
 
 // prepareHandoff assembles a handoff request from any pending
-// request_implementation tool request plus the given /handoff options: it
+// handoff tool request plus the given /handoff options: it
 // validates the latest recorded plan and resolves the target agent. Failures are
 // reported on app.Errw. handoffCommand (TTY
 // approval) and the JSON run driver (protocol approval) share it.
@@ -3889,7 +3889,6 @@ func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 		return handoff.Request{}, false
 	}
 	req.PlanPath = latest.Path
-	req.Brief = strings.TrimSpace(req.Brief)
 	target := req.Agent
 	if target == "" {
 		target = app.HandoffAgent
@@ -3903,8 +3902,8 @@ func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 
 // handoffCommand handles /handoff [-a agent] [-m model] [message]: hand off to
 // an implementation agent to carry out the most recently recorded plan, after
-// interactive approval. It consumes any request the request_implementation tool
-// recorded, applies manual overrides and guidance, fills in the brief, and
+// interactive approval. It consumes any request the handoff tool
+// recorded, applies manual overrides and guidance, and
 // switches with a clean, plan-seeded context.
 func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) bool {
 	req, ok := app.prepareHandoff(arg)
@@ -3917,13 +3916,6 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 		displayBrief = app.Renderer.FormatMarkdown(displayBrief)
 	}
 	fmt.Fprintf(app.Errw, "Implementation plan:\n%s\n", displayBrief)
-	if req.Brief != "" {
-		displayContext := req.Brief
-		if app.Renderer != nil {
-			displayContext = app.Renderer.FormatMarkdown(displayContext)
-		}
-		fmt.Fprintf(app.Errw, "Supplementary context:\n%s\n", displayContext)
-	}
 
 	approval := fmt.Sprintf("Hand off to %q", req.Agent)
 	if req.Model != "" {
@@ -3984,9 +3976,6 @@ func (app *App) handoffToImplementation(req handoff.Request) bool {
 		return false
 	}
 	seed := "=== Implementation handoff ===\nImplement the complete approved plan below.\n\nRecorded plan: " + latest.Path + "\n\n" + plan.Render(latest)
-	if req.Brief != "" {
-		seed += "\n\nSupplementary planning context:\n" + req.Brief
-	}
 	if req.Message != "" {
 		seed += "\n\nAdditional input from the user:\n" + req.Message
 	}

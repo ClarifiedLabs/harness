@@ -233,7 +233,7 @@ func TestBuiltInToolDescriptionsStayConcise(t *testing.T) {
 	toolList := []Tool{
 		readFile{}, listDir{}, glob{}, grep{}, ripgrep{}, edit{}, writeFile{},
 		runCommand{}, gitTool{}, gitReadonly{}, webFetch{}, applyPatch{}, newWriteTmpFile(),
-		NewRequestImplementation(nil, nil, true, nil),
+		NewHandoff(nil, nil, true, nil),
 	}
 	for _, tool := range toolList {
 		desc := tool.Description()

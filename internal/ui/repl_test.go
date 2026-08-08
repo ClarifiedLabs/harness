@@ -4703,7 +4703,6 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 	app.handoffToImplementation(handoff.Request{
 		Agent:    "auto",
 		PlanPath: ready.Path,
-		Brief:    "tests run with go test",
 		Message:  "preserve the public API",
 	})
 
@@ -4715,7 +4714,7 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 		t.Fatalf("seeded transcript invalid: %v", err)
 	}
 	seed := msgs[0].Content[0].Text
-	for _, want := range []string{"Implementation handoff", "Implement the change", "go test ./...", "tests run with go test", "Additional input from the user", "preserve the public API", ready.Path} {
+	for _, want := range []string{"Implementation handoff", "Implement the change", "go test ./...", "Additional input from the user", "preserve the public API", ready.Path} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
@@ -4748,7 +4747,6 @@ func TestHandoffToImplementationAbortsWhenModelSwitchFails(t *testing.T) {
 		Agent:    "auto",
 		Model:    "missing-model",
 		PlanPath: "/p/0001.plan.md",
-		Brief:    "tests run with go test",
 	})
 
 	msgs := app.Agent.Transcript()
@@ -4779,7 +4777,6 @@ func TestHandoffToImplementationAbortsWhenArchiveFails(t *testing.T) {
 	app.handoffToImplementation(handoff.Request{
 		Agent:    "auto",
 		PlanPath: "/p/0001.plan.md",
-		Brief:    "tests run with go test",
 	})
 
 	msgs := app.Agent.Transcript()
@@ -4851,7 +4848,7 @@ func TestHandoffCommandCancelledOnNo(t *testing.T) {
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{Brief: "ctx", PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 	switched := false
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		switched = true
@@ -4874,7 +4871,7 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{Brief: "planning context", PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 	var agentTarget, modelTarget, approval string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		agentTarget = name
@@ -4898,13 +4895,13 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 		t.Errorf("approval prompt should name the model override: %q", approval)
 	}
 	seed := transcriptTextForUI(app.Agent.Transcript())
-	for _, want := range []string{"planning context", "Additional input from the user", "preserve the public API"} {
+	for _, want := range []string{"Additional input from the user", "preserve the public API"} {
 		if !strings.Contains(seed, want) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
 	}
-	if got := errw.String(); !strings.Contains(got, "Supplementary context:\nplanning context") {
-		t.Errorf("supplementary context was not displayed:\n%s", got)
+	if got := errw.String(); strings.Contains(got, "Supplementary context:") {
+		t.Errorf("supplementary context should not be displayed after brief removal:\n%s", got)
 	}
 }
 
@@ -4919,8 +4916,7 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 	})
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
 	app.Handoff = handoff.NewPending()
-	const brief = "**Verify behavior** with [docs](https://example.com/design).\n\n- alpha beta gamma delta epsilon zeta eta theta"
-	app.Handoff.Request(handoff.Request{Brief: brief, PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
 	}
@@ -4930,23 +4926,14 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 	}
 
 	display := errw.String()
-	for _, want := range []string{
-		"Supplementary context:\nVerify behavior",
-		"docs\n<https://example.com/design>",
-		"- alpha beta gamma delta\n  epsilon zeta eta theta",
-	} {
-		if !strings.Contains(display, want) {
-			t.Errorf("rendered handoff brief missing %q:\n%s", want, display)
-		}
+	if !strings.Contains(display, "Implementation plan:") {
+		t.Errorf("handoff should display the plan:\n%s", display)
 	}
-	if strings.Contains(display, "**Verify behavior**") {
-		t.Errorf("display retained raw emphasis delimiters:\n%s", display)
+	if strings.Contains(display, "Supplementary context:") {
+		t.Errorf("supplementary context should not be displayed after brief removal:\n%s", display)
 	}
 	if strings.Contains(out.String(), "Supplementary context:") {
 		t.Errorf("supplementary context should remain on stderr, stdout = %q", out.String())
-	}
-	if seed := transcriptTextForUI(app.Agent.Transcript()); !strings.Contains(seed, brief) {
-		t.Errorf("seed did not retain original Markdown source: %q", seed)
 	}
 	if entries, _ := os.ReadDir(filepath.Join(app.SessionPath, "compactions")); len(entries) == 0 {
 		t.Error("planning transcript was not archived")
@@ -4960,15 +4947,15 @@ func TestHandoffCommandDisplaysRawBriefWithoutRenderer(t *testing.T) {
 	app.Renderer = nil
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{Brief: "**raw brief**", PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default()}, nil
 	}
 
 	app.handoffCommand("", func(string) (string, error) { return "n", nil })
 
-	if got := errw.String(); !strings.Contains(got, "Supplementary context:\n**raw brief**\n") {
-		t.Errorf("supplementary context should be displayed raw without a renderer:\n%s", got)
+	if got := errw.String(); strings.Contains(got, "Supplementary context:") {
+		t.Errorf("supplementary context should not be displayed without brief:\n%s", got)
 	}
 }
 
@@ -4981,7 +4968,7 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("x")})
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 	var target string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		target = name
@@ -5004,7 +4991,7 @@ func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
 	}
@@ -5033,7 +5020,7 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 			Events: []llm.StreamEvent{textDelta("plan ready")},
 			Stop:   llm.StopEndTurn,
 			Block: func(ctx context.Context) {
-				pending.Request(handoff.Request{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+				pending.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 				close(inPrompt)
 				<-releaseTurn
 			},
@@ -5072,8 +5059,8 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 	if got := transcriptPrompts(app); !strings.Contains(got, implementationStartPrompt) {
 		t.Fatalf("implementation prompt missing from transcript prompts %q", got)
 	}
-	if got := errw.String(); !strings.Contains(got, "Supplementary context:\nenv: go test") {
-		t.Fatalf("tool-requested supplementary context was not displayed: %q", got)
+	if got := errw.String(); strings.Contains(got, "Supplementary context:") {
+		t.Fatalf("supplementary context should not be displayed after brief removal: %q", got)
 	}
 }
 
@@ -5084,7 +5071,7 @@ func TestREPLAutoHandoffDeclineDoesNotStartImplementation(t *testing.T) {
 		Events: []llm.StreamEvent{textDelta("plan ready")},
 		Stop:   llm.StopEndTurn,
 		Block: func(ctx context.Context) {
-			pending.Request(handoff.Request{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+			pending.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 		},
 	})
 	app := newTestApp(t, &out, &errw, fp)
@@ -5116,7 +5103,7 @@ func TestREPLHandoffFailureDoesNotStartImplementationTurn(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{}, errors.New("no such agent")
 	}

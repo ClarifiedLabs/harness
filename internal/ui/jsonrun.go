@@ -631,7 +631,6 @@ func (d *jsonDriver) boundary() bool {
 			approval := runstream.ApprovalRequest{
 				ID:       id,
 				Kind:     runstream.ApprovalKindImplementationHandoff,
-				Brief:    req.Brief,
 				PlanPath: req.PlanPath,
 				Agent:    req.Agent,
 				Model:    req.Model,

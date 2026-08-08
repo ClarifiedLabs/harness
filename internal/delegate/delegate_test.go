@@ -209,7 +209,7 @@ func TestMissingToolsPreservesRequiredOrder(t *testing.T) {
 
 func TestMissingToolsExemptsAgentLocalCoordination(t *testing.T) {
 	got := MissingTools(
-		[]string{"read_file", updateTodosToolName, recordPlanToolName, requestImplementationToolName, "write_file"},
+		[]string{"read_file", updateTodosToolName, recordPlanToolName, handoffToolName, "write_file"},
 		[]string{"read_file"},
 	)
 	want := []string{"write_file"}

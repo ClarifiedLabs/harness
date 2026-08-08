@@ -39,7 +39,7 @@ const maxAgentDescriptionBytes = 160
 const delegateToolName = "delegate"
 const updateTodosToolName = "update_todos"
 const recordPlanToolName = "record_plan"
-const requestImplementationToolName = "request_implementation"
+const handoffToolName = "handoff"
 
 const ModeImplementation = "implementation"
 const continuationContextPercent = 60
@@ -589,7 +589,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	toolNames := launch.Tools.Names()
 	// Implementation approval belongs to the interactive root. A delegated plan
 	// agent records its artifact in its own child session and reports it upward.
-	toolNames = withoutTool(toolNames, requestImplementationToolName)
+	toolNames = withoutTool(toolNames, handoffToolName)
 	if runtime.Depth+1 >= maxDepth {
 		toolNames = withoutTool(toolNames, delegateToolName)
 	}
@@ -1615,7 +1615,7 @@ func MissingTools(required, available []string) []string {
 		}
 		// These are agent-local coordination capabilities, not authority
 		// inherited from the parent.
-		if name == updateTodosToolName || name == recordPlanToolName || name == requestImplementationToolName {
+		if name == updateTodosToolName || name == recordPlanToolName || name == handoffToolName {
 			continue
 		}
 		if name == "git_readonly" && have["git"] {

@@ -815,7 +815,7 @@ func handoffPlanStep(pending *handoff.Pending) llmtest.Step {
 		Events: []llm.StreamEvent{textDelta("plan ready")},
 		Stop:   llm.StopEndTurn,
 		Block: func(context.Context) {
-			pending.Request(handoff.Request{Brief: "env: go test", PlanPath: "/p/0001.plan.md"})
+			pending.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
 		},
 	}
 }
@@ -876,7 +876,7 @@ func TestRunJSONHandoffApprovalStartsImplementation(t *testing.T) {
 	if !ok {
 		t.Fatal("test app has no recorded plan")
 	}
-	if approval["kind"] != "implementation_handoff" || approval["brief"] != "env: go test" ||
+	if approval["kind"] != "implementation_handoff" ||
 		approval["plan_path"] != latest.Path || approval["agent"] != "auto" || approval["id"] == nil || approval["work_id"] != nil || approval["revision_id"] != nil {
 		t.Fatalf("approval_request = %v", approval)
 	}

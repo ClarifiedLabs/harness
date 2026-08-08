@@ -3869,7 +3869,7 @@ func TestRunInteractiveAutoExposesTodosButNotPlanHandoffOrGoalTools(t *testing.T
 	if !slices.Contains(names, "update_todos") {
 		t.Fatalf("interactive auto tools missing update_todos: %v", names)
 	}
-	for _, name := range []string{"record_plan", "request_implementation", "create_goal", "update_goal"} {
+	for _, name := range []string{"record_plan", "handoff", "create_goal", "update_goal"} {
 		if slices.Contains(names, name) {
 			t.Fatalf("interactive auto tools unexpectedly include removed %s: %v", name, names)
 		}
@@ -5022,7 +5022,7 @@ func TestRunREPLModeAliasSwitchesTools(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("want 1 post-switch request, got %d", len(fp.Requests))
 	}
-	want := append(expectedPlanToolNames(), "request_implementation")
+	want := append(expectedPlanToolNames(), "handoff")
 	if got := toolNames(fp.Requests[0]); !slices.Equal(got, want) {
 		t.Errorf("post-/mode tools = %v, want plan set %v", got, want)
 	}
@@ -5172,23 +5172,23 @@ func expectedDefaultToolNames() []string {
 func TestEnableInteractivePlanHandoff(t *testing.T) {
 	agents := agentdef.Builtins()
 	enableInteractivePlanHandoff(agents)
-	if !slices.Contains(agents["plan"].AllowedTools, "request_implementation") {
-		t.Fatalf("interactive plan tools missing request_implementation: %v", agents["plan"].AllowedTools)
+	if !slices.Contains(agents["plan"].AllowedTools, "handoff") {
+		t.Fatalf("interactive plan tools missing handoff: %v", agents["plan"].AllowedTools)
 	}
-	if slices.Contains(agents["auto"].AllowedTools, "request_implementation") {
-		t.Fatalf("interactive auto tools unexpectedly include request_implementation: %v", agents["auto"].AllowedTools)
+	if slices.Contains(agents["auto"].AllowedTools, "handoff") {
+		t.Fatalf("interactive auto tools unexpectedly include handoff: %v", agents["auto"].AllowedTools)
 	}
 	enableInteractivePlanHandoff(agents)
 	count := 0
 	for _, name := range agents["plan"].AllowedTools {
-		if name == "request_implementation" {
+		if name == "handoff" {
 			count++
 		}
 	}
 	if count != 1 {
-		t.Fatalf("request_implementation count = %d, want 1", count)
+		t.Fatalf("handoff count = %d, want 1", count)
 	}
-	if slices.Contains(agents["independent"].AllowedTools, "request_implementation") {
+	if slices.Contains(agents["independent"].AllowedTools, "handoff") {
 		t.Fatalf("interactive handoff leaked to independent: %v", agents["independent"].AllowedTools)
 	}
 }

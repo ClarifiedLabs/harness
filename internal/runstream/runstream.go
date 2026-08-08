@@ -22,7 +22,7 @@ import (
 )
 
 // Version is the JSON run-stream protocol version, published as run_start.v.
-const Version = 3
+const Version = 4
 
 // Envelope type names. Mirrored session events between run_start and run_end
 // keep their raw.ndjson type names ("user", "assistant_delta", "tool_start",
@@ -38,7 +38,7 @@ const (
 )
 
 // ApprovalKindImplementationHandoff marks an approval_request asking whether
-// to execute a request_implementation tool handoff.
+// to execute a handoff tool handoff.
 const ApprovalKindImplementationHandoff = "implementation_handoff"
 
 // Run modes published as run_start.mode.
@@ -195,7 +195,6 @@ type ApprovalRequest struct {
 	Type     string    `json:"type"`
 	ID       string    `json:"id"`
 	Kind     string    `json:"kind"`
-	Brief    string    `json:"brief"`
 	PlanPath string    `json:"plan_path"`
 	Agent    string    `json:"agent,omitempty"`
 	Model    string    `json:"model,omitempty"`

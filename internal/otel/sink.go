@@ -147,7 +147,7 @@ func sanitizeToolName(name string) string {
 		return "unknown"
 	}
 	known := map[string]bool{
-		"read_file": true, "edit": true, "write_file": true, "apply_patch": true, "run_command": true, "search": true, "rg": true, "grep": true, "glob": true, "list_dir": true, "git_readonly": true, "delegate": true, "background_jobs": true, "update_todos": true, "request_implementation": true, "view_image": true, "web_fetch": true,
+		"read_file": true, "edit": true, "write_file": true, "apply_patch": true, "run_command": true, "search": true, "rg": true, "grep": true, "glob": true, "list_dir": true, "git_readonly": true, "delegate": true, "background_jobs": true, "update_todos": true, "handoff": true, "view_image": true, "web_fetch": true,
 	}
 	if known[name] {
 		return truncate(name, 64)

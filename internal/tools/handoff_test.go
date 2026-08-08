@@ -11,7 +11,7 @@ import (
 	"harness/internal/plan"
 )
 
-func runRequestImpl(t *testing.T, tool *requestImplementation, args map[string]any) (string, error) {
+func runHandoff(t *testing.T, tool *handoffTool, args map[string]any) (string, error) {
 	t.Helper()
 	input, err := json.Marshal(args)
 	if err != nil {
@@ -26,10 +26,10 @@ func recordedPlan() *plan.Store {
 	return store
 }
 
-func TestRequestImplementationRecordsLatestPlan(t *testing.T) {
+func TestHandoffRecordsLatestPlan(t *testing.T) {
 	pending := handoff.NewPending()
-	tool := NewRequestImplementation(pending, recordedPlan(), true, []string{"auto", "plan"})
-	out, err := runRequestImpl(t, tool, map[string]any{"brief": "preserve the API", "agent": "auto"})
+	tool := NewHandoff(pending, recordedPlan(), true, []string{"auto", "plan"})
+	out, err := runHandoff(t, tool, map[string]any{"agent": "auto"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,41 +37,41 @@ func TestRequestImplementationRecordsLatestPlan(t *testing.T) {
 		t.Fatalf("receipt = %q", out)
 	}
 	req, ok := pending.Take()
-	if !ok || req.Agent != "auto" || req.Brief != "preserve the API" || req.PlanPath != "/session/plans/0001-implementation.plan.md" {
+	if !ok || req.Agent != "auto" || req.PlanPath != "/session/plans/0001-implementation.plan.md" {
 		t.Fatalf("request = %+v, present=%v", req, ok)
 	}
 }
 
-func TestRequestImplementationRequiresRecordedPlan(t *testing.T) {
+func TestHandoffRequiresRecordedPlan(t *testing.T) {
 	for _, store := range []*plan.Store{nil, plan.NewStore()} {
-		if out, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), nil); err == nil || !strings.Contains(err.Error(), "plan") {
+		if out, err := runHandoff(t, NewHandoff(handoff.NewPending(), store, true, nil), nil); err == nil || !strings.Contains(err.Error(), "plan") {
 			t.Fatalf("Run = %q, %v; want plan error", out, err)
 		}
 	}
 	store := plan.NewStore()
 	store.Replace(&plan.Plan{Title: "Incomplete", Body: "body"})
-	if _, err := runRequestImpl(t, NewRequestImplementation(handoff.NewPending(), store, true, nil), nil); err == nil {
+	if _, err := runHandoff(t, NewHandoff(handoff.NewPending(), store, true, nil), nil); err == nil {
 		t.Fatal("plan without an artifact path was accepted")
 	}
 }
 
-func TestRequestImplementationRejectsUnknownAgentAndOneShot(t *testing.T) {
+func TestHandoffRejectsUnknownAgentAndOneShot(t *testing.T) {
 	pending := handoff.NewPending()
-	tool := NewRequestImplementation(pending, recordedPlan(), true, []string{"auto", "plan"})
-	if _, err := runRequestImpl(t, tool, map[string]any{"agent": "implementation"}); err == nil || !strings.Contains(err.Error(), "agent must be one of") {
+	tool := NewHandoff(pending, recordedPlan(), true, []string{"auto", "plan"})
+	if _, err := runHandoff(t, tool, map[string]any{"agent": "implementation"}); err == nil || !strings.Contains(err.Error(), "agent must be one of") {
 		t.Fatalf("unknown-agent error = %v", err)
 	}
 	if _, ok := pending.Take(); ok {
 		t.Fatal("invalid request was recorded")
 	}
-	tool = NewRequestImplementation(pending, recordedPlan(), false, nil)
-	if _, err := runRequestImpl(t, tool, nil); err == nil || !strings.Contains(err.Error(), "interactive") {
+	tool = NewHandoff(pending, recordedPlan(), false, nil)
+	if _, err := runHandoff(t, tool, nil); err == nil || !strings.Contains(err.Error(), "interactive") {
 		t.Fatalf("one-shot error = %v", err)
 	}
 }
 
-func TestRequestImplementationSchemaKeepsSmallSurface(t *testing.T) {
-	tool := NewRequestImplementation(handoff.NewPending(), recordedPlan(), true, []string{"auto", "plan"})
+func TestHandoffSchemaKeepsSmallSurface(t *testing.T) {
+	tool := NewHandoff(handoff.NewPending(), recordedPlan(), true, []string{"auto", "plan"})
 	var schema struct {
 		Properties map[string]json.RawMessage `json:"properties"`
 		Required   []string                   `json:"required"`
@@ -79,7 +79,7 @@ func TestRequestImplementationSchemaKeepsSmallSurface(t *testing.T) {
 	if err := json.Unmarshal(tool.Schema(), &schema); err != nil {
 		t.Fatal(err)
 	}
-	if len(schema.Required) != 0 || len(schema.Properties) != 2 || schema.Properties["model"] != nil || schema.Properties["plan_path"] != nil {
+	if len(schema.Required) != 0 || len(schema.Properties) != 1 || schema.Properties["model"] != nil || schema.Properties["plan_path"] != nil || schema.Properties["brief"] != nil {
 		t.Fatalf("schema = %+v", schema)
 	}
 	var agent map[string]any

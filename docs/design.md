@@ -2658,7 +2658,7 @@ reuses its logical descendant slot; all terminal paths release active capacity.
 - Child agents receive private TODO and plan stores; child coordination state
   does not mutate the parent stores. `update_todos` and `record_plan` are local
   coordination tools and do not require matching authority in the parent tool
-  subset. `request_implementation` is always removed from child agents. Foreground
+  subset. `handoff` is always removed from child agents. Foreground
   delegates remain serialized because children share the checkout and may write.
 - The parent transcript records only the normal `delegate` tool call and compact result.
   Child transcripts are saved under `children/<child-id>/` in the parent session
@@ -2853,7 +2853,7 @@ preferred when locating identifiers, range bounds are inclusive, and several
 fields have Harness-owned defaults. `Registry.Specs` therefore retains those
 field descriptions instead of applying its normal prose-stripping policy.
 
-### 9.17 `record_plan` and `request_implementation`
+### 9.17 `record_plan` and `handoff`
 
 `record_plan` (`internal/plan`) accepts `{title, plan}` and requires both values
 after trimming. It renders `# <title>` followed by the self-contained Markdown
@@ -2867,18 +2867,18 @@ requires a live session directory and is therefore unavailable where no session
 artifact can be written. Delegate children receive private plan stores and write
 under their own child session directories.
 
-`request_implementation` (`internal/tools` + `internal/handoff`) accepts the
-optional `{brief, agent}` pair. It is enabled only for the interactive root
+`handoff` (`internal/tools` + `internal/handoff`) accepts the
+optional `{agent}`. It is enabled only for the interactive root
 `plan` agent. It rejects one-shot mode, an absent/latest plan without a body or
 path, and unknown explicit agents. The configured agent names populate the
 `agent` enum. The tool records a synchronized pending `handoff.Request`; tools
 never prompt or switch agents themselves.
 
 At the interactive boundary, Harness rejects a stale pending path, renders the
-complete latest plan plus optional brief, and asks for approval. Approval
+complete latest plan, and asks for approval. Approval
 switches the target agent/model, archives the planning transcript, resets the
 conversation tree to one user message containing the absolute plan path and
-complete plan body, appends optional planning/user context, clears the
+complete plan body, appends optional user context from `/handoff`, clears the
 implementation agent's TODO list, and starts the implementation prompt.
 
 ## 10. CLI / REPL (`internal/ui`)
@@ -4059,7 +4059,7 @@ reviewer, or the wide-open default without separate binaries.
   `update_todos`. `plan` exposes the inspection surface, `write_tmp_file`,
   `record_plan`, `delegate`, and background jobs, but deliberately omits
   `update_todos`; interactive root plan sessions additionally expose
-  `request_implementation`. Delegated and one-shot plan agents do not.
+  `handoff`. Delegated and one-shot plan agents do not.
   `explore`, `plan`, and `review` have no first-class file-mutation tools and
   use read-only MCP exposure. `auto` and `independent` advertise `git` rather
   than the redundant `git_readonly`; delegation treats `git` as satisfying a
@@ -4098,14 +4098,13 @@ reviewer, or the wide-open default without separate binaries.
   agent pair a smaller `model` with a lower `reasoning`.
 - **Plan → implementation handoff:** the `plan` agent writes a self-contained
   artifact with `record_plan` (§9.17) and requests a handoff with
-  `request_implementation` (§9.17).
+  `handoff` (§9.17).
   At the next prompt boundary, or on manual `/handoff` (§10), the REPL prompts for
   approval, archives the planning transcript via `SaveCompaction`, switches to
   the target agent — default `auto`, overridable by
   `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or `/handoff -a
   <agent>` — optionally swaps the model for a manual `/handoff -m <model>`, then
-  reseeds a clean transcript with the complete latest plan, optional
-  supplementary brief, and any
+  reseeds a clean transcript with the complete latest plan and any
   trailing `/handoff` user message as a separate section before submitting a
   fixed implementation-start prompt. Reusing
   the same in-session

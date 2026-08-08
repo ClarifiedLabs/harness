@@ -23,8 +23,8 @@ This page is the operational overview.
 | `update_todos` | replace the current advisory TODO list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
-| `record_plan` | persist a self-contained Markdown implementation plan under the session (plan agent) |
-| `request_implementation` | request approval to hand the latest recorded plan to an implementation agent (interactive plan agent) |
+| `record_plan` | Write a self-contained Markdown implementation plan (plan agent) |
+| `handoff` | Handoff a recorded plan for implementation (interactive plan agent) |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
@@ -252,7 +252,7 @@ The `plan` agent receives `record_plan` instead of `update_todos`. It writes a
 self-contained Markdown artifact to `<session>/plans/NNNN-<slug>.plan.md` with
 temp-file-then-rename durability and makes that artifact the session's latest
 plan. Older plan files remain immutable. In an interactive root session, the
-plan agent may call `request_implementation`; Harness displays the full latest
+plan agent may call `handoff`; Harness displays the full latest
 plan, asks for approval, archives the planning transcript, and seeds the
 implementation agent with the complete plan. Delegated plan agents may record
 private child plans but cannot request an interactive handoff.

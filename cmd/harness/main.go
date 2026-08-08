@@ -819,7 +819,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	handoffPending := handoff.NewPending()
 	toolCatalog.Register(todo.NewTool(todoStore))
 	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
-	toolCatalog.Register(tools.NewRequestImplementation(handoffPending, planStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
+	toolCatalog.Register(tools.NewHandoff(handoffPending, planStore, interactiveSession || machineInteractive, agentdef.Names(agents)))
 	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
@@ -1847,11 +1847,11 @@ func enableInteractivePlanHandoff(agents map[string]agentdef.Definition) {
 		return
 	}
 	for _, name := range planning.AllowedTools {
-		if name == "request_implementation" {
+		if name == "handoff" {
 			return
 		}
 	}
-	planning.AllowedTools = append(planning.AllowedTools, "request_implementation")
+	planning.AllowedTools = append(planning.AllowedTools, "handoff")
 	agents["plan"] = planning
 }
 
