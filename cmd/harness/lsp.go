@@ -33,7 +33,7 @@ type lspRuntime struct {
 // It is only active while LSP tools are enabled and registered, and tool specs
 // are cached at registry rebuild boundaries, so toggles take effect at the
 // next rebuild.
-const lspPreferSuffix = " For symbol questions (definitions, references, type info, outlines, diagnostics), prefer lsp_* tools when available."
+const lspPreferSuffix = " Use lsp_ tools for symbol lookups."
 
 func lspDescriptionSuffix(r *lspRuntime) func(name, base string) string {
 	return func(name, base string) string {
