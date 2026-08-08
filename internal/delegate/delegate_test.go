@@ -177,8 +177,8 @@ func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
 
 func TestMissingToolsPreservesRequiredOrder(t *testing.T) {
 	got := MissingTools(
-		[]string{"read_file", "write_file", "apply_patch", "write_file", "run_command"},
-		[]string{"read_file", "run_command"},
+		[]string{"read_file", "write_file", "apply_patch", "write_file", "shell"},
+		[]string{"read_file", "shell"},
 	)
 	want := []string{"write_file", "apply_patch"}
 	if !slices.Equal(got, want) {

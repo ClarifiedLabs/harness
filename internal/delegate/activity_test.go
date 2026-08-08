@@ -125,10 +125,10 @@ func TestSafeToolActivityUsesArgumentAllowlist(t *testing.T) {
 	}
 
 	command := safeToolActivity(llm.ToolCall{
-		Name:  "run_command",
+		Name:  "shell",
 		Input: json.RawMessage(`{"command":"curl -H 'Authorization: secret' https://example.test"}`),
 	})
-	if command != "tool run_command" {
+	if command != "tool shell" {
 		t.Fatalf("command summary = %q, want redacted tool name only", command)
 	}
 
@@ -136,9 +136,9 @@ func TestSafeToolActivityUsesArgumentAllowlist(t *testing.T) {
 	sinkRegistry := NewActivityRegistry(nil)
 	registration := sinkRegistry.Register(ActivityStart{ID: "child", Agent: "explore"})
 	sink := newChildSink("", nil, false, nil, registration)
-	sink.ToolStart(llm.ToolCall{ID: "call", Name: "run_command", Input: json.RawMessage(`{"command":"echo secret"}`)})
+	sink.ToolStart(llm.ToolCall{ID: "call", Name: "shell", Input: json.RawMessage(`{"command":"echo secret"}`)})
 	sink.ToolResult(llm.ToolResult{ForID: "call", Text: resultBody, IsError: true})
-	if activity := sinkRegistry.Snapshot().Recent.Activity; strings.Contains(activity, "secret") || activity != "tool run_command failed" {
+	if activity := sinkRegistry.Snapshot().Recent.Activity; strings.Contains(activity, "secret") || activity != "tool shell failed" {
 		t.Fatalf("tool result activity = %q", activity)
 	}
 }

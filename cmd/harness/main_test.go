@@ -1505,7 +1505,7 @@ func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
 	if got.MessageCount != len(got.Request.Messages) {
 		t.Fatalf("message_count = %d, request messages = %d", got.MessageCount, len(got.Request.Messages))
 	}
-	if !slices.Contains(got.ToolNames, "read_file") || got.ToolCount != len(got.ToolNames) || len(got.Request.Tools) != got.ToolCount {
+	if !slices.Contains(got.ToolNames, "read_file") || !slices.Contains(got.ToolNames, "shell") || got.ToolCount != len(got.ToolNames) || len(got.Request.Tools) != got.ToolCount {
 		t.Fatalf("tool accounting names=%v count=%d request=%d", got.ToolNames, got.ToolCount, len(got.Request.Tools))
 	}
 	if got.Context.Total <= 0 || got.Context.Tools <= 0 || got.RequestBytes.Total <= 0 {
@@ -4436,7 +4436,7 @@ func TestRunDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 		"agents":{
 			"style":{
 				"description":"Style review",
-				"allowed_tools":["read_file"],
+				"allowed_tools":["view_image"],
 				"prompt":"STYLE"
 			}
 		}
@@ -4471,7 +4471,7 @@ func TestRunDelegateSchemaAutoListsOnlyAutoSubsetAgents(t *testing.T) {
 		"agents":{
 			"style":{
 				"description":"Style review",
-				"allowed_tools":["read_file"],
+				"allowed_tools":["view_image"],
 				"prompt":"STYLE"
 			}
 		}
@@ -4548,7 +4548,7 @@ func TestRunDelegateNamedSubsetAgentFromPlanUsesDefinition(t *testing.T) {
 		"agents":{
 			"style":{
 				"description":"Review style after implementation",
-				"allowed_tools":["read_file"],
+				"allowed_tools":["view_image"],
 				"prompt":"STYLE AGENT PROMPT"
 			}
 		}
@@ -4565,8 +4565,8 @@ func TestRunDelegateNamedSubsetAgentFromPlanUsesDefinition(t *testing.T) {
 		t.Fatalf("provider requests = %d, want parent/tool, child, parent/final", len(fp.Requests))
 	}
 	child := fp.Requests[1]
-	if got := toolNames(child); !slices.Equal(got, []string{"read_file"}) {
-		t.Fatalf("delegate child tools = %v, want [read_file]", got)
+	if got := toolNames(child); !slices.Equal(got, []string{"view_image"}) {
+		t.Fatalf("delegate child tools = %v, want [view_image]", got)
 	}
 	if !strings.Contains(child.System, "STYLE AGENT PROMPT") {
 		t.Fatalf("delegate child system missing style prompt: %q", child.System)
@@ -4639,8 +4639,9 @@ func TestRunLogsUnavailableToolsAtLaunch(t *testing.T) {
 			t.Fatalf("request advertised unavailable tool %q: %v", name, toolNames(fp.Requests[0]))
 		}
 	}
-	if !slices.Contains(toolNames(fp.Requests[0]), "search") {
-		t.Fatalf("typed search should use its Go fallback when rg is unavailable: %v", toolNames(fp.Requests[0]))
+	// Search is catalog-only, not advertised by auto.
+	if slices.Contains(toolNames(fp.Requests[0]), "search") {
+		t.Fatalf("default should not advertise search: %v", toolNames(fp.Requests[0]))
 	}
 }
 
@@ -4722,7 +4723,7 @@ func TestRunLogLevelSuppressesUnavailableToolWarnings(t *testing.T) {
 	}
 }
 
-// Plan agent advertises its exploration tool set (incl. run_command, no
+// Plan agent advertises its exploration tool set (incl. shell, no
 // file-mutation tools) and includes its prompt.
 func TestRunPlanAgentRestrictsToolsAndAddsPrompt(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
@@ -4898,7 +4899,7 @@ func TestRunREPLAgentListShowsModelConfig(t *testing.T) {
 			"security":{
 				"description":"Security review",
 				"model":"openai:gpt-5.5",
-				"allowed_tools":["read_file"],
+				"allowed_tools":["view_image"],
 				"prompt":"SECURITY"
 			}
 		}
@@ -4950,7 +4951,7 @@ func TestRunDelegateNamedAgentUsesDefinition(t *testing.T) {
 			"style":{
 				"description":"Review style after implementation",
 				"model":"openai:gpt-5.5",
-				"allowed_tools":["read_file"],
+				"allowed_tools":["view_image"],
 				"prompt":"STYLE AGENT PROMPT"
 			}
 		}
@@ -4973,8 +4974,8 @@ func TestRunDelegateNamedAgentUsesDefinition(t *testing.T) {
 	if child.TargetID != "openai:gpt-5.5" {
 		t.Fatalf("delegate child target = %q, want openai:gpt-5.5", child.TargetID)
 	}
-	if got := toolNames(child.Request); !slices.Equal(got, []string{"read_file"}) {
-		t.Fatalf("delegate child tools = %v, want [read_file]", got)
+	if got := toolNames(child.Request); !slices.Equal(got, []string{"view_image"}) {
+		t.Fatalf("delegate child tools = %v, want [view_image]", got)
 	}
 	if !strings.Contains(child.Request.System, "STYLE AGENT PROMPT") {
 		t.Fatalf("delegate child system missing style prompt: %q", child.Request.System)
@@ -5144,27 +5145,18 @@ func expectedExploreToolNames() []string {
 }
 
 func expectedInspectionToolNames() []string {
-	names := []string{"read_file", "view_image", "list_dir", "glob", "search"}
-	// explore (and plan) gain run_command for exploration; it lands right after
-	// the search tool in catalog registration order.
-	names = append(names, "run_command", "web_fetch")
-	if tools.GitAvailable() {
-		names = append(names, "git_readonly")
-	}
-	return names
+	return []string{"read_file", "view_image", "shell", "web_fetch"}
 }
 
 func expectedPlanToolNames() []string {
 	names := expectedInspectionToolNames()
 	// plan's realized tool list is the shared inspection set (which now includes
-	// run_command) followed by the main-registered coordination tools in catalog
+	// shell) followed by the main-registered coordination tools in catalog
 	// order.
 	return append(names, "write_tmp_file", "delegate", "background_jobs", "record_plan")
 }
 
 func expectedDefaultToolNames() []string {
-	// The default set omits git_readonly: git already covers it, and read-only
-	// agents remain delegatable via the git->git_readonly subset rule.
 	names := tools.DefaultNames()
 	return append(names, "delegate", "background_jobs", "update_todos")
 }

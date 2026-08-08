@@ -54,9 +54,9 @@ func TestCallActivityConservativeDefaultsAndBuiltins(t *testing.T) {
 	}
 }
 
-func TestRunCommandActivityIsConservative(t *testing.T) {
+func TestShellActivityIsConservative(t *testing.T) {
 	reg := &Registry{}
-	reg.Register(runCommand{})
+	reg.Register(shell{})
 	tests := []struct {
 		name       string
 		input      string
@@ -81,7 +81,7 @@ func TestRunCommandActivityIsConservative(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := reg.CallActivity(llm.ToolCall{Name: "run_command", Input: json.RawMessage(tt.input)})
+			got := reg.CallActivity(llm.ToolCall{Name: "shell", Input: json.RawMessage(tt.input)})
 			if got.Class != tt.class || got.OperationCount != tt.operations || got.Batched != tt.batched {
 				t.Fatalf("CallActivity() = %+v, want class=%q operations=%d batched=%t", got, tt.class, tt.operations, tt.batched)
 			}
@@ -97,10 +97,10 @@ func TestInspectionBoundaryBlocksOpaqueShellBypass(t *testing.T) {
 		blocked  bool
 	}{
 		{name: "typed inspection", call: llm.ToolCall{Name: "read_file"}, activity: Activity{Class: ActivityInspect}, blocked: true},
-		{name: "simple shell inspection", call: llm.ToolCall{Name: "run_command"}, activity: Activity{Class: ActivityInspect}, blocked: true},
-		{name: "opaque shell", call: llm.ToolCall{Name: "run_command"}, activity: Activity{Class: ActivityOther}, blocked: true},
+		{name: "simple shell inspection", call: llm.ToolCall{Name: "shell"}, activity: Activity{Class: ActivityInspect}, blocked: true},
+		{name: "opaque shell", call: llm.ToolCall{Name: "shell"}, activity: Activity{Class: ActivityOther}, blocked: true},
 		{name: "typed mutation", call: llm.ToolCall{Name: "edit"}, activity: Activity{Class: ActivityMutate}},
-		{name: "argv verification", call: llm.ToolCall{Name: "run_command"}, activity: Activity{Class: ActivityVerify}},
+		{name: "argv verification", call: llm.ToolCall{Name: "shell"}, activity: Activity{Class: ActivityVerify}},
 		{name: "coordination", call: llm.ToolCall{Name: "delegate"}, activity: Activity{Class: ActivityCoordinate}},
 	}
 	for _, tt := range tests {

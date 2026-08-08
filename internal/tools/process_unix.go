@@ -10,7 +10,7 @@ import (
 )
 
 func configureProcessGroup(cmd *exec.Cmd) {
-	// run_command captures stdio and is not interactive. Give the child its own
+	// shell captures stdio and is not interactive. Give the child its own
 	// session so /dev/tty is unavailable instead of job-control stopping either
 	// the child or harness. Setsid also makes the child a process-group leader,
 	// preserving negative-pid group kills on timeout/cancel.

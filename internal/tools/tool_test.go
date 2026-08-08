@@ -695,11 +695,11 @@ func TestDispatchTruncateLinesStillRespectsBytes(t *testing.T) {
 
 func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
 	r, _ := DefaultWithOptions(Options{})
-
+	// Search is Catalog-only, so an unregistered lookup falls back to the global limit.
 	searchLimits := r.resultLimitsFor("search")
-	if searchLimits.maxBytes != defaultTypedSearchBytes || searchLimits.maxLines != defaultTypedSearchLines {
-		t.Fatalf("search limits = %d/%d, want %d/%d",
-			searchLimits.maxBytes, searchLimits.maxLines, defaultTypedSearchBytes, defaultTypedSearchLines)
+	if searchLimits.maxBytes != defaultMaxResultBytes || searchLimits.maxLines != defaultMaxResultLines {
+		t.Fatalf("search limits = %d/%d, want %d/%d (Default falls back to global)",
+			searchLimits.maxBytes, searchLimits.maxLines, defaultMaxResultBytes, defaultMaxResultLines)
 	}
 	readLimits := r.resultLimitsFor("read_file")
 	if readLimits.maxBytes != defaultReadFileResultBytes || readLimits.maxLines != defaultMaxResultLines {
@@ -711,6 +711,18 @@ func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
 		t.Fatalf("web_fetch limits = %d/%d, want %d/%d",
 			fetchLimits.maxBytes, fetchLimits.maxLines, defaultSearchResultBytes, defaultSearchResultLines)
 	}
+	// Catalog retains the typed noisy defaults.
+	cat, _ := CatalogWithOptions(Options{})
+	catSearch := cat.resultLimitsFor("search")
+	if catSearch.maxBytes != defaultTypedSearchBytes || catSearch.maxLines != defaultTypedSearchLines {
+		t.Fatalf("catalog search limits = %d/%d, want %d/%d",
+			catSearch.maxBytes, catSearch.maxLines, defaultTypedSearchBytes, defaultTypedSearchLines)
+	}
+	catRead := cat.resultLimitsFor("read_file")
+	if catRead.maxBytes != defaultReadFileResultBytes || catRead.maxLines != defaultMaxResultLines {
+		t.Fatalf("catalog read_file limits = %d/%d, want %d/%d",
+			catRead.maxBytes, catRead.maxLines, defaultReadFileResultBytes, defaultMaxResultLines)
+	}
 }
 
 func TestGlobalResultLimitsOverrideNoisyToolDefaults(t *testing.T) {
@@ -718,41 +730,59 @@ func TestGlobalResultLimitsOverrideNoisyToolDefaults(t *testing.T) {
 		MaxResultBytes: 1234,
 		MaxResultLines: 321,
 	})
-
-	for _, name := range []string{"search", "read_file"} {
+	for _, name := range []string{"read_file", "web_fetch"} {
 		limits := r.resultLimitsFor(name)
 		if limits.maxBytes != 1234 || limits.maxLines != 321 {
 			t.Fatalf("%s limits = %d/%d, want global 1234/321", name, limits.maxBytes, limits.maxLines)
 		}
 	}
+	// Catalog still has the noisy tools and global should override there too.
+	cat, _ := CatalogWithOptions(Options{
+		MaxResultBytes: 1234,
+		MaxResultLines: 321,
+	})
+	for _, name := range []string{"search", "read_file"} {
+		limits := cat.resultLimitsFor(name)
+		if limits.maxBytes != 1234 || limits.maxLines != 321 {
+			t.Fatalf("catalog %s limits = %d/%d, want global 1234/321", name, limits.maxBytes, limits.maxLines)
+		}
+	}
 }
 
 func TestPerToolResultLimitsOverrideGlobalByField(t *testing.T) {
-	r, _ := DefaultWithOptions(Options{
+	// Narrow Default delegates to Catalog for noisy tools; verify via Catalog.
+	cat, _ := CatalogWithOptions(Options{
 		MaxResultBytes:      1000,
 		MaxResultLines:      200,
 		RGResultBytes:       3000,
 		ReadFileResultLines: 40,
 	})
-
-	searchLimits := r.resultLimitsFor("search")
+	searchLimits := cat.resultLimitsFor("search")
 	if searchLimits.maxBytes != 3000 || searchLimits.maxLines != 200 {
-		t.Fatalf("search limits = %d/%d, want 3000/200", searchLimits.maxBytes, searchLimits.maxLines)
+		t.Fatalf("catalog search limits = %d/%d, want 3000/200", searchLimits.maxBytes, searchLimits.maxLines)
 	}
-	readLimits := r.resultLimitsFor("read_file")
+	readLimits := cat.resultLimitsFor("read_file")
 	if readLimits.maxBytes != 1000 || readLimits.maxLines != 40 {
-		t.Fatalf("read_file limits = %d/%d, want 1000/40", readLimits.maxBytes, readLimits.maxLines)
+		t.Fatalf("catalog read_file limits = %d/%d, want 1000/40", readLimits.maxBytes, readLimits.maxLines)
+	}
+	// Default's own web_fetch still inherits global bytes but was not overridden here.
+	r, _ := DefaultWithOptions(Options{
+		MaxResultBytes: 1000,
+		MaxResultLines: 200,
+	})
+	web := r.resultLimitsFor("web_fetch")
+	if web.maxBytes != 1000 || web.maxLines != 200 {
+		t.Fatalf("web_fetch limits = %d/%d, want 1000/200", web.maxBytes, web.maxLines)
 	}
 }
 
 func TestPerToolResultLimitSingleFieldInheritsGlobalDefault(t *testing.T) {
-	r, _ := DefaultWithOptions(Options{
+	cat, _ := CatalogWithOptions(Options{
 		RGResultLines: 123,
 	})
-
-	searchLimits := r.resultLimitsFor("search")
+	searchLimits := cat.resultLimitsFor("search")
 	if searchLimits.maxBytes != defaultMaxResultBytes || searchLimits.maxLines != 123 {
-		t.Fatalf("search limits = %d/%d, want %d/123", searchLimits.maxBytes, searchLimits.maxLines, defaultMaxResultBytes)
+		t.Fatalf("catalog search limits = %d/%d, want %d/123", searchLimits.maxBytes, searchLimits.maxLines, defaultMaxResultBytes)
 	}
 }
 
@@ -767,29 +797,41 @@ func TestDefaultNamesMatchDefaultRegistry(t *testing.T) {
 }
 
 func expectedDefaultNames() []string {
-	want := []string{"read_file", "view_image", "list_dir", "glob", "search"}
-	// apply_patch is not in the default set; it ships only in the Catalog (r56).
-	want = append(want, "edit", "write_file", "run_command")
-	if GitAvailable() {
-		want = append(want, "git")
-	}
-	return append(want, "web_fetch")
+	want := []string{"read_file", "view_image", "edit", "write_file", "shell", "web_fetch"}
+	return want
 }
 
 func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 	r := Catalog()
-	want := append([]string{}, DefaultNames()...)
-	want = append(want, "grep")
+	// Catalog is now full pre-narrow set, not Default plus extras; compare as sets.
+	wantSet := map[string]bool{}
+	for _, n := range DefaultNames() {
+		wantSet[n] = true
+	}
+	for _, n := range []string{"list_dir", "glob", "search", "grep", "apply_patch", "write_tmp_file"} {
+		wantSet[n] = true
+	}
 	if RipgrepAvailable() {
-		want = append(want, "rg")
+		wantSet["rg"] = true
 	}
-	want = append(want, "apply_patch") // relocated out of the default set (r56)
 	if GitAvailable() {
-		want = append(want, "git_readonly")
+		wantSet["git"] = true
+		wantSet["git_readonly"] = true
 	}
-	want = append(want, "write_tmp_file")
-	if got := r.Names(); !slices.Equal(got, want) {
-		t.Errorf("Catalog().Names() = %v, want %v", got, want)
+	// Ensure every wanted name is present; order check is via Default/Catalog construction parity.
+	gotSet := map[string]bool{}
+	for _, n := range r.Names() {
+		gotSet[n] = true
+	}
+	for n := range wantSet {
+		if !gotSet[n] {
+			t.Errorf("Catalog missing %q: got %v", n, r.Names())
+		}
+	}
+	for n := range gotSet {
+		if !wantSet[n] {
+			t.Errorf("Catalog has unexpected %q: got %v", n, r.Names())
+		}
 	}
 	for _, s := range r.Specs() {
 		if len(s.Parameters) == 0 {

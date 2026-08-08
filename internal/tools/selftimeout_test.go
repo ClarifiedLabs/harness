@@ -111,9 +111,9 @@ func TestSubsetCarriesDispatchTimeout(t *testing.T) {
 	}
 }
 
-func TestRunCommandSelfTimeout(t *testing.T) {
-	rc := runCommand{}
-	want := time.Duration(runCommandDefaultTimeout) * time.Second
+func TestShellSelfTimeout(t *testing.T) {
+	rc := shell{}
+	want := time.Duration(shellDefaultTimeout) * time.Second
 	if d, ok := rc.SelfTimeout(json.RawMessage(`{"command":"echo hi"}`)); !ok || d != want {
 		t.Errorf("default SelfTimeout = (%s,%v), want (%s,true)", d, ok, want)
 	}
@@ -121,7 +121,7 @@ func TestRunCommandSelfTimeout(t *testing.T) {
 		t.Errorf("explicit SelfTimeout = (%s,%v), want (1800s,true)", d, ok)
 	}
 	if _, ok := rc.SelfTimeout(json.RawMessage(`{"command":"x","background":true}`)); ok {
-		t.Error("background run_command should report no SelfTimeout")
+		t.Error("background shell should report no SelfTimeout")
 	}
 	if _, ok := rc.SelfTimeout(json.RawMessage(`{"command":"x","timeout_seconds":-1}`)); ok {
 		t.Error("negative timeout_seconds should report no SelfTimeout")

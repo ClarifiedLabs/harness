@@ -28,7 +28,7 @@ func TestClassifyToolError(t *testing.T) {
 		},
 		{
 			name:       "timeout",
-			display:    `[run_command command="sleep 9"] → error: tool timed out after 5s`,
+			display:    `[shell command="sleep 9"] → error: tool timed out after 5s`,
 			want:       llm.ToolErrorTimeout,
 			confidence: "high",
 		},
@@ -59,7 +59,7 @@ func TestClassifyToolError(t *testing.T) {
 		},
 		{
 			name:       "cancelled",
-			display:    `[run_command argv=["go","test","./..."]] → error: context canceled`,
+			display:    `[shell argv=["go","test","./..."]] → error: context canceled`,
 			want:       llm.ToolErrorCancelled,
 			confidence: "high",
 		},
@@ -83,7 +83,7 @@ func TestClassifyToolError(t *testing.T) {
 		},
 		{
 			name:       "blocked by loop guard",
-			display:    `[run_command command="go build ./..."] → error: [loop guard] blocked: this exact call (go build ./...) already failed …`,
+			display:    `[shell command="go build ./..."] → error: [loop guard] blocked: this exact call (go build ./...) already failed …`,
 			want:       llm.ToolErrorBlocked,
 			confidence: "high",
 		},

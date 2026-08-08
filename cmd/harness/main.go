@@ -696,19 +696,19 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// runtime advertises and dispatches only that agent's tools. Built once and
 	// shared with /agent and the /mode alias (write_tmp_file holds a per-run temp dir).
 	toolCatalog, disabledTools := tools.CatalogWithOptions(tools.Options{
-		MaxResultBytes:                     cfg.ToolResultMaxBytes,
-		MaxResultLines:                     cfg.ToolResultMaxLines,
-		ReadFileDefaultLimit:               cfg.ReadFileDefaultLimit,
-		ReadFileResultBytes:                cfg.ReadFileResultMaxBytes,
-		ReadFileResultLines:                cfg.ReadFileResultMaxLines,
-		RGResultBytes:                      cfg.RGResultMaxBytes,
-		RGResultLines:                      cfg.RGResultMaxLines,
-		GrepResultBytes:                    cfg.GrepResultMaxBytes,
-		GrepResultLines:                    cfg.GrepResultMaxLines,
-		Background:                         backgroundManager,
-		DispatchTimeout:                    time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
-		RunCommandTimeoutSeconds:           cfg.RunCommandTimeoutSeconds,
-		RunCommandBackgroundTimeoutSeconds: cfg.RunCommandBackgroundTimeoutSeconds,
+		MaxResultBytes:                cfg.ToolResultMaxBytes,
+		MaxResultLines:                cfg.ToolResultMaxLines,
+		ReadFileDefaultLimit:          cfg.ReadFileDefaultLimit,
+		ReadFileResultBytes:           cfg.ReadFileResultMaxBytes,
+		ReadFileResultLines:           cfg.ReadFileResultMaxLines,
+		RGResultBytes:                 cfg.RGResultMaxBytes,
+		RGResultLines:                 cfg.RGResultMaxLines,
+		GrepResultBytes:               cfg.GrepResultMaxBytes,
+		GrepResultLines:               cfg.GrepResultMaxLines,
+		Background:                    backgroundManager,
+		DispatchTimeout:               time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
+		ShellTimeoutSeconds:           cfg.ShellTimeoutSeconds,
+		ShellBackgroundTimeoutSeconds: cfg.ShellBackgroundTimeoutSeconds,
 	})
 	backgroundManager.SetResultPreparer(toolCatalog.PrepareResultWithOriginal)
 	for _, disabled := range disabledTools {

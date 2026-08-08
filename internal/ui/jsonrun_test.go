@@ -641,7 +641,7 @@ func TestRunJSONDetachedWaitCompletionStartsContinuation(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -709,7 +709,7 @@ func TestRunJSONInitialBoundaryRefreshesMCPAndPersistsNotice(t *testing.T) {
 	app.AgentName = "auto"
 	manager := background.NewManager(background.Options{})
 	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			return tools.BackgroundJobResult{Text: "background result"}, nil
 		},
@@ -815,7 +815,7 @@ func handoffPlanStep(pending *handoff.Pending) llmtest.Step {
 		Events: []llm.StreamEvent{textDelta("plan ready")},
 		Stop:   llm.StopEndTurn,
 		Block: func(context.Context) {
-			pending.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+			pending.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 		},
 	}
 }

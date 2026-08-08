@@ -15,7 +15,7 @@ This page is the operational overview.
 | `search` | search contents by RE2 regex |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
-| `run_command` | run a shell command or direct argv program |
+| `shell` | run a shell command or direct argv program |
 | `git` | run host git with `--no-pager`, including a compact `workspace_summary` workflow |
 | `git_readonly` | restricted git subcommands for read-only agents |
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
@@ -30,6 +30,12 @@ This page is the operational overview.
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool
 catalog, so an agent can opt back in by naming `apply_patch` in its
 `allowed_tools` whitelist.
+
+`read_file` is part of the default tool set. `list_dir`, `glob`, `search`,
+`git`, and `git_readonly` remain in the Catalog for explicit `allowed_tools`
+whitelisting, but none of the built-in agent configurations advertise them.
+Use `shell` with tools such as `rg` and `git --no-pager` when those operations
+are needed without a custom agent whitelist.
 
 Models issue schema-visible top-level read-only calls together in one tool
 turn; Harness runs consecutive read-only calls concurrently and preserves their
@@ -77,7 +83,7 @@ persistence, and continuation-cap behavior.
 
 ## Search and Inspection
 
-The default model surface exposes one flat typed `search` tool. Each call has a
+The constructible catalog exposes one flat typed `search` tool. Each call has a
 required `pattern`, optional singular `path` (default `.`), optional `globs[]`,
 and `case` (`smart`, `sensitive`, or `insensitive`). Patterns are RE2 regular
 expressions; escape punctuation when it should match literally. A pattern that
@@ -120,7 +126,7 @@ calls or use `read_file paths[]` for already-known files.
 
 Raw `grep` and optional `rg` wrappers remain in the constructible catalog for a
 custom agent that explicitly names them in `allowed_tools`; built-in agents do
-not advertise them. `grep`, `rg`, `git`, and direct-argv `run_command` calls expect JSON arrays of
+not advertise them. `grep`, `rg`, `git`, and direct-argv `shell` calls expect JSON arrays of
 strings for argv-style fields, not shell strings and not JSON-encoded arrays. The
 tools are thin wrappers around host CLIs, so native CLI semantics decide regex
 syntax, ignore behavior, output shape, and supported flags.
@@ -138,7 +144,7 @@ than 1024 bytes are clamped in-process (host `grep` has no portable
 
 ## Command Execution
 
-`run_command` accepts either one command or an ordered `steps` array:
+`shell` accepts either one command or an ordered `steps` array:
 
 - `argv`: preferred direct program invocation with literal args and no shell
 - `command`: executed through a non-login `bash -c` (with `sh -c` fallback). The
@@ -175,9 +181,9 @@ successful output or clipped failure output is archived through the normal
 session artifact path, so the model can inspect it without carrying it in every
 later request. `steps` is foreground-only.
 
-`run_command`, `grep`, `rg`, and `web_fetch` can set `background:true` to return
+`shell`, `grep`, `rg`, and `web_fetch` can set `background:true` to return
 a job id immediately. `delegate` can also run as a background child agent.
-Local background work carries a canonical resource lease. `run_command`
+Local background work carries a canonical resource lease. `shell`
 defaults to an `exclusive` lease on its canonical cwd; callers may set
 `background_lease:{"resource_key":"...","access":"read_only"}` only when the
 command will not mutate that resource. The lease is scheduling metadata: it

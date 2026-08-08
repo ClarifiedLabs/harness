@@ -233,7 +233,7 @@ reference below.
 -max-turns <n>    turns per prompt; <=0 means unlimited (default 0)
 -tool-timeout <s>   per-tool-call timeout backstop in seconds; <=0 disables (default 600). A
                     hung tool that ignores cancellation is force-failed after this many
-                    seconds so it cannot stall a turn; run_command's own timeout_seconds stays
+                    seconds so it cannot stall a turn; shell's own timeout_seconds stays
                     authoritative and is never cut below.
 -max-prompt-tokens <n>   stop a prompt after this many accumulated tokens; 0 means unlimited
                     (default 0). Counts input + cache-read + cache-write + output + reasoning
@@ -377,13 +377,13 @@ The agent loop has several controls against runaway work:
   cache, output, and reasoning tokens reach the configured budget.
 - `-max-prompt-cost` applies the equivalent cumulative USD ceiling when provider
   usage reports a known cost. Unpriced models cannot enforce this limit.
-- `-tool-timeout` is a per-tool-call backstop; `run_command`'s own
+- `-tool-timeout` is a per-tool-call backstop; `shell`'s own
   `timeout_seconds` remains authoritative.
 - `-goal-max-continuations` caps autonomous `/goal` continuation prompts before
   pausing the goal; `0` disables that count cap.
 - Repeated identical tool results and consecutive all-error tool turns are
   steered first and eventually stopped if the model does not change course.
-  Consecutive single `run_command` turns that keep the same underlying shell
+  Consecutive single `shell` turns that keep the same underlying shell
   command while changing only downstream pipeline filters are likewise steered
   after four turns and stopped after twelve ignored repeats.
 - Three consecutive turns that each perform one repository lookup get a steer
@@ -560,8 +560,8 @@ environment variables, JSON paths, types, and defaults. The concise
 | `max_prompt_cost_usd` | `number` | - | `-max-prompt-cost` | `HARNESS_MAX_PROMPT_COST` | `max_prompt_cost_usd` | 0 (unlimited) | no | Harness max prompt cost usd setting. |
 | `goal_max_continuations` | `integer` | - | `-goal-max-continuations` | `HARNESS_GOAL_MAX_CONTINUATIONS` | `goal_max_continuations` | 25 (zero means unlimited) | no | Harness goal max continuations setting. |
 | `tool_timeout_seconds` | `integer` | - | `-tool-timeout` | `HARNESS_TOOL_TIMEOUT` | `tool_timeout_seconds` | 600 (non-positive disables) | no | Harness tool timeout seconds setting. |
-| `run_command_timeout_seconds` | `integer` | - | - | `HARNESS_RUN_COMMAND_TIMEOUT_SECONDS` | `run_command_timeout_seconds` | 0 (tool default) | no | Harness run command timeout seconds setting. |
-| `run_command_background_timeout_seconds` | `integer` | - | - | `HARNESS_RUN_COMMAND_BACKGROUND_TIMEOUT_SECONDS` | `run_command_background_timeout_seconds` | 0 (tool default) | no | Harness run command background timeout seconds setting. |
+| `shell_timeout_seconds` | `integer` | - | - | `HARNESS_SHELL_TIMEOUT_SECONDS` | `shell_timeout_seconds` | 0 (tool default) | no | Harness shell timeout seconds setting. |
+| `shell_background_timeout_seconds` | `integer` | - | - | `HARNESS_SHELL_BACKGROUND_TIMEOUT_SECONDS` | `shell_background_timeout_seconds` | 0 (tool default) | no | Harness shell background timeout seconds setting. |
 | `default_context_window` | `integer` | - | `-default-context-window` | `HARNESS_DEFAULT_CONTEXT_WINDOW` | `default_context_window` | 256000 (tokens) | no | Harness default context window setting. |
 | `context_window` | `integer` | - | `-context-window` | `HARNESS_CONTEXT_WINDOW` | `context_window` | 0 (no override) | no | Harness context window setting. |
 | `reasoning` | `string` | `default`, `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | `-reasoning` | `HARNESS_REASONING` | `reasoning` | provider default | no | Harness reasoning setting. |
@@ -1648,11 +1648,11 @@ Five agents are built in:
 
 | agent | tools | behavior |
 |---|---|---|
-| `auto` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
-| `explore` | read-only inspection/search tools, `web_fetch`, optional `git_readonly`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
-| `plan` | inspection tools, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
-| `review` | the same read-only inspection and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
-| `independent` | all available built-in tools plus discovered MCP tools, including `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
+| `auto` | `read_file`, `view_image`, `edit`, `write_file`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
+| `explore` | `read_file`, `view_image`, `shell`, `web_fetch`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
+| `plan` | `read_file`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
+| `review` | the same read-only local and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
+| `independent` | the same local tools as `auto`, plus discovered MCP tools, `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
@@ -2046,7 +2046,7 @@ likely slow response startup, harness prints one warning per prompt to stderr.
 ## Interrupts
 
 - Ctrl-C during a prompt, or Esc twice in short succession during a REPL prompt,
-  cancels the prompt. It aborts the HTTP stream, kills any `run_command` process
+  cancels the prompt. It aborts the HTTP stream, kills any `shell` process
   group, keeps streamed partial text, strips unexecuted tool calls, prints
   `[cancelled]`, and returns to the prompt. Any text typed during the prompt is
   preserved and deposited into the next prompt as editable pre-filled text.
@@ -2071,7 +2071,7 @@ receive the one-shot `focus` field.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "run_command|apply_patch",
+        "matcher": "shell|apply_patch",
         "hooks": [
           {
             "type": "command",

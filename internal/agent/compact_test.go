@@ -302,7 +302,7 @@ func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
 		asstToolUse("w1", "write_file", `{"path":"a.go","content":"x"}`), toolResult("w1", "ok"),
 		asstToolUse("e1", "edit", `{"files":[{"path":"edit.go","edits":[{"oldText":"a","newText":"b"}]}]}`), toolResult("e1", "ok"),
 		asstToolUse("p1", "apply_patch", `{"patch":"*** Begin Patch\n*** Add File: patch.go\n+x\n*** End Patch\n"}`), toolResult("p1", "ok"),
-		asstToolUse("u1", "run_command", `{"args":["touch","ignored.go"]}`), toolResult("u1", "ok"),
+		asstToolUse("u1", "shell", `{"args":["touch","ignored.go"]}`), toolResult("u1", "ok"),
 	}
 	prior := &llm.CompactionMetadata{ReadFiles: []string{"prior.go"}, ModifiedFiles: []string{"already.go"}}
 	reads, modified := a.compactionFileActivity(messages, prior)
@@ -1504,7 +1504,7 @@ func TestTruncateLargestBlockShrinksToolInput(t *testing.T) {
 		Content: []llm.ContentBlock{{
 			Kind:      llm.BlockToolUse,
 			ToolUseID: "call_big",
-			ToolName:  "run_command",
+			ToolName:  "shell",
 			ToolInput: json.RawMessage(largeInput),
 		}},
 	}}

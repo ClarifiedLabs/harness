@@ -14,7 +14,7 @@ func TestDecodeFileAcceptsWrapperAndAliases(t *testing.T) {
 		"hooks": {
 			"PreToolUse": [
 				{
-					"matcher": "^run_command$",
+					"matcher": "^shell$",
 					"hooks": [
 						{"type":"command","command":"printf ok","timeout":3,"statusMessage":"Checking"}
 					]
@@ -29,7 +29,7 @@ func TestDecodeFileAcceptsWrapperAndAliases(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatalf("PreToolUse groups = %d, want 1", len(groups))
 	}
-	if !groups[0].matches("run_command") || groups[0].matches("read_file") {
+	if !groups[0].matches("shell") || groups[0].matches("read_file") {
 		t.Fatalf("matcher did not behave as expected")
 	}
 	h := groups[0].Hooks[0]
@@ -137,7 +137,7 @@ func TestRunnerTimeoutFailsOpen(t *testing.T) {
 		t.Fatalf("DecodeEventMap: %v", err)
 	}
 	start := time.Now()
-	res := (&Runner{Config: cfg}).Run(context.Background(), PreToolUse, "run_command", nil)
+	res := (&Runner{Config: cfg}).Run(context.Background(), PreToolUse, "shell", nil)
 	if res.Block {
 		t.Fatalf("timeout should fail open: %+v", res)
 	}
@@ -187,12 +187,12 @@ func TestTimeoutCircuitBreakerDiagnosticsAndHalfOpenProbe(t *testing.T) {
 		},
 	}
 	for wantCount := 1; wantCount <= defaultMaxTimeouts; wantCount++ {
-		res := runner.Run(context.Background(), PreToolUse, "run_command", Payload{"tool_use_id": "tool-1"})
+		res := runner.Run(context.Background(), PreToolUse, "shell", Payload{"tool_use_id": "tool-1"})
 		if len(res.Diagnostics) != 1 {
 			t.Fatalf("timeout %d diagnostics = %+v", wantCount, res.Diagnostics)
 		}
 		diagnostic := res.Diagnostics[0]
-		if diagnostic.Event != PreToolUse || diagnostic.Handler != "lint-policy" || diagnostic.Target != "run_command" || diagnostic.ToolID != "tool-1" ||
+		if diagnostic.Event != PreToolUse || diagnostic.Handler != "lint-policy" || diagnostic.Target != "shell" || diagnostic.ToolID != "tool-1" ||
 			diagnostic.TimeoutSeconds != 4 || diagnostic.Elapsed != 2*time.Second || diagnostic.ConsecutiveTimeouts != wantCount || diagnostic.Outcome != OutcomeTimeout {
 			t.Fatalf("timeout %d diagnostic = %+v", wantCount, diagnostic)
 		}
@@ -204,21 +204,21 @@ func TestTimeoutCircuitBreakerDiagnosticsAndHalfOpenProbe(t *testing.T) {
 		}
 	}
 
-	skipped := runner.Run(context.Background(), PreToolUse, "run_command", Payload{"tool_use_id": "tool-1"})
+	skipped := runner.Run(context.Background(), PreToolUse, "shell", Payload{"tool_use_id": "tool-1"})
 	if invocations != defaultMaxTimeouts || len(skipped.Diagnostics) != 1 || skipped.Diagnostics[0].Outcome != OutcomeCircuitOpen || !skipped.Diagnostics[0].CircuitOpen {
 		t.Fatalf("cooldown call invoked=%d result=%+v", invocations, skipped)
 	}
 
 	now = skipped.Diagnostics[0].CircuitOpenUntil.Add(time.Second)
 	result = commandResult{TimedOut: true}
-	reopened := runner.Run(context.Background(), PreToolUse, "run_command", nil)
+	reopened := runner.Run(context.Background(), PreToolUse, "shell", nil)
 	if invocations != defaultMaxTimeouts+1 || reopened.Diagnostics[0].Outcome != OutcomeTimeout || reopened.Diagnostics[0].ConsecutiveTimeouts != defaultMaxTimeouts+1 || !reopened.Diagnostics[0].CircuitOpen {
 		t.Fatalf("half-open timeout = %+v invocations=%d", reopened, invocations)
 	}
 
 	now = reopened.Diagnostics[0].CircuitOpenUntil.Add(time.Second)
 	result = commandResult{}
-	closed := runner.Run(context.Background(), PreToolUse, "run_command", nil)
+	closed := runner.Run(context.Background(), PreToolUse, "shell", nil)
 	if invocations != defaultMaxTimeouts+2 || closed.Diagnostics[0].Outcome != OutcomeSuccess || closed.Diagnostics[0].ConsecutiveTimeouts != 0 || closed.Diagnostics[0].CircuitOpen {
 		t.Fatalf("half-open success = %+v invocations=%d", closed, invocations)
 	}

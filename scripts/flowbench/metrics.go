@@ -206,9 +206,9 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		case "search":
 			m.UsedSearch = true
 			m.SearchQueries += searchQueryCount(ev.Input)
-		case "run_command":
+		case "shell":
 			commandInputs = append(commandInputs, strings.Join(flattenJSONStrings(ev.Input), " "))
-			if runCommandInvokesGit(ev.Input) {
+			if shellInvokesGit(ev.Input) {
 				m.GitCalls++
 			}
 			if strings.Contains(raw, `"steps"`) {
@@ -250,7 +250,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		if contains(turns[i].Names, "rg") && contains(turns[i+1].Names, "read_file") {
 			m.RGToReadTransitions++
 		}
-		if contains(turns[i].Names, "run_command") && contains(turns[i+1].Names, "run_command") {
+		if contains(turns[i].Names, "shell") && contains(turns[i+1].Names, "shell") {
 			m.CommandToCommandTransitions++
 		}
 	}
@@ -350,7 +350,7 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 				starts[ev.ToolID] = contractStart{kind: searchContract, count: exactKnownPathSearchInput(ev.Input)}
 			case ev.Tool == "inspect" && exactKnownPathInspectSearchInput(ev.Input) > 0:
 				starts[ev.ToolID] = contractStart{kind: searchContract, count: exactKnownPathInspectSearchInput(ev.Input)}
-			case ev.Tool == "run_command" && exactKnownPathCommandInput(ev.Input):
+			case ev.Tool == "shell" && exactKnownPathCommandInput(ev.Input):
 				starts[ev.ToolID] = contractStart{kind: commandContract, count: 1}
 			}
 		case session.EventToolResult:
@@ -366,7 +366,7 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 					searches += start.count
 				}
 			case commandContract:
-				if ev.Tool == "run_command" {
+				if ev.Tool == "shell" {
 					commands++
 				}
 			}
@@ -730,7 +730,7 @@ func finishEditRecovery(m *metrics, recovery editRecoveryState) {
 	m.UnresolvedEditFailure = m.UnresolvedEditFailures > 0
 }
 
-func runCommandInvokesGit(raw json.RawMessage) bool {
+func shellInvokesGit(raw json.RawMessage) bool {
 	for _, value := range flattenJSONStrings(raw) {
 		value = strings.TrimSpace(value)
 		if value == "git" || strings.HasPrefix(value, "git ") {

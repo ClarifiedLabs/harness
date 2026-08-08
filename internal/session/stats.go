@@ -690,20 +690,37 @@ func collectToolStats(events []Event) (toolStats, error) {
 				stats.skillReadPaths[pathHash]++
 			}
 		}
-		if ev.Tool != "run_command" {
+		if ev.Tool != "shell" {
 			continue
 		}
 		var input struct {
-			Command    string   `json:"command"`
-			Argv       []string `json:"argv"`
-			Background bool     `json:"background"`
+			Command    string          `json:"command"`
+			Argv       json.RawMessage `json:"argv"`
+			Background bool            `json:"background"`
 			Steps      []struct {
-				Command string   `json:"command"`
-				Argv    []string `json:"argv"`
+				Command string          `json:"command"`
+				Argv    json.RawMessage `json:"argv"`
 			} `json:"steps"`
 		}
 		if err := json.Unmarshal(ev.Input, &input); err != nil {
-			return toolStats{}, fmt.Errorf("decode run_command input for %s: %w", ev.ToolID, err)
+			// Malformed shell is a model error, not a stats failure.
+			continue
+		}
+		var argv []string
+		if len(input.Argv) > 0 {
+			if err := json.Unmarshal(input.Argv, &argv); err != nil {
+				var s string
+				if err2 := json.Unmarshal(input.Argv, &s); err2 == nil {
+					_ = json.Unmarshal([]byte(s), &argv)
+				}
+			}
+		}
+		hasArgv := len(argv) > 0
+		// Steps argv classification best-effort.
+		hasSteps := len(input.Steps) > 0
+		if hasSteps {
+			// Reuse argv decode for steps loosely.
+			_ = hasArgv // keep for branching below; steps block handles its own counts.
 		}
 		stats.commands.calls++
 		if input.Background {
@@ -713,7 +730,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 		}
 		if input.Command != "" {
 			stats.commands.shell++
-		} else if len(input.Argv) != 0 {
+		} else if hasArgv {
 			stats.commands.argv++
 		}
 		if len(input.Steps) > 0 {
@@ -722,8 +739,19 @@ func collectToolStats(events []Event) (toolStats, error) {
 			for _, step := range input.Steps {
 				if step.Command != "" {
 					stats.commands.stepShell++
-				} else if len(step.Argv) != 0 {
-					stats.commands.stepArgv++
+				} else {
+					var sArgv []string
+					if len(step.Argv) > 0 {
+						if err := json.Unmarshal(step.Argv, &sArgv); err != nil {
+							var s string
+							if err2 := json.Unmarshal(step.Argv, &s); err2 == nil {
+								_ = json.Unmarshal([]byte(s), &sArgv)
+							}
+						}
+					}
+					if len(sArgv) > 0 {
+						stats.commands.stepArgv++
+					}
 				}
 			}
 		}

@@ -1754,9 +1754,9 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 			t.Errorf("/tools output missing %q:\n%s", want, got)
 		}
 	}
-	readFileCol := toolSummaryDescriptionColumn(t, got, "read_file", "Read a file; use paths[] to batch; a directory lists entries.")
-	listDirCol := toolSummaryDescriptionColumn(t, got, "list_dir", "List one directory, non-recursive; glob filters base names.")
-	if readFileCol != listDirCol {
+	viewImageCol := toolSummaryDescriptionColumn(t, got, "view_image", "Attach a local PNG, JPEG, WebP, or GIF image to inspect.")
+	editCol := toolSummaryDescriptionColumn(t, got, "edit", "Replace exact unique oldText; the file must already exist.")
+	if viewImageCol != editCol {
 		t.Errorf("built-in description separators not aligned:\n%s", got)
 	}
 }
@@ -4848,7 +4848,7 @@ func TestHandoffCommandCancelledOnNo(t *testing.T) {
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	switched := false
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		switched = true
@@ -4871,7 +4871,7 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	var agentTarget, modelTarget, approval string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		agentTarget = name
@@ -4968,7 +4968,7 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("x")})
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	var target string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		target = name
@@ -4991,7 +4991,7 @@ func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
 	}
@@ -5020,7 +5020,7 @@ func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) 
 			Events: []llm.StreamEvent{textDelta("plan ready")},
 			Stop:   llm.StopEndTurn,
 			Block: func(ctx context.Context) {
-				pending.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+				pending.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 				close(inPrompt)
 				<-releaseTurn
 			},
@@ -5071,7 +5071,7 @@ func TestREPLAutoHandoffDeclineDoesNotStartImplementation(t *testing.T) {
 		Events: []llm.StreamEvent{textDelta("plan ready")},
 		Stop:   llm.StopEndTurn,
 		Block: func(ctx context.Context) {
-			pending.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+			pending.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 		},
 	})
 	app := newTestApp(t, &out, &errw, fp)
@@ -5103,7 +5103,7 @@ func TestREPLHandoffFailureDoesNotStartImplementationTurn(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{ PlanPath: "/p/0001.plan.md"})
+	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{}, errors.New("no such agent")
 	}
@@ -5635,7 +5635,7 @@ func TestREPLDuringPromptSteerRecoveredWhenTurnEndsWithoutToolRound(t *testing.T
 	}
 }
 
-func TestREPLDuringPromptRecoveredLiteralSlashSteerDoesNotRunCommand(t *testing.T) {
+func TestREPLDuringPromptRecoveredLiteralSlashSteerDoesNotShell(t *testing.T) {
 	var out, errw lockedBuffer
 	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
@@ -6429,7 +6429,7 @@ func TestSteerAcceptedDetachesBackgroundWait(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -6485,7 +6485,7 @@ func TestREPLDetachedWaitCompletionStartsContinuation(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release

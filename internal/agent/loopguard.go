@@ -61,7 +61,7 @@ type turnGuard struct {
 	lastCallSig              string // signature of the previous turn's calls+results
 	repeatRuns               int    // consecutive turns with that identical signature
 	repeatSteered            bool   // steering already injected for the current repeat streak
-	lastCommandSig           string // signature of the previous run_command pipeline head
+	lastCommandSig           string // signature of the previous shell pipeline head
 	commandRuns              int    // consecutive turns with that underlying shell command
 	commandSteered           bool   // steering already injected for the current command streak
 	errorRuns                int    // consecutive turns whose tool results were all errors
@@ -408,13 +408,13 @@ func shouldEnterTurnBudgetClosure(maxTurns, completedTurns int) bool {
 }
 
 // commandPipelineSignature identifies a narrowly defined command family: one
-// foreground run_command shell invocation whose first unquoted pipeline segment
+// foreground shell shell invocation whose first unquoted pipeline segment
 // is unchanged. It intentionally ignores only downstream pipe stages, not flags,
 // argv calls, multi-step batches, working directories, or unrelated tool turns.
 // This catches loops that keep appending grep/sed/awk wrappers without treating a
 // fix-and-rerun command with changed arguments as the same attempt.
 func commandPipelineSignature(calls []llm.ToolCall) string {
-	if len(calls) != 1 || calls[0].Name != "run_command" {
+	if len(calls) != 1 || calls[0].Name != "shell" {
 		return ""
 	}
 	var input struct {

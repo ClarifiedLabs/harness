@@ -125,20 +125,17 @@ func Builtins() map[string]Definition {
 }
 
 func inspectionTools() []string {
-	names := []string{"read_file", "view_image", "list_dir", "glob", "search", "update_todos"}
-	// run_command widens exploration (gh, builds, screenshots, live apps) for the
+	names := []string{"read_file", "view_image", "update_todos"}
+	// shell widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan, review). None has first-class file-mutation
 	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
 	// a prompt-level contract, not an enforced gate.
-	names = append(names, "run_command", "web_fetch")
-	if tools.GitAvailable() {
-		names = append(names, "git_readonly")
-	}
+	names = append(names, "shell", "web_fetch")
 	return names
 }
 
 func planTools() []string {
-	// run_command comes from the shared inspection set; plan adds no first-class
+	// shell comes from the shared inspection set; plan adds no first-class
 	// file-mutation tools (edit, write_file, apply_patch), so "don't modify the
 	// project" stays a prompt-level contract (prompts/agents/plan.txt).
 	names := slices.DeleteFunc(inspectionTools(), func(name string) bool { return name == "update_todos" })
@@ -146,11 +143,6 @@ func planTools() []string {
 }
 
 func defaultTools() []string {
-	// git already covers every git_readonly operation, so the default set omits
-	// git_readonly to avoid advertising duplicate functionality. Read-only
-	// agents (explore, plan, review) that require git_readonly remain delegatable
-	// from here because delegate.MissingTools treats an available git as
-	// satisfying a required git_readonly.
 	names := tools.DefaultNames()
 	return append(names, "update_todos", "delegate", "background_jobs")
 }

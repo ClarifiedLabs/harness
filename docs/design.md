@@ -1653,7 +1653,7 @@ prompt.
     order-insensitive signature of `name + canonical(JSON input) + result`. After
     3 identical signatures in a row it injects one RoleUser steering message; at 8
     it hard-stops with `[stopped: N identical tool turns repeated with no change]`.
-  - *Repeated shell-command families.* A single foreground `run_command` shell
+  - *Repeated shell-command families.* A single foreground `shell` shell
     turn is also fingerprinted by its working directory plus the command text before
     the first unquoted pipe. Four consecutive turns with the same pipeline head
     inject one steer even when downstream `grep`/`sed`/`awk` stages and results keep
@@ -1775,7 +1775,7 @@ additionally producing `path_not_found`, `regex_invalid`, and `other`; failed
 `model_request` events are mapped from their structured status/code to
 `rate_limited`, `provider_overloaded`, `provider_internal_error`,
 `provider_auth`, `provider_request`, `provider_5xx`, or `provider_error`.
-`run_command` non-zero exits stay in-band results, not tool errors (§9.7–9.8),
+`shell` non-zero exits stay in-band results, not tool errors (§9.7–9.8),
 so they never get an error kind; their diagnostics metrics feed the separate
 command-failure and effective-failure summaries.
 
@@ -1785,7 +1785,7 @@ hung tool that ignores cancellation cannot stall a turn; on expiry it returns th
 `tool timed out after <dur>` error result above. It applies to both the
 sequential path and the concurrent read-only batch. A tool that reports its own
 deadline via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
-`run_command`'s `timeout_seconds` stays authoritative. An outer cancellation
+`shell`'s `timeout_seconds` stays authoritative. An outer cancellation
 (`^C`) is reported as cancellation, not a dispatch timeout.
 
 ### 8.3 Output truncation
@@ -1816,7 +1816,7 @@ behavior stays consistent between execution modes.
 
 A tool that implements `ResultTool` may supply separate concise `Text` and full
 `OriginalText`. `Dispatch` caps the concise text normally and marks the supplied
-original for this same artifact pipeline. This is used by `run_command.steps`:
+original for this same artifact pipeline. This is used by `shell.steps`:
 successful verification output remains recoverable without entering live model
 context.
 
@@ -1825,7 +1825,7 @@ context.
 A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 
 - **^C during a prompt** → cancel the prompt context (aborts the HTTP stream; kills
-  `run_command` process groups). Apply the cancel repair rule (§4): keep streamed
+  `shell` process groups). Apply the cancel repair rule (§4): keep streamed
   partial text, strip un-executed tool calls. Print `[cancelled]`, return to prompt.
 - **Esc-Esc during a REPL prompt** → same prompt cancellation as the first ^C, without
   the second-^C exit behavior.
@@ -1843,7 +1843,7 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 - **Builtin instructions** (`prompts/system.txt`): concise agentic-coding guidance — read before
   editing, prefer `edit` with unique context, use tools rather than guessing file
   contents, use available search tools or `list_dir`, run builds/tests via
-  `run_command`, stop when done.
+  `shell`, stop when done.
 - **Environment context**, computed at startup:
 
   ```
@@ -2034,7 +2034,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 | `glob` | string | `path.Match` filter on base names |
 
 - Non-recursive by design — recursion belongs to `glob` (§9.2a, by name) and
-  `grep`/`rg`/host commands (by content), with `run_command` (`find`) as the escape
+  `grep`/`rg`/host commands (by content), with `shell` (`find`) as the escape
   hatch. No separate `find` tool: fewer tools means better model reliability.
 - One entry per line: type char, human-readable size, name (`/` suffix for dirs);
   dirs-first, then alphabetical. 1000-entry cap with truncation marker.
@@ -2119,7 +2119,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 - Raw `rg` retains the max-column/max-filesize guards and raw `grep` retains
   binary skipping and long-line clamping. Provider-hosted web search remains a
   separate `Request.ServerTools` capability controlled by `web_search`.
-- Raw command process execution follows the same conventions as `run_command`
+- Raw command process execution follows the same conventions as `shell`
   (§9.7): own process group, timeout or ^C
   kills the group, combined stdout+stderr, `[exit code: N]` trailer, and non-zero exit
   is NOT an error result. For search this matters because no matches is commonly exit
@@ -2226,7 +2226,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 - Success reports `Success. Updated the following files:` followed by `A`, `M`, or
   `D` status lines.
 
-### 9.7 `run_command`
+### 9.7 `shell`
 
 > Run a command or ordered steps; prefer argv; git tool for git.
 
@@ -2317,7 +2317,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   `get`/`list`; otherwise completed output is delivered once as request-only
   context. Use `/background` for interactive inspection or cancellation.
   The background result carries both compact and original text. Automatic
-  completion uses the originating `run_command` limits/artifact path; explicit
+  completion uses the originating `shell` limits/artifact path; explicit
   `background_jobs` get/wait results carry the full aggregate as their own
   `OriginalText`, so choosing an explicit wait never discards recovery.
 - Environment inherited unmodified.
@@ -2341,9 +2341,9 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.8 Shared process execution (`runProcess`)
 
-`run_command` (§9.7), `grep`/`rg` (§9.3), and `git`/`git_readonly` (§9.9, §9.11) all
+`shell` (§9.7), `grep`/`rg` (§9.3), and `git`/`git_readonly` (§9.9, §9.11) all
 run their subprocess through one shared `runProcess` helper, so they share identical
-process semantics. The §9.7 schema/description above describe `run_command`'s surface;
+process semantics. The §9.7 schema/description above describe `shell`'s surface;
 this subsection records the common runner those argv tools point at.
 
 - **Own process group/session, no controlling TTY.** The child leads its own group, so
@@ -2386,7 +2386,7 @@ this subsection records the common runner those argv tools point at.
   entire git surface (status, diff, log, blame, stash, rebase, commit) that the model
   already knows from training; enumerating subcommands multiplies schemas and still
   misses the long tail.
-- Combined output + exit code, same conventions as `run_command`: no controlling
+- Combined output + exit code, same conventions as `shell`: no controlling
   TTY, group kill on timeout/^C, default 120 s timeout, and non-zero exit is not
   a tool error. Interactive flows (`rebase -i`) fail fast rather than hang.
 - `workspace_summary` is a read-only deterministic survey. It runs porcelain
@@ -2727,7 +2727,7 @@ Tools that opt into the reusable background job contract hand the manager a job
 kind, description, optional canonical resource/access lease, and cancellable
 runner. The manager owns ids, status, list/get/wait/cancel, lease enforcement,
 one-shot notices, and request-only context delivery.
-`run_command`, `grep`, `rg`,
+`shell`, `grep`, `rg`,
 `web_fetch`, and `delegate` support this path via `background:true`; background
 delegate jobs still use the same launch validation, child transcript, private coordination stores,
 and token-accounting behavior as synchronous delegate.
@@ -3370,7 +3370,7 @@ Config accepts inline hooks:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "run_command|apply_patch",
+        "matcher": "shell|apply_patch",
         "hooks": [
           {"type": "command", "command": "./hooks/pre-tool.sh"}
         ]
@@ -3823,7 +3823,7 @@ type UsageTotals struct {
   snapshotted at its starting byte length so concurrent appends cannot change
   the scan. Multi-session scans report and skip unsupported/corrupt roots;
   explicitly named invalid roots remain errors.
-  The summary additionally reports in-band `run_command` execution failures,
+  The summary additionally reports in-band `shell` execution failures,
   cancellations, and an effective failure total without converting them into
   tool-error rows. The stats report renders the same collector's aggregate as its Errors
   section, including result denominators/rates and repeat loops calculated from
@@ -4035,7 +4035,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | `internal/sse` | frame parsing tables; huge frames; truncated input |
 | providers | `httptest.Server` replaying `.sse` golden fixtures per dialect → assert ordered events; golden request-JSON tests (Responses input items, Chat role:tool hoisting, args-string vs object, system placement, `stream_options`, cache_control); tool-call reassembly tables (fragment splits, empty args → `{}`, interleaved parallel calls, invalid tail → invalid `Done` diagnostic); truncated stream; mid-stream cancellation; retry loop via injected sleeper (429-then-200, 400 immediate failure, budget exhaustion) |
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
-| tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `run_command` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
+| tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `shell` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |
 | delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, private child TODO/plan stores, child transcript persistence, metered usage folded into parent prompt totals |
 | background | job start/completion, one-shot context delivery, notices, cancellation/errors, child transcript path preservation |

@@ -229,14 +229,14 @@ type Options struct {
 	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch/lsp call) so
 	// one stuck call cannot stall a turn forever. A tool that enforces its own
 	// longer deadline (see SelfTimeouter) is never cut below it.
-	DispatchTimeout                    time.Duration
-	RunCommandTimeoutSeconds           int // 0 = tool default (120)
-	RunCommandBackgroundTimeoutSeconds int // 0 = tool default (1200)
+	DispatchTimeout               time.Duration
+	ShellTimeoutSeconds           int // 0 = tool default (120)
+	ShellBackgroundTimeoutSeconds int // 0 = tool default (1200)
 }
 
 // SelfTimeouter is an optional Tool extension. A tool that enforces its own
 // per-call deadline reports it here so the Dispatch-level ceiling only ever
-// RAISES to that deadline, never lowers it. This preserves run_command's
+// RAISES to that deadline, never lowers it. This preserves shell's
 // documented "no maximum" (its own timeout_seconds stays authoritative) while
 // the ceiling still bounds tools that ignore ctx (design §8.2). ok is false when
 // the tool has no input-specific deadline.
@@ -370,10 +370,10 @@ func defaultToolResultLines(configBytes, configLines, globalBytes, globalLines, 
 }
 
 func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
-	r.Register(runCommand{
+	r.Register(shell{
 		background:        opts.Background,
-		foregroundTimeout: opts.RunCommandTimeoutSeconds,
-		backgroundTimeout: opts.RunCommandBackgroundTimeoutSeconds,
+		foregroundTimeout: opts.ShellTimeoutSeconds,
+		backgroundTimeout: opts.ShellBackgroundTimeoutSeconds,
 	})
 	if git, ok := newGitTool(); ok {
 		r.Register(git)
@@ -386,22 +386,36 @@ func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 		defaultToolResultLines(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
 }
 
-// Default returns a Registry preloaded with every built-in tool.
+// Default returns the built-in tools exposed to default-inheriting agents.
+// Directory/search/git wrappers remain in Catalog for explicit allowlisting.
 func Default() *Registry {
 	r, _ := DefaultWithOptions(Options{})
 	return r
 }
 
 // DefaultWithOptions returns the default tool registry with configurable result
-// and read_file limits.
+// and read_file limits. Directory/search/git wrappers are Catalog-only.
 func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 	r := &Registry{}
 	r.SetResultLimits(opts.MaxResultBytes, opts.MaxResultLines)
 	r.SetDispatchTimeout(opts.DispatchTimeout)
-	var disabled []DisabledTool
-	registerFileTools(r, &disabled, opts)
-	registerExecTools(r, &disabled, opts)
-	return r, disabled
+	r.Register(readFile{defaultLimit: opts.ReadFileDefaultLimit})
+	r.SetToolResultLimits("read_file",
+		defaultToolResultBytes(opts.ReadFileResultBytes, opts.ReadFileResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultReadFileResultBytes),
+		defaultToolResultLines(opts.ReadFileResultBytes, opts.ReadFileResultLines, opts.MaxResultBytes, opts.MaxResultLines, 0))
+	r.Register(viewImage{})
+	r.Register(edit{})
+	r.Register(writeFile{})
+	r.Register(shell{
+		background:        opts.Background,
+		foregroundTimeout: opts.ShellTimeoutSeconds,
+		backgroundTimeout: opts.ShellBackgroundTimeoutSeconds,
+	})
+	r.Register(webFetch{background: opts.Background})
+	r.SetToolResultLimits("web_fetch",
+		defaultToolResultBytes(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
+		defaultToolResultLines(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
+	return r, nil
 }
 
 // DefaultNames returns the names of the Default tool set in registration
@@ -429,9 +443,15 @@ func CatalogWithDiagnostics() (*Registry, []DisabledTool) {
 }
 
 // CatalogWithOptions returns the complete constructible tool catalog with
-// configurable limits.
+// configurable limits. Agents may explicitly whitelist Catalog-only tools such
+// as list_dir, glob, search, git, and git_readonly.
 func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
-	r, disabled := DefaultWithOptions(opts)
+	r := &Registry{}
+	r.SetResultLimits(opts.MaxResultBytes, opts.MaxResultLines)
+	r.SetDispatchTimeout(opts.DispatchTimeout)
+	var disabled []DisabledTool
+	registerFileTools(r, &disabled, opts)
+	registerExecTools(r, &disabled, opts)
 	// Raw search commands remain constructible for custom agents that explicitly
 	// whitelist them, but the default model surface exposes only typed search.
 	registerRawSearchTools(r, opts)

@@ -17,21 +17,21 @@ import (
 	"harness/internal/llm"
 )
 
-func runRunCommand(t *testing.T, args map[string]any) (string, error) {
-	return runTool(t, runCommand{}, args)
+func runShell(t *testing.T, args map[string]any) (string, error) {
+	return runTool(t, shell{}, args)
 }
 
-func runRunCommandResult(t *testing.T, args map[string]any) (RunResult, error) {
+func runShellResult(t *testing.T, args map[string]any) (RunResult, error) {
 	t.Helper()
 	input, err := json.Marshal(args)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return (runCommand{}).RunResult(context.Background(), input)
+	return (shell{}).RunResult(context.Background(), input)
 }
 
-func TestRunCommandEchoExitZero(t *testing.T) {
-	out, err := runRunCommand(t, map[string]any{"command": "echo hello"})
+func TestShellEchoExitZero(t *testing.T) {
+	out, err := runShell(t, map[string]any{"command": "echo hello"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestRunCommandEchoExitZero(t *testing.T) {
 	}
 }
 
-// r41: run_command uses a non-login shell (-c) instead of -lc, so the
+// r41: shell uses a non-login shell (-c) instead of -lc, so the
 // login-profile chain is not sourced on every call.
 func TestShellCommandUsesNonLoginShell(t *testing.T) {
 	cmd := shellCommand("echo hi")
@@ -94,7 +94,7 @@ func TestSetEnvPATH(t *testing.T) {
 
 // Integration: the once-resolved login PATH makes a tool reachable to a shell
 // command even though it is only on the login PATH.
-func TestRunCommandUsesResolvedLoginPATH(t *testing.T) {
+func TestShellUsesResolvedLoginPATH(t *testing.T) {
 	dir := t.TempDir()
 	makeExecutable(t, filepath.Join(dir, "harnesstool42"), "#!/bin/sh\necho found-it\n")
 
@@ -108,7 +108,7 @@ func TestRunCommandUsesResolvedLoginPATH(t *testing.T) {
 		loginPATHCached = ""
 	})
 
-	out, err := runRunCommand(t, map[string]any{"command": "harnesstool42"})
+	out, err := runShell(t, map[string]any{"command": "harnesstool42"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -117,8 +117,8 @@ func TestRunCommandUsesResolvedLoginPATH(t *testing.T) {
 	}
 }
 
-func TestRunCommandNonZeroExitNotError(t *testing.T) {
-	out, err := runRunCommand(t, map[string]any{"command": "exit 1"})
+func TestShellNonZeroExitNotError(t *testing.T) {
+	out, err := runShell(t, map[string]any{"command": "exit 1"})
 	if err != nil {
 		t.Fatalf("non-zero exit must not be a tool error: %v", err)
 	}
@@ -127,9 +127,9 @@ func TestRunCommandNonZeroExitNotError(t *testing.T) {
 	}
 }
 
-func TestRunCommandCombinedStdoutStderr(t *testing.T) {
+func TestShellCombinedStdoutStderr(t *testing.T) {
 	// Interleaved writes to both streams must appear in one buffer.
-	out, err := runRunCommand(t, map[string]any{"command": "echo out; echo err 1>&2"})
+	out, err := runShell(t, map[string]any{"command": "echo out; echo err 1>&2"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -138,10 +138,10 @@ func TestRunCommandCombinedStdoutStderr(t *testing.T) {
 	}
 }
 
-func TestRunCommandCwdHonored(t *testing.T) {
+func TestShellCwdHonored(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "marker.txt"), "x\n")
-	out, err := runRunCommand(t, map[string]any{"command": "ls", "cwd": dir})
+	out, err := runShell(t, map[string]any{"command": "ls", "cwd": dir})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,15 +150,15 @@ func TestRunCommandCwdHonored(t *testing.T) {
 	}
 }
 
-func TestRunCommandMissingCwd(t *testing.T) {
-	_, err := runRunCommand(t, map[string]any{"command": "echo hi", "cwd": filepath.Join(t.TempDir(), "does-not-exist")})
+func TestShellMissingCwd(t *testing.T) {
+	_, err := runShell(t, map[string]any{"command": "echo hi", "cwd": filepath.Join(t.TempDir(), "does-not-exist")})
 	if err == nil {
 		t.Fatal("expected error for missing cwd")
 	}
 }
 
-func TestRunCommandStdinWired(t *testing.T) {
-	out, err := runRunCommand(t, map[string]any{"command": "cat", "stdin": "hello stdin\n"})
+func TestShellStdinWired(t *testing.T) {
+	out, err := runShell(t, map[string]any{"command": "cat", "stdin": "hello stdin\n"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -170,8 +170,8 @@ func TestRunCommandStdinWired(t *testing.T) {
 	}
 }
 
-func TestRunCommandArgvRunsWithoutShell(t *testing.T) {
-	out, err := runRunCommand(t, map[string]any{"argv": []string{"printf", "%s", "hello argv"}})
+func TestShellArgvRunsWithoutShell(t *testing.T) {
+	out, err := runShell(t, map[string]any{"argv": []string{"printf", "%s", "hello argv"}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -183,8 +183,8 @@ func TestRunCommandArgvRunsWithoutShell(t *testing.T) {
 	}
 }
 
-func TestRunCommandRejectsCommandAndArgvTogether(t *testing.T) {
-	_, err := runRunCommand(t, map[string]any{"command": "echo shell", "argv": []string{"echo", "argv"}})
+func TestShellRejectsCommandAndArgvTogether(t *testing.T) {
+	_, err := runShell(t, map[string]any{"command": "echo shell", "argv": []string{"echo", "argv"}})
 	if err == nil {
 		t.Fatal("expected error for command and argv together")
 	}
@@ -193,20 +193,20 @@ func TestRunCommandRejectsCommandAndArgvTogether(t *testing.T) {
 	}
 }
 
-func TestRunCommandMissingCommand(t *testing.T) {
-	_, err := runRunCommand(t, map[string]any{})
+func TestShellMissingCommand(t *testing.T) {
+	_, err := runShell(t, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing command or argv")
 	}
 }
 
-func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
+func TestShellModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 	tests := []struct {
 		name string
-		tool runCommand
+		tool shell
 	}{
-		{name: "foreground", tool: runCommand{}},
-		{name: "background", tool: runCommand{background: &fakeBackgroundStarter{}}},
+		{name: "foreground", tool: shell{}},
+		{name: "background", tool: shell{background: &fakeBackgroundStarter{}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -256,8 +256,8 @@ func TestRunCommandModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 	}
 }
 
-func TestRunCommandTopLevelOutputModes(t *testing.T) {
-	largeOutput := strings.Repeat("x", runCommandAutoReceiptBytes+100)
+func TestShellTopLevelOutputModes(t *testing.T) {
+	largeOutput := strings.Repeat("x", shellAutoReceiptBytes+100)
 	largeArgs := map[string]any{
 		"argv":  []string{"sh", "-c", "cat; printf '\\nSUMMARY ok\\n'"},
 		"stdin": largeOutput,
@@ -265,7 +265,7 @@ func TestRunCommandTopLevelOutputModes(t *testing.T) {
 	}
 
 	t.Run("auto compacts large success", func(t *testing.T) {
-		result, err := runRunCommandResult(t, largeArgs)
+		result, err := runShellResult(t, largeArgs)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -274,7 +274,7 @@ func TestRunCommandTopLevelOutputModes(t *testing.T) {
 				t.Fatalf("receipt missing %q:\n%s", want, result.Text)
 			}
 		}
-		if len(result.Text) >= 1024 || strings.Count(result.Text, "x") >= runCommandAutoReceiptBytes {
+		if len(result.Text) >= 6000 || strings.Count(result.Text, "x") >= shellAutoReceiptBytes {
 			t.Fatalf("large success receipt is not compact: %d bytes", len(result.Text))
 		}
 		if !strings.Contains(result.OriginalText, largeOutput) || !strings.Contains(result.OriginalText, "[exit code: 0]") {
@@ -283,7 +283,7 @@ func TestRunCommandTopLevelOutputModes(t *testing.T) {
 	})
 
 	t.Run("auto preserves small success", func(t *testing.T) {
-		result, err := runRunCommandResult(t, map[string]any{
+		result, err := runShellResult(t, map[string]any{
 			"argv": []string{"printf", "small output"},
 		})
 		if err != nil {
@@ -295,7 +295,7 @@ func TestRunCommandTopLevelOutputModes(t *testing.T) {
 	})
 
 	t.Run("receipt compacts small success", func(t *testing.T) {
-		result, err := runRunCommandResult(t, map[string]any{
+		result, err := runShellResult(t, map[string]any{
 			"argv":        []string{"printf", "small output"},
 			"name":        "small check",
 			"output_mode": "receipt",
@@ -323,7 +323,7 @@ func TestRunCommandTopLevelOutputModes(t *testing.T) {
 			args[key] = value
 		}
 		args["output_mode"] = "receipt"
-		result, err := runRunCommandResult(t, args)
+		result, err := runShellResult(t, args)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -341,20 +341,20 @@ func TestRunCommandTopLevelOutputModes(t *testing.T) {
 			args[key] = value
 		}
 		args["output_mode"] = "full"
-		result, err := runRunCommandResult(t, args)
+		result, err := runShellResult(t, args)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(result.Text) <= runCommandAutoReceiptBytes || result.OriginalText != "" ||
+		if len(result.Text) <= shellAutoReceiptBytes || result.OriginalText != "" ||
 			!strings.Contains(result.Text, "SUMMARY ok") {
 			t.Fatalf("full result = text %d bytes, original %d bytes", len(result.Text), len(result.OriginalText))
 		}
 	})
 }
 
-func TestRunCommandAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
-	largeOutput := strings.Repeat("x", runCommandFailureOutputBytes+1000)
-	result, err := runRunCommandResult(t, map[string]any{
+func TestShellAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
+	largeOutput := strings.Repeat("x", shellFailureOutputBytes+1000)
+	result, err := runShellResult(t, map[string]any{
 		"command": "cat; printf '\\nfailure-tail\\n'; exit 7",
 		"stdin":   largeOutput,
 		"name":    "failing test",
@@ -367,7 +367,7 @@ func TestRunCommandAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
 			t.Fatalf("failure receipt missing %q:\n%s", want, result.Text)
 		}
 	}
-	if len(result.Text) > runCommandFailureOutputBytes+512 {
+	if len(result.Text) > shellFailureOutputBytes+512 {
 		t.Fatalf("failure receipt = %d bytes, want bounded diagnostic", len(result.Text))
 	}
 	if !strings.Contains(result.OriginalText, largeOutput) || !strings.Contains(result.OriginalText, "[exit code: 7]") {
@@ -377,7 +377,7 @@ func TestRunCommandAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
 		t.Fatalf("failure outcome metrics = %+v, outcome=%v available=%v", result.Metrics, outcome, ok)
 	}
 
-	small, err := runRunCommandResult(t, map[string]any{"command": "printf small-failure; exit 2"})
+	small, err := runShellResult(t, map[string]any{"command": "printf small-failure; exit 2"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,8 +386,8 @@ func TestRunCommandAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
 	}
 }
 
-func TestRunCommandStepsReturnCompactReceiptsAndOriginal(t *testing.T) {
-	tool := runCommand{}
+func TestShellStepsReturnCompactReceiptsAndOriginal(t *testing.T) {
+	tool := shell{}
 	input := json.RawMessage(`{
 		"steps": [
 			{"name":"first check","command":"printf 'verbose first output'"},
@@ -413,10 +413,10 @@ func TestRunCommandStepsReturnCompactReceiptsAndOriginal(t *testing.T) {
 	}
 }
 
-func TestRunCommandStepsStopOnFailure(t *testing.T) {
+func TestShellStepsStopOnFailure(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "should-not-exist")
-	tool := runCommand{}
+	tool := shell{}
 	input, err := json.Marshal(map[string]any{
 		"steps": []map[string]any{
 			{"name": "fails", "command": "printf 'bad output'; exit 7"},
@@ -444,10 +444,10 @@ func TestRunCommandStepsStopOnFailure(t *testing.T) {
 	}
 }
 
-func TestRunCommandStepsCanContinueAfterFailure(t *testing.T) {
+func TestShellStepsCanContinueAfterFailure(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "continued")
-	tool := runCommand{}
+	tool := shell{}
 	input, err := json.Marshal(map[string]any{
 		"stop_on_failure": false,
 		"steps": []map[string]any{
@@ -470,9 +470,9 @@ func TestRunCommandStepsCanContinueAfterFailure(t *testing.T) {
 	}
 }
 
-func TestRunCommandStepsInheritCwdAndTimeout(t *testing.T) {
+func TestShellStepsInheritCwdAndTimeout(t *testing.T) {
 	dir := t.TempDir()
-	tool := runCommand{}
+	tool := shell{}
 	input, err := json.Marshal(map[string]any{
 		"cwd":             dir,
 		"timeout_seconds": 7,
@@ -495,7 +495,7 @@ func TestRunCommandStepsInheritCwdAndTimeout(t *testing.T) {
 	}
 }
 
-func TestRunCommandStepsValidation(t *testing.T) {
+func TestShellStepsValidation(t *testing.T) {
 	tests := []struct {
 		name  string
 		input map[string]any
@@ -510,7 +510,7 @@ func TestRunCommandStepsValidation(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := runRunCommand(t, tc.input)
+			_, err := runShell(t, tc.input)
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
@@ -518,8 +518,8 @@ func TestRunCommandStepsValidation(t *testing.T) {
 	}
 }
 
-func TestRunCommandStepsSupportsBatchNameAndFullOutput(t *testing.T) {
-	result, err := runRunCommandResult(t, map[string]any{
+func TestShellStepsSupportsBatchNameAndFullOutput(t *testing.T) {
+	result, err := runShellResult(t, map[string]any{
 		"name": "checks", "output_mode": "full",
 		"steps": []map[string]any{{"name": "one", "argv": []string{"printf", "STEP_ONE"}}, {"name": "two", "argv": []string{"printf", "STEP_TWO"}}},
 	})
@@ -536,8 +536,8 @@ func TestRunCommandStepsSupportsBatchNameAndFullOutput(t *testing.T) {
 	}
 }
 
-func TestRunCommandRejectsInvalidOutputMode(t *testing.T) {
-	_, err := runRunCommandResult(t, map[string]any{
+func TestShellRejectsInvalidOutputMode(t *testing.T) {
+	_, err := runShellResult(t, map[string]any{
 		"command":     "true",
 		"output_mode": "verbose",
 	})
@@ -546,12 +546,12 @@ func TestRunCommandRejectsInvalidOutputMode(t *testing.T) {
 	}
 }
 
-func TestRunCommandStepsDispatchArchivesSuppressedOutput(t *testing.T) {
+func TestShellStepsDispatchArchivesSuppressedOutput(t *testing.T) {
 	r := &Registry{}
-	r.Register(runCommand{})
+	r.Register(shell{})
 	res := r.Dispatch(context.Background(), llm.ToolCall{
 		ID:    "steps",
-		Name:  "run_command",
+		Name:  "shell",
 		Input: json.RawMessage(`{"steps":[{"name":"test","command":"printf verbose-success"}]}`),
 	})
 	if res.IsError || !res.Truncated {
@@ -565,12 +565,12 @@ func TestRunCommandStepsDispatchArchivesSuppressedOutput(t *testing.T) {
 	}
 }
 
-func TestRunCommandTopLevelDispatchArchivesReceiptOriginal(t *testing.T) {
+func TestShellTopLevelDispatchArchivesReceiptOriginal(t *testing.T) {
 	r := &Registry{}
-	r.Register(runCommand{})
+	r.Register(shell{})
 	res := r.Dispatch(context.Background(), llm.ToolCall{
 		ID:    "top-level",
-		Name:  "run_command",
+		Name:  "shell",
 		Input: json.RawMessage(`{"argv":["printf","verbose-success"],"name":"check","output_mode":"receipt"}`),
 	})
 	// A small unclipped success is fully shown in the receipt, so dispatch does
@@ -595,9 +595,9 @@ func (f *fakeBackgroundStarter) StartBackgroundJob(req BackgroundJobRequest) (Ba
 	return BackgroundJobInfo{ID: "bg_test", Status: "running"}, nil
 }
 
-func TestRunCommandBackgroundStartsJob(t *testing.T) {
+func TestShellBackgroundStartsJob(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
-	out, err := runTool(t, runCommand{background: starter}, map[string]any{
+	out, err := runTool(t, shell{background: starter}, map[string]any{
 		"command":    "echo background",
 		"background": true,
 	})
@@ -611,8 +611,8 @@ func TestRunCommandBackgroundStartsJob(t *testing.T) {
 	if starter.req.ResourceKey == "" || starter.req.Access != BackgroundAccessExclusive {
 		t.Fatalf("job lease = %q/%q, want canonical cwd/exclusive", starter.req.ResourceKey, starter.req.Access)
 	}
-	if starter.req.Kind != "run_command" {
-		t.Fatalf("job kind = %q, want run_command", starter.req.Kind)
+	if starter.req.Kind != "shell" {
+		t.Fatalf("job kind = %q, want shell", starter.req.Kind)
 	}
 	if starter.req.Description != "echo background" {
 		t.Fatalf("job description = %q", starter.req.Description)
@@ -630,9 +630,9 @@ func TestRunCommandBackgroundStartsJob(t *testing.T) {
 	}
 }
 
-func TestRunCommandBackgroundArgvStartsJob(t *testing.T) {
+func TestShellBackgroundArgvStartsJob(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
-	out, err := runTool(t, runCommand{background: starter}, map[string]any{
+	out, err := runTool(t, shell{background: starter}, map[string]any{
 		"argv":       []string{"printf", "%s", "background argv"},
 		"background": true,
 	})
@@ -655,9 +655,9 @@ func TestRunCommandBackgroundArgvStartsJob(t *testing.T) {
 	}
 }
 
-func TestRunCommandBackgroundPreservesReceiptOriginal(t *testing.T) {
+func TestShellBackgroundPreservesReceiptOriginal(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
-	_, err := runTool(t, runCommand{background: starter}, map[string]any{
+	_, err := runTool(t, shell{background: starter}, map[string]any{
 		"argv":        []string{"printf", "background output"},
 		"name":        "background check",
 		"output_mode": "receipt",
@@ -679,10 +679,10 @@ func TestRunCommandBackgroundPreservesReceiptOriginal(t *testing.T) {
 	}
 }
 
-func TestRunCommandBackgroundLeaseOverrideAndForegroundValidation(t *testing.T) {
+func TestShellBackgroundLeaseOverrideAndForegroundValidation(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	resource := t.TempDir()
-	out, err := runTool(t, runCommand{background: starter}, map[string]any{
+	out, err := runTool(t, shell{background: starter}, map[string]any{
 		"command":    "printf read-only",
 		"background": true,
 		"background_lease": map[string]any{
@@ -704,7 +704,7 @@ func TestRunCommandBackgroundLeaseOverrideAndForegroundValidation(t *testing.T) 
 		t.Fatalf("start output = %q", out)
 	}
 
-	_, err = runTool(t, runCommand{background: starter}, map[string]any{
+	_, err = runTool(t, shell{background: starter}, map[string]any{
 		"command": "printf foreground",
 		"background_lease": map[string]any{
 			"resource_key": resource,
@@ -716,10 +716,10 @@ func TestRunCommandBackgroundLeaseOverrideAndForegroundValidation(t *testing.T) 
 	}
 }
 
-func TestRunCommandAcceptsLegacyTopLevelBackgroundLeaseAliases(t *testing.T) {
+func TestShellAcceptsLegacyTopLevelBackgroundLeaseAliases(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	resource := t.TempDir()
-	_, err := runTool(t, runCommand{background: starter}, map[string]any{
+	_, err := runTool(t, shell{background: starter}, map[string]any{
 		"command":      "printf compatibility",
 		"background":   true,
 		"resource_key": resource,
@@ -737,8 +737,8 @@ func TestRunCommandAcceptsLegacyTopLevelBackgroundLeaseAliases(t *testing.T) {
 	}
 }
 
-func TestRunCommandRejectsNestedAndLegacyLeaseTogether(t *testing.T) {
-	_, err := runTool(t, runCommand{background: &fakeBackgroundStarter{}}, map[string]any{
+func TestShellRejectsNestedAndLegacyLeaseTogether(t *testing.T) {
+	_, err := runTool(t, shell{background: &fakeBackgroundStarter{}}, map[string]any{
 		"command":      "true",
 		"background":   true,
 		"resource_key": t.TempDir(),
@@ -751,8 +751,8 @@ func TestRunCommandRejectsNestedAndLegacyLeaseTogether(t *testing.T) {
 	}
 }
 
-func TestRunCommandBackgroundRequiresStarter(t *testing.T) {
-	_, err := runRunCommand(t, map[string]any{
+func TestShellBackgroundRequiresStarter(t *testing.T) {
+	_, err := runShell(t, map[string]any{
 		"command":    "echo background",
 		"background": true,
 	})
@@ -767,13 +767,13 @@ func TestRunCommandBackgroundRequiresStarter(t *testing.T) {
 // The timeout test exercises a real subprocess kill (sanctioned exception).
 // A sleeping child in its own process group must be killed when the timeout
 // fires, and the partial output captured before the kill must be reported.
-func TestRunCommandTimeoutKillsGroup(t *testing.T) {
+func TestShellTimeoutKillsGroup(t *testing.T) {
 	oldUnit := processTimeoutUnit
 	processTimeoutUnit = 250 * time.Millisecond
 	t.Cleanup(func() { processTimeoutUnit = oldUnit })
 
 	start := time.Now()
-	out, err := runRunCommand(t, map[string]any{
+	out, err := runShell(t, map[string]any{
 		"command":         "echo started; sleep 30",
 		"timeout_seconds": 1,
 	})
@@ -793,7 +793,7 @@ func TestRunCommandTimeoutKillsGroup(t *testing.T) {
 	}
 }
 
-func TestRunCommandReceiptTimeoutPreservesOriginalWhenWaitIncomplete(t *testing.T) {
+func TestShellReceiptTimeoutPreservesOriginalWhenWaitIncomplete(t *testing.T) {
 	oldUnit := processTimeoutUnit
 	oldGrace := processReapGrace
 	processTimeoutUnit = 25 * time.Millisecond
@@ -806,7 +806,7 @@ func TestRunCommandReceiptTimeoutPreservesOriginalWhenWaitIncomplete(t *testing.
 		killProcessGroup = oldKill
 	})
 
-	result, err := runRunCommandResult(t, map[string]any{
+	result, err := runShellResult(t, map[string]any{
 		// Short, unclipped partial output, but the wait does not finish: the
 		// receipt drops the partial-reap signal, so the original must be kept.
 		"command":         `echo started; sleep 5`,
@@ -876,9 +876,9 @@ func TestRunProcessTimeoutReturnsPartialOutputWhenWaitDoesNotFinish(t *testing.T
 	}
 }
 
-func TestRunCommandDoesNotWaitForBackgroundChildHoldingStdout(t *testing.T) {
+func TestShellDoesNotWaitForBackgroundChildHoldingStdout(t *testing.T) {
 	start := time.Now()
-	out, err := runRunCommand(t, map[string]any{
+	out, err := runShell(t, map[string]any{
 		"command":         "echo started; sleep 30 &",
 		"timeout_seconds": 5,
 	})
@@ -900,7 +900,7 @@ func TestRunCommandDoesNotWaitForBackgroundChildHoldingStdout(t *testing.T) {
 	}
 }
 
-func TestRunCommandDoesNotStopOnTTYJobControl(t *testing.T) {
+func TestShellDoesNotStopOnTTYJobControl(t *testing.T) {
 	if !hasForegroundTTY() {
 		t.Skip("no foreground controlling terminal")
 	}
@@ -914,7 +914,7 @@ func TestRunCommandDoesNotStopOnTTYJobControl(t *testing.T) {
 		processReapGrace = oldGrace
 	})
 
-	out, err := runRunCommand(t, map[string]any{
+	out, err := runShell(t, map[string]any{
 		"command":         `go test harness/internal/term -run TestResetOnRealTTY -count=1 -v && echo tty-termios-ok`,
 		"timeout_seconds": 40,
 	})

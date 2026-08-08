@@ -193,10 +193,10 @@ func TestSink_Detailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := NewSink(exp, nil, "openai", "gpt-4", "auto", false)
-	// Simulate 2 parallel read_file + 1 run_command error via tool results
+	// Simulate 2 parallel read_file + 1 shell error via tool results
 	sink.ToolResultWithName("read_file", llm.ToolResult{}, 5, tools.Activity{Class: tools.ActivityInspect})
 	sink.ToolResultWithName("read_file", llm.ToolResult{}, 7, tools.Activity{Class: tools.ActivityInspect})
-	sink.ToolResultWithName("run_command", llm.ToolResult{IsError: true}, 100, tools.Activity{Class: tools.ActivityOther})
+	sink.ToolResultWithName("shell", llm.ToolResult{IsError: true}, 100, tools.Activity{Class: tools.ActivityOther})
 	// Turn progress with 3 tools
 	sink.TurnProgress(agent.TurnProgress{ToolCalls: 3, Operations: 3})
 	if err := exp.Export(context.Background()); err != nil {

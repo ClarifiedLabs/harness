@@ -14,7 +14,7 @@ calls. A turn-level scan found these recurring patterns:
 | Pattern | Occurrences | Sessions | Candidate deterministic flow |
 |---|---:|---:|---|
 | `rg` turn followed by a `read_file` turn | 688 | 160 | bounded contextual code search |
-| `run_command` followed by another `run_command` | 434 | 65 | ordered verification steps with compact receipts |
+| `shell` followed by another `shell` | 434 | 65 | ordered verification steps with compact receipts |
 | nonterminal `update_work`-only turn | 60 | 32 | coissue progress with useful work |
 | repeated git inspection | 2,318 git calls | 179 sessions with at least two | one workspace-summary workflow |
 | `background_jobs` `get`/`list` polling | 95 polls | 20 | event-driven wait |
@@ -82,7 +82,7 @@ The implementations were:
 - `search` (the benchmark case retains its historical `search_context` name):
   bounded ripgrep JSON parsing, grouped context windows, deterministic limits,
   truncation, and artifact-compatible citations.
-- `run_command.steps`: 1–16 serial commands, stop-on-failure behavior, compact
+- `shell.steps`: 1–16 serial commands, stop-on-failure behavior, compact
   `PASS` receipts, bounded failure output, and archived suppressed output.
 - Advisory `update_todos` coissuing guidance in the system and non-plan agent prompts.
 - `git {"workflow":"workspace_summary"}`: branch/HEAD, porcelain status,
@@ -431,7 +431,7 @@ showed the mechanism most clearly: all eight candidates reduced 36 lines to 12
 and 3,300 bytes to 1,374 per run, with no unique lines omitted.
 
 The correctness audit did not establish a batching-caused failure. Both failed
-candidate known-path runs issued an extra `run_command`; their search batches
+candidate known-path runs issued an extra `shell`; their search batches
 omitted no unique lines, and the baseline also had two failures on the same
 command contract. The failed V4 Pro natural run had no budget-omitted search
 lines. Mimo omitted 200 lines in later broad searches, but its initial

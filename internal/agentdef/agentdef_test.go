@@ -53,8 +53,8 @@ func TestBuiltins(t *testing.T) {
 	if explore.WorkspaceAccess != WorkspaceAccessReadOnly {
 		t.Errorf("explore WorkspaceAccess = %q, want read_only", explore.WorkspaceAccess)
 	}
-	if !slices.Contains(explore.AllowedTools, "run_command") {
-		t.Errorf("explore tools missing run_command: %v", explore.AllowedTools)
+	if !slices.Contains(explore.AllowedTools, "shell") {
+		t.Errorf("explore tools missing shell: %v", explore.AllowedTools)
 	}
 	for _, forbidden := range []string{"write_file", "edit", "apply_patch", "record_plan", "handoff", "create_goal", "update_goal", "delegate", "background_jobs"} {
 		if slices.Contains(explore.AllowedTools, forbidden) {
@@ -101,8 +101,8 @@ func TestBuiltins(t *testing.T) {
 	if plan.WorkspaceAccess != WorkspaceAccessReadOnly {
 		t.Errorf("plan WorkspaceAccess = %q, want read_only", plan.WorkspaceAccess)
 	}
-	if !slices.Contains(plan.AllowedTools, "run_command") {
-		t.Errorf("plan tools missing run_command: %v", plan.AllowedTools)
+	if !slices.Contains(plan.AllowedTools, "shell") {
+		t.Errorf("plan tools missing shell: %v", plan.AllowedTools)
 	}
 	for _, forbidden := range []string{"edit", "write_file", "apply_patch"} {
 		if slices.Contains(plan.AllowedTools, forbidden) {
@@ -140,38 +140,16 @@ func TestResolveNilKeepsBuiltins(t *testing.T) {
 	}
 }
 
-func TestInspectionAgentsIncludeGlob(t *testing.T) {
-	for _, name := range []string{"explore", "plan", "review"} {
-		agent := Builtins()[name]
-		if !slices.Contains(agent.AllowedTools, "glob") {
-			t.Fatalf("%s agent tools missing glob: %v", name, agent.AllowedTools)
+func TestBuiltinsIncludeReadFileAndOmitCatalogOnlyInspectionTools(t *testing.T) {
+	for name, agent := range Builtins() {
+		if !slices.Contains(agent.AllowedTools, "read_file") {
+			t.Fatalf("%s agent tools missing read_file: %v", name, agent.AllowedTools)
 		}
-	}
-}
-
-func TestInspectionAgentsOmitGitReadonlyWhenGitMissing(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-
-	for _, name := range []string{"explore", "plan", "review"} {
-		agent := Builtins()[name]
-		if slices.Contains(agent.AllowedTools, "git_readonly") {
-			t.Fatalf("%s agent includes unavailable git_readonly: %v", name, agent.AllowedTools)
+		for _, forbidden := range []string{"list_dir", "glob", "search", "git", "git_readonly", "grep", "rg"} {
+			if slices.Contains(agent.AllowedTools, forbidden) {
+				t.Fatalf("%s agent tools unexpectedly include %s: %v", name, forbidden, agent.AllowedTools)
+			}
 		}
-	}
-}
-
-// The default set (auto/independent) never advertises git_readonly: git already
-// covers every read-only operation, so listing both wastes context. Read-only
-// agents stay delegatable via the git->git_readonly subset rule in delegate.
-func TestDefaultToolsOmitGitReadonly(t *testing.T) {
-	for _, name := range []string{"auto", "independent"} {
-		agent := Builtins()[name]
-		if slices.Contains(agent.AllowedTools, "git_readonly") {
-			t.Fatalf("%s agent includes git_readonly: %v", name, agent.AllowedTools)
-		}
-	}
-	if slices.Contains(DefaultTools(), "git_readonly") {
-		t.Fatalf("DefaultTools includes git_readonly: %v", DefaultTools())
 	}
 }
 
@@ -285,19 +263,6 @@ func TestResolvePromptOnlyReviewOverrideKeepsReadOnlyDefaults(t *testing.T) {
 	}
 }
 
-func TestBuiltinsUseTypedSearchOnly(t *testing.T) {
-	for name, agent := range Builtins() {
-		if !slices.Contains(agent.AllowedTools, "search") {
-			t.Fatalf("%s tools missing typed search: %v", name, agent.AllowedTools)
-		}
-		for _, raw := range []string{"grep", "rg"} {
-			if slices.Contains(agent.AllowedTools, raw) {
-				t.Fatalf("%s tools unexpectedly include raw %s: %v", name, raw, agent.AllowedTools)
-			}
-		}
-	}
-}
-
 func TestResolveNewAgentWithExplicitTools(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"ro": {AllowedTools: []string{"read_file", "grep"}}})
 	ro := m["ro"]
@@ -399,14 +364,14 @@ func TestPlanToolsOnlyIncludePlanCoordinationTool(t *testing.T) {
 	}
 }
 
-// plan (and explore) gain run_command via the shared inspection set so they can
+// plan (and explore) gain shell via the shared inspection set so they can
 // explore via external tools (gh, builds, screenshots, live apps) but keep no
 // first-class file-mutation tools, so "don't modify the project" remains a
 // prompt-level contract.
-func TestPlanToolsAllowRunCommandButNotFileMutation(t *testing.T) {
+func TestPlanToolsAllowShellButNotFileMutation(t *testing.T) {
 	pt := planTools()
-	if !slices.Contains(pt, "run_command") {
-		t.Errorf("plan tools missing run_command: %v", pt)
+	if !slices.Contains(pt, "shell") {
+		t.Errorf("plan tools missing shell: %v", pt)
 	}
 	for _, forbidden := range []string{"edit", "write_file", "apply_patch"} {
 		if slices.Contains(pt, forbidden) {

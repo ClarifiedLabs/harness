@@ -146,8 +146,8 @@ func TestSemanticProgressSignalsResetInspectionStreak(t *testing.T) {
 		t.Fatalf("mutation attempt left inspection streak at %d", guard.semanticRuns)
 	}
 
-	verification := []llm.ToolCall{{Name: "run_command", Input: json.RawMessage(`{"argv":["go","test","./..."]}`)}}
-	failedVerification := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "run_command", ResultText: "tests failed", ResultError: true}}
+	verification := []llm.ToolCall{{Name: "shell", Input: json.RawMessage(`{"argv":["go","test","./..."]}`)}}
+	failedVerification := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "shell", ResultText: "tests failed", ResultError: true}}
 	progress = guard.aggregateTurnProgress(reg, 6, verification, failedVerification)
 	if !progress.VerificationAttempt || progress.SuccessfulVerification || !progress.ExplicitProgress {
 		t.Fatalf("failed verification progress = %+v", progress)
@@ -292,7 +292,7 @@ func TestShellPipelineHeadIgnoresQuotedPipes(t *testing.T) {
 
 func TestCommandPipelineLoopSteersThenHardStops(t *testing.T) {
 	n := 0
-	tool := &recordTool{name: "run_command", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+	tool := &recordTool{name: "shell", run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		n++
 		return fmt.Sprintf("changing output %d", n), nil
 	}}
@@ -309,7 +309,7 @@ func TestCommandPipelineLoopSteersThenHardStops(t *testing.T) {
 			t.Fatal(err)
 		}
 		steps = append(steps, llmtest.Step{
-			Events: []llm.StreamEvent{toolDone(0, fmt.Sprintf("call_%d", i), "run_command", string(input))},
+			Events: []llm.StreamEvent{toolDone(0, fmt.Sprintf("call_%d", i), "shell", string(input))},
 			Stop:   llm.StopToolUse,
 		})
 	}
@@ -352,10 +352,10 @@ func TestCommandPipelineStreakResetsWhenBaseCommandChanges(t *testing.T) {
 	var guard turnGuard
 	result := []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultText: "ok"}}
 	for i := 0; i < commandRepeatSteer-1; i++ {
-		call := llm.ToolCall{Name: "run_command", Input: json.RawMessage(fmt.Sprintf(`{"command":"go test ./pkg | head -%d"}`, i+1))}
+		call := llm.ToolCall{Name: "shell", Input: json.RawMessage(fmt.Sprintf(`{"command":"go test ./pkg | head -%d"}`, i+1))}
 		guard.recordTools([]llm.ToolCall{call}, result)
 	}
-	changed := llm.ToolCall{Name: "run_command", Input: json.RawMessage(`{"command":"go test ./other | head -1"}`)}
+	changed := llm.ToolCall{Name: "shell", Input: json.RawMessage(`{"command":"go test ./other | head -1"}`)}
 	guard.recordTools([]llm.ToolCall{changed}, result)
 	if guard.commandRuns != 1 {
 		t.Fatalf("command streak after base change = %d, want 1", guard.commandRuns)

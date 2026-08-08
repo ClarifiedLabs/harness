@@ -34,7 +34,8 @@ func TestCompleteSkillReadPinsInstructionsAndStoresReceipt(t *testing.T) {
 		DisplayPath: "artifacts/tool-results/skill-read.txt",
 		ModelPath:   "/session/artifacts/tool-results/skill-read.txt",
 	}}
-	a := newAgent(fp, tools.Default(), Options{})
+	// Skills always read via the full catalog, independent of the narrowed auto Default.
+	a := newAgent(fp, tools.Catalog(), Options{})
 
 	if err := a.RunPrompt(context.Background(), "use the skill", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
@@ -97,7 +98,7 @@ func TestRepeatedSkillReadKeepsOnePinnedContext(t *testing.T) {
 		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "read-2", "read_file", input)}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
-	a := newAgent(fp, tools.Default(), Options{})
+	a := newAgent(fp, tools.Catalog(), Options{})
 	sink := &archiveSink{archive: ToolResultArchive{ModelPath: "/session/full.txt"}}
 
 	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
@@ -130,7 +131,7 @@ func TestSkillActivationKeepsFullResultWhenArtifactWriteFails(t *testing.T) {
 		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "skill-read", "read_file", input)}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
-	a := newAgent(fp, tools.Default(), Options{})
+	a := newAgent(fp, tools.Catalog(), Options{})
 	sink := &archiveSink{archiveErr: errors.New("disk unavailable")}
 
 	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
@@ -147,7 +148,7 @@ func TestSkillActivationKeepsFullResultWhenArtifactWriteFails(t *testing.T) {
 
 func TestExplicitSkillContextReportsActivationWithoutToolRound(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
-	a := newAgent(fp, tools.Default(), Options{})
+	a := newAgent(fp, tools.Catalog(), Options{})
 	sink := &archiveSink{}
 	contextText := skills.ActiveContext("commit", "/skills/commit/SKILL.md", "DIRECT BODY")
 
@@ -180,7 +181,7 @@ func TestPartialSkillReadDoesNotActivate(t *testing.T) {
 		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "partial", "read_file", input)}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
-	a := newAgent(fp, tools.Default(), Options{})
+	a := newAgent(fp, tools.Catalog(), Options{})
 
 	if err := a.RunPrompt(context.Background(), "go", &recordSink{}); err != nil {
 		t.Fatal(err)

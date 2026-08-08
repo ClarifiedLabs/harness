@@ -262,7 +262,7 @@ func TestLiveModels(t *testing.T) {
 			"-reasoning", "none",
 			"-max-turns", "3",
 			"-max-output-tokens", "256",
-			"-p", "Use run_command exactly once to execute printf with LIVE_TOOL_OK_91827 as its output. After the tool succeeds, reply with exactly LIVE_TOOL_OK_91827. Do not answer before using the tool.",
+			"-p", "Use shell exactly once to execute printf with LIVE_TOOL_OK_91827 as its output. After the tool succeeds, reply with exactly LIVE_TOOL_OK_91827. Do not answer before using the tool.",
 		)
 		if !strings.Contains(output.stdout, marker) {
 			t.Fatalf("stdout = %q, want %s", output.stdout, marker)
@@ -280,7 +280,7 @@ func TestLiveModels(t *testing.T) {
 			"-reasoning", "none",
 			"-max-turns", "3",
 			"-max-output-tokens", "256",
-			"-p", "Use run_command exactly once to execute printf with OPENROUTER_TOOL_OK_61403 as its output. After the tool succeeds, reply with exactly OPENROUTER_TOOL_OK_61403. Do not answer before using the tool.",
+			"-p", "Use shell exactly once to execute printf with OPENROUTER_TOOL_OK_61403 as its output. After the tool succeeds, reply with exactly OPENROUTER_TOOL_OK_61403. Do not answer before using the tool.",
 		)
 		if !strings.Contains(output.stdout, marker) {
 			t.Fatalf("stdout = %q, want %s", output.stdout, marker)
@@ -500,7 +500,7 @@ func assertLiveToolRoundTrip(t *testing.T, messages []llm.Message, marker string
 			continue
 		}
 		for _, block := range message.Content {
-			if block.Kind == llm.BlockToolUse && block.ToolName == "run_command" {
+			if block.Kind == llm.BlockToolUse && block.ToolName == "shell" {
 				toolUseID = block.ToolUseID
 				toolUseMessage = messageIndex
 				break
@@ -511,7 +511,7 @@ func assertLiveToolRoundTrip(t *testing.T, messages []llm.Message, marker string
 		}
 	}
 	if toolUseID == "" {
-		t.Fatal("transcript contains no assistant run_command tool use")
+		t.Fatal("transcript contains no assistant shell tool use")
 	}
 	for _, message := range messages[toolUseMessage+1:] {
 		for _, block := range message.Content {

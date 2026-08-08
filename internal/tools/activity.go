@@ -86,12 +86,12 @@ func normalizedActivity(activity Activity) Activity {
 // their behavior cannot be classified, they must not provide a bypass around
 // the typed inspection tools blocked by the same boundary.
 func InspectionBoundaryBlocked(call llm.ToolCall, activity Activity) bool {
-	return activity.Class == ActivityInspect || call.Name == "run_command" && activity.Class == ActivityOther
+	return activity.Class == ActivityInspect || call.Name == "shell" && activity.Class == ActivityOther
 }
 
 // InspectionToolVisibleAtBoundary keeps tools that can still make a valid
 // transition visible while suppressing obvious typed inspection surfaces.
-// run_command stays visible because argv-classified verification remains legal.
+// shell stays visible because argv-classified verification remains legal.
 func InspectionToolVisibleAtBoundary(name string) bool {
 	switch name {
 	case "read_file", "view_image", "list_dir", "glob", "search", "rg", "grep", "git_readonly", "web_fetch":
@@ -101,10 +101,10 @@ func InspectionToolVisibleAtBoundary(name string) bool {
 	}
 }
 
-func (runCommand) Activity(input json.RawMessage) Activity {
-	var args runCommandArgs
+func (shell) Activity(input json.RawMessage) Activity {
+	var args shellArgs
 	if err := json.Unmarshal(input, &args); err != nil || args.Background {
-		return Activity{Class: ActivityOther, OperationCount: 1, Source: "run_command"}
+		return Activity{Class: ActivityOther, OperationCount: 1, Source: "shell"}
 	}
 	if len(args.Steps) > 0 {
 		classes := make([]ActivityClass, 0, len(args.Steps))
@@ -115,7 +115,7 @@ func (runCommand) Activity(input json.RawMessage) Activity {
 			Class:          combineCommandClasses(classes),
 			OperationCount: len(args.Steps),
 			Batched:        len(args.Steps) > 1,
-			Source:         "run_command_steps",
+			Source:         "shell_steps",
 		}
 	}
 	class, operations := classifyCommandWithCount(args.Argv, args.Command)
@@ -123,7 +123,7 @@ func (runCommand) Activity(input json.RawMessage) Activity {
 		Class:          class,
 		OperationCount: operations,
 		Batched:        operations > 1,
-		Source:         "run_command",
+		Source:         "shell",
 	}
 }
 

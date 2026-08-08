@@ -10,7 +10,7 @@ import (
 // drives both behaviors via a per-prompt cancel func:
 //
 //   - First ^C during a prompt cancels the prompt (aborting the stream and any
-//     run_command process group).
+//     shell process group).
 //   - A second ^C while that prompt remains active, or any ^C at the idle
 //     prompt, requests exit.
 //

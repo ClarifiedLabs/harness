@@ -205,12 +205,12 @@ func TestKnownPathContractEvidenceRequiresExactInputsAndSuccess(t *testing.T) {
 		return successfulKnownPathContracts([]session.Event{
 			{Type: session.EventToolStart, ToolID: "search", Tool: "search", Input: json.RawMessage(searchInput)},
 			searchResult,
-			{Type: session.EventToolStart, ToolID: "command", Tool: "run_command", Input: json.RawMessage(commandInput)},
+			{Type: session.EventToolStart, ToolID: "command", Tool: "shell", Input: json.RawMessage(commandInput)},
 			commandResult,
 		})
 	}
 	successfulSearch := session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search"}
-	successfulCommand := session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "run_command"}
+	successfulCommand := session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "shell"}
 	if searches, commands := evidence(validSearch, validCommand, successfulSearch, successfulCommand); searches != 3 || commands != 1 {
 		t.Fatalf("valid evidence = %d/%d, want 3/1", searches, commands)
 	}
@@ -259,7 +259,7 @@ func TestKnownPathContractEvidenceRequiresExactInputsAndSuccess(t *testing.T) {
 		{name: "empty second step", searchInput: validSearch, commandInput: strings.Replace(validCommand, `{"argv":["printf","STEP_BETA\n"]}`, `{}`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
 		{name: "wrong step input", searchInput: validSearch, commandInput: strings.Replace(validCommand, "STEP_BETA", "STEP_OTHER", 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
 		{name: "compact output", searchInput: validSearch, commandInput: strings.Replace(validCommand, `"full"`, `"receipt"`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
-		{name: "command execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: successfulSearch, commandResult: session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "run_command", ResultError: true}, wantSearch: 3},
+		{name: "command execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: successfulSearch, commandResult: session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "shell", ResultError: true}, wantSearch: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -401,16 +401,16 @@ func TestValidateArchivedRecordChecksContractAndEvents(t *testing.T) {
 	}
 }
 
-func TestRunCommandInvokesGit(t *testing.T) {
+func TestShellInvokesGit(t *testing.T) {
 	for _, input := range []string{
 		`{"argv":["git","status","--short"]}`,
 		`{"steps":[{"command":"git status --short"},{"command":"git diff --stat"}]}`,
 	} {
-		if !runCommandInvokesGit(json.RawMessage(input)) {
+		if !shellInvokesGit(json.RawMessage(input)) {
 			t.Fatalf("git invocation not detected in %s", input)
 		}
 	}
-	if runCommandInvokesGit(json.RawMessage(`{"command":"printf 'git status'"}`)) {
+	if shellInvokesGit(json.RawMessage(`{"command":"printf 'git status'"}`)) {
 		t.Fatal("quoted git text counted as an invocation")
 	}
 }
@@ -481,7 +481,7 @@ func TestToolAccuracyAcceptanceRequiresPositiveEfficiencyAndErrorReduction(t *te
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
-				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"search": 3, "read_file": 1, "run_command": 1}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"search": 3, "read_file": 1, "shell": 1}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
 			)
 		}
 	}
@@ -632,7 +632,7 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 		t.Fatalf("known-path prompt does not enumerate fixture paths: %s", known.Prompt)
 	}
 	knownMetrics := metrics{
-		ToolCalls:              map[string]int{"read_file": 1, "search": 3, "run_command": 1},
+		ToolCalls:              map[string]int{"read_file": 1, "search": 3, "shell": 1},
 		SuccessfulReadPaths:    contractFixturePaths("known", "contract-%02d.txt"),
 		SearchQueries:          3,
 		ExactKnownPathSearches: 3,
@@ -874,7 +874,7 @@ func TestTodoAdoptionRequiresTodoCall(t *testing.T) {
 
 func TestOrientationAdoptionAcceptsCoissuedDirectReads(t *testing.T) {
 	known := metrics{
-		ToolCalls:              map[string]int{"search": 3, "read_file": 18, "run_command": 1},
+		ToolCalls:              map[string]int{"search": 3, "read_file": 18, "shell": 1},
 		ExactKnownPathSearches: 3,
 		ExactKnownPathCommands: 1,
 		CoissuedReadTurns:      1,

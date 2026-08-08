@@ -79,8 +79,8 @@ func TestAnalyzeCorpusRecursiveDiscoveryAndCutoff(t *testing.T) {
 
 func TestAnalyzeCorpusCountsInBandCommandFailures(t *testing.T) {
 	root := t.TempDir()
-	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1}})
-	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1}})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}})
 	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "read_file", ResultError: true})
 	report, err := AnalyzeCorpus(root, AnalyzeOptions{})
 	if err != nil {
@@ -337,7 +337,7 @@ func TestDeriveExecutionCountsAndCompleteness(t *testing.T) {
 func TestAnalysisJSONDeterministicVersionedAndTranscriptFree(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	mustAppendAnalysisEvent(t, dir, Event{Type: EventUser, Text: "TOP SECRET TRANSCRIPT"})
-	mustAppendAnalysisEvent(t, dir, Event{Type: EventToolStart, Tool: "run_command", Input: json.RawMessage(`{"command":"TOP SECRET INPUT"}`)})
+	mustAppendAnalysisEvent(t, dir, Event{Type: EventToolStart, Tool: "shell", Input: json.RawMessage(`{"command":"TOP SECRET INPUT"}`)})
 	report, err := AnalyzeCorpus(dir, AnalyzeOptions{})
 	if err != nil {
 		t.Fatal(err)

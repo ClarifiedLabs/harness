@@ -5723,7 +5723,7 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 			toolName = pendingOTel.name
 		}
 		s.otel.ToolResultWithName(toolName, res, durMS, pendingOTel.activity)
-		if toolName == "run_command" && len(input) > 0 {
+		if toolName == "shell" && len(input) > 0 {
 			s.otel.RecordCommands(input)
 		}
 		if toolName == "search" || toolName == "rg" || toolName == "grep" {

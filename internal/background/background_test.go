@@ -20,7 +20,7 @@ func TestManagerStartBackgroundJobCompletesAndDrainsContext(t *testing.T) {
 	}})
 
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "run_command",
+		Kind:        "shell",
 		Description: "echo hi",
 		Run: func(ctx context.Context, id string) (tools.BackgroundJobResult, error) {
 			if id == "" {
@@ -37,14 +37,14 @@ func TestManagerStartBackgroundJobCompletesAndDrainsContext(t *testing.T) {
 	if done.Status != StatusCompleted {
 		t.Fatalf("job status = %q, want completed", done.Status)
 	}
-	if done.Kind != "run_command" || done.Task != "echo hi" {
+	if done.Kind != "shell" || done.Task != "echo hi" {
 		t.Fatalf("job identity = kind %q task %q", done.Kind, done.Task)
 	}
 	if !strings.Contains(done.Result.Text, "command output") {
 		t.Fatalf("job text = %q", done.Result.Text)
 	}
 	ctx := m.DrainCompletedContext(nil)
-	for _, want := range []string{"kind: run_command", "command output"} {
+	for _, want := range []string{"kind: shell", "command output"} {
 		if len(ctx) != 1 || !strings.Contains(ctx[0], want) {
 			t.Fatalf("drained context missing %q: %+v", want, ctx)
 		}
@@ -125,12 +125,12 @@ func TestManagerTruncatedContextUsesForegroundPreparationAndArchiveHint(t *testi
 	m := NewManager(Options{})
 	registry := &tools.Registry{}
 	registry.SetResultLimits(1000, 1000)
-	registry.SetToolResultLimits("run_command", 32, 1000)
+	registry.SetToolResultLimits("shell", 32, 1000)
 	m.SetResultPreparer(registry.PrepareResultWithOriginal)
 
 	full := strings.Repeat("background output ", 20)
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "run_command",
+		Kind:        "shell",
 		Description: "noisy command",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			return tools.BackgroundJobResult{Text: full}, nil
@@ -171,7 +171,7 @@ func TestManagerArchivesProactiveBackgroundOriginal(t *testing.T) {
 
 	full := strings.Repeat("verbose command output\n", 200)
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "run_command",
+		Kind:        "shell",
 		Description: "large check",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			return tools.BackgroundJobResult{
@@ -266,7 +266,7 @@ func TestManagerResourceLeasesAllowReadsAndRejectConflictingAccess(t *testing.T)
 	}
 
 	_, err = m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "run_command",
+		Kind:        "shell",
 		ResourceKey: resource,
 		Access:      tools.BackgroundAccessExclusive,
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
@@ -292,7 +292,7 @@ func TestManagerResourceLeasesAllowReadsAndRejectConflictingAccess(t *testing.T)
 	exclusiveStarted := make(chan struct{})
 	exclusiveRelease := make(chan struct{})
 	exclusive, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "run_command",
+		Kind:        "shell",
 		ResourceKey: resource,
 		Access:      tools.BackgroundAccessExclusive,
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
@@ -319,7 +319,7 @@ func TestManagerResourceLeasesAllowReadsAndRejectConflictingAccess(t *testing.T)
 		}
 	}
 	unrelated, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:        "run_command",
+		Kind:        "shell",
 		ResourceKey: t.TempDir(),
 		Access:      tools.BackgroundAccessExclusive,
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
@@ -339,7 +339,7 @@ func TestManagerResourceLeaseReleaseLifecycle(t *testing.T) {
 	startImmediate := func(t *testing.T, m *Manager, run func(context.Context, string) (tools.BackgroundJobResult, error)) tools.BackgroundJobInfo {
 		t.Helper()
 		started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-			Kind:        "run_command",
+			Kind:        "shell",
 			ResourceKey: resource,
 			Access:      tools.BackgroundAccessExclusive,
 			Run:         run,
@@ -517,7 +517,7 @@ func TestManagerWaitSpecificJobCompletesOnNotification(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -1012,7 +1012,7 @@ func TestJobsToolWaitPreservesBackgroundOriginal(t *testing.T) {
 	m := NewManager(Options{})
 	full := strings.Repeat("full output\n", 100)
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			return tools.BackgroundJobResult{
 				Text:         "PASS check (1s; exit 0; 1.2KB output)",
@@ -1266,7 +1266,7 @@ func TestManagerWaitDetachesOnAcceptedSteerAndDeliversOnce(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -1342,7 +1342,7 @@ func TestManagerDetachedWaitTransfersOriginalTimer(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -1417,7 +1417,7 @@ func TestManagerWaitCompletionWinsAcceptedSteer(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -1461,7 +1461,7 @@ func TestManagerOverlappingDetachedWaitsSuppressOrdinaryContext(t *testing.T) {
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -1525,7 +1525,7 @@ func TestManagerDetachedWaitContextUsesForegroundPreparation(t *testing.T) {
 	release := make(chan struct{})
 	full := strings.Repeat("complete detached output\n", 20)
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release
@@ -1577,7 +1577,7 @@ func TestManagerClearDropsDetachedWaitObserver(t *testing.T) {
 	release := make(chan struct{})
 	runnerDone := make(chan struct{})
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "run_command",
+		Kind: "shell",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			close(startedRun)
 			<-release

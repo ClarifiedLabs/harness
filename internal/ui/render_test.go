@@ -1116,7 +1116,7 @@ func TestLiveDelegateStatusKeepsElapsedCounterWithLongBackgroundWaitArgs(t *test
 	registry := delegate.NewActivityRegistry(nil)
 	registration := registry.Register(delegate.ActivityStart{ID: "background-child", Agent: "auto"})
 	registration.MarkTurn(2, 1, agent.ContextEstimate{})
-	registration.MarkActivity("tool run_command")
+	registration.MarkActivity("tool shell")
 	r := NewRenderer(&out, &errw, RenderOptions{
 		LiveStatus:       true,
 		DelegateActivity: registry,
@@ -1139,7 +1139,7 @@ func TestLiveDelegateStatusKeepsElapsedCounterWithLongBackgroundWaitArgs(t *test
 	r.tick()
 
 	got := errw.String()
-	want := "[tool: background_jobs · 12s · delegate d1 auto: turn 2 · tool run_command]"
+	want := "[tool: background_jobs · 12s · delegate d1 auto: turn 2 · tool shell]"
 	if !strings.Contains(got, want) {
 		t.Fatalf("long background wait status = %q, want compact live counter %q", got, want)
 	}

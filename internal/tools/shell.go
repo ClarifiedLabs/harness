@@ -19,15 +19,15 @@ import (
 )
 
 const (
-	runCommandDefaultTimeout           = 120
-	runCommandBackgroundDefaultTimeout = 1200
-	runCommandMaxSteps                 = 16
-	runCommandFailureOutputBytes       = 4096
-	runCommandAutoReceiptBytes         = 8 * 1024
-	runCommandSuccessTailBytes         = 512
-	runCommandSuccessTailLines         = 8
-	runCommandFailureTailLines         = 40
-	runCommandReceiptLabelBytes        = 160
+	shellDefaultTimeout           = 120
+	shellBackgroundDefaultTimeout = 1200
+	shellMaxSteps                 = 16
+	shellFailureOutputBytes       = 4096
+	shellFailureTailLines         = 40
+	shellAutoReceiptBytes         = 8 * 1024
+	shellSuccessTailBytes         = 4096
+	shellSuccessTailLines         = 40
+	shellReceiptLabelBytes        = 160
 )
 
 const (
@@ -59,7 +59,7 @@ const (
 	CommandOutcomeNotRun
 )
 
-// CommandResultOutcome decodes run_command's diagnostics-only outcome. It
+// CommandResultOutcome decodes shell's diagnostics-only outcome. It
 // returns false for tools and legacy results that do not carry the contract.
 func CommandResultOutcome(result llm.ToolResult) (CommandOutcome, bool) {
 	metrics := result.Metrics
@@ -79,9 +79,9 @@ func CommandResultOutcome(result llm.ToolResult) (CommandOutcome, bool) {
 }
 
 const (
-	runCommandOutputAuto    = "auto"
-	runCommandOutputReceipt = "receipt"
-	runCommandOutputFull    = "full"
+	shellOutputAuto    = "auto"
+	shellOutputReceipt = "receipt"
+	shellOutputFull    = "full"
 )
 
 var (
@@ -89,7 +89,7 @@ var (
 	processReapGrace   = 500 * time.Millisecond
 )
 
-const runCommandSchemaFmt = `{
+const shellSchemaFmt = `{
   "type": "object",
   "properties": {
     "argv": {
@@ -125,7 +125,7 @@ const runCommandSchemaFmt = `{
   }
 }`
 
-const runCommandBackgroundSchemaFmt = `{
+const shellBackgroundSchemaFmt = `{
   "type": "object",
   "properties": {
     "argv": {
@@ -171,32 +171,32 @@ const runCommandBackgroundSchemaFmt = `{
   }
 }`
 
-type runCommand struct {
+type shell struct {
 	background        BackgroundJobStarter
 	foregroundTimeout int // seconds; 0 means use constant default
 	backgroundTimeout int // seconds; 0 means use constant default
 }
 
-func (runCommand) Name() string { return "run_command" }
+func (shell) Name() string { return "shell" }
 
-func (runCommand) Description() string { return "Run a command or ordered steps; prefer argv; git tool for git." }
+func (shell) Description() string { return "Run a command or ordered steps; prefer argv." }
 
-func (t runCommand) Schema() json.RawMessage {
+func (t shell) Schema() json.RawMessage {
 	fg := t.foregroundTimeout
 	if fg <= 0 {
-		fg = runCommandDefaultTimeout
+		fg = shellDefaultTimeout
 	}
 	bg := t.backgroundTimeout
 	if bg <= 0 {
-		bg = runCommandBackgroundDefaultTimeout
+		bg = shellBackgroundDefaultTimeout
 	}
 	if t.background != nil {
-		return json.RawMessage(fmt.Sprintf(runCommandBackgroundSchemaFmt, bg))
+		return json.RawMessage(fmt.Sprintf(shellBackgroundSchemaFmt, bg))
 	}
-	return json.RawMessage(fmt.Sprintf(runCommandSchemaFmt, fg))
+	return json.RawMessage(fmt.Sprintf(shellSchemaFmt, fg))
 }
 
-func (runCommand) ReadOnly(json.RawMessage) bool { return false }
+func (shell) ReadOnly(json.RawMessage) bool { return false }
 
 // hasBackgroundFlag reports whether the tool input JSON contains
 // "background": true, without decoding the rest of the tool-specific args.
@@ -208,18 +208,18 @@ func hasBackgroundFlag(input json.RawMessage) bool {
 	return v.Background
 }
 
-type runCommandArgs struct {
-	Command         string           `json:"command"`
-	Argv            []string         `json:"argv"`
-	Steps           []runCommandStep `json:"steps"`
-	StopOnFailure   *bool            `json:"stop_on_failure"`
-	Name            string           `json:"name"`
-	OutputMode      string           `json:"output_mode"`
-	Stdin           string           `json:"stdin"`
-	Cwd             string           `json:"cwd"`
-	TimeoutSeconds  int              `json:"timeout_seconds"`
-	Background      bool             `json:"background"`
-	BackgroundLease *runCommandLease `json:"background_lease"`
+type shellArgs struct {
+	Command         string      `json:"command"`
+	Argv            []string    `json:"argv"`
+	Steps           []shellStep `json:"steps"`
+	StopOnFailure   *bool       `json:"stop_on_failure"`
+	Name            string      `json:"name"`
+	OutputMode      string      `json:"output_mode"`
+	Stdin           string      `json:"stdin"`
+	Cwd             string      `json:"cwd"`
+	TimeoutSeconds  int         `json:"timeout_seconds"`
+	Background      bool        `json:"background"`
+	BackgroundLease *shellLease `json:"background_lease"`
 
 	// Backward-compatible input aliases. They deliberately stay out of the
 	// model-facing schema because top-level access was easy to misread as a
@@ -228,12 +228,12 @@ type runCommandArgs struct {
 	Access      string `json:"access"`
 }
 
-type runCommandLease struct {
+type shellLease struct {
 	ResourceKey string `json:"resource_key"`
 	Access      string `json:"access"`
 }
 
-type runCommandStep struct {
+type shellStep struct {
 	Name           string   `json:"name"`
 	Command        string   `json:"command"`
 	Argv           []string `json:"argv"`
@@ -242,21 +242,21 @@ type runCommandStep struct {
 	TimeoutSeconds int      `json:"timeout_seconds"`
 }
 
-func (t runCommand) Run(ctx context.Context, input json.RawMessage) (string, error) {
+func (t shell) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	result, err := t.RunResult(ctx, input)
 	return result.Text, err
 }
 
-func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
-	args, err := decodeRunCommandArgs(input)
+func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult, error) {
+	args, err := decodeShellArgs(input)
 	if err != nil {
 		return RunResult{}, err
 	}
-	if err := validateRunCommandArgs(args); err != nil {
+	if err := validateShellArgs(args); err != nil {
 		return RunResult{}, err
 	}
 	args.Name = strings.TrimSpace(args.Name)
-	outputMode, err := normalizeRunCommandOutputMode(args.OutputMode)
+	outputMode, err := normalizeShellOutputMode(args.OutputMode)
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -271,7 +271,7 @@ func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 		args.TimeoutSeconds = t.foregroundTimeout
 	}
 	if len(args.Steps) > 0 {
-		return runCommandSteps(ctx, args)
+		return shellSteps(ctx, args)
 	}
 	if args.Background {
 		if err := ctx.Err(); err != nil {
@@ -284,7 +284,7 @@ func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 			if t.backgroundTimeout > 0 {
 				args.TimeoutSeconds = t.backgroundTimeout
 			} else {
-				args.TimeoutSeconds = runCommandBackgroundDefaultTimeout
+				args.TimeoutSeconds = shellBackgroundDefaultTimeout
 			}
 		}
 		defaultResource, err := DefaultBackgroundResource(args.Cwd)
@@ -301,12 +301,12 @@ func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 			return RunResult{}, err
 		}
 		info, err := t.background.StartBackgroundJob(BackgroundJobRequest{
-			Kind:        "run_command",
-			Description: runCommandDescription(args),
+			Kind:        "shell",
+			Description: shellDescription(args),
 			ResourceKey: resourceKey,
 			Access:      access,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
-				result, err := runCommandTopLevel(ctx, args)
+				result, err := shellTopLevel(ctx, args)
 				return BackgroundJobResult{
 					Text:         result.Text,
 					OriginalText: result.OriginalText,
@@ -324,17 +324,61 @@ func (t runCommand) RunResult(ctx context.Context, input json.RawMessage) (RunRe
 		)}, nil
 	}
 
-	return runCommandTopLevel(ctx, args)
+	return shellTopLevel(ctx, args)
 }
 
-func decodeRunCommandArgs(input json.RawMessage) (runCommandArgs, error) {
-	var args runCommandArgs
-	if err := json.Unmarshal(input, &args); err != nil {
-		return runCommandArgs{}, err
+func decodeShellArgs(input json.RawMessage) (shellArgs, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(input, &raw); err != nil {
+		return shellArgs{}, err
+	}
+	var args shellArgs
+	// Tolerant argv: model may send "[\"go\",\"test\"]" string or []string.
+	if v, ok := raw["argv"]; ok && len(v) > 0 {
+		var argv []string
+		if err := json.Unmarshal(v, &argv); err == nil {
+			args.Argv = argv
+		} else {
+			var s string
+			if err2 := json.Unmarshal(v, &s); err2 == nil && strings.TrimSpace(s) != "" {
+				var parsed []string
+				if err3 := json.Unmarshal([]byte(s), &parsed); err3 == nil && len(parsed) > 0 {
+					args.Argv = parsed
+				} else {
+					return shellArgs{}, badArgs("argv: expected an array of strings; got string — send argv as a JSON array, e.g. [\"go\",\"test\"]")
+				}
+			} else {
+				return shellArgs{}, err
+			}
+		}
+		delete(raw, "argv")
+	}
+	// Tolerant command: model may send ["git","status"] or "git status".
+	if v, ok := raw["command"]; ok && len(v) > 0 {
+		var s string
+		if err := json.Unmarshal(v, &s); err == nil {
+			args.Command = s
+		} else {
+			var arr []string
+			if err2 := json.Unmarshal(v, &arr); err2 == nil && len(arr) > 0 {
+				args.Command = strings.Join(arr, " ")
+			} else {
+				return shellArgs{}, err
+			}
+		}
+		delete(raw, "command")
+	}
+	// Decode remainder strictly so unknown top-level keys still fail.
+	remainder, err := json.Marshal(raw)
+	if err != nil {
+		return shellArgs{}, err
+	}
+	if err := json.Unmarshal(remainder, &args); err != nil {
+		return shellArgs{}, err
 	}
 	if args.BackgroundLease != nil {
 		if strings.TrimSpace(args.ResourceKey) != "" || strings.TrimSpace(args.Access) != "" {
-			return runCommandArgs{}, badArgs("provide background_lease or legacy top-level resource_key/access, not both")
+			return shellArgs{}, badArgs("provide background_lease or legacy top-level resource_key/access, not both")
 		}
 		args.ResourceKey = args.BackgroundLease.ResourceKey
 		args.Access = args.BackgroundLease.Access
@@ -342,12 +386,12 @@ func decodeRunCommandArgs(input json.RawMessage) (runCommandArgs, error) {
 	return args, nil
 }
 
-// SelfTimeout reports run_command's own per-call deadline so its documented
+// SelfTimeout reports shell's own per-call deadline so its documented
 // "no maximum" timeout_seconds is honored even under a shorter dispatch ceiling.
 // Background jobs run outside Dispatch (it returns once the job is queued), so
 // they report no deadline. See tools.SelfTimeouter.
-func (t runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
-	var args runCommandArgs
+func (t shell) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
+	var args shellArgs
 	if err := json.Unmarshal(input, &args); err != nil {
 		return 0, false
 	}
@@ -357,7 +401,7 @@ func (t runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
 	if len(args.Steps) > 0 {
 		defaultTimeout := args.TimeoutSeconds
 		if defaultTimeout == 0 {
-			defaultTimeout = runCommandDefaultTimeout
+			defaultTimeout = shellDefaultTimeout
 			if t.foregroundTimeout > 0 {
 				defaultTimeout = t.foregroundTimeout
 			}
@@ -380,13 +424,13 @@ func (t runCommand) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
 		return total, len(args.Steps) > 0
 	}
 	timeout := resolveProcessTimeoutSeconds(args.TimeoutSeconds)
-	if timeout == runCommandDefaultTimeout && t.foregroundTimeout > 0 {
+	if timeout == shellDefaultTimeout && t.foregroundTimeout > 0 {
 		timeout = t.foregroundTimeout
 	}
 	return time.Duration(timeout) * processTimeoutUnit, true
 }
 
-func validateRunCommandArgs(args runCommandArgs) error {
+func validateShellArgs(args shellArgs) error {
 	hasCommand := strings.TrimSpace(args.Command) != ""
 	hasArgv := len(args.Argv) > 0
 	hasSteps := len(args.Steps) > 0
@@ -400,8 +444,8 @@ func validateRunCommandArgs(args runCommandArgs) error {
 		return badArgs("steps cannot run in the background")
 	case !args.Background && hasLease:
 		return badArgs("background_lease requires background:true")
-	case len(args.Steps) > runCommandMaxSteps:
-		return badArgs("steps must contain at most %d items", runCommandMaxSteps)
+	case len(args.Steps) > shellMaxSteps:
+		return badArgs("steps must contain at most %d items", shellMaxSteps)
 	case hasCommand && hasArgv:
 		return badArgs("provide command or argv, not both")
 	case !hasCommand && !hasArgv && !hasSteps:
@@ -410,7 +454,7 @@ func validateRunCommandArgs(args runCommandArgs) error {
 		return badArgs("argv[0] is required")
 	}
 	for i, step := range args.Steps {
-		stepArgs := runCommandArgs{
+		stepArgs := shellArgs{
 			Command:        step.Command,
 			Argv:           step.Argv,
 			Stdin:          step.Stdin,
@@ -420,7 +464,7 @@ func validateRunCommandArgs(args runCommandArgs) error {
 		if strings.TrimSpace(step.Name) == "" {
 			step.Name = fmt.Sprintf("step %d", i+1)
 		}
-		if err := validateRunCommandArgs(stepArgs); err != nil {
+		if err := validateShellArgs(stepArgs); err != nil {
 			return badArgs("steps[%d]: %v", i, err)
 		}
 		if step.TimeoutSeconds < 0 {
@@ -433,46 +477,46 @@ func validateRunCommandArgs(args runCommandArgs) error {
 	return nil
 }
 
-func runCommandDescription(args runCommandArgs) string {
+func shellDescription(args shellArgs) string {
 	if len(args.Argv) > 0 {
 		return strings.Join(args.Argv, " ")
 	}
 	return args.Command
 }
 
-func runCommandTopLevel(ctx context.Context, args runCommandArgs) (RunResult, error) {
+func shellTopLevel(ctx context.Context, args shellArgs) (RunResult, error) {
 	started := time.Now()
-	result, err := runCommandArgsProcess(ctx, args)
+	result, err := shellArgsProcess(ctx, args)
 	if err != nil {
 		return RunResult{}, err
 	}
-	return formatRunCommandResult(args, result, conciseDuration(time.Since(started))), nil
+	return formatShellResult(args, result, conciseDuration(time.Since(started))), nil
 }
 
-func normalizeRunCommandOutputMode(mode string) (string, error) {
+func normalizeShellOutputMode(mode string) (string, error) {
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
-		return runCommandOutputAuto, nil
+		return shellOutputAuto, nil
 	}
 	switch mode {
-	case runCommandOutputAuto, runCommandOutputReceipt, runCommandOutputFull:
+	case shellOutputAuto, shellOutputReceipt, shellOutputFull:
 		return mode, nil
 	default:
 		return "", badArgs(`output_mode must be "auto", "receipt", or "full"`)
 	}
 }
 
-func formatRunCommandResult(args runCommandArgs, result processResult, elapsed string) RunResult {
+func formatShellResult(args shellArgs, result processResult, elapsed string) RunResult {
 	full := formatProcessResult(result)
 	metrics := commandProcessMetrics(result)
-	if args.OutputMode == runCommandOutputFull {
+	if args.OutputMode == shellOutputFull {
 		return RunResult{Text: full, Metrics: metrics}
 	}
 	if result.success() {
-		if args.OutputMode == runCommandOutputAuto && len(result.Output) <= runCommandAutoReceiptBytes {
+		if args.OutputMode == shellOutputAuto && len(result.Output) <= shellAutoReceiptBytes {
 			return RunResult{Text: full, Metrics: metrics}
 		}
-		text, clipped := formatRunCommandReceipt(args, result, elapsed, runCommandSuccessTailBytes, runCommandSuccessTailLines)
+		text, clipped := formatShellReceipt(args, result, elapsed, shellSuccessTailBytes, shellSuccessTailLines)
 		original := ""
 		// Archive only when something was cut, or when the receipt drops the
 		// partial-reap signal that formatProcessResult emits for an incomplete
@@ -484,7 +528,7 @@ func formatRunCommandResult(args runCommandArgs, result processResult, elapsed s
 		return RunResult{Text: text, OriginalText: original, Metrics: metrics}
 	}
 
-	text, clipped := formatRunCommandReceipt(args, result, elapsed, runCommandFailureOutputBytes, runCommandFailureTailLines)
+	text, clipped := formatShellReceipt(args, result, elapsed, shellFailureOutputBytes, shellFailureTailLines)
 	original := ""
 	// As on the success path, keep the original when the receipt drops the
 	// partial-reap signal (timeoutStatusLine) for an incomplete wait.
@@ -517,7 +561,7 @@ func commandProcessMetrics(result processResult) map[string]int {
 	return metrics
 }
 
-func formatRunCommandReceipt(args runCommandArgs, result processResult, elapsed string, tailBytes, tailLines int) (string, bool) {
+func formatShellReceipt(args shellArgs, result processResult, elapsed string, tailBytes, tailLines int) (string, bool) {
 	status := "PASS"
 	if !result.success() {
 		status = "FAIL"
@@ -527,7 +571,7 @@ func formatRunCommandReceipt(args runCommandArgs, result processResult, elapsed 
 		&b,
 		"%s %s (%s; %s; %s output)",
 		status,
-		runCommandReceiptLabel(args),
+		shellReceiptLabel(args),
 		elapsed,
 		result.receiptStatus(),
 		HumanBytes(len(result.Output)),
@@ -547,23 +591,26 @@ func formatRunCommandReceipt(args runCommandArgs, result processResult, elapsed 
 		b.WriteString("\noutput:\n")
 	}
 	b.WriteString(strings.TrimRight(tail, "\n"))
+	if clipped {
+		fmt.Fprint(&b, "\n[full transcript archived — retry with sed -n or output_mode full if you need hidden lines]")
+	}
 	fmt.Fprintf(&b, "\n[exit code: %d]", result.ExitCode)
 	return b.String(), clipped
 }
 
-func runCommandReceiptLabel(args runCommandArgs) string {
+func shellReceiptLabel(args shellArgs) string {
 	label := strings.TrimSpace(args.Name)
 	if label == "" {
-		label = runCommandDescription(args)
+		label = shellDescription(args)
 	}
 	label = strings.Join(strings.Fields(label), " ")
 	if label == "" {
 		label = "command"
 	}
-	if len(label) <= runCommandReceiptLabelBytes {
+	if len(label) <= shellReceiptLabelBytes {
 		return label
 	}
-	clipped := label[:runCommandReceiptLabelBytes-len("...")]
+	clipped := label[:shellReceiptLabelBytes-len("...")]
 	for !utf8.ValidString(clipped) {
 		clipped = clipped[:len(clipped)-1]
 	}
@@ -606,7 +653,7 @@ func commandOutputTail(output string, maxBytes, maxLines int) (string, bool) {
 	return tail, clipped
 }
 
-func runCommandArgsProcess(ctx context.Context, args runCommandArgs) (processResult, error) {
+func shellArgsProcess(ctx context.Context, args shellArgs) (processResult, error) {
 	if len(args.Argv) == 0 {
 		cmd := shellCommand(args.Command)
 		cmd.Dir = args.Cwd
@@ -632,7 +679,7 @@ func runCommandArgsProcess(ctx context.Context, args runCommandArgs) (processRes
 	return result, nil
 }
 
-func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error) {
+func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 	stopOnFailure := args.StopOnFailure == nil || *args.StopOnFailure
 	var receipt strings.Builder
 	var transcript strings.Builder
@@ -646,7 +693,7 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 		if name == "" {
 			name = fmt.Sprintf("step %d", i+1)
 		}
-		resolved := runCommandArgs{
+		resolved := shellArgs{
 			Command:        step.Command,
 			Argv:           append([]string(nil), step.Argv...),
 			Stdin:          step.Stdin,
@@ -660,14 +707,14 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 			resolved.TimeoutSeconds = args.TimeoutSeconds
 		}
 		started := time.Now()
-		result, err := runCommandArgsProcess(ctx, resolved)
+		result, err := shellArgsProcess(ctx, resolved)
 		metrics[CommandMetricStepsExecuted]++
 		elapsed := conciseDuration(time.Since(started))
 
 		if transcript.Len() > 0 {
 			transcript.WriteString("\n\n")
 		}
-		fmt.Fprintf(&transcript, "==> %s <==\n$ %s\n", name, runCommandDescription(resolved))
+		fmt.Fprintf(&transcript, "==> %s <==\n$ %s\n", name, shellDescription(resolved))
 		if err != nil {
 			metrics[CommandMetricFailed] = 1
 			metrics[CommandMetricStepsFailed]++
@@ -702,7 +749,7 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 
 		fmt.Fprintf(&receipt, "FAIL %s (%s; %s)\n", name, elapsed, result.receiptStatus())
 		if strings.TrimSpace(result.Output) != "" {
-			excerpt, clipped := clipCommandOutput(result.Output, runCommandFailureOutputBytes)
+			excerpt, clipped := clipCommandOutput(result.Output, shellFailureOutputBytes)
 			receipt.WriteString("output:\n")
 			receipt.WriteString(strings.TrimRight(excerpt, "\n"))
 			receipt.WriteByte('\n')
@@ -726,7 +773,7 @@ func runCommandSteps(ctx context.Context, args runCommandArgs) (RunResult, error
 		text = fmt.Sprintf("Batch %s\n%s", name, text)
 		full = fmt.Sprintf("== %s ==\n%s", name, full)
 	}
-	if args.OutputMode == runCommandOutputFull {
+	if args.OutputMode == shellOutputFull {
 		return RunResult{Text: full, Metrics: metrics}, nil
 	}
 	original := ""
@@ -978,13 +1025,13 @@ func timeoutStatusLine(status, detail string, waitComplete bool) string {
 
 func resolveProcessTimeoutSeconds(timeoutSeconds int) int {
 	if timeoutSeconds == 0 {
-		return runCommandDefaultTimeout
+		return shellDefaultTimeout
 	}
 	return timeoutSeconds
 }
 
 // shellCommand builds the *exec.Cmd that runs line under the user's shell.
-// Running an arbitrary shell command is run_command's documented purpose
+// Running an arbitrary shell command is shell's documented purpose
 // (design §2 no-sandbox stance, §9.7); the harness is assumed to be launched
 // inside an already-sandboxed environment, so there is no command allowlist.
 // The shell program name is a static literal in each branch; only the command
@@ -1076,7 +1123,7 @@ var (
 
 // loginShellPATH returns the PATH a login shell exports, resolved at most once
 // per process. This recovers the toolchain PATH the dropped -lc would have set
-// without paying the login-shell cost on every run_command call.
+// without paying the login-shell cost on every shell call.
 func loginShellPATH() string {
 	loginPATHOnce.Do(func() { loginPATHCached = loginPATHResolver() })
 	return loginPATHCached

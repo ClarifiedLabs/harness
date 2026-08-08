@@ -63,9 +63,9 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 		{Type: EventMaintenanceUsage, Prompt: 2, Purpose: "compaction", Usage: &maintenance},
 		{Type: EventBranch, Prompt: 2, FromEntryID: "old", ToEntryID: "new", Purpose: "tree"},
 		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "z", Tool: "z_tool", Input: json.RawMessage(`{}`)},
-		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "shell", Tool: "run_command", Input: json.RawMessage(`{"command":"SECRET shell text"}`)},
+		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "shell", Tool: "shell", Input: json.RawMessage(`{"command":"SECRET shell text"}`)},
 		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "a", Tool: "a_tool", Input: json.RawMessage(`{}`)},
-		{Type: EventToolStart, Prompt: 2, Turn: 1, ToolID: "argv", Tool: "run_command", Input: json.RawMessage(`{"argv":["SECRET-ARGV"],"background":true}`)},
+		{Type: EventToolStart, Prompt: 2, Turn: 1, ToolID: "argv", Tool: "shell", Input: json.RawMessage(`{"argv":["SECRET-ARGV"],"background":true}`)},
 		{Type: EventToolResult, Prompt: 1, Turn: 2, ToolID: "a", Tool: "a_tool", ResultTruncated: true, ResultOriginalBytes: 4000, ResultShownBytes: 1000, DurationMS: 25},
 	}
 	saveStatsFixture(t, dir, state, events)
@@ -156,7 +156,7 @@ func TestStatsFullReportAggregationAndRendering(t *testing.T) {
 			t.Errorf("stats output missing %q:\n%s", want, got)
 		}
 	}
-	assertOrdered(t, got, "    a_tool:", "    run_command:", "    z_tool:")
+	assertOrdered(t, got, "    a_tool:", "    shell:", "    z_tool:")
 	assertOrdered(t, got, "    a-provider/a-model:", "    z-provider/z-model:")
 	if strings.Contains(got, "SECRET") {
 		t.Fatalf("stats output leaked command input: %s", got)
@@ -182,7 +182,7 @@ func TestStatsOptimizationDiagnosticsAreAggregatedAndRedacted(t *testing.T) {
 		{Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "read-1", Tool: "read_file", ResultError: true, ResultTruncated: true, ResultOriginalBytes: 1000, ResultShownBytes: 100, DurationMS: 12},
 		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "read-2", Tool: "read_file", Input: skillInput},
 		{Type: EventToolStart, Prompt: 1, Turn: 3, ToolID: "read-3", Tool: "read_file", Input: skillInput},
-		{Type: EventToolStart, Prompt: 1, Turn: 4, ToolID: "steps", Tool: "run_command", Input: json.RawMessage(`{"steps":[{"command":"SECRET shell"},{"argv":["SECRET-ARGV"]}]}`)},
+		{Type: EventToolStart, Prompt: 1, Turn: 4, ToolID: "steps", Tool: "shell", Input: json.RawMessage(`{"steps":[{"command":"SECRET shell"},{"argv":["SECRET-ARGV"]}]}`)},
 		{Type: EventSkillActivation, Prompt: 1, Turn: 4, Purpose: "explicit", Summary: "activated"},
 		{Type: EventSkillActivation, Prompt: 1, Turn: 4, Purpose: "read_file", Summary: "already_active"},
 		{Type: EventToolResult, Prompt: 1, Turn: 4, ToolID: "search", Tool: "search", ResultMetrics: map[string]int{
@@ -320,7 +320,7 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 		Created:  base.Add(time.Minute),
 		Updated:  base.Add(3 * time.Minute),
 		Usage:    UsageTotals{Usage: llm.Usage{InputTokens: 300}, CostUSD: 0.3},
-	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "top-command", Tool: "run_command", Input: json.RawMessage(`{"argv":["go","test"]}`)}})
+	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "top-command", Tool: "shell", Input: json.RawMessage(`{"argv":["go","test"]}`)}})
 
 	nestedDir, err := SaveChildMeta(rootDir, ChildMeta{
 		ID:                "nested",
@@ -358,7 +358,7 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 	for _, want := range []string{
 		"  tool calls: 3 total (1 root, 2 delegates)\n",
 		"    read_file: 1 total (1 root, 0 delegates)\n",
-		"    run_command: 1 total (0 root, 1 delegates)\n",
+		"    shell: 1 total (0 root, 1 delegates)\n",
 		"    write_file: 1 total (0 root, 1 delegates)\n",
 		"Usage (includes delegates)\n  uncached input: 1000\n",
 		"Delegates (2)\n",

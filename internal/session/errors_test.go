@@ -200,9 +200,9 @@ func TestAnalyzeErrorsReportsInBandCommandFailuresSeparately(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := []Event{
-		{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_succeeded": 1}},
-		{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1, "command_exit_code": 2}},
-		{Type: EventToolResult, Tool: "run_command", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}},
+		{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_succeeded": 1}},
+		{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1, "command_exit_code": 2}},
+		{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}},
 		{Type: EventToolResult, Tool: "read_file", ResultError: true, ErrorKind: string(llm.ToolErrorPathNotFound)},
 	}
 	for _, event := range events {
