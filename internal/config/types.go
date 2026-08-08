@@ -210,6 +210,7 @@ type LocalMCPConfig struct {
 
 type LSPConfig struct {
 	Enable  bool                       `json:"enable"`
+	Prewarm bool                       `json:"prewarm"`
 	Tools   []string                   `json:"tools,omitempty"`
 	Servers map[string]LSPServerConfig `json:"servers,omitempty"`
 	Serena  SerenaConfig               `json:"serena"`

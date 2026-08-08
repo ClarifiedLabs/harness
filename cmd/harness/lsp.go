@@ -23,6 +23,29 @@ type lspRuntime struct {
 	mgr     *lspproxy.Manager
 	summary mcptools.Summary
 	enabled bool
+	prewarm bool
+	logger  *slog.Logger
+}
+
+// lspDescriptionSuffix is appended to the navigation tools' descriptions at
+// Specs() time so the model learns that lsp_* tools are the better answer for
+// symbol questions — without repeating that guidance across every lsp_* tool.
+// It is only active while LSP tools are enabled and registered, and tool specs
+// are cached at registry rebuild boundaries, so toggles take effect at the
+// next rebuild.
+const lspPreferSuffix = " For symbol questions (definitions, references, type info, outlines, diagnostics), prefer lsp_* tools when available."
+
+func lspDescriptionSuffix(r *lspRuntime) func(name, base string) string {
+	return func(name, base string) string {
+		if r == nil || !r.enabled || len(r.summary.Names) == 0 {
+			return base
+		}
+		switch name {
+		case "search", "grep", "rg", "glob":
+			return base + lspPreferSuffix
+		}
+		return base
+	}
 }
 
 // newLSPRuntime prepares the static tool surface without launching a language
@@ -43,7 +66,25 @@ func newLSPRuntime(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.
 		return nil, err
 	}
 	warnUnknownLSPTools(lspCfg.Tools, summary.Names, logger)
-	return &lspRuntime{mgr: mgr, summary: summary, enabled: lspCfg.Enable}, nil
+	runtime := &lspRuntime{mgr: mgr, summary: summary, enabled: lspCfg.Enable, prewarm: lspCfg.Prewarm, logger: logger}
+	catalog.SetDescriptionSuffix(lspDescriptionSuffix(runtime))
+	runtime.startPrewarm()
+	return runtime, nil
+}
+
+// startPrewarm background-launches the language servers whose languages have
+// files in the detected workspace root, so early lsp_* calls are warm. It is a
+// best-effort optimization: it never blocks startup and never fails it.
+func (r *lspRuntime) startPrewarm() {
+	if r == nil || !r.enabled || !r.prewarm {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		warmed := r.mgr.Prewarm(ctx)
+		r.logger.Info("lsp: prewarmed language servers", logging.Category("lsp"), slog.Int("warmed", warmed))
+	}()
 }
 
 func (r *lspRuntime) ActiveSummary() mcptools.Summary {
@@ -60,6 +101,7 @@ func (r *lspRuntime) SetEnabled(enabled bool) {
 	r.enabled = enabled
 	if enabled {
 		r.mgr.RefreshAvailability()
+		r.startPrewarm()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

@@ -251,10 +251,11 @@ func mergeLSPOpt(global, project optional[fileLSPConfig], globalPath, projectPat
 	}
 	var merged fileLSPConfig
 	merged.Enable = mergeOpt(gVal.Enable, pVal.Enable, globalPath, projectPath, "lsp.enable", sourceMap)
+	merged.Prewarm = mergeOpt(gVal.Prewarm, pVal.Prewarm, globalPath, projectPath, "lsp.prewarm", sourceMap)
 	merged.Tools = mergeOpt(gVal.Tools, pVal.Tools, globalPath, projectPath, "lsp.tools", sourceMap)
 	merged.Servers = mergeOpt(gVal.Servers, pVal.Servers, globalPath, projectPath, "lsp.servers", sourceMap)
 	merged.Serena = mergeSerenaOpt(gVal.Serena, pVal.Serena, globalPath, projectPath, sourceMap)
-	hasLeaf := merged.Enable.Set || merged.Tools.Set || merged.Servers.Set || merged.Serena.Set
+	hasLeaf := merged.Enable.Set || merged.Prewarm.Set || merged.Tools.Set || merged.Servers.Set || merged.Serena.Set
 	if hasLeaf || global.Set || project.Set {
 		return optional[fileLSPConfig]{Set: true, Value: merged}
 	}

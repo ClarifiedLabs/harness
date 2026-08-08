@@ -183,6 +183,7 @@ type Registry struct {
 	tools            map[string]Tool
 	dispatchGuard    func(llm.ToolCall, Activity) error
 	specFilter       func(string) bool
+	descSuffix       func(name, baseDesc string) string
 	dispatchTimeout  time.Duration // zero = no dispatch-level timeout
 	resultLimits     resultLimits
 	toolResultLimits map[string]resultLimits
@@ -200,6 +201,16 @@ func (r *Registry) SetDispatchGuard(guard func(llm.ToolCall, Activity) error) {
 // authorization boundary.
 func (r *Registry) SetSpecFilter(filter func(string) bool) {
 	r.specFilter = filter
+}
+
+// SetDescriptionSuffix installs a hook applied to tool descriptions at Specs()
+// time. Tool.Description() stays static; the hook transforms the exposed spec
+// description per tool name. Passing nil disables the hook. Because agent tool
+// specs are cached from Specs() at registry rebuild boundaries, a hook closure
+// reading live runtime state takes effect at the next rebuild without touching
+// call sites.
+func (r *Registry) SetDescriptionSuffix(f func(name, baseDesc string) string) {
+	r.descSuffix = f
 }
 
 // Options configures a tool registry. Zero values keep package defaults.
@@ -451,7 +462,7 @@ func (r *Registry) Subset(names []string) (*Registry, error) {
 	for _, name := range names {
 		want[name] = true
 	}
-	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout, dispatchGuard: r.dispatchGuard, specFilter: r.specFilter}
+	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout, dispatchGuard: r.dispatchGuard, specFilter: r.specFilter, descSuffix: r.descSuffix}
 	for _, name := range r.order {
 		if want[name] {
 			sub.Register(r.tools[name])
@@ -477,6 +488,28 @@ func (r *Registry) Register(t Tool) {
 		r.order = append(r.order, name)
 	}
 	r.tools[name] = t
+}
+
+// RegisterAfter adds a tool immediately after the already-registered afterName
+// tool, so a related tool block can be anchored to a stable neighbor instead of
+// trailing the whole registry. Re-registering an existing name replaces the tool
+// in place (like Register) and keeps its current position. A missing anchor
+// appends the tool at the end as a documented fallback.
+func (r *Registry) RegisterAfter(t Tool, afterName string) {
+	if r.tools == nil {
+		r.tools = make(map[string]Tool)
+	}
+	name := t.Name()
+	if _, ok := r.tools[name]; ok {
+		r.tools[name] = t
+		return
+	}
+	r.tools[name] = t
+	if i := slices.Index(r.order, afterName); i >= 0 {
+		r.order = slices.Insert(r.order, i+1, name)
+		return
+	}
+	r.order = append(r.order, name)
 }
 
 // Lookup returns the registered tool by name. The returned tool is the concrete
@@ -518,9 +551,13 @@ func (r *Registry) Specs() []llm.ToolSchema {
 			preserveDescriptions = preserver.PreserveSchemaDescriptions()
 		}
 		parameters := modelSchemaWithPolicy(t.Schema(), preserveDescriptions)
+		desc := t.Description()
+		if r.descSuffix != nil {
+			desc = r.descSuffix(name, desc)
+		}
 		specs = append(specs, llm.ToolSchema{
 			Name:        t.Name(),
-			Description: t.Description(),
+			Description: desc,
 			Parameters:  parameters,
 		})
 	}

@@ -1,6 +1,7 @@
 package lspproxy
 
 import (
+	"io/fs"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -60,6 +61,88 @@ var extLanguage = map[string]string{
 func languageForExt(ext string) (string, bool) {
 	lang, ok := extLanguage[strings.ToLower(ext)]
 	return lang, ok
+}
+
+// serverExtensions returns the set of file extensions (lowercase, with leading
+// dot) that count as evidence for a server's languages: the server's configured
+// Extensions plus every built-in extension mapping to one of its Languages. An
+// empty result means the server's languages are undetectable by file extension.
+func serverExtensions(s ResolvedServer) map[string]bool {
+	exts := make(map[string]bool, len(s.Extensions)+len(extLanguage))
+	for _, ext := range s.Extensions {
+		ext = strings.ToLower(strings.TrimSpace(ext))
+		if ext == "" {
+			continue
+		}
+		if !strings.HasPrefix(ext, ".") {
+			ext = "." + ext
+		}
+		exts[ext] = true
+	}
+	langs := make(map[string]bool, len(s.Languages))
+	for _, l := range s.Languages {
+		langs[l] = true
+	}
+	for ext, lang := range extLanguage {
+		if langs[lang] {
+			exts[ext] = true
+		}
+	}
+	return exts
+}
+
+// prewarmSkipDirs are directory base names excluded from the evidence scan:
+// build artifacts and vendored trees whose contents do not indicate the
+// workspace's own languages.
+var prewarmSkipDirs = map[string]bool{
+	".git":         true,
+	"node_modules": true,
+	"vendor":       true,
+	"target":       true,
+	"dist":         true,
+	"build":        true,
+	"__pycache__":  true,
+	".venv":        true,
+}
+
+// hasLanguageFiles reports whether root contains at least one regular file
+// whose extension is in exts. The scan is bounded to maxEntries visited entries
+// for evidence collection only; exceeding the cap without a match returns false
+// (inconclusive, treated as no evidence). Unreadable entries are skipped and
+// symlinks are not followed. Noise directories (prewarmSkipDirs) are pruned.
+func hasLanguageFiles(root string, exts map[string]bool, maxEntries int) bool {
+	if len(exts) == 0 {
+		return false
+	}
+	visited := 0
+	found := false
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if path == root {
+			return nil
+		}
+		visited++
+		if visited > maxEntries {
+			return fs.SkipAll // inconclusive: cap reached without a match
+		}
+		if d.IsDir() {
+			if prewarmSkipDirs[d.Name()] {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		if exts[strings.ToLower(filepath.Ext(d.Name()))] {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	return found
 }
 
 // detectRoot finds the workspace root for a file living in fileDir. Markers are

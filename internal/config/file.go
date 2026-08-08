@@ -130,6 +130,7 @@ type fileLocalMCPConfig struct {
 
 type fileLSPConfig struct {
 	Enable  optional[bool]                       `json:"enable"`
+	Prewarm optional[bool]                       `json:"prewarm"`
 	Tools   optional[[]string]                   `json:"tools"`
 	Servers optional[map[string]LSPServerConfig] `json:"servers"`
 	Serena  optional[fileSerenaConfig]           `json:"serena"`

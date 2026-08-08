@@ -69,6 +69,32 @@ func threeToolProvider() *fakeProvider {
 	}}
 }
 
+// stubNavTool is a minimal tools.Tool used to seed navigation anchors.
+type stubNavTool struct{ name string }
+
+func (s stubNavTool) Name() string                  { return s.name }
+func (s stubNavTool) Description() string           { return s.name }
+func (s stubNavTool) Schema() json.RawMessage       { return json.RawMessage(`{"type":"object"}`) }
+func (s stubNavTool) ReadOnly(json.RawMessage) bool { return true }
+func (s stubNavTool) Run(context.Context, json.RawMessage) (string, error) {
+	return "", nil
+}
+
+func TestRegisterInsertsAfterNavigationAnchor(t *testing.T) {
+	reg := &tools.Registry{}
+	reg.Register(stubNavTool{name: "glob"})
+	reg.Register(stubNavTool{name: "search"})
+	reg.Register(stubNavTool{name: "grep"})
+
+	if _, err := Register(context.Background(), reg, threeToolProvider()); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	want := []string{"glob", "search", "lsp_definition", "lsp_references", "lsp_hover", "grep"}
+	if !slices.Equal(reg.Names(), want) {
+		t.Fatalf("registry names = %v, want %v", reg.Names(), want)
+	}
+}
+
 func TestRegisterAllowlistRegistersSubset(t *testing.T) {
 	reg := &tools.Registry{}
 	sum, err := Register(context.Background(), reg, threeToolProvider(), "definition", "hover")

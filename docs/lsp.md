@@ -57,6 +57,22 @@ removes the LSP runtime hint. It does not rewrite the config file. Servers remai
 lazy after enabling, so `loaded languages: none` is expected until an LSP tool is
 used successfully.
 
+### Prewarming
+
+When `lsp.prewarm` is enabled (the default; disable with `lsp.prewarm: false` or
+`HARNESS_LSP_PREWARM=false`), harness scans the detected workspace root and
+background-launches each installed configured server **only for languages with
+files present** — it looks for at least one file whose extension matches the
+server's configured extensions or its languages' built-in extensions. Servers
+whose root markers are not found above the working directory, whose languages
+have no file evidence, or whose binary is not on `PATH` stay lazy. The scan is
+evidence-only and bounded (20000 entries); an inconclusive scan skips prewarming
+rather than guessing, and files that live only under skipped directories are not
+evidence. Skipped directories: `.git`, `node_modules`, `vendor`, `target`,
+`dist`, `build`, `__pycache__`, `.venv`. Prewarm failures are logged only and
+never affect startup or the exit code; ordinary lazy startup remains the
+fallback. Only the root containing the process cwd is prewarmed.
+
 ## Enabling Serena
 
 Serena is disabled by default and is independent of native LSP. To launch Serena

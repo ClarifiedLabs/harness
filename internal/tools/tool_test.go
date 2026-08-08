@@ -934,3 +934,101 @@ func TestDispatchNoTruncateWithinCaps(t *testing.T) {
 		t.Errorf("output mutated: %q", res.Text)
 	}
 }
+
+func TestDescriptionSuffixHook(t *testing.T) {
+	r := &Registry{}
+	r.Register(fakeTool{name: "search", desc: "base search", schema: `{"type":"object"}`})
+	r.Register(fakeTool{name: "read_file", desc: "base read", schema: `{"type":"object"}`})
+
+	// Nil hook leaves descriptions byte-identical.
+	specs := r.Specs()
+	for _, s := range specs {
+		want := map[string]string{"search": "base search", "read_file": "base read"}[s.Name]
+		if s.Description != want {
+			t.Fatalf("nil hook changed %s description: %q", s.Name, s.Description)
+		}
+	}
+
+	// Hook applies only to targeted names.
+	r.SetDescriptionSuffix(func(name, base string) string {
+		if name == "search" {
+			return base + " SUFFIX"
+		}
+		return base
+	})
+	var sawSearch bool
+	for _, s := range r.Specs() {
+		switch s.Name {
+		case "search":
+			sawSearch = true
+			if s.Description != "base search SUFFIX" {
+				t.Fatalf("search description = %q", s.Description)
+			}
+		case "read_file":
+			if s.Description != "base read" {
+				t.Fatalf("read_file description changed: %q", s.Description)
+			}
+		}
+	}
+	if !sawSearch {
+		t.Fatal("search spec missing")
+	}
+
+	// Description() itself stays static.
+	tool, _ := r.Lookup("search")
+	if tool.Description() != "base search" {
+		t.Fatalf("Description() mutated: %q", tool.Description())
+	}
+
+	// Resetting to nil restores base descriptions.
+	r.SetDescriptionSuffix(nil)
+	for _, s := range r.Specs() {
+		if strings.HasSuffix(s.Description, "SUFFIX") {
+			t.Fatalf("suffix survived nil reset: %q", s.Description)
+		}
+	}
+}
+
+func TestSubsetCarriesDescriptionSuffixHook(t *testing.T) {
+	r := &Registry{}
+	r.Register(fakeTool{name: "search", desc: "base", schema: `{"type":"object"}`})
+	r.Register(fakeTool{name: "glob", desc: "base", schema: `{"type":"object"}`})
+	r.SetDescriptionSuffix(func(name, base string) string { return base + "+" })
+	sub, err := r.Subset([]string{"search", "glob"})
+	if err != nil {
+		t.Fatalf("Subset: %v", err)
+	}
+	for _, s := range sub.Specs() {
+		if s.Description != "base+" {
+			t.Fatalf("subset hook lost for %s: %q", s.Name, s.Description)
+		}
+	}
+}
+
+func TestRegisterAfter(t *testing.T) {
+	r := &Registry{}
+	r.Register(newOK("read_file", ""))
+	r.Register(newOK("glob", ""))
+	r.Register(newOK("search", ""))
+	r.Register(newOK("edit", ""))
+
+	// Insert immediately after the anchor.
+	r.RegisterAfter(newOK("lsp_definition", ""), "search")
+	r.RegisterAfter(newOK("lsp_hover", ""), "lsp_definition")
+	want := []string{"read_file", "glob", "search", "lsp_definition", "lsp_hover", "edit"}
+	if got := r.Names(); !slices.Equal(got, want) {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+
+	// Missing anchor appends.
+	r.RegisterAfter(newOK("tail_tool", ""), "no_such_anchor")
+	if got := r.Names(); got[len(got)-1] != "tail_tool" {
+		t.Fatalf("missing anchor should append: %v", got)
+	}
+
+	// Re-registration keeps the existing position.
+	r.RegisterAfter(newOK("lsp_definition", ""), "read_file")
+	if got := r.Names(); !slices.Equal(got, append(want, "tail_tool")) {
+		t.Fatalf("re-registration moved tool: %v", got)
+	}
+}

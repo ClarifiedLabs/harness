@@ -279,6 +279,12 @@ var definitions = []parameterDefinition{
 		}
 		return optional[bool]{}
 	}, func(c *Config, v bool) { c.LSP.Enable = v }, func(c Config) bool { return c.LSP.Enable }),
+	boolDef("lsp.prewarm", "lsp.prewarm", nil, []string{"HARNESS_LSP_PREWARM"}, literal(true, "", ""), func(f fileConfig) optional[bool] {
+		if f.LSP.Set {
+			return f.LSP.Value.Prewarm
+		}
+		return optional[bool]{}
+	}, func(c *Config, v bool) { c.LSP.Prewarm = v }, func(c Config) bool { return c.LSP.Prewarm }),
 	boolDef("lsp.serena.enable", "lsp.serena.enable", nil, []string{"HARNESS_LSP_SERENA_ENABLE"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
 		if f.LSP.Set && f.LSP.Value.Serena.Set {
 			return f.LSP.Value.Serena.Value.Enable

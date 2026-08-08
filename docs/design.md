@@ -2853,6 +2853,22 @@ preferred when locating identifiers, range bounds are inclusive, and several
 fields have Harness-owned defaults. `Registry.Specs` therefore retains those
 field descriptions instead of applying its normal prose-stripping policy.
 
+Registration is anchored, not appended: `Register` inserts each `lsp_*` tool
+immediately after `search` (chaining each new tool after the previous one), so
+the LSP block sits adjacent to the navigation tools it complements instead of
+trailing the whole catalog; a missing anchor falls back to append.
+
+The per-tool "Prefer over search." phrase was removed from every LSP tool
+description for context economy. The cross-reference moved to the navigation
+tools instead: when LSP tools are enabled and registered, the catalog's
+description-suffix hook appends a conditional "prefer lsp_* tools" instruction
+to `search`, `glob`, `grep`, and `rg` at `Specs()` time (byte-identical
+descriptions when disabled or empty). The per-tool phrase removal also applies
+to the `harness lsp serve` shim surface, since both paths share the same static
+`internal/lspproxy` tool specs; that is intentional, while the conditional
+suffix itself is a harness-catalog behavior and is not part of the MCP shim
+surface.
+
 ### 9.17 `record_plan` and `handoff`
 
 `record_plan` (`internal/plan`) accepts `{title, plan}` and requires both values

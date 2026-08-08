@@ -618,6 +618,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `mcp.local.enable` | `boolean` | `true`, `false` | - | `HARNESS_MCP_LOCAL_ENABLE` | `mcp.local.enable` | false | no | Harness mcp.local.enable setting. |
 | `mcp.local.command` | `string` | - | - | - | `mcp.local.command` | unset | no | Harness mcp.local.command setting. |
 | `lsp.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_ENABLE` | `lsp.enable` | false | no | Harness lsp.enable setting. |
+| `lsp.prewarm` | `boolean` | `true`, `false` | - | `HARNESS_LSP_PREWARM` | `lsp.prewarm` | true | no | Harness lsp.prewarm setting. |
 | `lsp.serena.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_SERENA_ENABLE` | `lsp.serena.enable` | false | no | Harness lsp.serena.enable setting. |
 | `lsp.serena.command` | `string` | - | - | - | `lsp.serena.command` | "serena" | no | Harness lsp.serena.command setting. |
 | `otel.enabled` | `boolean` | `true`, `false` | `-otel-enabled` | `HARNESS_OTEL_ENABLED` | `otel.enabled` | false | no | Harness otel.enabled setting. |

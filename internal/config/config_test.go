@@ -519,6 +519,27 @@ func TestStructuredSettingsAndInterpolation(t *testing.T) {
 	}
 }
 
+func TestLSPPrewarmDefaultsAndOverride(t *testing.T) {
+	// Default is true when nothing is configured.
+	result := load(t, nil, nil, "")
+	if !result.Config.LSP.Prewarm {
+		t.Fatalf("lsp.prewarm default = false, want true")
+	}
+	// Config file can disable it.
+	result = load(t, nil, nil, writeConfig(t, `{"lsp":{"prewarm":false}}`))
+	if result.Config.LSP.Prewarm {
+		t.Fatalf("lsp.prewarm from file = true, want false")
+	}
+	if got := result.Sources["lsp.prewarm"]; got.Kind != configmeta.SourceFile {
+		t.Fatalf("lsp.prewarm source = %+v, want file", got)
+	}
+	// Env var overrides the file.
+	result = load(t, nil, map[string]string{"HARNESS_LSP_PREWARM": "true"}, writeConfig(t, `{"lsp":{"prewarm":false}}`))
+	if !result.Config.LSP.Prewarm {
+		t.Fatalf("lsp.prewarm env override = false, want true")
+	}
+}
+
 func TestSnapshotDoesNotAliasResolvedConfig(t *testing.T) {
 	result := load(t, nil, nil, writeConfig(t, `{"agents":{"custom":{"description":"Custom agent","allowed_tools":["read_file"]}}}`))
 	snapshot := Snapshot(result)

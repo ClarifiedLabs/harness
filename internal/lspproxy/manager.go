@@ -860,6 +860,56 @@ func (m *Manager) acquire(ctx context.Context, s ResolvedServer, root string) (*
 	return inst.ensure(ctx)
 }
 
+// prewarmScanMaxEntries caps the evidence-only workspace scan that decides
+// whether a language server is worth prewarming. An inconclusive scan (cap
+// reached without a match) skips prewarm; lazy startup remains the fallback.
+const prewarmScanMaxEntries = 20000
+
+// Prewarm background-launches language servers for which there is evidence of
+// their language files in the workspace root containing the process cwd. For
+// each installed configured server it detects the root from the server's root
+// markers and scans (bounded) for a matching file extension before acquiring a
+// client. Servers with undetectable languages, no detected root, or no file
+// evidence are skipped. Failures are logged only. It returns the number of
+// servers successfully warmed.
+func (m *Manager) Prewarm(ctx context.Context) int {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return 0
+	}
+	warmed := 0
+	for _, s := range m.cfg.Servers {
+		m.mu.Lock()
+		present := m.present[s.Name]
+		m.mu.Unlock()
+		if !present {
+			continue
+		}
+		exts := serverExtensions(s)
+		if len(exts) == 0 {
+			m.logger.Debug("lsp prewarm: skipping server with undetectable languages",
+				slog.String("server", s.Name))
+			continue
+		}
+		root, found := detectRoot(cwd, s.RootMarkers)
+		if !found {
+			continue
+		}
+		if !hasLanguageFiles(root, exts, prewarmScanMaxEntries) {
+			m.logger.Debug("lsp prewarm: no language-file evidence (or scan cap reached); skipping",
+				slog.String("server", s.Name), slog.String("root", root))
+			continue
+		}
+		if _, err := m.acquire(ctx, s, root); err != nil {
+			m.logger.Warn("lsp prewarm: failed to warm server",
+				slog.String("server", s.Name), slog.String("root", root), slog.Any("error", err))
+			continue
+		}
+		warmed++
+	}
+	return warmed
+}
+
 // prepareDoc reads abs from disk and syncs it with the server: didOpen on first
 // use, didChange (full text) when the file changed since the last sync. It marks
 // the doc pending first so a following diagnostics wait blocks for the fresh

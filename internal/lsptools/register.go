@@ -44,6 +44,10 @@ func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvide
 	}
 	allowSet := allowlistSet(allow)
 	sum := mcptools.Summary{Servers: map[string]int{"lsp": 0}}
+	// Chain lsp_* tools immediately after the navigation cluster (anchored at
+	// search) so they sit next to the tools they complement instead of trailing
+	// the whole catalog. A missing anchor falls back to append.
+	anchor := "search"
 	for _, d := range list.Tools {
 		if allowSet != nil && !allowSet[d.Name] {
 			continue
@@ -54,14 +58,15 @@ func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvide
 			continue
 		}
 		readOnly := readOnlyHint(d)
-		reg.Register(&Tool{
+		reg.RegisterAfter(&Tool{
 			name:     name,
 			target:   d.Name,
 			desc:     oneLineDesc(d.Description),
 			schema:   normalizeSchema(d.InputSchema),
 			readOnly: readOnly,
 			provider: provider,
-		})
+		}, anchor)
+		anchor = name
 		sum.Names = append(sum.Names, name)
 		if readOnly {
 			sum.ReadOnlyNames = append(sum.ReadOnlyNames, name)

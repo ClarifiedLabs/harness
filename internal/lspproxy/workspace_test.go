@@ -150,6 +150,101 @@ func TestWorkspaceName(t *testing.T) {
 	}
 }
 
+func TestServerExtensionsUnion(t *testing.T) {
+	s := ResolvedServer{
+		Name:       "gopls",
+		Languages:  []string{"go"},
+		Extensions: []string{".gop", "GOP"},
+	}
+	exts := serverExtensions(s)
+	for _, want := range []string{".go", ".gop"} {
+		if !exts[want] {
+			t.Errorf("missing extension %q in %v", want, exts)
+		}
+	}
+	if exts[".rs"] || exts[".py"] {
+		t.Errorf("foreign language extensions leaked into %v", exts)
+	}
+
+	// A language with no built-in extensions and no configured extensions is
+	// undetectable.
+	if got := serverExtensions(ResolvedServer{Name: "x", Languages: []string{"cobol"}}); len(got) != 0 {
+		t.Errorf("undetectable server should yield empty set, got %v", got)
+	}
+}
+
+func TestHasLanguageFiles(t *testing.T) {
+	t.Run("matching file found", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(root, "sub", "main.go"))
+		if !hasLanguageFiles(root, map[string]bool{".go": true}, 100) {
+			t.Fatal("expected match")
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "notes.txt"))
+		if hasLanguageFiles(root, map[string]bool{".go": true}, 100) {
+			t.Fatal("unexpected match")
+		}
+	})
+
+	t.Run("cap reached without match", func(t *testing.T) {
+		root := t.TempDir()
+		// Fill entries up to the cap, then place a match beyond it.
+		for i := range 10 {
+			mustWrite(t, filepath.Join(root, string(rune('a'+i))+".txt"))
+		}
+		deep := filepath.Join(root, "deep")
+		if err := os.Mkdir(deep, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mustWrite(t, filepath.Join(deep, "late.go"))
+		if hasLanguageFiles(root, map[string]bool{".go": true}, 5) {
+			t.Fatal("inconclusive scan must not report a match")
+		}
+	})
+
+	t.Run("noise dirs skipped", func(t *testing.T) {
+		root := t.TempDir()
+		for _, dir := range []string{".git", "node_modules"} {
+			if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(root, dir, "pkg.go"))
+		}
+		if hasLanguageFiles(root, map[string]bool{".go": true}, 100) {
+			t.Fatal("matches inside noise dirs must be ignored")
+		}
+	})
+
+	t.Run("configured extension matches", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "module.zig"))
+		if !hasLanguageFiles(root, map[string]bool{".zig": true}, 100) {
+			t.Fatal("expected configured-extension match")
+		}
+	})
+
+	t.Run("case-insensitive extension", func(t *testing.T) {
+		root := t.TempDir()
+		mustWrite(t, filepath.Join(root, "MAIN.GO"))
+		if !hasLanguageFiles(root, map[string]bool{".go": true}, 100) {
+			t.Fatal("expected case-insensitive match")
+		}
+	})
+
+	t.Run("empty extension set", func(t *testing.T) {
+		if hasLanguageFiles(t.TempDir(), nil, 100) {
+			t.Fatal("empty extension set must not match")
+		}
+	})
+}
+
 func mustWrite(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte("x"), 0o600); err != nil {

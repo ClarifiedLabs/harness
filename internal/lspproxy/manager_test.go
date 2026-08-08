@@ -366,3 +366,163 @@ func TestResolveCharacter(t *testing.T) {
 		t.Fatal("missing symbol should error")
 	}
 }
+
+func TestPrewarmAcquiresServersWithFileEvidence(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "main.go"))
+
+	cfg := Config{Servers: []ResolvedServer{{
+		Name:        "gopls",
+		Languages:   []string{"go"},
+		RootMarkers: []string{".git"},
+		Command:     []string{"gopls"},
+	}}}
+	m := NewManager(cfg, "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
+	m.computeAvailable()
+
+	type acquired struct {
+		server string
+		root   string
+	}
+	var calls []acquired
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, r string) (*lspClient, error) {
+		calls = append(calls, acquired{server: s.Name, root: r})
+		return nil, nil
+	}
+
+	if got := m.Prewarm(context.Background()); got != 1 {
+		t.Fatalf("Prewarm = %d, want 1", got)
+	}
+	if len(calls) != 1 || calls[0].server != "gopls" || calls[0].root != root {
+		t.Fatalf("acquire calls = %+v, want one for (gopls, %s)", calls, root)
+	}
+}
+
+func TestPrewarmSkipsWithoutEvidence(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// No .go files: the marker is present but there is no language evidence.
+	mustWrite(t, filepath.Join(root, "README.md"))
+
+	m := NewManager(goConfig(), "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
+	m.computeAvailable()
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, r string) (*lspClient, error) {
+		t.Fatal("acquire must not be called without file evidence")
+		return nil, nil
+	}
+	if got := m.Prewarm(context.Background()); got != 0 {
+		t.Fatalf("Prewarm = %d, want 0", got)
+	}
+}
+
+func TestPrewarmSkipsAbsentBinary(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "main.go"))
+
+	m := NewManager(goConfig(), "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "", os.ErrNotExist }
+	m.computeAvailable()
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, r string) (*lspClient, error) {
+		t.Fatal("acquire must not be called for an absent binary")
+		return nil, nil
+	}
+	if got := m.Prewarm(context.Background()); got != 0 {
+		t.Fatalf("Prewarm = %d, want 0", got)
+	}
+}
+
+func TestPrewarmSkipsWithoutRootMarker(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	// No .git marker anywhere above cwd (t.TempDir roots are marker-free).
+	mustWrite(t, filepath.Join(root, "main.go"))
+
+	cfg := Config{Servers: []ResolvedServer{{
+		Name:        "gopls",
+		Languages:   []string{"go"},
+		RootMarkers: []string{"definitely-not-present.marker"},
+		Command:     []string{"gopls"},
+	}}}
+	m := NewManager(cfg, "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
+	m.computeAvailable()
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, r string) (*lspClient, error) {
+		t.Fatal("acquire must not be called without a detected root")
+		return nil, nil
+	}
+	if got := m.Prewarm(context.Background()); got != 0 {
+		t.Fatalf("Prewarm = %d, want 0", got)
+	}
+}
+
+func TestPrewarmOnlyWarmsServersWithEvidence(t *testing.T) {
+	// A repo containing only Go files must prewarm gopls and no other
+	// installed server.
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "main.go"))
+
+	cfg := Config{Servers: []ResolvedServer{
+		{Name: "gopls", Languages: []string{"go"}, RootMarkers: []string{".git"}, Command: []string{"gopls"}},
+		{Name: "rust-analyzer", Languages: []string{"rust"}, RootMarkers: []string{".git"}, Command: []string{"rust-analyzer"}},
+		{Name: "pyright", Languages: []string{"python"}, RootMarkers: []string{".git"}, Command: []string{"pyright"}},
+	}}
+	m := NewManager(cfg, "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/installed", nil }
+	m.computeAvailable()
+
+	var warmed []string
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, r string) (*lspClient, error) {
+		warmed = append(warmed, s.Name)
+		return nil, nil
+	}
+	if got := m.Prewarm(context.Background()); got != 1 {
+		t.Fatalf("Prewarm = %d, want 1", got)
+	}
+	if len(warmed) != 1 || warmed[0] != "gopls" {
+		t.Fatalf("warmed = %v, want [gopls]", warmed)
+	}
+}
+
+func TestPrewarmUndetectableLanguagesSkipped(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "main.go"))
+
+	cfg := Config{Servers: []ResolvedServer{{
+		Name:        "mystery",
+		Languages:   []string{"cobol"},
+		RootMarkers: []string{".git"},
+		Command:     []string{"mystery-lsp"},
+		// No configured Extensions: cobol has no built-in extension mapping.
+	}}}
+	m := NewManager(cfg, "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/mystery-lsp", nil }
+	m.computeAvailable()
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, r string) (*lspClient, error) {
+		t.Fatal("acquire must not be called for undetectable languages")
+		return nil, nil
+	}
+	if got := m.Prewarm(context.Background()); got != 0 {
+		t.Fatalf("Prewarm = %d, want 0", got)
+	}
+}

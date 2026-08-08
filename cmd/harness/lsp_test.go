@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"testing"
+
+	"harness/internal/mcptools"
+)
 
 func TestLSPSystemHint(t *testing.T) {
 	if got := lspSystemHint([]string{"go", "rust"}); got != "lsp_* available for: go, rust. Prefer lsp_* over search for definitions, references, hover, symbols, diagnostics, and rename." {
@@ -8,5 +12,39 @@ func TestLSPSystemHint(t *testing.T) {
 	}
 	if got := lspSystemHint(nil); got != "lsp_* tools enabled but no language server on PATH." {
 		t.Errorf("empty hint = %q", got)
+	}
+}
+
+func TestLSPDescriptionSuffix(t *testing.T) {
+	enabled := &lspRuntime{enabled: true, summary: mcptools.Summary{Names: []string{"lsp_definition"}}}
+	disabled := &lspRuntime{enabled: false, summary: mcptools.Summary{Names: []string{"lsp_definition"}}}
+	empty := &lspRuntime{enabled: true, summary: mcptools.Summary{}}
+
+	cases := []struct {
+		name    string
+		runtime *lspRuntime
+	}{
+		{"disabled", disabled},
+		{"empty summary", empty},
+		{"nil", nil},
+	}
+	for _, tc := range cases {
+		f := lspDescriptionSuffix(tc.runtime)
+		for _, name := range []string{"search", "glob", "grep", "rg", "read_file"} {
+			if got := f(name, "base"); got != "base" {
+				t.Errorf("%s runtime must leave %s byte-identical, got %q", tc.name, name, got)
+			}
+		}
+	}
+
+	f := lspDescriptionSuffix(enabled)
+	for _, name := range []string{"search", "glob", "grep", "rg"} {
+		got := f(name, "base")
+		if got != "base"+lspPreferSuffix {
+			t.Errorf("enabled suffix for %s = %q", name, got)
+		}
+	}
+	if got := f("read_file", "base"); got != "base" {
+		t.Errorf("non-navigation tool got suffix: %q", got)
 	}
 }
