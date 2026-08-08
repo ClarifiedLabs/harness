@@ -294,6 +294,137 @@ func TestMergeLineWindows(t *testing.T) {
 	}
 }
 
+// A pattern that can match a newline is rejected by rg's default
+// line-oriented mode; search retries with --multiline and reports the
+// spanning match with correct start/end lines.
+func TestSearchMultilineRetryOnNewlineRejection(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "sample.go")
+	content := "package sample\n\nfunc Needle() string {\n\treturn \"x\"\n}\n\nfunc six() {}\nfunc seven() {}\n"
+	if err := os.WriteFile(source, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	match := rgMatchJSON(t, source, 3, "func Needle() string {\n\treturn \"x\"\n")
+	tool := searchTool{program: fakeRGLineMode(t, match)}
+	input, err := json.Marshal(searchArgs{Pattern: `\{\n\s*return`, Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The match spans lines 3-4, so the window is 1-8.
+	for _, want := range []string{source + ":1-8", "3\tfunc Needle() string {", "4\t\treturn \"x\""} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+}
+
+// The multiline retry is reserved for patterns rg rejects: negated classes
+// like [^x] must keep line-bound semantics and never see --multiline.
+func TestSearchNegatedClassNeverEnablesMultiline(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "argv.log")
+	t.Setenv("RG_ARGV_LOG", log)
+	tool := searchTool{program: fakeRGRecordingArgv(t)}
+	input, err := json.Marshal(searchArgs{Pattern: `o[^x]*o`, Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out != "(no matches)" {
+		t.Fatalf("output = %q", out)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "--multiline") {
+		t.Fatalf("--multiline passed for line-mode pattern:\n%s", data)
+	}
+}
+
+// The stdlib fallback matches newline patterns across lines with the same
+// span contract as the rg path.
+func TestSearchGoFallbackMatchesAcrossLines(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "sample.go")
+	content := "package sample\n\nfunc Needle() string {\n\treturn \"x\"\n}\nfunc six() {}\n"
+	if err := os.WriteFile(source, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(searchArgs{Pattern: `\{\n\s*return`, Path: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := (searchTool{}).Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{source + ":1-8", "3\tfunc Needle() string {", "4\t\treturn \"x\""} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+}
+
+// An all-newline class like [\n] also opts the stdlib fallback into multiline
+// matching; each newline reports the line it terminates.
+func TestSearchGoFallbackNewlineClass(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "sample.txt")
+	if err := os.WriteFile(source, []byte("a\nb\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(searchArgs{Pattern: `[\n]`, Path: source})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := (searchTool{}).Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"matches: 2 shown of 2", "1\ta", "2\tb"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+}
+
+// End to end against the host rg: a newline pattern is retried with
+// --multiline and the JSON span maps to the right source lines.
+func TestSearchMultilineAgainstHostRG(t *testing.T) {
+	program, ok := ripgrepProgram()
+	if !ok {
+		t.Skip("rg unavailable")
+	}
+	dir := t.TempDir()
+	source := filepath.Join(dir, "sample.go")
+	content := "package sample\n\nfunc Needle() string {\n\treturn \"x\"\n}\n"
+	if err := os.WriteFile(source, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tool := searchTool{program: program}
+	input, err := json.Marshal(searchArgs{Pattern: `\{\n\s*return`, Path: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := tool.Run(context.Background(), input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"3\tfunc Needle() string {", "4\t\treturn \"x\""} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q\n%s", want, out)
+		}
+	}
+}
+
 func rgMatchJSON(t *testing.T, path string, line int, text string) string {
 	t.Helper()
 	event := map[string]any{
@@ -338,6 +469,46 @@ func fakeRG(t *testing.T, lines []string, exitCode int) string {
 	b.WriteString(string(rune('0' + exitCode)))
 	b.WriteByte('\n')
 	if err := os.WriteFile(path, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// fakeRGLineMode emulates rg's line-oriented rejection: it exits 2 with the
+// literal-newline diagnostic unless invoked with --multiline, in which case it
+// emits the given match events. A succeeding search therefore proves the
+// retry happened and carried the flag.
+func fakeRGLineMode(t *testing.T, matchEvents ...string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rg")
+	var b strings.Builder
+	b.WriteString("#!/bin/sh\n")
+	b.WriteString(`case " $* " in *" --multiline "*)` + "\n")
+	for _, line := range matchEvents {
+		b.WriteString("printf '%s\\n' ")
+		encoded, err := json.Marshal(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b.Write(encoded)
+		b.WriteByte('\n')
+	}
+	b.WriteString("exit 0\n;;\nesac\n")
+	b.WriteString(`printf '%s\n' 'rg: the literal "\n" is not allowed in a regex' >&2` + "\n")
+	b.WriteString("exit 2\n")
+	if err := os.WriteFile(path, []byte(b.String()), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// fakeRGRecordingArgv appends its argv to $RG_ARGV_LOG and reports no
+// matches, so a test can assert which flags search passed.
+func fakeRGRecordingArgv(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rg")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$RG_ARGV_LOG\"\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return path

@@ -2064,7 +2064,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.3 `search` and raw search commands
 
-> `search`: Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally.
+> `search`: Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally; patterns containing \n automatically match across lines.
 
 - `search` is the only content-search tool in built-in agent definitions. Its
   flat input requires `pattern`; singular `path` defaults to `"."`; optional
@@ -2086,6 +2086,12 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   it literally` with the kinded `regex_invalid` class instead of surfacing
   an rg stderr dump or an `invalid_args` bucket.
 - Runtime ripgrep regex parser failures are remapped to `regex_invalid`.
+- Patterns that can match a newline (`\n`, `[\n]`, `\x0a`, …) are rejected by
+  ripgrep's default line-oriented mode; `search` detects that diagnostic and
+  retries once with `--multiline`, mapping the JSON span to start/end lines.
+  The stdlib walker opts into whole-content matching from the parsed pattern
+  syntax (literal newline or all-newline class). Multiline is enabled only for
+  such patterns: negated classes like `[^x]` keep line-bound semantics.
 - Context output groups matches by file, merges touching windows, numbers source
   lines, and renders at most 200 source lines. No match is a successful
   `(no matches)` result. `RunResult.Metrics` records shown matches/files, source

@@ -80,7 +80,10 @@ persistence, and continuation-cap behavior.
 The default model surface exposes one flat typed `search` tool. Each call has a
 required `pattern`, optional singular `path` (default `.`), optional `globs[]`,
 and `case` (`smart`, `sensitive`, or `insensitive`). Patterns are RE2 regular
-expressions; escape punctuation when it should match literally. The model
+expressions; escape punctuation when it should match literally. A pattern that
+can match a newline (for example one containing `\n`) works: harness enables
+ripgrep's multiline mode automatically for exactly those patterns, so negated
+classes like `[^x]` otherwise stay line-bound. The model
 does not choose output modes or result bounds. Harness always returns numbered,
 merged matching context and owns the limits: four surrounding lines, at most 60
 matches across 12 files, and at most 200 source lines. Harness uses

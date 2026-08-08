@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"sort"
 	"strings"
 
@@ -96,7 +97,7 @@ type rgJSONEvent struct {
 func (searchTool) Name() string { return "search" }
 
 func (searchTool) Description() string {
-	return "Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally."
+	return "Search one file or directory for an RE2 regular expression and return host-bounded matching context. Escape punctuation to match it literally; patterns containing \\n automatically match across lines."
 }
 
 func (searchTool) Schema() json.RawMessage { return json.RawMessage(searchSchema) }
@@ -211,6 +212,14 @@ func validateSearchPattern(query searchQuery) error {
 }
 
 func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult {
+	return s.searchRGMode(ctx, args, false)
+}
+
+// rg rejects patterns that can match a newline in its default line-oriented
+// mode and suggests --multiline; honor that instead of failing. Multiline
+// stays opt-in per call because it also lets negated classes like [^x] match
+// across lines, which would silently change line-mode results.
+func (s searchTool) searchRGMode(ctx context.Context, args searchQuery, multiline bool) searchResult {
 	argv := []string{
 		"--json",
 		"--line-number",
@@ -218,6 +227,9 @@ func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult
 		"--max-columns=" + ripgrepDefaultMaxColumns,
 		"--max-columns-preview",
 		"--max-filesize=" + ripgrepDefaultMaxFilesize,
+	}
+	if multiline {
+		argv = append(argv, "--multiline")
 	}
 	switch args.Case {
 	case "smart":
@@ -306,6 +318,9 @@ func (s searchTool) searchRG(ctx context.Context, args searchQuery) searchResult
 		if errors.As(waitErr, &exitErr) && exitErr.ExitCode() == 1 {
 			return searchResult{}
 		}
+		if !multiline && isRGLineModeNewlineError(stderr.String()) {
+			return s.searchRGMode(ctx, args, true)
+		}
 		return searchResult{err: fmt.Errorf("rg failed: %w: %s", waitErr, strings.TrimSpace(stderr.String()))}
 	}
 	sortSearchMatches(matches)
@@ -322,6 +337,7 @@ func searchGo(ctx context.Context, args searchQuery) searchResult {
 	if err != nil {
 		return searchResult{err: fmt.Errorf("compile pattern: %w", err)}
 	}
+	multiline := patternMatchesAcrossLines(pattern)
 
 	files := map[string]bool{}
 	omitted := map[string]bool{}
@@ -352,19 +368,28 @@ func searchGo(ctx context.Context, args searchQuery) searchResult {
 		if bytes.IndexByte(data, 0) >= 0 {
 			return nil
 		}
+		record := func(start, end int) error {
+			total++
+			if !files[path] && len(files) >= searchMaxFiles {
+				omitted[path] = true
+				return nil
+			}
+			files[path] = true
+			matches = append(matches, searchMatch{Path: path, Start: start, End: end})
+			if len(matches) >= searchMaxMatches {
+				capped = true
+				return stop
+			}
+			return nil
+		}
+		if multiline {
+			return multilineFileMatches(data, re, record)
+		}
 		line := 1
 		for _, text := range strings.Split(string(data), "\n") {
 			if re.MatchString(text) {
-				total++
-				if !files[path] && len(files) >= searchMaxFiles {
-					omitted[path] = true
-				} else {
-					files[path] = true
-					matches = append(matches, searchMatch{Path: path, Start: line, End: line})
-					if len(matches) >= searchMaxMatches {
-						capped = true
-						return stop
-					}
+				if err := record(line, line); err != nil {
+					return err
 				}
 			}
 			line++
@@ -377,6 +402,83 @@ func searchGo(ctx context.Context, args searchQuery) searchResult {
 	}
 	sortSearchMatches(matches)
 	return searchResult{matches: matches, total: total, omittedFiles: len(omitted), capped: capped}
+}
+
+// patternMatchesAcrossLines reports whether the pattern can match a newline
+// explicitly: a literal newline (any escape spelling) or an all-newline class
+// like [\n]. Negated classes like [^x] stay line-bound, mirroring rg's
+// line-oriented default. The rg path learns the same from rg's own rejection;
+// the stdlib fallback must decide up front, so it inspects the parsed syntax.
+func patternMatchesAcrossLines(pattern string) bool {
+	parsed, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return false // unreachable: the pattern already compiled
+	}
+	return syntaxNeedsNewline(parsed)
+}
+
+func syntaxNeedsNewline(re *syntax.Regexp) bool {
+	switch re.Op {
+	case syntax.OpLiteral:
+		for _, r := range re.Rune {
+			if r == '\n' {
+				return true
+			}
+		}
+	case syntax.OpCharClass:
+		allNewline := len(re.Rune) > 0
+		for _, r := range re.Rune {
+			if r != '\n' {
+				allNewline = false
+				break
+			}
+		}
+		if allNewline {
+			return true
+		}
+	}
+	for _, sub := range re.Sub {
+		if syntaxNeedsNewline(sub) {
+			return true
+		}
+	}
+	return false
+}
+
+var newlineBytes = []byte{'\n'}
+
+// multilineFileMatches matches re against the whole file content and reports
+// 1-based inclusive line spans. Match offsets advance monotonically, so line
+// numbers are tracked incrementally instead of rescanning from the top.
+func multilineFileMatches(data []byte, re *regexp.Regexp, record func(start, end int) error) error {
+	line, scanned := 1, 0
+	lineAt := func(offset int) int {
+		line += bytes.Count(data[scanned:offset], newlineBytes)
+		scanned = offset
+		return line
+	}
+	offset := 0
+	for offset <= len(data) {
+		loc := re.FindIndex(data[offset:])
+		if loc == nil {
+			return nil
+		}
+		start, end := offset+loc[0], offset+loc[1]
+		startLine := lineAt(start)
+		endLine := startLine
+		if end > start {
+			endLine = lineAt(end - 1)
+		}
+		if err := record(startLine, endLine); err != nil {
+			return err
+		}
+		if loc[1] == 0 {
+			offset++ // empty match: advance to avoid stalling
+		} else {
+			offset += loc[1]
+		}
+	}
+	return nil
 }
 
 func matchesSearchGlobs(path string, globs []string) bool {
@@ -441,6 +543,14 @@ func uniqueSearchPaths(matches []searchMatch) []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// isRGLineModeNewlineError reports whether rg refused the pattern because it
+// can match a literal newline (any spelling: \n, [\n], \x0a). rg exits 2 with
+// this diagnostic on stderr and points at --multiline; it is the only channel
+// rg provides, so the exact message is matched rather than an error class.
+func isRGLineModeNewlineError(stderr string) bool {
+	return strings.Contains(stderr, `the literal "\n" is not allowed in a regex`)
 }
 
 func sortSearchMatches(matches []searchMatch) {
