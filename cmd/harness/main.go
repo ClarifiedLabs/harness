@@ -61,6 +61,8 @@ import (
 
 const modelProxyCheckTimeout = 2 * time.Second
 
+const rgSystemHint = "When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`."
+
 func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT)
@@ -663,6 +665,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	skillsCatalog := skills.BuildCatalog(discoveredSkills)
 	var runtimeHints []string
+	if tools.RipgrepAvailable() {
+		runtimeHints = append(runtimeHints, rgSystemHint)
+	}
 	var lspHint string
 
 	// buildSystem assembles the full system prompt for a given agent prompt,

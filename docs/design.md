@@ -1864,7 +1864,7 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   `~/.agents/AGENTS.md` is appended before the current working directory's
   `AGENTS.md`; missing files are ignored and other read failures fail startup.
   The skills catalog includes its activation/read instruction once and caps each
-  description at 160 runes. Process-specific LSP/Serena hints follow it. The
+  description at 160 runes. Process-specific `rg`/LSP/Serena hints follow it. When ripgrep is on `PATH`, a short runtime hint ("When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`.") is appended to `RuntimeHints`. The
   active agent prompt is always the final section.
   `@~/path` expands through the current user's home directory; relative `@file`
   references in the config file resolve from that config file's directory.
