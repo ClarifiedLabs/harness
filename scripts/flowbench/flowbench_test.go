@@ -225,6 +225,10 @@ func TestKnownPathContractEvidenceRequiresExactShellRGInputsAndSuccess(t *testin
 	if searches, commands := evidence(validSearches, -1, validCommand, false); searches != 3 || commands != 1 {
 		t.Fatalf("valid evidence = %d/%d, want 3/1", searches, commands)
 	}
+	withOutputOnlyFlag := replaceString(validSearches, `"Marker[0-9]+"`, `"-o","Marker[0-9]+"`)
+	if searches, _ := evidence(withOutputOnlyFlag, -1, validCommand, false); searches != 3 {
+		t.Fatalf("output-only rg flag rejected: %d searches", searches)
+	}
 
 	batchedSearches := `{"steps":[{"argv":["rg","-F","Widget(",".flowbench-tool-accuracy/known"]},{"argv":["rg","-F","State{",".flowbench-tool-accuracy/known"]},{"argv":["rg","Marker[0-9]+",".flowbench-tool-accuracy/known"]}]}`
 	batchedEvents := []session.Event{
@@ -280,6 +284,10 @@ func TestKnownPathContractEvidenceRequiresExactShellRGInputsAndSuccess(t *testin
 	if _, commands := evidence(validSearches, -1, commandWithNames, false); commands != 1 {
 		t.Fatalf("cosmetic command step names rejected: %d", commands)
 	}
+	commandWithHarmlessControls := strings.Replace(validCommand, `{"steps"`, `{"cwd":"/tmp/worktree","stop_on_failure":true,"steps"`, 1)
+	if _, commands := evidence(validSearches, -1, commandWithHarmlessControls, false); commands != 1 {
+		t.Fatalf("semantically default command controls rejected: %d", commands)
+	}
 }
 
 func replaceString(values []string, old, new string) []string {
@@ -300,6 +308,9 @@ func TestDiscoveryTargetsFixtureThroughShell(t *testing.T) {
 		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-type","f"]}`, true},
 		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-type","f","-name","shard-*-hidden.txt"]}`, true},
 		{`{"command":"find .flowbench-tool-accuracy/discovery -type f | sort"}`, true},
+		{`{"command":"find .flowbench-tool-accuracy/discovery -type f 2>/dev/null | sort"}`, true},
+		{`{"argv":["sh","-c","rg --files .flowbench-tool-accuracy/discovery | sort"]}`, true},
+		{`{"argv":["sh","-c","rg --files .flowbench-tool-accuracy/discovery 2>/dev/null | sort; echo ---; find .flowbench-tool-accuracy/discovery -type f 2>/dev/null | sort"]}`, true},
 		{`{"steps":[{"argv":["rg","--files",".flowbench-tool-accuracy/discovery"]}]}`, true},
 		{`{"argv":["rg","--files","."]}`, false},
 		{`{"argv":["rg","Discover",".flowbench-tool-accuracy/discovery"]}`, false},
@@ -309,6 +320,14 @@ func TestDiscoveryTargetsFixtureThroughShell(t *testing.T) {
 		if got := discoveryTargetsFixture("shell", json.RawMessage(test.input)); got != test.want {
 			t.Errorf("discoveryTargetsFixture(shell, %s) = %v, want %v", test.input, got, test.want)
 		}
+	}
+}
+
+func TestReadFilePathsNormalizeAbsoluteFixturePaths(t *testing.T) {
+	input := json.RawMessage(`{"path":"/tmp/worktree/.flowbench-tool-accuracy/discovery/shard-01-hidden.txt"}`)
+	want := ".flowbench-tool-accuracy/discovery/shard-01-hidden.txt"
+	if got := readFilePaths(input); len(got) != 1 || got[0] != want {
+		t.Fatalf("absolute fixture path normalized to %v, want %q", got, want)
 	}
 }
 

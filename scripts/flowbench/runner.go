@@ -46,7 +46,7 @@ type runConfig struct {
 
 const (
 	runRecordVersion      = 3
-	oracleContractVersion = "flowbench-oracle-2026-08-05-v8"
+	oracleContractVersion = "flowbench-oracle-2026-08-09-v9"
 )
 
 type runRecord struct {

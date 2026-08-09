@@ -529,7 +529,7 @@ func exactKnownPathRGArgv(argv []string) (string, bool) {
 		switch arg {
 		case "-F", "--fixed-strings":
 			fixed = true
-		case "-n", "--line-number", "--no-heading", "--with-filename", "--color=never", "--":
+		case "-n", "--line-number", "-o", "--only-matching", "--no-heading", "--with-filename", "--color=never", "--":
 			// Output-only flags do not change the benchmark contract.
 		default:
 			if strings.HasPrefix(arg, "-") {
@@ -585,17 +585,47 @@ func shellDiscoversFixture(raw json.RawMessage) bool {
 		if discoveryArgvTargetsFixture(argv) {
 			return true
 		}
+		if len(argv) == 3 && (filepath.Base(argv[0]) == "sh" || filepath.Base(argv[0]) == "bash") && argv[1] == "-c" &&
+			discoveryShellCommandTargetsFixture(argv[2]) {
+			return true
+		}
 	}
-	if input.Command == "" {
-		return false
+	return discoveryShellCommandTargetsFixture(input.Command)
+}
+
+func discoveryShellCommandTargetsFixture(command string) bool {
+	for _, statement := range strings.Split(command, ";") {
+		pipeline := strings.Split(statement, "|")
+		if len(pipeline) > 2 || len(pipeline) == 2 && strings.TrimSpace(pipeline[1]) != "sort" {
+			continue
+		}
+		fields := strings.Fields(strings.TrimSpace(pipeline[0]))
+		argv := make([]string, 0, len(fields))
+		valid := true
+		for i := 0; i < len(fields); i++ {
+			field := strings.Trim(fields[i], `"'`)
+			switch field {
+			case ">", "1>", "2>":
+				i++
+				valid = i < len(fields) && strings.Trim(fields[i], `"'`) == "/dev/null"
+			case ">/dev/null", "1>/dev/null", "2>/dev/null", "2>&1":
+				// Output-only redirections do not narrow discovery.
+			default:
+				if strings.ContainsAny(field, "<>") {
+					valid = false
+				} else {
+					argv = append(argv, field)
+				}
+			}
+			if !valid {
+				break
+			}
+		}
+		if valid && discoveryArgvTargetsFixture(argv) {
+			return true
+		}
 	}
-	command := strings.TrimSpace(input.Command)
-	command = strings.TrimSpace(strings.TrimSuffix(command, "| sort"))
-	fields := strings.Fields(command)
-	for i := range fields {
-		fields[i] = strings.Trim(fields[i], `"'`)
-	}
-	return discoveryArgvTargetsFixture(fields)
+	return false
 }
 
 func discoveryArgvTargetsFixture(argv []string) bool {
@@ -723,12 +753,12 @@ func exactKnownPathCommandInput(raw json.RawMessage) bool {
 		Background bool     `json:"background"`
 	}
 	if json.Unmarshal(raw, &input) != nil || input.Command != "" || len(input.Argv) != 0 ||
-		len(input.Steps) != 2 || input.OutputMode != "full" || input.Stdin != "" || input.Cwd != "" || input.Background {
+		len(input.Steps) != 2 || input.OutputMode != "full" || input.Stdin != "" || input.Background {
 		return false
 	}
 	want := [][]string{{"printf", "STEP_ALPHA\n"}, {"printf", "STEP_BETA\n"}}
 	for i, step := range input.Steps {
-		if step.Command != "" || step.Stdin != "" || step.Cwd != "" || step.TimeoutSeconds != 0 ||
+		if step.Command != "" || step.Stdin != "" || step.TimeoutSeconds != 0 ||
 			len(step.Argv) != len(want[i]) {
 			return false
 		}
@@ -850,11 +880,19 @@ func searchPatternCoversDiscovery(pattern string, fixed bool, caseMode string) b
 	return true
 }
 
-func normalizeFixturePath(path string) string {
-	if strings.TrimSpace(path) == "" {
+func normalizeFixturePath(input string) string {
+	if strings.TrimSpace(input) == "" {
 		return "."
 	}
-	return filepath.ToSlash(filepath.Clean(path))
+	clean := filepath.ToSlash(filepath.Clean(input))
+	marker := "/" + toolAccuracyFixture
+	if index := strings.LastIndex(clean, marker); index >= 0 {
+		suffix := clean[index+1:]
+		if suffix == toolAccuracyFixture || strings.HasPrefix(suffix, toolAccuracyFixture+"/") {
+			return suffix
+		}
+	}
+	return clean
 }
 
 func readFilePaths(raw json.RawMessage) []string {
