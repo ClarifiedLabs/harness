@@ -12,7 +12,6 @@ This page is the operational overview.
 | `view_image` | attach a local PNG, JPEG, WebP, or non-animated GIF to the next model request |
 | `list_dir` | list directory entries with type and size, non-recursive |
 | `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
-| `search` | search contents by RE2 regex |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
 | `shell` | run a shell command or direct argv program; co-issued calls may run concurrently (best-effort) |
@@ -31,11 +30,11 @@ default tool set — `edit` and `write_file` subsume it. It still ships in the t
 catalog, so an agent can opt back in by naming `apply_patch` in its
 `allowed_tools` whitelist.
 
-`read_file` is part of the default tool set. `list_dir`, `glob`, `search`,
-`git`, and `git_readonly` remain in the Catalog for explicit `allowed_tools`
-whitelisting, but none of the built-in agent configurations advertise them.
-Use `shell` with tools such as `rg` and `git --no-pager` when those operations
-are needed without a custom agent whitelist.
+`read_file` is part of the default tool set. `list_dir`, `glob`, `grep`, optional
+`rg`, `git`, and `git_readonly` remain in the Catalog for explicit
+`allowed_tools` whitelisting, but none of the built-in agent configurations
+advertise them. Use `shell` with host commands such as `rg`, `rg --files`,
+`find`, and `git --no-pager` for repository inspection with a built-in agent.
 
 Models issue schema-visible top-level parallel-eligible calls together in one tool
 turn; Harness runs consecutive parallel-eligible calls concurrently
@@ -87,46 +86,24 @@ persistence, and continuation-cap behavior.
 
 ## Search and Inspection
 
-The constructible catalog exposes one flat typed `search` tool. Each call has a
-required `pattern`, optional singular `path` (default `.`), optional `globs[]`,
-and `case` (`smart`, `sensitive`, or `insensitive`). Patterns are RE2 regular
-expressions; escape punctuation when it should match literally. A pattern that
-can match a newline (for example one containing `\n`) works: harness enables
-ripgrep's multiline mode automatically for exactly those patterns, so negated
-classes like `[^x]` otherwise stay line-bound. The model
-does not choose output modes or result bounds. Harness always returns numbered,
-merged matching context and owns the limits: four surrounding lines, at most 60
-matches across 12 files, and at most 200 source lines. Harness uses
-ripgrep when it is installed and a bounded standard-library walker otherwise,
-so the tool contract does not depend on the host CLI.
-The filesystem root (`/`, or the platform equivalent) is rejected as
-excessively broad; callers must choose a narrower file or directory.
+Built-in agents intentionally use the general `shell` tool for repository
+search instead of a typed content-search tool. Prefer argv-form `rg` for content,
+`rg --files` or `find` for path discovery, and `shell.steps[]` when several
+ordered lookups belong in one process call. Independent `shell` or `read_file`
+calls can instead be coissued in one model turn. Native command semantics decide
+regex syntax, ignore behavior, output shape, and exit status; scope the command
+to the relevant repository path and use `read_file` for targeted source context.
 
-When a model coissues two or more successful `search` calls, Harness preserves
-one result for each call while showing the same `(path, line)` context only in
-its first sibling result. The batch layer imposes no additional aggregate line
-or byte limit: every call retains the unique context admitted by its ordinary
-host-owned bounds. A compact result marker reports duplicate context shown by a
-sibling; session diagnostics record batch size, overlap, low-yield calls, and
-bytes before and after deduplication. A single `search` call keeps its ordinary
-result unchanged.
+After three consecutive turns containing one unbatched repository lookup,
+Harness adds a one-time soft reminder to coissue independent `read_file` calls,
+use `read_file paths[]` for known files, or batch repository lookups in one
+`shell` call. The reminder names only tools present in the built-in surface.
 
-A `search` `path` or `read_file` path that does not exist fails with
-`similar existing paths: <up to 3>` appended. Harness first scans the same
-directory and one parent level for a mistyped directory, then uses a bounded
-four-level/1024-entry recursive fallback from the nearest existing directory,
-so a misplaced or mistyped path can be retargeted without a list_dir round trip.
-
-Invalid search regexes are rejected at argument decode with `invalid regex:
-<compile error>; escape regex punctuation to match it literally` (error kind
-`regex_invalid`), before ripgrep or the stdlib walker runs.
-Ripgrep-only parser failures are also classified as `regex_invalid` and never
-cause a regex to be silently treated as literal. Results report match/file and
-source-line counts plus whether collection or context was bounded. For several
-independent searches, issue several top-level `search` calls in the same model
-turn. After three consecutive single-lookup turns, Harness adds a one-time soft
-reminder to coissue independent `read_file`, `search`, `glob`, and `list_dir`
-calls or use `read_file paths[]` for already-known files.
+A `read_file` path that does not exist fails with `similar existing paths: <up
+to 3>` appended. Harness first scans the same directory and one parent level for
+a mistyped directory, then uses a bounded four-level/1024-entry recursive
+fallback from the nearest existing directory, so a misplaced or mistyped path
+can be retargeted without another lookup round trip.
 
 Raw `grep` and optional `rg` wrappers remain in the constructible catalog for a
 custom agent that explicitly names them in `allowed_tools`; built-in agents do
@@ -484,8 +461,7 @@ Tool results are centrally capped at 64 KB or 1000 lines by default. Configure
 this with `tool_result_max_bytes` / `tool_result_max_lines`, or
 `HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`. Noisy file
 inspection tools have smaller defaults unless a global cap is configured:
-typed `search` uses 16 KB or 250 lines, raw `rg`/`grep` use 32 KB or 500 lines,
-and `read_file` uses a 500-line default
+raw `rg`/`grep` use 32 KB or 500 lines, and `read_file` uses a 500-line default
 window plus a 32 KB result cap. Override them with `rg_result_max_bytes` /
 `rg_result_max_lines`, `grep_result_max_bytes` / `grep_result_max_lines`,
 `read_file_default_limit`, and `read_file_result_max_bytes` /
@@ -495,7 +471,7 @@ variable.
 Truncated results include a marker in the model-visible text, a warning in the
 UI, and the full output is archived under the session directory when available.
 The model-visible tool result includes the absolute artifact path so the next
-turn can inspect it with `read_file` or `search`. When live retention later
+turn can inspect it with `read_file` or a targeted `shell` command. When live retention later
 removes an old read-only result body, Harness leaves a typed receipt with the
 tool, status, byte counts, bounded head, and recovery path; the exact original
 is preserved in the same artifact store. If that artifact write fails, the

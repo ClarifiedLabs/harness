@@ -13,6 +13,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/internal/tools"
 )
 
 type metrics struct {
@@ -118,6 +119,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		return metrics{}, err
 	}
 	byTurn := map[int][]string{}
+	lookupOperationsByTurn := map[int]int{}
 	var commandInputs []string
 	editRecovery := editRecoveryState{}
 	m.ReadDriftAfterPhaseOne = successfulDriftReread(events)
@@ -143,7 +145,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 				m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, readStarts[ev.ToolID]...)
 			}
 			delete(readStarts, ev.ToolID)
-			if !ev.ResultError && ev.ResultMetrics["query_errors"] == 0 && discoveryStarts[ev.ToolID] {
+			if discoveryStarts[ev.ToolID] && successfulDiscoveryResult(ev) {
 				discoverySucceeded = true
 			}
 			if ev.Tool == "inspect" {
@@ -173,6 +175,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		if isDiscoveryTool(ev.Tool) {
 			discoveryStarts[ev.ToolID] = discoveryTargetsFixture(ev.Tool, ev.Input)
 		}
+		lookupOperationsByTurn[ev.Turn] += repositoryLookupOperationCount(ev.Tool, ev.Input)
 		raw := string(ev.Input)
 		switch ev.Tool {
 		case "read_file":
@@ -203,11 +206,19 @@ func collectMetrics(sessionDir string) (metrics, error) {
 					m.ReadBeforeDiscovery = true
 				}
 			}
-		case "search":
+		case "search": // Historical benchmark sessions.
 			m.UsedSearch = true
 			m.SearchQueries += searchQueryCount(ev.Input)
+		case "rg", "grep": // Catalog-only wrappers in historical/custom runs.
+			m.UsedSearch = true
+			m.SearchQueries++
 		case "shell":
 			commandInputs = append(commandInputs, strings.Join(flattenJSONStrings(ev.Input), " "))
+			if queries := shellRGSearchCount(ev.Input); queries > 0 {
+				m.UsedSearch = true
+				m.SearchQueries += queries
+				byTurn[ev.Turn] = append(byTurn[ev.Turn], "rg")
+			}
 			if shellInvokesGit(ev.Input) {
 				m.GitCalls++
 			}
@@ -255,12 +266,9 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 	}
 	for i, tt := range turns {
-		lookups := 0
+		lookups := lookupOperationsByTurn[tt.Turn]
 		reads := 0
 		for _, name := range tt.Names {
-			if name == "read_file" || name == "search" || name == "glob" || name == "list_dir" {
-				lookups++
-			}
 			if name == "read_file" {
 				reads++
 			}
@@ -332,26 +340,26 @@ func searchQueryCount(raw json.RawMessage) int {
 }
 
 func successfulKnownPathContracts(events []session.Event) (searches, commands int) {
-	type contractKind int
-	const (
-		searchContract contractKind = iota + 1
-		commandContract
-	)
 	type contractStart struct {
-		kind  contractKind
-		count int
+		searches int
+		command  bool
 	}
 	starts := make(map[string]contractStart)
 	for _, ev := range events {
 		switch ev.Type {
 		case session.EventToolStart:
-			switch {
-			case ev.Tool == "search" && exactKnownPathSearchInput(ev.Input) > 0:
-				starts[ev.ToolID] = contractStart{kind: searchContract, count: exactKnownPathSearchInput(ev.Input)}
-			case ev.Tool == "inspect" && exactKnownPathInspectSearchInput(ev.Input) > 0:
-				starts[ev.ToolID] = contractStart{kind: searchContract, count: exactKnownPathInspectSearchInput(ev.Input)}
-			case ev.Tool == "shell" && exactKnownPathCommandInput(ev.Input):
-				starts[ev.ToolID] = contractStart{kind: commandContract, count: 1}
+			start := contractStart{}
+			switch ev.Tool {
+			case "search": // Historical benchmark sessions.
+				start.searches = exactKnownPathSearchInput(ev.Input)
+			case "inspect": // Historical benchmark sessions.
+				start.searches = exactKnownPathInspectSearchInput(ev.Input)
+			case "shell":
+				start.searches = exactKnownPathShellSearchInput(ev.Input)
+				start.command = exactKnownPathCommandInput(ev.Input)
+			}
+			if start.searches > 0 || start.command {
+				starts[ev.ToolID] = start
 			}
 		case session.EventToolResult:
 			start, ok := starts[ev.ToolID]
@@ -359,16 +367,13 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 				continue
 			}
 			delete(starts, ev.ToolID)
-			switch start.kind {
-			case searchContract:
-				if (ev.Tool == "search" && ev.ResultMetrics["query_errors"] == 0) ||
-					(ev.Tool == "inspect" && ev.ResultMetrics["operation_errors"] == 0) {
-					searches += start.count
-				}
-			case commandContract:
-				if ev.Tool == "shell" {
-					commands++
-				}
+			if (ev.Tool == "search" && ev.ResultMetrics["query_errors"] == 0) ||
+				(ev.Tool == "inspect" && ev.ResultMetrics["operation_errors"] == 0) ||
+				(ev.Tool == "shell" && successfulShellResult(ev)) {
+				searches += start.searches
+			}
+			if ev.Tool == "shell" && start.command && successfulShellResult(ev) {
+				commands++
 			}
 		}
 	}
@@ -450,6 +455,255 @@ func exactKnownPathSearchInput(raw json.RawMessage) int {
 	return len(queries)
 }
 
+type shellMetricStep struct {
+	Command string   `json:"command"`
+	Argv    []string `json:"argv"`
+}
+
+type shellMetricInput struct {
+	Command string            `json:"command"`
+	Argv    []string          `json:"argv"`
+	Steps   []shellMetricStep `json:"steps"`
+}
+
+func parseShellMetricInput(raw json.RawMessage) (shellMetricInput, bool) {
+	var input shellMetricInput
+	return input, json.Unmarshal(raw, &input) == nil
+}
+
+func shellArgvGroups(raw json.RawMessage) [][]string {
+	input, ok := parseShellMetricInput(raw)
+	if !ok {
+		return nil
+	}
+	groups := make([][]string, 0, len(input.Steps)+1)
+	if len(input.Argv) > 0 {
+		groups = append(groups, input.Argv)
+	}
+	for _, step := range input.Steps {
+		if len(step.Argv) > 0 {
+			groups = append(groups, step.Argv)
+		}
+	}
+	return groups
+}
+
+func shellRGSearchCount(raw json.RawMessage) int {
+	input, ok := parseShellMetricInput(raw)
+	if !ok {
+		return 0
+	}
+	count := 0
+	for _, argv := range shellArgvGroups(raw) {
+		if len(argv) > 0 && filepath.Base(argv[0]) == "rg" && !contains(argv, "--files") {
+			count++
+		}
+	}
+	if input.Command != "" {
+		for _, field := range strings.Fields(input.Command) {
+			if filepath.Base(strings.Trim(field, `"'`)) == "rg" {
+				count++
+			}
+		}
+	}
+	return count
+}
+
+func exactKnownPathShellSearchInput(raw json.RawMessage) int {
+	seen := map[string]bool{}
+	for _, argv := range shellArgvGroups(raw) {
+		if key, ok := exactKnownPathRGArgv(argv); ok {
+			seen[key] = true
+		}
+	}
+	return len(seen)
+}
+
+func exactKnownPathRGArgv(argv []string) (string, bool) {
+	if len(argv) < 3 || filepath.Base(argv[0]) != "rg" {
+		return "", false
+	}
+	fixed := false
+	positional := make([]string, 0, 2)
+	for _, arg := range argv[1:] {
+		switch arg {
+		case "-F", "--fixed-strings":
+			fixed = true
+		case "-n", "--line-number", "--no-heading", "--with-filename", "--color=never", "--":
+			// Output-only flags do not change the benchmark contract.
+		default:
+			if strings.HasPrefix(arg, "-") {
+				return "", false
+			}
+			positional = append(positional, arg)
+		}
+	}
+	if len(positional) != 2 || normalizeFixturePath(positional[1]) != toolAccuracyFixture+"/known" {
+		return "", false
+	}
+	switch {
+	case fixed && positional[0] == "Widget(", !fixed && positional[0] == `Widget\(`:
+		return "widget", true
+	case fixed && positional[0] == "State{", !fixed && positional[0] == `State\{`:
+		return "state", true
+	case !fixed && positional[0] == "Marker[0-9]+":
+		return "marker", true
+	default:
+		return "", false
+	}
+}
+
+func repositoryLookupOperationCount(tool string, raw json.RawMessage) int {
+	switch tool {
+	case "search": // Historical benchmark sessions may carry several typed queries in one call.
+		return max(1, searchQueryCount(raw))
+	case "read_file", "glob", "list_dir", "rg", "grep": // Non-default names support archived/custom sessions.
+		return 1
+	case "shell":
+		count := 0
+		for _, argv := range shellArgvGroups(raw) {
+			if len(argv) == 0 {
+				continue
+			}
+			switch filepath.Base(argv[0]) {
+			case "rg", "grep", "find", "ls":
+				count++
+			}
+		}
+		return count
+	default:
+		return 0
+	}
+}
+
+func shellDiscoversFixture(raw json.RawMessage) bool {
+	input, ok := parseShellMetricInput(raw)
+	if !ok {
+		return false
+	}
+	for _, argv := range shellArgvGroups(raw) {
+		if discoveryArgvTargetsFixture(argv) {
+			return true
+		}
+	}
+	if input.Command == "" {
+		return false
+	}
+	command := strings.TrimSpace(input.Command)
+	command = strings.TrimSpace(strings.TrimSuffix(command, "| sort"))
+	fields := strings.Fields(command)
+	for i := range fields {
+		fields[i] = strings.Trim(fields[i], `"'`)
+	}
+	return discoveryArgvTargetsFixture(fields)
+}
+
+func discoveryArgvTargetsFixture(argv []string) bool {
+	const root = toolAccuracyFixture + "/discovery"
+	names := contractFixturePaths("discovery", "shard-%02d-hidden.txt")
+	for i := range names {
+		names[i] = path.Base(names[i])
+	}
+	if len(argv) == 0 {
+		return false
+	}
+	switch filepath.Base(argv[0]) {
+	case "rg":
+		var filesMode bool
+		var roots, patterns []string
+		for i := 1; i < len(argv); i++ {
+			arg := argv[i]
+			switch {
+			case arg == "--files":
+				filesMode = true
+			case arg == "-g" || arg == "--glob":
+				i++
+				if i >= len(argv) || strings.HasPrefix(argv[i], "!") {
+					return false
+				}
+				patterns = append(patterns, argv[i])
+			case strings.HasPrefix(arg, "--glob="):
+				pattern := strings.TrimPrefix(arg, "--glob=")
+				if pattern == "" || strings.HasPrefix(pattern, "!") {
+					return false
+				}
+				patterns = append(patterns, pattern)
+			case arg == "--hidden" || arg == "--no-ignore" || arg == "--no-ignore-vcs" || arg == "--follow" || arg == "-L":
+				// These options do not narrow the discovered fixture set.
+			case strings.HasPrefix(arg, "-"):
+				return false
+			default:
+				roots = append(roots, normalizeFixturePath(arg))
+			}
+		}
+		if !filesMode || len(roots) != 1 || roots[0] != root {
+			return false
+		}
+		return len(patterns) == 0 || patternsCoverNames(patterns, names)
+	case "find":
+		if len(argv) < 4 || normalizeFixturePath(argv[1]) != root {
+			return false
+		}
+		var fileType bool
+		var patterns []string
+		for i := 2; i < len(argv); i++ {
+			switch argv[i] {
+			case "-type":
+				i++
+				if i >= len(argv) || argv[i] != "f" {
+					return false
+				}
+				fileType = true
+			case "-name":
+				i++
+				if i >= len(argv) {
+					return false
+				}
+				patterns = append(patterns, argv[i])
+			default:
+				return false
+			}
+		}
+		return fileType && (len(patterns) == 0 || patternsCoverNames(patterns, names))
+	default:
+		return false
+	}
+}
+
+func patternsCoverNames(patterns, names []string) bool {
+	for _, name := range names {
+		covered := false
+		for _, pattern := range patterns {
+			if globCoversNames(pattern, []string{name}) {
+				covered = true
+				break
+			}
+		}
+		if !covered {
+			return false
+		}
+	}
+	return true
+}
+
+func successfulDiscoveryResult(event session.Event) bool {
+	if event.ResultError {
+		return false
+	}
+	if event.Tool == "shell" {
+		return successfulShellResult(event)
+	}
+	return event.ResultMetrics["query_errors"] == 0
+}
+
+func successfulShellResult(event session.Event) bool {
+	if event.ResultError {
+		return false
+	}
+	outcome, available := tools.CommandResultOutcome(llm.ToolResult{Metrics: event.ResultMetrics})
+	return !available || outcome == tools.CommandOutcomePassed
+}
+
 func exactKnownPathCommandInput(raw json.RawMessage) bool {
 	type step struct {
 		Name           string   `json:"name"`
@@ -488,7 +742,8 @@ func exactKnownPathCommandInput(raw json.RawMessage) bool {
 }
 
 func isDiscoveryTool(name string) bool {
-	return name == "glob" || name == "list_dir" || name == "search"
+	// Typed names are retained only to analyze archived benchmark sessions.
+	return name == "shell" || name == "glob" || name == "list_dir" || name == "search"
 }
 
 func discoveryTargetsFixture(tool string, raw json.RawMessage) bool {
@@ -498,6 +753,8 @@ func discoveryTargetsFixture(tool string, raw json.RawMessage) bool {
 		names[i] = path.Base(names[i])
 	}
 	switch tool {
+	case "shell":
+		return shellDiscoversFixture(raw)
 	case "glob":
 		var input struct {
 			Root    string `json:"root"`

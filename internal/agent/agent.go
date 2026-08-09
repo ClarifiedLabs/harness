@@ -39,8 +39,6 @@ const streamRetries = 2
 // connect-level Retry-After guard.
 const maxStreamRetryAfter = time.Minute
 
-
-
 // EventSink receives the prompt's observable events for rendering. The agent loop
 // owns the transcript and the control flow; the sink only reports. Phase 10's
 // renderer implements it (design §8.1, §10).
@@ -2504,7 +2502,6 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 		}(i, call)
 	}
 	wg.Wait()
-	a.tools.PrepareReadOnlyBatch(calls, results)
 
 	var total llm.Usage
 	for i, r := range results {

@@ -174,21 +174,19 @@ can be exempted while another late or unresolved miss remains effective.
 Ambiguous/invalid edits, timeouts, panics, unresolved misses, over-budget
 recovery, and unrelated top-level or nested errors are never forgiven.
 
-The v8 orientation oracle no longer requires `inspect` or a particular batching
-wrapper. `known_path_batching` enumerates all 18 fixture paths and requires
-successful reads covering them, successful directory-scoped regex searches for
-the two escaped literals and one regex, the exact two-step command result,
-requested marker evidence, and an unchanged fixture. Cosmetic command-step
-names are ignored. Historical nested search/inspect baselines and current
-flat-search/direct-read candidates normalize to the same evidence. Candidate
-adoption additionally requires no `inspect`, either a batched `read_file` or a
-turn coissuing multiple direct reads, and at least one turn coissuing independent
-repository lookups.
-`unknown_path_discovery` supplies only a root, requires successful complete
-discovery before any read, successful batched reads of the first and last
-discovered paths, requested marker evidence, and an unchanged fixture.
-Candidate adoption requires either a batched direct read or coissued direct
-reads and no `inspect`. Metrics also record successful read paths, direct read
+The orientation oracle uses the same minimal surface as the built-in agents.
+`known_path_batching` enumerates all 18 fixture paths and requires successful
+reads covering them, three successful directory-scoped argv-form `rg` searches
+through `shell` (two escaped literals and one regex), the exact two-step command
+result, requested marker evidence, and an unchanged fixture. Cosmetic command-
+step names are ignored. Candidate adoption additionally requires either a
+batched `read_file` or a turn coissuing multiple direct reads, plus at least one
+turn that coissues independent repository lookups.
+`unknown_path_discovery` supplies only a root, recognizes successful scoped
+`rg --files` or `find` discovery through `shell` before any read, and requires
+successful batched or coissued reads of the first and last discovered paths,
+requested marker evidence, and an unchanged fixture. Metrics also record
+successful read paths, direct read
 operations, coissued read/lookup turns, search context before and after shared
 batch shaping, duplicate and budget-omitted lines, low-yield search calls,
 batch bytes before/after, and bounded-search calls.
@@ -488,9 +486,9 @@ focused receipt is in
 One baseline Mimo sample also exposed an independent runtime-bound gap: it
 issued three searches with `path:"/"`, causing sorted ripgrep processes to scan
 the filesystem root for more than seven minutes before completing. Output caps
-did not provide a runtime cap. Treat typed-search runtime bounding as a separate
-tool-efficiency follow-up rather than folding it into the deduplication
-ablation.
+did not provide a runtime cap. This was a limitation of the historical typed
+search tool, which has since been removed; current built-in agents search through
+`shell` and its command timeout contract.
 
 The causal dedupe-only ablation then compared `01e272a` with its immediate
 root-safe aggregate-cap parent `9f49dbe`. The filesystem-root rejection was
@@ -554,9 +552,9 @@ per-token charge because both configured providers are subscription based.
 ## Decision rule going forward
 
 In the earlier workflow campaign, only background wait cleared the complete
-promotion gate. The optional search, steps, and git primitives remain available
-because they are bounded, useful, and do not force the model down the rejected
-path. The legacy todo-coissuing experiment was pure steering and was removed after its measured
+promotion gate. Structured command steps and catalog-only raw search/git
+wrappers remain available because they are useful and do not force built-in
+agents down the rejected path. The legacy todo-coissuing experiment was pure steering and was removed after its measured
 regression. The typed tool-accuracy package stopped at smoke first because edit
 precision failed; a focused guidance revision fixed that case. Longer focused
 confirmation cleared the smoke's Sonnet anomaly, but the resulting five-pair

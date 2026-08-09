@@ -3571,43 +3571,6 @@ func TestAllReadOnlyStepDispatchesConcurrently(t *testing.T) {
 	}
 }
 
-func TestReadOnlyBatchCoalescesSearchResults(t *testing.T) {
-	search := &recordTool{name: "search", readOnly: true, run: func(_ context.Context, input json.RawMessage) (string, error) {
-		if strings.Contains(string(input), "first") {
-			return "matches: first\n\n==> a.go:1-2 <==\n1\tshared\n2\talpha", nil
-		}
-		return "matches: second\n\n==> a.go:1-3 <==\n1\tshared\n3\tbeta", nil
-	}}
-	reg := &tools.Registry{}
-	reg.Register(search)
-
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{
-				toolDone(0, "a", "search", `{"pattern":"first"}`),
-				toolDone(1, "b", "search", `{"pattern":"second"}`),
-			},
-			Stop: llm.StopToolUse,
-		},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
-	)
-	a := newAgent(fp, reg, Options{})
-	sink := &recordSink{}
-
-	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunPrompt: %v", err)
-	}
-	mustValid(t, a.Transcript())
-	resultMessage := a.Transcript()[2]
-	combined := resultMessage.Content[0].ResultText + "\n" + resultMessage.Content[1].ResultText
-	if got := strings.Count(combined, "1\tshared"); got != 1 {
-		t.Fatalf("shared line count = %d, want 1:\n%s", got, combined)
-	}
-	if len(sink.results) != 2 || sink.results[0].Metrics["search_batch_calls"] != 2 {
-		t.Fatalf("sink results lack batch telemetry: %+v", sink.results)
-	}
-}
-
 func TestNonToolHooksDoNotDisableReadOnlyParallelDispatch(t *testing.T) {
 	run := barrierRun(2)
 	t1 := &recordTool{name: "r1", readOnly: true, run: run}

@@ -1,8 +1,6 @@
 package tools
 
 import (
-	"context"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -121,45 +119,5 @@ func TestReadManyFilesInlineErrorSuggestsSimilarPaths(t *testing.T) {
 	}
 	if !strings.Contains(out, "error: ") || !strings.Contains(out, "similar existing paths: ") || !strings.Contains(out, "usage.md") {
 		t.Errorf("inline per-file error should suggest usage.md:\n%s", out)
-	}
-}
-
-func TestSearchMissingPathSuggestsSimilarPaths(t *testing.T) {
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "usage.md"), "# usage\n")
-	input, err := json.Marshal(map[string]any{
-		"pattern": "needle",
-		"path":    filepath.Join(dir, "ussage.md"),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = (searchTool{}).Run(context.Background(), input)
-	if err == nil {
-		t.Fatal("expected not-found error")
-	}
-	for _, want := range []string{"path", "no such file or directory", "similar existing paths: ", "usage.md"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q missing %q", err, want)
-		}
-	}
-}
-
-func TestSearchExistingPathUnaffected(t *testing.T) {
-	dir := t.TempDir()
-	mustWrite(t, filepath.Join(dir, "f.txt"), "needle\n")
-	input, err := json.Marshal(map[string]any{
-		"pattern": "needle",
-		"path":    dir,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	out, err := (searchTool{}).Run(context.Background(), input)
-	if err != nil {
-		t.Fatalf("existing path should search fine: %v", err)
-	}
-	if !strings.Contains(out, "f.txt") {
-		t.Errorf("expected match listing, got %q", out)
 	}
 }

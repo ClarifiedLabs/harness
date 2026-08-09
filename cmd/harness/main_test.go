@@ -4639,7 +4639,7 @@ func TestRunLogsUnavailableToolsAtLaunch(t *testing.T) {
 			t.Fatalf("request advertised unavailable tool %q: %v", name, toolNames(fp.Requests[0]))
 		}
 	}
-	// Search is catalog-only, not advertised by auto.
+	// The removed typed search tool must not be advertised by auto.
 	if slices.Contains(toolNames(fp.Requests[0]), "search") {
 		t.Fatalf("default should not advertise search: %v", toolNames(fp.Requests[0]))
 	}

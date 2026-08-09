@@ -12,7 +12,7 @@
   "agents": {
     "focused_review": {
       "description": "Review a focused change when the parent needs an independent correctness check.",
-      "allowed_tools": ["read_file", "search", "git"],
+      "allowed_tools": ["read_file", "shell"],
       "mcp_tools": "read_only",
       "prompt": "Review the requested change and report concrete findings first."
     }

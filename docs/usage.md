@@ -1669,7 +1669,7 @@ value. Other fields continue to merge onto a built-in of the same name:
     "plan": { "prompt": "@~/.config/harness/plan-prompt.md" },
     "security_review": {
       "description": "Use after implementation for an independent review of concrete security issues.",
-      "allowed_tools": ["read_file", "list_dir", "search", "git_readonly"],
+      "allowed_tools": ["read_file", "shell"],
       "mcp_tools": "read_only",
       "workspace_access": "read_only",
       "model": "anthropic:claude-opus-4-8",
@@ -1828,8 +1828,8 @@ entries/branches/leaves/depth, direct and delegate tool/command activity,
 calls per tool-bearing turn, standalone TODO/single-inspection turns, result
 size/truncation/timing totals and per-tool result volume, normalized repeated
 call aggregates with arguments redacted, command-step use, `SKILL.md`
-reads/activations, search context volume/bounding, concurrent-search dedup batch
-size, overlap, low-yield calls, before/after bytes, active-context
+reads/activations, historical typed-search context/bounding and dedup-batch
+metrics when present, active-context
 composition and the latest request estimate, parallel batches, compactions,
 and a hierarchical delegate breakdown with the highest direct-token children.
 A child that has metadata and replay events
@@ -1927,8 +1927,8 @@ physical agents. A success or different failure breaks a streak. Tool failures
 are attributed to the event-time model identity; older logs use the preceding
 `model_request` before falling back to session metadata. Summaries include
 tool-result denominators, separately counted in-band command failures and
-cancellations, an effective combined failure rate, historical composite-inspect
-diagnostics, and current search-batch diagnostics carried in metrics.
+cancellations, an effective combined failure rate, and historical
+composite-inspect and typed-search batch diagnostics carried in old metrics.
 
 ### Session diagnostics
 
@@ -1944,11 +1944,11 @@ and failed results carry a structured `error_kind` plus a bounded, rune-safe
 `error_excerpt` (2 lines / 240 runes) for error analysis; skill activation records
 carry only source and status; neither includes
 skill bodies or adds model-visible content.
-Coissued typed-search results use those metrics to identify one batch owner and
-report candidate, unique, and shown source lines, duplicate lines, low-yield
-siblings, and aggregate bytes before and after deduplication;
-the source text and search arguments remain only in the ordinary session
-transcript.
+Historical typed-search result metrics remain decodable so old sessions can
+report their batch owner, candidate/unique/shown lines, duplicate lines,
+low-yield siblings, and before/after bytes. The removed tool emits no new such
+records; source text and arguments in old sessions remain only in their ordinary
+transcripts.
 New tool start/result records also snapshot `model_target`, `provider`,
 `api_type`, and `model`, making attribution stable if a resumed session later
 switches models.

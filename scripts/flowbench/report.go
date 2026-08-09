@@ -322,10 +322,10 @@ func adopted(name string, m metrics) bool {
 	case "edit_drift_recovery":
 		return m.ToolCalls["edit"] > 0 && m.ReadDriftAfterPhaseOne
 	case "known_path_batching":
-		return m.ToolCalls["inspect"] == 0 && m.ExactKnownPathSearches >= 3 && m.ExactKnownPathCommands == 1 &&
+		return m.ExactKnownPathSearches >= 3 && m.ExactKnownPathCommands == 1 &&
 			(m.BatchedReadCalls > 0 || m.CoissuedReadTurns > 0) && m.CoissuedLookupTurns > 0
 	case "unknown_path_discovery":
-		return m.DiscoveryBeforeRead && m.ToolCalls["inspect"] == 0 && (m.BatchedReadCalls > 0 || m.CoissuedReadTurns > 0)
+		return m.DiscoveryBeforeRead && (m.BatchedReadCalls > 0 || m.CoissuedReadTurns > 0)
 	default:
 		return false
 	}

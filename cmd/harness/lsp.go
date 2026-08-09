@@ -41,7 +41,7 @@ func lspDescriptionSuffix(r *lspRuntime) func(name, base string) string {
 			return base
 		}
 		switch name {
-		case "search", "grep", "rg", "glob":
+		case "grep", "rg", "glob":
 			return base + lspPreferSuffix
 		}
 		return base
@@ -153,7 +153,7 @@ func lspSystemHint(languages []string) string {
 	if len(languages) == 0 {
 		return "lsp_* tools enabled but no language server on PATH."
 	}
-	return "lsp_* available for: " + strings.Join(languages, ", ") + ". Prefer lsp_* over search for definitions, references, hover, symbols, diagnostics, and rename."
+	return "lsp_* available for: " + strings.Join(languages, ", ") + ". Prefer lsp_* over text search for definitions, references, hover, symbols, diagnostics, and rename."
 }
 
 // warnUnknownLSPTools logs a warning for each configured lsp.tools entry that did

@@ -69,28 +69,62 @@ func TestOrientationGuardSteersToBatching(t *testing.T) {
 		input := json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))
 		guard.recordTools([]llm.ToolCall{{Name: "read_file", Input: input}}, results)
 	}
-	if got := guard.steerMessage(); !strings.Contains(got, "Coissue") || !strings.Contains(got, "paths[]") {
+	got := guard.steerMessage()
+	if !strings.Contains(got, "Coissue") || !strings.Contains(got, "paths[]") || !strings.Contains(got, "shell") {
 		t.Fatalf("orientation steer = %q", got)
+	}
+	for _, unavailable := range []string{"search", "glob", "list_dir"} {
+		if strings.Contains(got, unavailable) {
+			t.Fatalf("orientation steer names unavailable tool %q: %q", unavailable, got)
+		}
 	}
 	if got := guard.steerMessage(); got != "" {
 		t.Fatalf("orientation steer repeated: %q", got)
 	}
 }
 
-func TestOrientationGuardIgnoresBatchedLookups(t *testing.T) {
-	for _, call := range []llm.ToolCall{
-		{Name: "read_file", Input: json.RawMessage(`{"paths":["a","b"]}`)},
-	} {
-		if isSingleOrientationTurn([]llm.ToolCall{call}) {
-			t.Errorf("%s batched call classified as single orientation lookup", call.Name)
-		}
+func TestOrientationProgressClassifiesSingleAndBatchedLookups(t *testing.T) {
+	reg := tools.Default()
+	tests := []struct {
+		name  string
+		calls []llm.ToolCall
+		want  int
+	}{
+		{
+			name:  "single read",
+			calls: []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)}},
+			want:  1,
+		},
+		{
+			name:  "single shell search",
+			calls: []llm.ToolCall{{Name: "shell", Input: json.RawMessage(`{"argv":["rg","needle","internal"]}`)}},
+			want:  1,
+		},
+		{
+			name:  "read paths batch",
+			calls: []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(`{"paths":["a","b"]}`)}},
+		},
+		{
+			name: "coissued reads",
+			calls: []llm.ToolCall{
+				{Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)},
+				{Name: "read_file", Input: json.RawMessage(`{"path":"b.go"}`)},
+			},
+			want: 2,
+		},
+		{
+			name:  "batched shell lookups",
+			calls: []llm.ToolCall{{Name: "shell", Input: json.RawMessage(`{"command":"rg first internal; rg second internal"}`)}},
+		},
 	}
-	searches := []llm.ToolCall{
-		{Name: "search", Input: json.RawMessage(`{"pattern":"a"}`)},
-		{Name: "search", Input: json.RawMessage(`{"pattern":"b"}`)},
-	}
-	if isSingleOrientationTurn(searches) {
-		t.Fatal("coissued searches classified as one sequential orientation lookup")
+	var guard turnGuard
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			progress := guard.aggregateTurnProgress(reg, 1, tt.calls, nil)
+			if progress.SingleLookupCount != tt.want {
+				t.Fatalf("single lookup count = %d, want %d", progress.SingleLookupCount, tt.want)
+			}
+		})
 	}
 }
 

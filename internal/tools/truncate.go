@@ -12,8 +12,6 @@ const (
 	defaultMaxResultLines      = 1000
 	defaultSearchResultBytes   = 32 * 1024
 	defaultSearchResultLines   = 500
-	defaultTypedSearchBytes    = 16 * 1024
-	defaultTypedSearchLines    = 250
 	defaultReadFileResultBytes = 32 * 1024
 )
 

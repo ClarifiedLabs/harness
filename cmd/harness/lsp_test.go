@@ -7,7 +7,7 @@ import (
 )
 
 func TestLSPSystemHint(t *testing.T) {
-	if got := lspSystemHint([]string{"go", "rust"}); got != "lsp_* available for: go, rust. Prefer lsp_* over search for definitions, references, hover, symbols, diagnostics, and rename." {
+	if got := lspSystemHint([]string{"go", "rust"}); got != "lsp_* available for: go, rust. Prefer lsp_* over text search for definitions, references, hover, symbols, diagnostics, and rename." {
 		t.Errorf("hint = %q", got)
 	}
 	if got := lspSystemHint(nil); got != "lsp_* tools enabled but no language server on PATH." {
@@ -40,7 +40,7 @@ func TestLSPDescriptionSuffix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		f := lspDescriptionSuffix(tc.runtime)
-		for _, name := range []string{"search", "glob", "grep", "rg", "read_file"} {
+		for _, name := range []string{"glob", "grep", "rg", "read_file"} {
 			if got := f(name, "base"); got != "base" {
 				t.Errorf("%s runtime must leave %s byte-identical, got %q", tc.name, name, got)
 			}
@@ -48,7 +48,7 @@ func TestLSPDescriptionSuffix(t *testing.T) {
 	}
 
 	f := lspDescriptionSuffix(enabled)
-	for _, name := range []string{"search", "glob", "grep", "rg"} {
+	for _, name := range []string{"glob", "grep", "rg"} {
 		got := f(name, "base")
 		if got != "base"+lspPreferSuffix {
 			t.Errorf("enabled suffix for %s = %q", name, got)

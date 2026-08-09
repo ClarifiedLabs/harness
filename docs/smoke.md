@@ -229,7 +229,7 @@ and the final synthesis, then `/exit`:
 
 | Case | Prompt shape | Expected steering |
 |---|---|---|
-| Narrow known lookup | “In `internal/agentdef/agentdef.go`, find `Definition` and tell me what `Reasoning` means. Do not edit.” | Parent uses direct search/read tools; no `delegate` event and no child record. |
+| Narrow known lookup | “In `internal/agentdef/agentdef.go`, find `Definition` and tell me what `Reasoning` means. Do not edit.” | Parent uses `shell`/`rg` and `read_file` directly; no `delegate` event and no child record. |
 | Broad architecture | “Trace delegation end to end from model-facing schema through child launch, recursive rebinding, persistence, and usage accounting. Cite paths/symbols; do not edit.” | Parent delegates to `explore`, then synthesizes and verifies its evidence. |
 | Independent multi-angle research | “Assess delegation from three independent angles: capability safety, context/cost behavior, and operator observability. Investigate in parallel where safe, then synthesize; do not edit.” | Multiple independent background children are reasonable; parent continues useful work, does not poll or duplicate them, and waits for automatic completion context before synthesis. |
 | Tightly coupled edit/test | “Make one small change to the delegate schema wording and update its focused test, then run that test.” | Parent owns the coupled edit/test loop rather than delegating it merely because `delegate` exists. Revert this smoke-only edit manually afterward. |

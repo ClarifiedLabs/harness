@@ -308,8 +308,8 @@ func (r *Registry) resultLimitsFor(toolName string) resultLimits {
 	return limits
 }
 
-// RegisterFileTools registers the built-in file tools (read_file, list_dir,
-// glob, search, edit, write_file) on r, in that order. It is the only
+// RegisterFileTools registers the built-in file tools (read_file, view_image,
+// list_dir, glob, edit, write_file) on r, in that order. It is the only
 // exported path to these tools; their types are unexported by design. apply_patch
 // is intentionally not here — it ships only in the constructible Catalog (see
 // CatalogWithOptions) since edit+write_file subsume it.
@@ -325,17 +325,8 @@ func registerFileTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	r.Register(viewImage{})
 	r.Register(listDir{})
 	r.Register(glob{})
-	registerSearchTool(r, opts)
 	r.Register(edit{})
 	r.Register(writeFile{})
-}
-
-func registerSearchTool(r *Registry, opts Options) {
-	rg, _ := newRipgrep(opts.Background)
-	r.Register(searchTool{program: rg.program})
-	r.SetToolResultLimits("search",
-		defaultToolResultBytes(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultTypedSearchBytes),
-		defaultToolResultLines(opts.RGResultBytes, opts.RGResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultTypedSearchLines))
 }
 
 func registerRawSearchTools(r *Registry, opts Options) {
@@ -395,14 +386,14 @@ func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 }
 
 // Default returns the built-in tools exposed to default-inheriting agents.
-// Directory/search/git wrappers remain in Catalog for explicit allowlisting.
+// Directory, raw-search, and git wrappers remain in Catalog for explicit allowlisting.
 func Default() *Registry {
 	r, _ := DefaultWithOptions(Options{})
 	return r
 }
 
 // DefaultWithOptions returns the default tool registry with configurable result
-// and read_file limits. Directory/search/git wrappers are Catalog-only.
+// and read_file limits. Directory, raw-search, and git wrappers are Catalog-only.
 func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 	r := &Registry{}
 	r.SetResultLimits(opts.MaxResultBytes, opts.MaxResultLines)
@@ -452,7 +443,7 @@ func CatalogWithDiagnostics() (*Registry, []DisabledTool) {
 
 // CatalogWithOptions returns the complete constructible tool catalog with
 // configurable limits. Agents may explicitly whitelist Catalog-only tools such
-// as list_dir, glob, search, git, and git_readonly.
+// as list_dir, glob, rg, grep, git, and git_readonly.
 func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
 	r := &Registry{}
 	r.SetResultLimits(opts.MaxResultBytes, opts.MaxResultLines)
@@ -461,7 +452,7 @@ func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
 	registerFileTools(r, &disabled, opts)
 	registerExecTools(r, &disabled, opts)
 	// Raw search commands remain constructible for custom agents that explicitly
-	// whitelist them, but the default model surface exposes only typed search.
+	// whitelist them; default-inheriting agents use shell for repository search.
 	registerRawSearchTools(r, opts)
 	// apply_patch overlaps edit+write_file, so it is kept out of the default
 	// request and registered only here, where agents may still whitelist it by

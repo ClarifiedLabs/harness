@@ -422,21 +422,10 @@ printf '\n'
 
 	r := &Registry{}
 	RegisterFileTools(r)
-	names := r.Names()
-	searchIndex := slices.Index(names, "search")
-	editIndex := slices.Index(names, "edit")
-	if searchIndex < 0 {
-		t.Fatalf("RegisterFileTools did not include typed search: %v", names)
-	}
-	if slices.Contains(names, "rg") || slices.Contains(names, "grep") {
-		t.Fatalf("default file tools should omit raw search commands: %v", names)
-	}
-	if !(searchIndex < editIndex) {
-		t.Errorf("search should be registered before edit: %v", names)
-	}
-	search, ok := r.Lookup("search")
-	if !ok || search.(searchTool).program == "" {
-		t.Fatalf("typed search should select available rg backend: %#v", search)
+	for _, name := range []string{"search", "rg", "grep"} {
+		if slices.Contains(r.Names(), name) {
+			t.Fatalf("RegisterFileTools unexpectedly included %q: %v", name, r.Names())
+		}
 	}
 }
 

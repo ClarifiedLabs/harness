@@ -1773,8 +1773,8 @@ Every `is_error` result also carries a diagnostics-only `ErrorKind`
 (`llm.ToolErrorKind`) that, like `Metrics`, never enters model-visible content.
 The dispatch/agent layers stamp `unknown_tool`, `invalid_args`, `timeout`,
 `cancelled`, `panic`, `hook_blocked`, `blocked` (workflow and repetition guards),
-`unsupported_modality`, `invalid_result`, and `regex_invalid` (search pattern
-pre-validation) directly; a tool declares one by wrapping its error with
+`unsupported_modality` and `invalid_result` directly; historical records may
+also contain `regex_invalid`. A tool declares a kind by wrapping its error with
 `tools.WithKind` (used for `edit_oldtext_not_found` /
 `edit_oldtext_ambiguous`), and the delegate tool stamps transient child
 failures as `rate_limited` / `provider_error`. WithKind leaves the error
@@ -1854,8 +1854,8 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 
 - **Builtin instructions** (`prompts/system.txt`): concise agentic-coding guidance — read before
   editing, prefer `edit` with unique context, use tools rather than guessing file
-  contents, use available search tools or `list_dir`, run builds/tests via
-  `shell`, stop when done.
+  contents, use `shell` with host search commands when paths are unknown, run
+  builds/tests via `shell`, stop when done.
 - **Environment context**, computed at startup:
 
   ```
@@ -2071,57 +2071,20 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   sorted output is truncated to the first `listDirCap` (1000) with a
   `[truncated: showing first 1000 of <N> matches; narrow the pattern or root]`
   marker (the total gains a `+` when the scan cap was hit).
-- Available to the default `auto`/`independent` agents and the shared
-  inspection set used by `explore`, `plan`, and `review`.
+- Catalog-only: built-in agents do not advertise it and use `shell` with host
+  commands such as `rg --files` or `find` for path discovery.
 
-### 9.3 `search` and raw search commands
+### 9.3 Repository search and raw search commands
 
-> Search contents by RE2 regex; escape punctuation.
-
-- `search` is the only content-search tool in built-in agent definitions. Its
-  flat input requires `pattern`; singular `path` defaults to `"."`; optional
-  `globs[]` and `case` (`smart`, `sensitive`, `insensitive`) control matching.
-  Result shape and budgets are host-owned rather than
-  model-authored: four surrounding lines, 60 matches, 12 files, and 200 rendered
-  source lines.
-- With ripgrep available, `search` streams `rg --json --sort=path`; otherwise a
-  standard-library walker supplies the same model-facing contract, skips hidden
-  directories and binary files, and uses Go regular expressions.
-- A `path` that does not exist is rejected before search runs, with
-  the same `similar existing paths` suggestions as read_file.
-- A `path` that is the filesystem root after lexical cleaning is rejected at
-  argument decode as excessively broad.
-- Patterns are pre-compiled at argument decode (respecting the smart-case
-  `(?i)` transform the stdlib walker applies; Go RE2 and
-  ripgrep's default engine are both RE2-class). An invalid regex fails fast as
-  `pattern: invalid regex: <compile error>; escape regex punctuation to match
-  it literally` with the kinded `regex_invalid` class instead of surfacing
-  an rg stderr dump or an `invalid_args` bucket.
-- Runtime ripgrep regex parser failures are remapped to `regex_invalid`.
-- Patterns that can match a newline (`\n`, `[\n]`, `\x0a`, …) are rejected by
-  ripgrep's default line-oriented mode; `search` detects that diagnostic and
-  retries once with `--multiline`, mapping the JSON span to start/end lines.
-  The stdlib walker opts into whole-content matching from the parsed pattern
-  syntax (literal newline or all-newline class). Multiline is enabled only for
-  such patterns: negated classes like `[^x]` keep line-bound semantics.
-- Context output groups matches by file, merges touching windows, numbers source
-  lines, and renders at most 200 source lines. No match is a successful
-  `(no matches)` result. `RunResult.Metrics` records shown matches/files, source
-  lines, and collection/context bounding for session analysis without entering
-  model context.
-- After a concurrent parallel island completes, two or more successful,
-  parseable, model-visible `search` results are shaped together. They retain one
-  `tool_result` per `tool_use`; duplicate `(path, line)` context is assigned to
-  the earliest sibling only. No additional aggregate line or byte cap is
-  applied, and parsing never restores context removed by an individual call's
-  ordinary host-owned bounds. Batch-only shaping does not set the
-  archive-oriented `Truncated` flag, but it updates shown/original bytes, adds a
-  model-visible duplicate marker where needed, and records diagnostics-only
-  overlap, yield, low-yield, and before/after-byte metrics on one batch owner.
-  Single searches and unparseable/error results are unchanged.
+- There is no typed repository-content search tool. Built-in agents use `shell`
+  with host commands such as `rg`, `rg --files`, and `find`; argv form is
+  preferred when quoting is unnecessary, and `steps[]` batches ordered commands.
+  This keeps the default model-facing surface aligned with the small built-in
+  agent tool lists.
 - Three consecutive turns containing one unbatched orientation lookup trigger
-  one soft steering message recommending coissued top-level read-only calls or
-  `read_file.paths[]`. It does not block execution.
+  one soft steering message recommending coissued `read_file` calls,
+  `read_file.paths[]` for known files, or batched repository lookups in one
+  `shell` call. It does not block execution.
 - Raw `grep` and optional `rg` are registered only in the complete tool catalog,
   not the default set. Custom agents may explicitly whitelist them for native
   CLI flags or background execution. Their input remains argv-style
@@ -2872,7 +2835,7 @@ fields have Harness-owned defaults. `Registry.Specs` therefore retains those
 field descriptions instead of applying its normal prose-stripping policy.
 
 Registration is anchored, not appended: `Register` inserts each `lsp_*` tool
-immediately after `search` (chaining each new tool after the previous one), so
+immediately after `glob` (chaining each new tool after the previous one), so
 the LSP block sits adjacent to the navigation tools it complements instead of
 trailing the whole catalog; a missing anchor falls back to append.
 
@@ -2880,7 +2843,7 @@ The per-tool " Symbols: prefer lsp_*." phrase was removed from every LSP tool
 description for context economy. The cross-reference moved to the navigation
 tools instead: when LSP tools are enabled and registered, the catalog's
 description-suffix hook appends a conditional " Symbols: prefer lsp_*." instruction
-to `search`, `glob`, `grep`, and `rg` at `Specs()` time (byte-identical
+to `glob`, `grep`, and `rg` at `Specs()` time (byte-identical
 descriptions when disabled or empty). The per-tool phrase removal also applies
 to the `harness lsp serve` shim surface, since both paths share the same static
 `internal/lspproxy` tool specs; that is intentional, while the conditional
@@ -3805,8 +3768,9 @@ type UsageTotals struct {
   totals, calls per tool-bearing turn, standalone TODO/single-inspection turns,
   result truncation/byte/timing totals and per-tool volume, redacted aggregates
   of repeated normalized calls, command-step shape, skill reads/activations,
-  search selected-versus-unique context lines and bounded-result counts, active transcript
-  composition, the latest request estimate, and a hierarchical delegate
+  historical typed-search selected-versus-unique context lines and bounded-result
+  counts when present, active transcript composition, the latest request estimate,
+  and a hierarchical delegate
   breakdown with the five highest direct-token children.
   The session header includes build identity and the non-secret runtime profile
   used for efficiency comparisons. A child without a completed

@@ -138,7 +138,7 @@ func allCases() map[string]benchmarkCase {
 		{
 			Name: "unknown_path_discovery",
 			Prompt: "Work directly; do not delegate or edit. Files are somewhere under .flowbench-tool-accuracy/discovery, but their paths are unknown. " +
-				"Discover all matching paths before reading any file, then read the first and last discovered files together. Independent repository lookups may be issued together in one turn. Report Discover01 and Discover18.",
+				"Use shell with rg --files or find to discover all matching paths before reading any file, then read the first and last discovered files together. Independent repository lookups may be issued together in one turn. Report Discover01 and Discover18.",
 			Setup: setupUnknownPathDiscovery, Score: scoreUnknownPathDiscovery,
 			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
 		},
@@ -196,8 +196,8 @@ func applyEditDrift(dir string) error {
 func knownPathBatchingPrompt() string {
 	paths := contractFixturePaths("known", "contract-%02d.txt")
 	return "Work directly; do not delegate or edit. Read these known paths efficiently: " + strings.Join(paths, ", ") + ". " +
-		"Search the .flowbench-tool-accuracy/known directory for the literal strings Widget( and State{ (escape the punctuation in the regular expressions) plus the regular expression Marker[0-9]+. Independent repository lookups may be issued together in one turn. " +
-		"Use exactly one shell call with output_mode full and two steps, in order: argv [\"printf\", \"STEP_ALPHA\\n\"] then argv [\"printf\", \"STEP_BETA\\n\"]. Report Marker01, Marker18, and both step outputs."
+		"Use argv-form rg calls through shell to search the .flowbench-tool-accuracy/known directory for the literal strings Widget( and State{ (escape the punctuation in the regular expressions) plus the regular expression Marker[0-9]+. Independent repository lookups may be issued together in one turn. " +
+		"For the requested step outputs, use exactly one shell call with output_mode full and two steps, in order: argv [\"printf\", \"STEP_ALPHA\\n\"] then argv [\"printf\", \"STEP_BETA\\n\"]. Report Marker01, Marker18, and both step outputs."
 }
 
 func setupKnownPathBatching(dir string) error {
@@ -289,8 +289,8 @@ func scoreKnownPathBatching(in scoreInput) score {
 	if in.Metrics.ExactKnownPathSearches < 3 {
 		result.Reasons = append(result.Reasons, "the two literal searches and one regex search were not completed successfully in the known directory")
 	}
-	if in.Metrics.ToolCalls["shell"] != 1 || in.Metrics.ExactKnownPathCommands != 1 {
-		result.Reasons = append(result.Reasons, "shell was not one successful exact full-output two-step argv batch")
+	if in.Metrics.ExactKnownPathCommands != 1 {
+		result.Reasons = append(result.Reasons, "the requested output steps were not one successful exact full-output argv batch")
 	}
 	if in.FixtureBefore != in.FixtureAfter {
 		result.Reasons = append(result.Reasons, "known-path fixture was modified")

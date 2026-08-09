@@ -94,7 +94,7 @@ func InspectionBoundaryBlocked(call llm.ToolCall, activity Activity) bool {
 // shell stays visible because argv-classified verification remains legal.
 func InspectionToolVisibleAtBoundary(name string) bool {
 	switch name {
-	case "read_file", "view_image", "list_dir", "glob", "search", "rg", "grep", "git_readonly", "web_fetch":
+	case "read_file", "view_image", "list_dir", "glob", "rg", "grep", "git_readonly", "web_fetch":
 		return false
 	default:
 		return true
@@ -287,9 +287,6 @@ func builtinActivity(name string, input json.RawMessage) (Activity, bool) {
 		activity.Class = ActivityInspect
 		activity.OperationCount = max(1, len(args.Paths))
 		activity.Batched = len(args.Paths) > 1
-		return activity, true
-	case "search":
-		activity.Class = ActivityInspect
 		return activity, true
 	case "background_jobs":
 		var args struct {

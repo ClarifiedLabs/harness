@@ -49,7 +49,7 @@ const commandRepeatSteerMsg = "[loop guard] The last several tool turns ran the 
 
 const errorStormSteerMsg = "[loop guard] Several consecutive tool calls have all failed. Re-read the latest error output and change your approach, or stop and report what is blocking you — do not keep retrying the same way."
 
-const orientationSteer = "[efficiency] The last several turns each performed one repository lookup. Coissue independent read_file, search, glob, or list_dir calls in one turn; use read_file paths[] when the files are already known."
+const orientationSteer = "[efficiency] The last several turns each performed one repository lookup. Coissue independent read_file calls in one turn; use read_file paths[] when the files are already known, or batch repository lookups in one shell call."
 
 const semanticProgressSteer = "[progress] The recent turns have remained in inspection without explicit progress. Synthesize the evidence, take the next concrete action appropriate to the task, validate the current result, or report the blocker."
 
@@ -235,10 +235,7 @@ func (g *turnGuard) recordTurn(calls []llm.ToolCall, results []llm.ContentBlock,
 // recordTools retains the small legacy test helper while production passes the
 // richer aggregate through recordTurn.
 func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock) {
-	progress := TurnProgress{ToolCalls: len(calls), InspectionOnly: len(calls) > 0, NoExplicitProgress: true}
-	if isSingleOrientationTurn(calls) {
-		progress.SingleLookupCount = 1
-	}
+	progress := g.aggregateTurnProgress(tools.Default(), 0, calls, results)
 	g.recordTurn(calls, results, &progress)
 }
 
@@ -339,27 +336,6 @@ func toolResultEvidence(result llm.ContentBlock) [sha256.Size]byte {
 	var signature [sha256.Size]byte
 	copy(signature[:], h.Sum(nil))
 	return signature
-}
-
-func isSingleOrientationTurn(calls []llm.ToolCall) bool {
-	if len(calls) != 1 {
-		return false
-	}
-	call := calls[0]
-	switch call.Name {
-	case "glob", "list_dir", "git_readonly":
-		return true
-	case "read_file":
-		var args struct {
-			Paths []string `json:"paths"`
-		}
-		_ = json.Unmarshal(call.Input, &args)
-		return len(args.Paths) < 2
-	case "search":
-		return true
-	default:
-		return false
-	}
 }
 
 // shouldBreakErrors reports whether the error storm has reached the hard stop.

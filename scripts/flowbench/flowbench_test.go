@@ -13,6 +13,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/internal/tools"
 )
 
 func TestBenchmarkArgsPinConfigModelAndReasoning(t *testing.T) {
@@ -111,7 +112,7 @@ func TestToolAccuracyCasesRegistered(t *testing.T) {
 		t.Fatal("drift case is not configured as a two-phase run")
 	}
 	knownPrompt := cases["known_path_batching"].Prompt
-	if !strings.Contains(knownPrompt, "Search the .flowbench-tool-accuracy/known directory") ||
+	if !strings.Contains(knownPrompt, "Use argv-form rg calls through shell") ||
 		!strings.Contains(knownPrompt, "Independent repository lookups may be issued together") {
 		t.Fatalf("known-path prompt lacks valid directory-scoped search guidance: %s", knownPrompt)
 	}
@@ -198,108 +199,127 @@ func TestObserveSearchResultMetricsCountsSharedBatchOnce(t *testing.T) {
 	}
 }
 
-func TestKnownPathContractEvidenceRequiresExactInputsAndSuccess(t *testing.T) {
-	validSearch := `{"queries":[{"pattern":"Widget(","fixed_strings":true,"paths":[".flowbench-tool-accuracy/known"]},{"pattern":"State{","fixed_strings":true,"paths":[".flowbench-tool-accuracy/known"]},{"pattern":"Marker[0-9]+","paths":[".flowbench-tool-accuracy/known"]}]}`
-	validCommand := `{"steps":[{"argv":["printf","STEP_ALPHA\n"]},{"argv":["printf","STEP_BETA\n"]}],"output_mode":"full"}`
-	evidence := func(searchInput, commandInput string, searchResult, commandResult session.Event) (int, int) {
-		return successfulKnownPathContracts([]session.Event{
-			{Type: session.EventToolStart, ToolID: "search", Tool: "search", Input: json.RawMessage(searchInput)},
-			searchResult,
-			{Type: session.EventToolStart, ToolID: "command", Tool: "shell", Input: json.RawMessage(commandInput)},
-			commandResult,
-		})
+func TestKnownPathContractEvidenceRequiresExactShellRGInputsAndSuccess(t *testing.T) {
+	root := ".flowbench-tool-accuracy/known"
+	validSearches := []string{
+		`{"argv":["rg","-n","Widget\\(","` + root + `"]}`,
+		`{"argv":["rg","--fixed-strings","State{","` + root + `"]}`,
+		`{"argv":["rg","Marker[0-9]+","` + root + `"]}`,
 	}
-	successfulSearch := session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search"}
-	successfulCommand := session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "shell"}
-	if searches, commands := evidence(validSearch, validCommand, successfulSearch, successfulCommand); searches != 3 || commands != 1 {
+	validCommand := `{"steps":[{"argv":["printf","STEP_ALPHA\n"]},{"argv":["printf","STEP_BETA\n"]}],"output_mode":"full"}`
+	evidence := func(searches []string, failedSearch int, commandInput string, commandError bool) (int, int) {
+		var events []session.Event
+		for i, input := range searches {
+			id := fmt.Sprintf("search-%d", i)
+			events = append(events,
+				session.Event{Type: session.EventToolStart, ToolID: id, Tool: "shell", Input: json.RawMessage(input)},
+				session.Event{Type: session.EventToolResult, ToolID: id, Tool: "shell", ResultError: i == failedSearch},
+			)
+		}
+		events = append(events,
+			session.Event{Type: session.EventToolStart, ToolID: "command", Tool: "shell", Input: json.RawMessage(commandInput)},
+			session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "shell", ResultError: commandError},
+		)
+		return successfulKnownPathContracts(events)
+	}
+	if searches, commands := evidence(validSearches, -1, validCommand, false); searches != 3 || commands != 1 {
 		t.Fatalf("valid evidence = %d/%d, want 3/1", searches, commands)
 	}
-	flatEvents := []session.Event{}
-	for i, input := range []string{
-		`{"pattern":"Widget\\(","path":".flowbench-tool-accuracy/known"}`,
-		`{"pattern":"State\\{","path":".flowbench-tool-accuracy/known"}`,
-		`{"pattern":"Marker[0-9]+","path":".flowbench-tool-accuracy/known"}`,
-	} {
-		id := fmt.Sprintf("flat-%d", i)
-		flatEvents = append(flatEvents,
-			session.Event{Type: session.EventToolStart, ToolID: id, Tool: "search", Input: json.RawMessage(input)},
-			session.Event{Type: session.EventToolResult, ToolID: id, Tool: "search"},
-		)
+
+	batchedSearches := `{"steps":[{"argv":["rg","-F","Widget(",".flowbench-tool-accuracy/known"]},{"argv":["rg","-F","State{",".flowbench-tool-accuracy/known"]},{"argv":["rg","Marker[0-9]+",".flowbench-tool-accuracy/known"]}]}`
+	batchedEvents := []session.Event{
+		{Type: session.EventToolStart, ToolID: "searches", Tool: "shell", Input: json.RawMessage(batchedSearches)},
+		{Type: session.EventToolResult, ToolID: "searches", Tool: "shell"},
 	}
-	if searches, _ := successfulKnownPathContracts(flatEvents); searches != 3 {
-		t.Fatalf("flat search evidence = %d, want 3", searches)
+	if searches, _ := successfulKnownPathContracts(batchedEvents); searches != 3 {
+		t.Fatalf("batched shell search evidence = %d, want 3", searches)
 	}
-	globScopedSearch := `{"queries":[{"pattern":"Widget\\(","globs":[".flowbench-tool-accuracy/known/*"]},{"pattern":"State\\{","globs":[".flowbench-tool-accuracy/known/*"]},{"pattern":"Marker[0-9]+","globs":[".flowbench-tool-accuracy/known/*"]}]}`
-	inspectInput := `{"operations":[{"tool":"search","input":` + globScopedSearch + `}]}`
-	inspectEvents := []session.Event{
-		{Type: session.EventToolStart, ToolID: "inspect", Tool: "inspect", Input: json.RawMessage(inspectInput)},
-		{Type: session.EventToolResult, ToolID: "inspect", Tool: "inspect", ResultMetrics: map[string]int{"operation_errors": 0}},
+	failedOutcome := []session.Event{
+		{Type: session.EventToolStart, ToolID: "search", Tool: "shell", Input: json.RawMessage(validSearches[0])},
+		{Type: session.EventToolResult, ToolID: "search", Tool: "shell", ResultMetrics: map[string]int{
+			tools.CommandMetricOutcomeAvailable: 1,
+			tools.CommandMetricFailed:           1,
+		}},
+		{Type: session.EventToolStart, ToolID: "command", Tool: "shell", Input: json.RawMessage(validCommand)},
+		{Type: session.EventToolResult, ToolID: "command", Tool: "shell", ResultMetrics: map[string]int{
+			tools.CommandMetricOutcomeAvailable: 1,
+			tools.CommandMetricCancelled:        1,
+		}},
 	}
-	if searches, _ := successfulKnownPathContracts(inspectEvents); searches != 3 {
-		t.Fatalf("nested inspect search evidence = %d, want 3", searches)
+	if searches, commands := successfulKnownPathContracts(failedOutcome); searches != 0 || commands != 0 {
+		t.Fatalf("failed shell outcomes counted as evidence: %d/%d", searches, commands)
 	}
-	inspectEvents[1].ResultMetrics["operation_errors"] = 1
-	if searches, _ := successfulKnownPathContracts(inspectEvents); searches != 0 {
-		t.Fatalf("failed nested inspect search evidence = %d, want 0", searches)
-	}
+
 	tests := []struct {
-		name          string
-		searchInput   string
-		commandInput  string
-		searchResult  session.Event
-		commandResult session.Event
-		wantSearch    int
-		wantCommand   int
+		name         string
+		searches     []string
+		failedSearch int
+		command      string
+		commandError bool
+		wantSearch   int
+		wantCommand  int
 	}{
-		{name: "literal regex unescaped", searchInput: strings.Replace(validSearch, `"Widget(","fixed_strings":true`, `"Widget("`, 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
-		{name: "pattern changed", searchInput: strings.Replace(validSearch, "Marker[0-9]+", "Marker.*", 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
-		{name: "scope broadened", searchInput: strings.Replace(validSearch, ".flowbench-tool-accuracy/known", ".", 1), commandInput: validCommand, searchResult: successfulSearch, commandResult: successfulCommand, wantCommand: 1},
-		{name: "search execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search", ResultError: true}, commandResult: successfulCommand, wantCommand: 1},
-		{name: "search query failed", searchInput: validSearch, commandInput: validCommand, searchResult: session.Event{Type: session.EventToolResult, ToolID: "search", Tool: "search", ResultMetrics: map[string]int{"query_errors": 1}}, commandResult: successfulCommand, wantCommand: 1},
-		{name: "empty second step", searchInput: validSearch, commandInput: strings.Replace(validCommand, `{"argv":["printf","STEP_BETA\n"]}`, `{}`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
-		{name: "wrong step input", searchInput: validSearch, commandInput: strings.Replace(validCommand, "STEP_BETA", "STEP_OTHER", 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
-		{name: "compact output", searchInput: validSearch, commandInput: strings.Replace(validCommand, `"full"`, `"receipt"`, 1), searchResult: successfulSearch, commandResult: successfulCommand, wantSearch: 3},
-		{name: "command execution failed", searchInput: validSearch, commandInput: validCommand, searchResult: successfulSearch, commandResult: session.Event{Type: session.EventToolResult, ToolID: "command", Tool: "shell", ResultError: true}, wantSearch: 3},
+		{name: "literal regex unescaped", searches: replaceString(validSearches, `Widget\\(`, `Widget(`), failedSearch: -1, command: validCommand, wantSearch: 2, wantCommand: 1},
+		{name: "pattern changed", searches: replaceString(validSearches, "Marker[0-9]+", "Marker.*"), failedSearch: -1, command: validCommand, wantSearch: 2, wantCommand: 1},
+		{name: "scope broadened", searches: replaceString(validSearches, root, "."), failedSearch: -1, command: validCommand, wantSearch: 0, wantCommand: 1},
+		{name: "search execution failed", searches: validSearches, failedSearch: 1, command: validCommand, wantSearch: 2, wantCommand: 1},
+		{name: "empty second step", searches: validSearches, failedSearch: -1, command: strings.Replace(validCommand, `{"argv":["printf","STEP_BETA\n"]}`, `{}`, 1), wantSearch: 3},
+		{name: "wrong step input", searches: validSearches, failedSearch: -1, command: strings.Replace(validCommand, "STEP_BETA", "STEP_OTHER", 1), wantSearch: 3},
+		{name: "compact output", searches: validSearches, failedSearch: -1, command: strings.Replace(validCommand, `"full"`, `"receipt"`, 1), wantSearch: 3},
+		{name: "command execution failed", searches: validSearches, failedSearch: -1, command: validCommand, commandError: true, wantSearch: 3},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			searches, commands := evidence(tt.searchInput, tt.commandInput, tt.searchResult, tt.commandResult)
+			searches, commands := evidence(tt.searches, tt.failedSearch, tt.command, tt.commandError)
 			if searches != tt.wantSearch || commands != tt.wantCommand {
 				t.Fatalf("evidence = %d/%d, want %d/%d", searches, commands, tt.wantSearch, tt.wantCommand)
 			}
 		})
 	}
 	commandWithNames := strings.ReplaceAll(validCommand, `{"argv"`, `{"name":"step","argv"`)
-	if _, commands := evidence(validSearch, commandWithNames, successfulSearch, successfulCommand); commands != 1 {
+	if _, commands := evidence(validSearches, -1, commandWithNames, false); commands != 1 {
 		t.Fatalf("cosmetic command step names rejected: %d", commands)
 	}
 }
 
-func TestDiscoveryTargetsFixtureRoot(t *testing.T) {
+func replaceString(values []string, old, new string) []string {
+	out := append([]string(nil), values...)
+	for i := range out {
+		out[i] = strings.ReplaceAll(out[i], old, new)
+	}
+	return out
+}
+
+func TestDiscoveryTargetsFixtureThroughShell(t *testing.T) {
 	for _, test := range []struct {
-		tool  string
 		input string
 		want  bool
 	}{
-		{"glob", `{"root":".flowbench-tool-accuracy/discovery","pattern":"**/*"}`, true},
-		{"glob", `{"root":".","pattern":".flowbench-tool-accuracy/discovery/**/*"}`, true},
-		{"list_dir", `{"path":".flowbench-tool-accuracy/discovery"}`, true},
-		{"search", `{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18}]}`, true},
-		{"list_dir", `{"path":".flowbench-tool-accuracy/discovery","glob":"missing-*"}`, false},
-		{"glob", `{"root":".flowbench-tool-accuracy/discovery","pattern":"missing-*"}`, false},
-		{"list_dir", `{"path":"."}`, false},
-		{"search", `{"queries":[{"pattern":"missing","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18}]}`, false},
-		{"search", `{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"]}]}`, false},
-		{"search", `{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18,"max_matches":1}]}`, false},
-		{"search", `{"queries":[{"pattern":"unrelated"}]}`, false},
+		{`{"argv":["rg","--files",".flowbench-tool-accuracy/discovery"]}`, true},
+		{`{"argv":["rg","--hidden","--files","--glob","*.txt",".flowbench-tool-accuracy/discovery"]}`, true},
+		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-type","f"]}`, true},
+		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-type","f","-name","shard-*-hidden.txt"]}`, true},
+		{`{"command":"find .flowbench-tool-accuracy/discovery -type f | sort"}`, true},
+		{`{"steps":[{"argv":["rg","--files",".flowbench-tool-accuracy/discovery"]}]}`, true},
+		{`{"argv":["rg","--files","."]}`, false},
+		{`{"argv":["rg","Discover",".flowbench-tool-accuracy/discovery"]}`, false},
+		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-name","missing-*"]}`, false},
+		{`{"argv":["rg","--files","--glob","missing-*",".flowbench-tool-accuracy/discovery"]}`, false},
 	} {
-		if got := discoveryTargetsFixture(test.tool, json.RawMessage(test.input)); got != test.want {
-			t.Errorf("discoveryTargetsFixture(%q, %s) = %v, want %v", test.tool, test.input, got, test.want)
+		if got := discoveryTargetsFixture("shell", json.RawMessage(test.input)); got != test.want {
+			t.Errorf("discoveryTargetsFixture(shell, %s) = %v, want %v", test.input, got, test.want)
 		}
 	}
 }
 
-func TestInspectOperationSummary(t *testing.T) {
+func TestHistoricalSearchLookupCountPreservesQueryCardinality(t *testing.T) {
+	input := json.RawMessage(`{"queries":[{"pattern":"one"},{"pattern":"two"},{"pattern":"three"}]}`)
+	if got := repositoryLookupOperationCount("search", input); got != 3 {
+		t.Fatalf("historical search lookup count = %d, want 3", got)
+	}
+}
+
+func TestInspectOperationSummaryForArchivedSessions(t *testing.T) {
 	input := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"paths":["./.flowbench-tool-accuracy/known/contract-01.txt",".flowbench-tool-accuracy/known/contract-02.txt"]}},{"tool":"search","input":{"queries":[]}}]}`)
 	operations, got := inspectOperationSummary(input)
 	want := contractFixturePaths("known", "contract-%02d.txt")[:2]
@@ -481,7 +501,7 @@ func TestToolAccuracyAcceptanceRequiresPositiveEfficiencyAndErrorReduction(t *te
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
-				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"search": 3, "read_file": 1, "shell": 1}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"read_file": 1, "shell": 4}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
 			)
 		}
 	}
@@ -632,7 +652,7 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 		t.Fatalf("known-path prompt does not enumerate fixture paths: %s", known.Prompt)
 	}
 	knownMetrics := metrics{
-		ToolCalls:              map[string]int{"read_file": 1, "search": 3, "shell": 1},
+		ToolCalls:              map[string]int{"read_file": 1, "shell": 4},
 		SuccessfulReadPaths:    contractFixturePaths("known", "contract-%02d.txt"),
 		SearchQueries:          3,
 		ExactKnownPathSearches: 3,
@@ -658,7 +678,7 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 
 	discoveryPaths := contractFixturePaths("discovery", "shard-%02d-hidden.txt")
 	validDiscovery := metrics{
-		ToolCalls:           map[string]int{"list_dir": 1, "read_file": 1},
+		ToolCalls:           map[string]int{"shell": 1, "read_file": 1},
 		SuccessfulReadPaths: []string{discoveryPaths[0], discoveryPaths[len(discoveryPaths)-1]},
 		DiscoveryBeforeRead: true,
 	}
@@ -874,7 +894,7 @@ func TestTodoAdoptionRequiresTodoCall(t *testing.T) {
 
 func TestOrientationAdoptionAcceptsCoissuedDirectReads(t *testing.T) {
 	known := metrics{
-		ToolCalls:              map[string]int{"search": 3, "read_file": 18, "shell": 1},
+		ToolCalls:              map[string]int{"read_file": 18, "shell": 4},
 		ExactKnownPathSearches: 3,
 		ExactKnownPathCommands: 1,
 		CoissuedReadTurns:      1,

@@ -147,7 +147,7 @@ func sanitizeToolName(name string) string {
 		return "unknown"
 	}
 	known := map[string]bool{
-		"read_file": true, "edit": true, "write_file": true, "apply_patch": true, "shell": true, "search": true, "rg": true, "grep": true, "glob": true, "list_dir": true, "git_readonly": true, "delegate": true, "background_jobs": true, "update_todos": true, "handoff": true, "view_image": true, "web_fetch": true,
+		"read_file": true, "edit": true, "write_file": true, "apply_patch": true, "shell": true, "rg": true, "grep": true, "glob": true, "list_dir": true, "git_readonly": true, "delegate": true, "background_jobs": true, "update_todos": true, "handoff": true, "view_image": true, "web_fetch": true,
 	}
 	if known[name] {
 		return truncate(name, 64)
@@ -196,7 +196,7 @@ func isSingleInspectTurn(toolNames []string) bool {
 		return false
 	}
 	switch normalized[0] {
-	case "read_file", "search", "rg", "grep", "glob", "list_dir", "git_readonly":
+	case "read_file", "rg", "grep", "glob", "list_dir", "git_readonly":
 		return true
 	default:
 		return false
@@ -409,7 +409,7 @@ func (s *Sink) RecordSearch(tool string, display string, metrics map[string]int)
 		return
 	}
 	tool = sanitizeToolName(tool)
-	if tool != "search" && tool != "rg" && tool != "grep" {
+	if tool != "rg" && tool != "grep" {
 		return
 	}
 	if strings.Contains(strings.ToLower(display), "no matches") {
@@ -417,9 +417,6 @@ func (s *Sink) RecordSearch(tool string, display string, metrics map[string]int)
 	}
 	if metrics != nil && (metrics["results_bounded"] != 0 || metrics["context_bounded"] != 0) {
 		s.exp.RecordSum("harness.search.bounded_calls", "{search}", 1, s.baseAttrs(nil))
-	}
-	if metrics != nil && metrics["search_batch_calls"] > 0 {
-		s.exp.RecordSum("harness.search.batch.calls", "{search}", 1, s.baseAttrs(nil))
 	}
 }
 

@@ -695,12 +695,6 @@ func TestDispatchTruncateLinesStillRespectsBytes(t *testing.T) {
 
 func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
 	r, _ := DefaultWithOptions(Options{})
-	// Search is Catalog-only, so an unregistered lookup falls back to the global limit.
-	searchLimits := r.resultLimitsFor("search")
-	if searchLimits.maxBytes != defaultMaxResultBytes || searchLimits.maxLines != defaultMaxResultLines {
-		t.Fatalf("search limits = %d/%d, want %d/%d (Default falls back to global)",
-			searchLimits.maxBytes, searchLimits.maxLines, defaultMaxResultBytes, defaultMaxResultLines)
-	}
 	readLimits := r.resultLimitsFor("read_file")
 	if readLimits.maxBytes != defaultReadFileResultBytes || readLimits.maxLines != defaultMaxResultLines {
 		t.Fatalf("read_file limits = %d/%d, want %d/%d",
@@ -711,13 +705,7 @@ func TestDefaultWithOptionsUsesNoisyToolResultDefaults(t *testing.T) {
 		t.Fatalf("web_fetch limits = %d/%d, want %d/%d",
 			fetchLimits.maxBytes, fetchLimits.maxLines, defaultSearchResultBytes, defaultSearchResultLines)
 	}
-	// Catalog retains the typed noisy defaults.
 	cat, _ := CatalogWithOptions(Options{})
-	catSearch := cat.resultLimitsFor("search")
-	if catSearch.maxBytes != defaultTypedSearchBytes || catSearch.maxLines != defaultTypedSearchLines {
-		t.Fatalf("catalog search limits = %d/%d, want %d/%d",
-			catSearch.maxBytes, catSearch.maxLines, defaultTypedSearchBytes, defaultTypedSearchLines)
-	}
 	catRead := cat.resultLimitsFor("read_file")
 	if catRead.maxBytes != defaultReadFileResultBytes || catRead.maxLines != defaultMaxResultLines {
 		t.Fatalf("catalog read_file limits = %d/%d, want %d/%d",
@@ -741,7 +729,7 @@ func TestGlobalResultLimitsOverrideNoisyToolDefaults(t *testing.T) {
 		MaxResultBytes: 1234,
 		MaxResultLines: 321,
 	})
-	for _, name := range []string{"search", "read_file"} {
+	for _, name := range []string{"web_fetch", "read_file"} {
 		limits := cat.resultLimitsFor(name)
 		if limits.maxBytes != 1234 || limits.maxLines != 321 {
 			t.Fatalf("catalog %s limits = %d/%d, want global 1234/321", name, limits.maxBytes, limits.maxLines)
@@ -754,12 +742,12 @@ func TestPerToolResultLimitsOverrideGlobalByField(t *testing.T) {
 	cat, _ := CatalogWithOptions(Options{
 		MaxResultBytes:      1000,
 		MaxResultLines:      200,
-		RGResultBytes:       3000,
+		GrepResultBytes:     3000,
 		ReadFileResultLines: 40,
 	})
-	searchLimits := cat.resultLimitsFor("search")
-	if searchLimits.maxBytes != 3000 || searchLimits.maxLines != 200 {
-		t.Fatalf("catalog search limits = %d/%d, want 3000/200", searchLimits.maxBytes, searchLimits.maxLines)
+	grepLimits := cat.resultLimitsFor("grep")
+	if grepLimits.maxBytes != 3000 || grepLimits.maxLines != 200 {
+		t.Fatalf("catalog grep limits = %d/%d, want 3000/200", grepLimits.maxBytes, grepLimits.maxLines)
 	}
 	readLimits := cat.resultLimitsFor("read_file")
 	if readLimits.maxBytes != 1000 || readLimits.maxLines != 40 {
@@ -778,11 +766,11 @@ func TestPerToolResultLimitsOverrideGlobalByField(t *testing.T) {
 
 func TestPerToolResultLimitSingleFieldInheritsGlobalDefault(t *testing.T) {
 	cat, _ := CatalogWithOptions(Options{
-		RGResultLines: 123,
+		GrepResultLines: 123,
 	})
-	searchLimits := cat.resultLimitsFor("search")
-	if searchLimits.maxBytes != defaultMaxResultBytes || searchLimits.maxLines != 123 {
-		t.Fatalf("catalog search limits = %d/%d, want %d/123", searchLimits.maxBytes, searchLimits.maxLines, defaultMaxResultBytes)
+	grepLimits := cat.resultLimitsFor("grep")
+	if grepLimits.maxBytes != defaultMaxResultBytes || grepLimits.maxLines != 123 {
+		t.Fatalf("catalog grep limits = %d/%d, want %d/123", grepLimits.maxBytes, grepLimits.maxLines, defaultMaxResultBytes)
 	}
 }
 
@@ -808,7 +796,7 @@ func TestCatalogRegistersDefaultPlusModeTools(t *testing.T) {
 	for _, n := range DefaultNames() {
 		wantSet[n] = true
 	}
-	for _, n := range []string{"list_dir", "glob", "search", "grep", "apply_patch", "write_tmp_file"} {
+	for _, n := range []string{"list_dir", "glob", "grep", "apply_patch", "write_tmp_file"} {
 		wantSet[n] = true
 	}
 	if RipgrepAvailable() {
@@ -877,19 +865,13 @@ func TestCatalogDiagnosticsForMissingCLITools(t *testing.T) {
 		}
 	}
 	if disabledContains(disabled, "rg") {
-		t.Fatalf("auto search mode should fall back to grep without a disabled rg diagnostic: %+v", disabled)
+		t.Fatalf("optional raw rg should be omitted without a disabled-tool diagnostic: %+v", disabled)
 	}
 }
 
-func TestTypedSearchFallsBackAndRawRipgrepIsOmittedWhenMissing(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-
-	r, _ := CatalogWithOptions(Options{})
-	if slices.Contains(r.Names(), "rg") {
-		t.Fatalf("CatalogWithOptions registered rg without its binary; names=%v", r.Names())
-	}
-	if !slices.Contains(r.Names(), "search") {
-		t.Fatalf("typed search missing without rg: %v", r.Names())
+func TestCatalogOmitsRemovedSearchTool(t *testing.T) {
+	if names := Catalog().Names(); slices.Contains(names, "search") {
+		t.Fatalf("Catalog registered removed search tool: %v", names)
 	}
 }
 
@@ -975,13 +957,13 @@ func TestDispatchNoTruncateWithinCaps(t *testing.T) {
 
 func TestDescriptionSuffixHook(t *testing.T) {
 	r := &Registry{}
-	r.Register(fakeTool{name: "search", desc: "base search", schema: `{"type":"object"}`})
+	r.Register(fakeTool{name: "glob", desc: "base glob", schema: `{"type":"object"}`})
 	r.Register(fakeTool{name: "read_file", desc: "base read", schema: `{"type":"object"}`})
 
 	// Nil hook leaves descriptions byte-identical.
 	specs := r.Specs()
 	for _, s := range specs {
-		want := map[string]string{"search": "base search", "read_file": "base read"}[s.Name]
+		want := map[string]string{"glob": "base glob", "read_file": "base read"}[s.Name]
 		if s.Description != want {
 			t.Fatalf("nil hook changed %s description: %q", s.Name, s.Description)
 		}
@@ -989,18 +971,18 @@ func TestDescriptionSuffixHook(t *testing.T) {
 
 	// Hook applies only to targeted names.
 	r.SetDescriptionSuffix(func(name, base string) string {
-		if name == "search" {
+		if name == "glob" {
 			return base + " SUFFIX"
 		}
 		return base
 	})
-	var sawSearch bool
+	var sawGlob bool
 	for _, s := range r.Specs() {
 		switch s.Name {
-		case "search":
-			sawSearch = true
-			if s.Description != "base search SUFFIX" {
-				t.Fatalf("search description = %q", s.Description)
+		case "glob":
+			sawGlob = true
+			if s.Description != "base glob SUFFIX" {
+				t.Fatalf("glob description = %q", s.Description)
 			}
 		case "read_file":
 			if s.Description != "base read" {
@@ -1008,13 +990,13 @@ func TestDescriptionSuffixHook(t *testing.T) {
 			}
 		}
 	}
-	if !sawSearch {
-		t.Fatal("search spec missing")
+	if !sawGlob {
+		t.Fatal("glob spec missing")
 	}
 
 	// Description() itself stays static.
-	tool, _ := r.Lookup("search")
-	if tool.Description() != "base search" {
+	tool, _ := r.Lookup("glob")
+	if tool.Description() != "base glob" {
 		t.Fatalf("Description() mutated: %q", tool.Description())
 	}
 
@@ -1029,10 +1011,10 @@ func TestDescriptionSuffixHook(t *testing.T) {
 
 func TestSubsetCarriesDescriptionSuffixHook(t *testing.T) {
 	r := &Registry{}
-	r.Register(fakeTool{name: "search", desc: "base", schema: `{"type":"object"}`})
 	r.Register(fakeTool{name: "glob", desc: "base", schema: `{"type":"object"}`})
+	r.Register(fakeTool{name: "read_file", desc: "base", schema: `{"type":"object"}`})
 	r.SetDescriptionSuffix(func(name, base string) string { return base + "+" })
-	sub, err := r.Subset([]string{"search", "glob"})
+	sub, err := r.Subset([]string{"glob", "read_file"})
 	if err != nil {
 		t.Fatalf("Subset: %v", err)
 	}
@@ -1047,13 +1029,12 @@ func TestRegisterAfter(t *testing.T) {
 	r := &Registry{}
 	r.Register(newOK("read_file", ""))
 	r.Register(newOK("glob", ""))
-	r.Register(newOK("search", ""))
 	r.Register(newOK("edit", ""))
 
 	// Insert immediately after the anchor.
-	r.RegisterAfter(newOK("lsp_definition", ""), "search")
+	r.RegisterAfter(newOK("lsp_definition", ""), "glob")
 	r.RegisterAfter(newOK("lsp_hover", ""), "lsp_definition")
-	want := []string{"read_file", "glob", "search", "lsp_definition", "lsp_hover", "edit"}
+	want := []string{"read_file", "glob", "lsp_definition", "lsp_hover", "edit"}
 	if got := r.Names(); !slices.Equal(got, want) {
 		t.Fatalf("order = %v, want %v", got, want)
 	}
