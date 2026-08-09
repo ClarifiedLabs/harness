@@ -47,7 +47,7 @@
     {
       "type": "function_call",
       "call_id": "call_01C",
-      "name": "list_dir",
+      "name": "read",
       "arguments": "{}"
     },
     {
@@ -77,7 +77,7 @@
     },
     {
       "type": "function",
-      "name": "list_dir",
+      "name": "read",
       "description": "List directory entries.",
       "parameters": {
         "type": "object",

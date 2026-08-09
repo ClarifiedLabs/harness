@@ -138,7 +138,7 @@ type Renderer struct {
 	disableDelegateStatus bool
 	statusActive          bool                  // in a wait; the ticker should keep the line painted
 	statusDrawn           bool                  // a status line is currently on the terminal
-	statusLabel           string                // e.g. "turn: 3" or "tool: grep args=[\"x\"]"
+	statusLabel           string                // e.g. "turn: 3" or "tool: shell argv=[\"rg\",\"x\"]"
 	statusStart           time.Time             // when the current wait began
 	statusCtx             agent.ContextEstimate // context usage to append for model waits (r27)
 	statusProgress        any                   // foreground delegate live-progress closure, or nil
@@ -1309,7 +1309,7 @@ func compactWaitLabel(label string) string {
 // visible instead of collapsing to a static delegate identity. Normal grammar
 // is:
 //
-//	· delegate d1 explore: turn 2 · tool read_file
+//	· delegate d1 explore: turn 2 · tool read
 //	· 3 delegates · latest d4 plan: turn 1 · thinking
 //
 // The greatest registry activity sequence selects the displayed child; equal

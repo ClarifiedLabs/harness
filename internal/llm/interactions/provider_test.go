@@ -75,7 +75,7 @@ func TestProviderStreamsThoughtSearchAndFunctionCall(t *testing.T) {
 		!strings.Contains(string(searchSteps[1].InteractionStep), `"type":"google_search_result"`) {
 		t.Fatalf("search steps = %+v", searchSteps)
 	}
-	if call == nil || call.ToolID != "call-1" || call.ToolName != "read_file" || string(call.ToolInput) != `{"path":"README.md"}` {
+	if call == nil || call.ToolID != "call-1" || call.ToolName != "read" || string(call.ToolInput) != `{"path":"README.md"}` {
 		t.Fatalf("call = %+v", call)
 	}
 	if done == nil || done.StopReason != llm.StopToolUse || done.ResponseID != "interaction-1" || done.Usage == nil {
@@ -175,7 +175,7 @@ func TestDecoderTextAndIncomplete(t *testing.T) {
 
 func TestDecoderAssemblesParallelAndMalformedFunctionCalls(t *testing.T) {
 	stream := strings.Join([]string{
-		`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call-a","name":"read_file","arguments":{}}}`,
+		`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call-a","name":"read","arguments":{}}}`,
 		``,
 		`data: {"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call-b","name":"rg","arguments":{}}}`,
 		``,
@@ -227,7 +227,7 @@ func TestDecoderAssemblesParallelAndMalformedFunctionCalls(t *testing.T) {
 
 func TestDecoderStopsAfterConsumerRejectsFlushedStep(t *testing.T) {
 	stream := strings.Join([]string{
-		`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call-a","name":"read_file","arguments":{"path":"README.md"}}}`,
+		`data: {"event_type":"step.start","index":0,"step":{"type":"function_call","id":"call-a","name":"read","arguments":{"path":"README.md"}}}`,
 		``,
 		`data: {"event_type":"interaction.completed","interaction":{"status":"completed"}}`,
 		``,

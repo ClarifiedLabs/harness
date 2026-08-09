@@ -60,13 +60,9 @@ type fileConfig struct {
 	AgentsMDWarnBytes             optional[int]                        `json:"agents_md_warn_bytes"`
 	ToolResultMaxBytes            optional[int]                        `json:"tool_result_max_bytes"`
 	ToolResultMaxLines            optional[int]                        `json:"tool_result_max_lines"`
-	RGResultMaxBytes              optional[int]                        `json:"rg_result_max_bytes"`
-	RGResultMaxLines              optional[int]                        `json:"rg_result_max_lines"`
-	GrepResultMaxBytes            optional[int]                        `json:"grep_result_max_bytes"`
-	GrepResultMaxLines            optional[int]                        `json:"grep_result_max_lines"`
-	ReadFileDefaultLimit          optional[int]                        `json:"read_file_default_limit"`
-	ReadFileResultMaxBytes        optional[int]                        `json:"read_file_result_max_bytes"`
-	ReadFileResultMaxLines        optional[int]                        `json:"read_file_result_max_lines"`
+	ReadDefaultLimit              optional[int]                        `json:"read_default_limit"`
+	ReadResultMaxBytes            optional[int]                        `json:"read_result_max_bytes"`
+	ReadResultMaxLines            optional[int]                        `json:"read_result_max_lines"`
 	CompactKeepTurns              optional[int]                        `json:"compact_keep_turns"`
 	CompactKeepTokens             optional[int]                        `json:"compact_keep_tokens"`
 	CompactAutoEnabled            optional[bool]                       `json:"compact_auto_enabled"`

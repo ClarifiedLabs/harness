@@ -347,8 +347,8 @@ func safeNoticeLine(message string) (string, bool) {
 }
 
 // safeToolActivity applies a strict allowlist. Every tool may expose its
-// sanitized name; only local path-oriented built-ins expose selected path
-// metadata. Commands, URLs, search patterns, arbitrary MCP arguments, and all
+// sanitized name; only read, write, and view_image expose a selected local
+// path. Commands, URLs, search patterns, arbitrary MCP arguments, and all
 // result bodies are intentionally omitted because they may contain credentials
 // or model/user content.
 func safeToolActivity(call llm.ToolCall) string {
@@ -357,25 +357,9 @@ func safeToolActivity(call llm.ToolCall) string {
 		name = "unknown"
 	}
 	summary := "tool " + name
-	switch name {
-	case "read_file", "write_file", "view_image":
+	if name == "read" || name == "write" || name == "view_image" {
 		if path := safeToolStringField(call.Input, "path"); path != "" {
 			summary += " path=" + strconv.Quote(path)
-		}
-	case "list_dir":
-		if path := safeToolStringField(call.Input, "path"); path != "" {
-			summary += " path=" + strconv.Quote(path)
-		}
-	case "glob":
-		if root := safeToolStringField(call.Input, "root"); root != "" {
-			summary += " root=" + strconv.Quote(root)
-		}
-	case "edit":
-		if path, count := safeEditPath(call.Input); path != "" {
-			summary += " path=" + strconv.Quote(path)
-			if count > 1 {
-				summary += fmt.Sprintf(" files=%d", count)
-			}
 		}
 	}
 	return sanitizeRetainedText(summary, maxActivityRunes)
@@ -414,22 +398,6 @@ func safeLocalPath(path string) bool {
 		}
 	}
 	return true
-}
-
-func safeEditPath(input json.RawMessage) (string, int) {
-	var args struct {
-		Files []struct {
-			Path string `json:"path"`
-		} `json:"files"`
-	}
-	if json.Unmarshal(input, &args) != nil || len(args.Files) == 0 {
-		return "", 0
-	}
-	path := sanitizeRetainedText(args.Files[0].Path, maxToolPathRunes)
-	if !safeLocalPath(path) {
-		return "", 0
-	}
-	return path, len(args.Files)
 }
 
 // sanitizeRetainedText strips ANSI CSI/OSC sequences, replaces other controls,

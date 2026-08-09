@@ -530,7 +530,7 @@ func TestBuildRequestServerTools(t *testing.T) {
 	req := llm.Request{
 		Model: "claude-opus-4-8",
 		Tools: []llm.ToolSchema{
-			{Name: "read_file", Parameters: json.RawMessage(`{}`)},
+			{Name: "read", Parameters: json.RawMessage(`{}`)},
 		},
 		ServerTools: []llm.ServerTool{
 			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindAnthropicWebSearch},
@@ -682,7 +682,7 @@ func thinkingChainRequest() llm.Request {
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 1
 				{Kind: llm.BlockThinking, Thinking: "old plan", ThinkingSignature: "sig-old"},
 				{Kind: llm.BlockRedactedThinking, RedactedData: "redacted-old"},
-				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
 			}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}}, // 2
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 3
@@ -692,7 +692,7 @@ func thinkingChainRequest() llm.Request {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "continue"}}}, // 4 <- boundary
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 5
 				{Kind: llm.BlockThinking, Thinking: "chain thought 1", ThinkingSignature: "sig-keep1"},
-				{Kind: llm.BlockToolUse, ToolUseID: "call_2", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"b.go"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_2", ToolName: "read", ToolInput: json.RawMessage(`{"path":"b.go"}`)},
 			}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_2", ResultText: "ok"}}}, // 6
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{ // 7

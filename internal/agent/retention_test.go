@@ -263,7 +263,7 @@ func TestStableMessagePrefix(t *testing.T) {
 		{
 			name: "mutating result",
 			messages: []llm.Message{
-				userText("q"), asstToolUse("call", "write_file", `{}`), toolResult("call", big),
+				userText("q"), asstToolUse("call", "write", `{}`), toolResult("call", big),
 			},
 			want: 3,
 		},
@@ -547,7 +547,7 @@ func TestAutoRetentionPreservesResponseStateBelowPressure(t *testing.T) {
 func TestAutoPressureEpochWithoutEligibleBlocksPreservesResponseState(t *testing.T) {
 	big := strings.Repeat("x", 60_000)
 	msgs := []llm.Message{
-		userText("q0"), asstToolUse("t0", "write_file", `{}`), toolResult("t0", big), asstText("a0"),
+		userText("q0"), asstToolUse("t0", "write", `{}`), toolResult("t0", big), asstText("a0"),
 	}
 	for i := 1; i <= 9; i++ {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))

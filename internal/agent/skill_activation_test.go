@@ -25,7 +25,7 @@ func TestCompleteSkillReadPinsInstructionsAndStoresReceipt(t *testing.T) {
 	input := fmt.Sprintf(`{"path":%q}`, path)
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{toolDone(0, "skill-read", "read_file", input)},
+			Events: []llm.StreamEvent{toolDone(0, "skill-read", "read", input)},
 			Stop:   llm.StopToolUse,
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
@@ -77,7 +77,7 @@ func TestCompleteSkillReadPinsInstructionsAndStoresReceipt(t *testing.T) {
 		t.Fatalf("archived results = %+v", sink.archived)
 	}
 	if len(sink.activations) != 1 ||
-		sink.activations[0] != (SkillActivationEvent{Source: "read_file", Status: "activated"}) {
+		sink.activations[0] != (SkillActivationEvent{Source: "read", Status: "activated"}) {
 		t.Fatalf("activation events = %+v", sink.activations)
 	}
 	archived := sink.archived[0]
@@ -94,8 +94,8 @@ func TestRepeatedSkillReadKeepsOnePinnedContext(t *testing.T) {
 	}
 	input := fmt.Sprintf(`{"path":%q}`, path)
 	fp := llmtest.New("fake",
-		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "read-1", "read_file", input)}, Stop: llm.StopToolUse},
-		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "read-2", "read_file", input)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "read-1", "read", input)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "read-2", "read", input)}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
 	a := newAgent(fp, tools.Catalog(), Options{})
@@ -128,7 +128,7 @@ func TestSkillActivationKeepsFullResultWhenArtifactWriteFails(t *testing.T) {
 	}
 	input := fmt.Sprintf(`{"path":%q}`, path)
 	fp := llmtest.New("fake",
-		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "skill-read", "read_file", input)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "skill-read", "read", input)}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
 	a := newAgent(fp, tools.Catalog(), Options{})
@@ -178,7 +178,7 @@ func TestPartialSkillReadDoesNotActivate(t *testing.T) {
 	}
 	input := fmt.Sprintf(`{"path":%q}`, path)
 	fp := llmtest.New("fake",
-		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "partial", "read_file", input)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "partial", "read", input)}, Stop: llm.StopToolUse},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
 	a := newAgent(fp, tools.Catalog(), Options{})

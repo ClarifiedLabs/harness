@@ -520,9 +520,9 @@ func TestMCPRefresherAppliesAsyncRegistration(t *testing.T) {
 
 	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read_file"}, MCPTools: agentdef.MCPToolsAll},
+		"auto": {Name: "auto", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll},
 	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
 
 	var errw strings.Builder
 	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
@@ -558,7 +558,7 @@ func TestMCPRefresherAppliesAsyncRegistration(t *testing.T) {
 func TestAsyncMCPRegistrationRestoresExplicitWhitelistTool(t *testing.T) {
 	catalog := tools.Catalog()
 	agents := map[string]agentdef.Definition{
-		"locked": {Name: "locked", AllowedTools: []string{"read_file", "mcp__test__async"}},
+		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__async"}},
 	}
 	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
 	initial, err := subsetForAgentTools(catalog, agents["locked"].AllowedTools, pending)
@@ -617,9 +617,9 @@ func TestAsyncMCPRegistrationRegistersToolsForUnknownAgent(t *testing.T) {
 
 	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read_file"}, MCPTools: agentdef.MCPToolsAll},
+		"auto": {Name: "auto", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll},
 	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
 	refresh := newMCPRefresher(conn, catalog, agents, bases, mcptools.Summary{}, mcptools.Summary{}, slog.New(slog.DiscardHandler), pending)
 
 	// The refresh fires for an agent the map does not contain.
@@ -646,7 +646,7 @@ func TestAsyncMCPRegistrationRegistersToolsForUnknownAgent(t *testing.T) {
 func TestAsyncMCPRegistrationPrunesUnknownWhitelistTool(t *testing.T) {
 	catalog := tools.Catalog()
 	agents := map[string]agentdef.Definition{
-		"locked": {Name: "locked", AllowedTools: []string{"read_file", "mcp__test__async", "mcp__typo__missing"}},
+		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__async", "mcp__typo__missing"}},
 	}
 	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
 	discovered := &tools.Registry{}
@@ -791,9 +791,9 @@ func TestMCPRefresherAddsAndRemovesTools(t *testing.T) {
 	// An mcp_tools=all agent re-unions the live MCP names (alpha + gamma after
 	// the swap).
 	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read_file", "mcp__test__alpha", "mcp__test__beta"}, MCPTools: agentdef.MCPToolsAll},
+		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__test__alpha", "mcp__test__beta"}, MCPTools: agentdef.MCPToolsAll},
 	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
 	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
 
 	// No change yet: not dirty.
@@ -851,10 +851,10 @@ func TestMCPRefresherSkipsUnaffectedWhitelistAgent(t *testing.T) {
 	// "locked" is the current agent: an explicit whitelist of built-ins only, not
 	// in bases. "auto" is a default-inheriting agent in bases.
 	agents := map[string]agentdef.Definition{
-		"locked": {Name: "locked", AllowedTools: []string{"read_file", "grep"}},
-		"auto":   {Name: "auto", AllowedTools: []string{"read_file", "mcp__test__alpha", "mcp__test__beta"}, MCPTools: agentdef.MCPToolsAll},
+		"locked": {Name: "locked", AllowedTools: []string{"read", "shell"}},
+		"auto":   {Name: "auto", AllowedTools: []string{"read", "mcp__test__alpha", "mcp__test__beta"}, MCPTools: agentdef.MCPToolsAll},
 	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
 	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
 
 	// Swap beta for gamma and fire list_changed.
@@ -891,7 +891,7 @@ func TestMCPRefresherSwapsWhitelistAgentLosingTool(t *testing.T) {
 
 	// "locked" explicitly whitelists mcp__test__beta, which is about to vanish.
 	agents := map[string]agentdef.Definition{
-		"locked": {Name: "locked", AllowedTools: []string{"read_file", "mcp__test__beta"}},
+		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__beta"}},
 	}
 	refresh := newMCPRefresher(conn, catalog, agents, mcpAgentBases{}, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
 
@@ -926,9 +926,9 @@ func TestMCPRefresherFailedRefreshKeepsDirtyForRetry(t *testing.T) {
 	}
 
 	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read_file", "mcp__test__alpha"}, MCPTools: agentdef.MCPToolsAll},
+		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__test__alpha"}, MCPTools: agentdef.MCPToolsAll},
 	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
 	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
 
 	provider.setTools([]mcp.Tool{mcpTool("mcp__test__beta")})
@@ -981,8 +981,8 @@ func TestAugmentAgentsWithMCP(t *testing.T) {
 	def := agentdef.DefaultTools()
 	agents := map[string]agentdef.Definition{
 		"auto":   {Name: "auto", AllowedTools: slices.Clone(def), MCPTools: agentdef.MCPToolsAll},
-		"plan":   {Name: "plan", AllowedTools: []string{"read_file"}, MCPTools: agentdef.MCPToolsReadOnly},
-		"locked": {Name: "locked", AllowedTools: []string{"read_file", "grep"}, MCPTools: agentdef.MCPToolsDisabled},
+		"plan":   {Name: "plan", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsReadOnly},
+		"locked": {Name: "locked", AllowedTools: []string{"read", "shell"}, MCPTools: agentdef.MCPToolsDisabled},
 	}
 	augmentAgentsWithMCP(agents, []string{"mcp__test__echo", "mcp__test__read"}, []string{"mcp__test__read"})
 
@@ -1082,9 +1082,9 @@ func TestMCPRefresherAppliesToolCap(t *testing.T) {
 
 	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read_file"}, MCPTools: agentdef.MCPToolsAll},
+		"auto": {Name: "auto", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll},
 	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read_file"}, Mode: agentdef.MCPToolsAll}}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
 	refresh := newMCPRefresher(conn, catalog, agents, bases, mcptools.Summary{}, mcptools.Summary{}, slog.New(slog.DiscardHandler), pending, mcpLimits{maxTools: 1})
 
 	sel, _ := refresh(context.Background(), "auto")

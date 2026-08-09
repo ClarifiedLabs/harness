@@ -159,53 +159,6 @@ func TestFlattenJSONStrings(t *testing.T) {
 	}
 }
 
-func TestSearchQueryCount(t *testing.T) {
-	if got := searchQueryCount(json.RawMessage(`{"queries":[{"pattern":"one"},{"pattern":"two"},{"pattern":"three"}]}`)); got != 3 {
-		t.Fatalf("searchQueryCount = %d, want 3", got)
-	}
-	if got := searchQueryCount(json.RawMessage(`{"pattern":"flat"}`)); got != 1 {
-		t.Fatalf("searchQueryCount flat input = %d, want 1", got)
-	}
-}
-
-func TestObserveSearchResultMetricsCountsSharedBatchOnce(t *testing.T) {
-	var got metrics
-	observeSearchResultMetrics(&got, map[string]int{
-		"search_batch_member":                     1,
-		"search_batch_metrics_owner":              1,
-		"search_batch_calls":                      3,
-		"search_batch_context_lines_before":       90,
-		"search_batch_unique_context_lines":       50,
-		"search_batch_context_lines_after":        40,
-		"search_batch_duplicate_lines_suppressed": 40,
-		"search_batch_budget_lines_omitted":       10,
-		"search_batch_low_yield_calls":            1,
-		"search_batch_bytes_before":               9000,
-		"search_batch_bytes_after":                4000,
-		"context_bounded":                         1,
-	})
-	observeSearchResultMetrics(&got, map[string]int{
-		"search_batch_member": 1,
-		"context_lines":       20,
-	})
-	for name, values := range map[string][2]int{
-		"shown":          {got.SearchContextLines, 40},
-		"before":         {got.SearchContextLinesBeforeBatch, 90},
-		"duplicates":     {got.SearchDuplicateLines, 40},
-		"budget omitted": {got.SearchBudgetOmittedLines, 10},
-		"batches":        {got.SearchBatches, 1},
-		"batch calls":    {got.SearchBatchCalls, 3},
-		"low yield":      {got.SearchLowYieldCalls, 1},
-		"bytes before":   {got.SearchBatchBytesBefore, 9000},
-		"bytes after":    {got.SearchBatchBytesAfter, 4000},
-		"bounded":        {got.SearchBoundedCalls, 1},
-	} {
-		if values[0] != values[1] {
-			t.Errorf("%s = %d, want %d", name, values[0], values[1])
-		}
-	}
-}
-
 func TestKnownPathContractEvidenceRequiresExactShellRGInputsAndSuccess(t *testing.T) {
 	root := ".flowbench-tool-accuracy/known"
 	validSearches := []string{
@@ -324,39 +277,57 @@ func TestDiscoveryTargetsFixtureThroughShell(t *testing.T) {
 		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-name","missing-*"]}`, false},
 		{`{"argv":["rg","--files","--glob","missing-*",".flowbench-tool-accuracy/discovery"]}`, false},
 	} {
-		if got := discoveryTargetsFixture("shell", json.RawMessage(test.input)); got != test.want {
-			t.Errorf("discoveryTargetsFixture(shell, %s) = %v, want %v", test.input, got, test.want)
+		if got := shellDiscoversFixture(json.RawMessage(test.input)); got != test.want {
+			t.Errorf("shellDiscoversFixture(%s) = %v, want %v", test.input, got, test.want)
 		}
 	}
 }
 
-func TestReadFilePathsNormalizeAbsoluteFixturePaths(t *testing.T) {
+func TestReadPathsNormalizeAbsoluteFixturePaths(t *testing.T) {
 	input := json.RawMessage(`{"path":"/tmp/worktree/.flowbench-tool-accuracy/discovery/shard-01-hidden.txt"}`)
 	want := ".flowbench-tool-accuracy/discovery/shard-01-hidden.txt"
-	if got := readFilePaths(input); len(got) != 1 || got[0] != want {
+	if got := readPaths(input); len(got) != 1 || got[0] != want {
 		t.Fatalf("absolute fixture path normalized to %v, want %q", got, want)
 	}
 }
 
-func TestHistoricalSearchLookupCountPreservesQueryCardinality(t *testing.T) {
-	input := json.RawMessage(`{"queries":[{"pattern":"one"},{"pattern":"two"},{"pattern":"three"}]}`)
-	if got := repositoryLookupOperationCount("search", input); got != 3 {
-		t.Fatalf("historical search lookup count = %d, want 3", got)
+func TestRemovedTypedSearchEventsDoNotSatisfyKnownPathOracle(t *testing.T) {
+	searchInput := json.RawMessage(`{"queries":[{"pattern":"Widget\\(","paths":[".flowbench-tool-accuracy/known"]},{"pattern":"State\\{","paths":[".flowbench-tool-accuracy/known"]},{"pattern":"Marker[0-9]+","paths":[".flowbench-tool-accuracy/known"]}]}`)
+	inspectInput := json.RawMessage(`{"operations":[{"tool":"search","input":{"queries":[{"pattern":"Marker[0-9]+","paths":[".flowbench-tool-accuracy/known"]}]}}]}`)
+	for _, tool := range []string{"search", "inspect", "rg", "grep"} {
+		input := searchInput
+		if tool == "inspect" {
+			input = inspectInput
+		}
+		events := []session.Event{
+			{Type: session.EventToolStart, ToolID: "typed", Tool: tool, Input: input},
+			{Type: session.EventToolResult, ToolID: "typed", Tool: tool},
+		}
+		if searches, commands := successfulKnownPathContracts(events); searches != 0 || commands != 0 {
+			t.Errorf("removed %s events satisfied known-path oracle: %d searches, %d commands", tool, searches, commands)
+		}
 	}
 }
 
-func TestInspectOperationSummaryForArchivedSessions(t *testing.T) {
-	input := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"paths":["./.flowbench-tool-accuracy/known/contract-01.txt",".flowbench-tool-accuracy/known/contract-02.txt"]}},{"tool":"search","input":{"queries":[]}}]}`)
-	operations, got := inspectOperationSummary(input)
-	want := contractFixturePaths("known", "contract-%02d.txt")[:2]
-	if operations != 2 || !sameFixturePaths(got, want) {
-		t.Fatalf("inspectOperationSummary = %d, %v; want 2, %v", operations, got, want)
+func TestRemovedTypedDiscoveryEventsDoNotSatisfyDiscoveryOracle(t *testing.T) {
+	inputs := map[string]json.RawMessage{
+		"glob":     json.RawMessage(`{"root":".flowbench-tool-accuracy/discovery","pattern":"*.txt"}`),
+		"list_dir": json.RawMessage(`{"path":".flowbench-tool-accuracy/discovery"}`),
+		"search":   json.RawMessage(`{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18}]}`),
+	}
+	for tool, input := range inputs {
+		event := session.Event{Type: session.EventToolStart, Tool: tool, Input: input}
+		if discoveryStartTargetsFixture(event) {
+			t.Errorf("removed %s event satisfied discovery oracle", tool)
+		}
+		if got := repositoryLookupOperationCount(tool, input); got != 0 {
+			t.Errorf("removed %s event counted as %d repository lookups", tool, got)
+		}
 	}
 }
 
 func TestSuccessfulDriftRereadRequiresSuccessfulCorrelatedResult(t *testing.T) {
 	readInput := json.RawMessage(`{"path":".flowbench-tool-accuracy/edit-drift.txt"}`)
-	inspectInput := json.RawMessage(`{"operations":[{"tool":"read_file","input":{"path":".flowbench-tool-accuracy/edit-drift.txt"}}]}`)
 	tests := []struct {
 		name   string
 		events []session.Event
@@ -365,45 +336,37 @@ func TestSuccessfulDriftRereadRequiresSuccessfulCorrelatedResult(t *testing.T) {
 		{
 			name: "direct success",
 			events: []session.Event{
-				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read_file", Input: readInput},
-				{Type: session.EventToolResult, Prompt: 2, ToolID: "read", Tool: "read_file"},
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "read", Tool: "read"},
 			},
 			want: true,
 		},
 		{
 			name: "direct failure",
 			events: []session.Event{
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "read", Tool: "read", ResultError: true},
+			},
+		},
+		{
+			name: "removed read_file tool",
+			events: []session.Event{
 				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read_file", Input: readInput},
-				{Type: session.EventToolResult, Prompt: 2, ToolID: "read", Tool: "read_file", ResultError: true},
-			},
-		},
-		{
-			name: "inspect success",
-			events: []session.Event{
-				{Type: session.EventToolStart, Prompt: 2, ToolID: "inspect", Tool: "inspect", Input: inspectInput},
-				{Type: session.EventToolResult, Prompt: 2, ToolID: "inspect", Tool: "inspect"},
-			},
-			want: true,
-		},
-		{
-			name: "inspect nested failure",
-			events: []session.Event{
-				{Type: session.EventToolStart, Prompt: 2, ToolID: "inspect", Tool: "inspect", Input: inspectInput},
-				{Type: session.EventToolResult, Prompt: 2, ToolID: "inspect", Tool: "inspect", ResultMetrics: map[string]int{"operation_errors": 1}},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "read", Tool: "read_file"},
 			},
 		},
 		{
 			name: "phase one",
 			events: []session.Event{
-				{Type: session.EventToolStart, Prompt: 1, ToolID: "read", Tool: "read_file", Input: readInput},
-				{Type: session.EventToolResult, Prompt: 1, ToolID: "read", Tool: "read_file"},
+				{Type: session.EventToolStart, Prompt: 1, ToolID: "read", Tool: "read", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 1, ToolID: "read", Tool: "read"},
 			},
 		},
 		{
 			name: "uncorrelated success",
 			events: []session.Event{
-				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read_file", Input: readInput},
-				{Type: session.EventToolResult, Prompt: 2, ToolID: "other", Tool: "read_file"},
+				{Type: session.EventToolStart, Prompt: 2, ToolID: "read", Tool: "read", Input: readInput},
+				{Type: session.EventToolResult, Prompt: 2, ToolID: "other", Tool: "read"},
 			},
 		},
 	}
@@ -527,7 +490,7 @@ func TestToolAccuracyAcceptanceRequiresPositiveEfficiencyAndErrorReduction(t *te
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
-				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"read_file": 1, "shell": 4}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"read": 1, "shell": 4}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
 			)
 		}
 	}
@@ -678,7 +641,7 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 		t.Fatalf("known-path prompt does not enumerate fixture paths: %s", known.Prompt)
 	}
 	knownMetrics := metrics{
-		ToolCalls:              map[string]int{"read_file": 1, "shell": 4},
+		ToolCalls:              map[string]int{"read": 1, "shell": 4},
 		SuccessfulReadPaths:    contractFixturePaths("known", "contract-%02d.txt"),
 		SearchQueries:          3,
 		ExactKnownPathSearches: 3,
@@ -704,7 +667,7 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 
 	discoveryPaths := contractFixturePaths("discovery", "shard-%02d-hidden.txt")
 	validDiscovery := metrics{
-		ToolCalls:           map[string]int{"shell": 1, "read_file": 1},
+		ToolCalls:           map[string]int{"shell": 1, "read": 1},
 		SuccessfulReadPaths: []string{discoveryPaths[0], discoveryPaths[len(discoveryPaths)-1]},
 		DiscoveryBeforeRead: true,
 	}
@@ -951,7 +914,7 @@ func TestTodoAdoptionRequiresTodoCall(t *testing.T) {
 
 func TestOrientationAdoptionAcceptsCoissuedDirectReads(t *testing.T) {
 	known := metrics{
-		ToolCalls:              map[string]int{"read_file": 18, "shell": 4},
+		ToolCalls:              map[string]int{"read": 18, "shell": 4},
 		ExactKnownPathSearches: 3,
 		ExactKnownPathCommands: 1,
 		CoissuedReadTurns:      1,
@@ -960,7 +923,7 @@ func TestOrientationAdoptionAcceptsCoissuedDirectReads(t *testing.T) {
 	if !adopted("known_path_batching", known) {
 		t.Fatal("coissued known-path reads did not count as adoption")
 	}
-	unknown := metrics{DiscoveryBeforeRead: true, ToolCalls: map[string]int{"read_file": 2}, CoissuedReadTurns: 1}
+	unknown := metrics{DiscoveryBeforeRead: true, ToolCalls: map[string]int{"read": 2}, CoissuedReadTurns: 1}
 	if !adopted("unknown_path_discovery", unknown) {
 		t.Fatal("coissued discovered-path reads did not count as adoption")
 	}

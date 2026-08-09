@@ -71,7 +71,7 @@ type Skill struct {
 }
 
 // Read returns the full text of the SKILL.md file at Location. Called by the
-// model (via read_file) or by the harness to feed the body into context at
+// model (via read) or by the harness to feed the body into context at
 // activation time.
 func (s Skill) Read() (string, error) {
 	data, err := os.ReadFile(s.Location)
@@ -280,7 +280,7 @@ func BuildCatalog(skills map[string]Skill) string {
 
 // catalogDescMaxChars caps the per-skill description rendered into the
 // always-resident catalog. The full frontmatter description stays in SKILL.md
-// for Tier-2 read_file, so this only bounds the always-paid prompt cost.
+// for Tier-2 read, so this only bounds the always-paid prompt cost.
 const catalogDescMaxChars = 160
 
 // catalogDescription renders a skill description for the Tier-1 catalog: the

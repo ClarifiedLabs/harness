@@ -31,7 +31,7 @@ func TestPrivacy_NoTranscriptLeak(t *testing.T) {
 	}
 	sink := NewSink(exp, nil, "openai", "gpt-4", "auto", false)
 	// Only bounded labels should appear; never raw prompt/tool input.
-	sink.ToolResultWithName("read_file", llm.ToolResult{}, 10, tools.Activity{Class: tools.ActivityInspect})
+	sink.ToolResultWithName("read", llm.ToolResult{}, 10, tools.Activity{Class: tools.ActivityInspect})
 	sink.PromptComplete(agent.PromptUsage{TerminationReason: agent.TerminationModelCompleted}, 0)
 	if err := exp.Export(t.Context()); err != nil {
 		t.Fatalf("export: %v", err)

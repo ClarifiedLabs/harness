@@ -5726,9 +5726,6 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 		if toolName == "shell" && len(input) > 0 {
 			s.otel.RecordCommands(input)
 		}
-		if toolName == "rg" || toolName == "grep" {
-			s.otel.RecordSearch(toolName, res.Text, res.Metrics)
-		}
 	}
 	s.r.ToolResult(res)
 	s.rec.ToolResult(res)

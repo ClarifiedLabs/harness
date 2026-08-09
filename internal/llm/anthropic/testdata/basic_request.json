@@ -87,7 +87,7 @@
       }
     },
     {
-      "name": "list_dir",
+      "name": "read",
       "description": "List directory entries.",
       "input_schema": {
         "type": "object",

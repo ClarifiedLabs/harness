@@ -61,7 +61,7 @@ func WeatherToolRequest(model, toolIDPrefix string, includeEmptyToolCall bool) l
 		messages = append(messages,
 			llm.Message{
 				Role:    llm.RoleAssistant,
-				Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: toolIDPrefix + "01C", ToolName: "list_dir", ToolInput: json.RawMessage(`{}`)}},
+				Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: toolIDPrefix + "01C", ToolName: "read", ToolInput: json.RawMessage(`{}`)}},
 			},
 			llm.Message{
 				Role:    llm.RoleUser,
@@ -75,7 +75,7 @@ func WeatherToolRequest(model, toolIDPrefix string, includeEmptyToolCall bool) l
 		Messages: messages,
 		Tools: []llm.ToolSchema{
 			{Name: "get_weather", Description: "Get the current weather for a location.", Parameters: json.RawMessage(`{"type":"object","properties":{"location":{"type":"string","description":"City and state, e.g. San Francisco, CA"}},"required":["location"]}`)},
-			{Name: "list_dir", Description: "List directory entries.", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
+			{Name: "read", Description: "List directory entries.", Parameters: json.RawMessage(`{"type":"object","properties":{"path":{"type":"string"}}}`)},
 		},
 	}
 }

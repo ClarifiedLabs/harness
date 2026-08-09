@@ -46,7 +46,7 @@ func (p *releaseAfterFirstProvider) Stream(ctx context.Context, req llm.Request)
 
 func TestOneShotAssistantTextOnStdoutNoiseOnStderr(t *testing.T) {
 	var out, errw bytes.Buffer
-	tool := toolStep("read_file", `{"path":"a.go"}`, "c1")
+	tool := toolStep("read", `{"path":"a.go"}`, "c1")
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{textDelta("reading file "), tool},
@@ -68,10 +68,10 @@ func TestOneShotAssistantTextOnStdoutNoiseOnStderr(t *testing.T) {
 	if !strings.Contains(out.String(), "the answer is 42") {
 		t.Errorf("assistant text should be on stdout, out=%q", out.String())
 	}
-	if strings.Contains(out.String(), "[read_file]") || strings.Contains(out.String(), "[turn:") {
+	if strings.Contains(out.String(), "[read]") || strings.Contains(out.String(), "[turn:") {
 		t.Errorf("tool summaries and usage must not pollute stdout, out=%q", out.String())
 	}
-	if !strings.Contains(errw.String(), "[read_file]") {
+	if !strings.Contains(errw.String(), "[read]") {
 		t.Errorf("tool summary should be on stderr, errw=%q", errw.String())
 	}
 	if !strings.Contains(errw.String(), "[turn:") {
@@ -372,10 +372,10 @@ func TestOneShotShowsToolCallProgressOnStderrOnly(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{
-				{Kind: llm.EventToolCallStart, Index: 0, ToolID: "call_1", ToolName: "list_dir"},
+				{Kind: llm.EventToolCallStart, Index: 0, ToolID: "call_1", ToolName: "read"},
 				{Kind: llm.EventToolCallDelta, Index: 0, ArgsDelta: `{"path":`},
 				{Kind: llm.EventToolCallDelta, Index: 0, ArgsDelta: `"."}`},
-				toolStep("list_dir", `{"path":"."}`, "call_1"),
+				toolStep("read", `{"path":"."}`, "call_1"),
 			},
 			Stop: llm.StopToolUse,
 		},
@@ -395,9 +395,9 @@ func TestOneShotShowsToolCallProgressOnStderrOnly(t *testing.T) {
 	got := errw.String()
 	for _, want := range []string{
 		"[turn: 1 waiting]",
-		"[tool-call: list_dir id=call_1]",
-		"[tool: list_dir started path=.]",
-		"[list_dir] path=.",
+		"[tool-call: read id=call_1]",
+		"[tool: read started path=.]",
+		"[read] path=.",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("stderr missing %q:\n%s", want, got)

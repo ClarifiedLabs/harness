@@ -22,7 +22,7 @@ func TestClassifyToolError(t *testing.T) {
 		},
 		{
 			name:       "invalid arguments",
-			display:    `[read_file path=x] → error: invalid arguments: path is required`,
+			display:    `[read path=x] → error: invalid arguments: path is required`,
 			want:       llm.ToolErrorInvalidArgs,
 			confidence: "high",
 		},
@@ -34,19 +34,19 @@ func TestClassifyToolError(t *testing.T) {
 		},
 		{
 			name:       "panic",
-			display:    `[glob] → error: tool panicked: boom`,
+			display:    `[frobnicate] → error: tool panicked: boom`,
 			want:       llm.ToolErrorPanic,
 			confidence: "high",
 		},
 		{
 			name:       "path not found from display",
-			display:    `[read_file path=/missing] → error: stat /missing: no such file or directory`,
+			display:    `[read path=/missing] → error: stat /missing: no such file or directory`,
 			want:       llm.ToolErrorPathNotFound,
 			confidence: "medium",
 		},
 		{
 			name:       "path not found via excerpt fallback",
-			display:    `[read_file path=/very/long/path/that/got/clipped/before/the/marker] → error: stat /very/long/path/that/got/clipped/before/t…`,
+			display:    `[read path=/very/long/path/that/got/clipped/before/the/marker] → error: stat /very/long/path/that/got/clipped/before/t…`,
 			excerpt:    "stat /very/long/path/that/got/clipped/before/the/marker: no such file or directory",
 			want:       llm.ToolErrorPathNotFound,
 			confidence: "medium",
@@ -77,7 +77,7 @@ func TestClassifyToolError(t *testing.T) {
 		},
 		{
 			name:       "regexp error",
-			display:    `[search pattern=(] → error: compile pattern: error parsing regexp: missing closing ): ` + "`(`",
+			display:    `[read pattern=(] → error: compile pattern: error parsing regexp: missing closing ): ` + "`(`",
 			want:       llm.ToolErrorRegexInvalid,
 			confidence: "low",
 		},
@@ -89,7 +89,7 @@ func TestClassifyToolError(t *testing.T) {
 		},
 		{
 			name:       "blocked by hook",
-			display:    `[write_file path=x] → error: blocked by PreToolUse hook: no writes`,
+			display:    `[write path=x] → error: blocked by PreToolUse hook: no writes`,
 			want:       llm.ToolErrorHookBlocked,
 			confidence: "high",
 		},

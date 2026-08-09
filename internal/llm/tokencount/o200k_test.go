@@ -41,7 +41,7 @@ func TestEstimateOpenAIChatIncludesToolsAndContext(t *testing.T) {
 			}},
 		}},
 		Tools: []llm.ToolSchema{{
-			Name:        "list_dir",
+			Name:        "read",
 			Description: "List directory entries.",
 			Parameters:  schema,
 		}},

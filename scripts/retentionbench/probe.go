@@ -49,8 +49,8 @@ func createProbeWorkspace(dir string, count, approximateBytes int) (probeFixture
 
 func probePrompt(files, markers []string) string {
 	return fmt.Sprintf(
-		"Work directly and do not delegate or modify files. Read these files in exact numerical order with read_file: %s. "+
-			"Call read_file exactly once in each model turn, wait for its result, then call the next file; never batch multiple tool calls and use no other tool. "+
+		"Work directly and do not delegate or modify files. Read these files in exact numerical order with read: %s. "+
+			"Call read exactly once in each model turn, wait for its result, then call the next file; never batch multiple tool calls and use no other tool. "+
 			"After all files are read, reply with %s followed by every RETENTION_PROBE marker in numerical order. "+
 			"The expected marker count is %d. Do not finish early.",
 		strings.Join(files, ", "),
@@ -71,7 +71,7 @@ func scoreProbe(
 		if event.Type != session.EventToolStart {
 			continue
 		}
-		if event.Tool != "read_file" {
+		if event.Tool != "read" {
 			reasons = append(reasons, "unexpected tool call: "+event.Tool)
 			continue
 		}
@@ -79,13 +79,13 @@ func scoreProbe(
 			Path string `json:"path"`
 		}
 		if err := json.Unmarshal(event.Input, &input); err != nil {
-			reasons = append(reasons, "invalid read_file input")
+			reasons = append(reasons, "invalid read input")
 			continue
 		}
 		calls = append(calls, probeCall{Path: filepath.Base(input.Path), Turn: event.Turn})
 	}
 	if len(calls) != len(fixture.Files) {
-		reasons = append(reasons, fmt.Sprintf("read_file calls = %d, want %d", len(calls), len(fixture.Files)))
+		reasons = append(reasons, fmt.Sprintf("read calls = %d, want %d", len(calls), len(fixture.Files)))
 	}
 	for i := 0; i < min(len(calls), len(fixture.Files)); i++ {
 		if calls[i].Path != fixture.Files[i] {

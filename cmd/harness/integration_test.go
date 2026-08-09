@@ -7,7 +7,7 @@ package main
 // OpenAI-compatible mock server on 127.0.0.1 — no real API keys, no network.
 // Each leg asserts an observable end-to-end behavior:
 //
-//   - tool round-trip: the mock streams a read_file tool call then a final text
+//   - tool round-trip: the mock streams a read tool call then a final text
 //     turn; the second request must carry the tool result, the assistant text
 //     must land on stdout, and the session file must be written.
 //   - ^C mid-stream: a deliberately slow stream is interrupted with SIGINT; the
@@ -209,7 +209,7 @@ func textTurn(text string) string {
 	return strings.Join([]string{delta, "", stop, "", usage, "", "data: [DONE]", ""}, "\n")
 }
 
-// toolCallTurn scripts an assistant turn that calls read_file on path, in two
+// toolCallTurn scripts an assistant turn that calls read on path, in two
 // fragments (id+name, then the arguments), finishing with finish_reason
 // "tool_calls" — the OpenAI streaming tool-call shape (design §5.3).
 func toolCallTurn(callID, path string) string {
@@ -217,7 +217,7 @@ func toolCallTurn(callID, path string) string {
 		"choices": []any{map[string]any{
 			"delta": map[string]any{"tool_calls": []any{map[string]any{
 				"index": 0, "id": callID,
-				"function": map[string]any{"name": "read_file", "arguments": ""},
+				"function": map[string]any{"name": "read", "arguments": ""},
 			}}},
 			"finish_reason": nil,
 		}},
@@ -826,7 +826,7 @@ func findSession(t *testing.T, home string) string {
 }
 
 // TestSmokeToolRoundTrip is the LOCAL OpenAI-compatible server leg: the mock
-// streams a read_file tool call, then (after the harness executes the tool and
+// streams a read tool call, then (after the harness executes the tool and
 // sends the result back) a final text turn. It asserts the round-trip happened
 // (a second request carrying the tool result), the assistant text reached
 // stdout, and a session file was written (design §13).
@@ -874,7 +874,7 @@ func TestSmokeToolRoundTrip(t *testing.T) {
 		}
 	}
 	if !sawToolResult {
-		t.Errorf("second request missing the read_file tool result: %+v", reqs[1].Messages)
+		t.Errorf("second request missing the read tool result: %+v", reqs[1].Messages)
 	}
 
 	// A session file was written and is a valid transcript.
@@ -964,7 +964,7 @@ func TestSmokeResumeInterrupted(t *testing.T) {
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "earlier task"}}},
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
-				{Kind: llm.BlockToolUse, ToolUseID: "dangling_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"x"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "dangling_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"x"}`)},
 			}},
 		},
 	}
@@ -992,7 +992,7 @@ func TestSmokeResumeInterrupted(t *testing.T) {
 	if strings.Contains(string(outBytes), "last exchange") {
 		t.Errorf("resume recap must not touch stdout, got %q", outBytes)
 	}
-	if got := errBuf.String(); !strings.Contains(got, "[turn interrupted during tool execution: read_file did not complete]") {
+	if got := errBuf.String(); !strings.Contains(got, "[turn interrupted during tool execution: read did not complete]") {
 		t.Errorf("resume stderr missing the interrupted-tools recap, got %q", got)
 	}
 

@@ -29,7 +29,7 @@ func TestDecodeFileAcceptsWrapperAndAliases(t *testing.T) {
 	if len(groups) != 1 {
 		t.Fatalf("PreToolUse groups = %d, want 1", len(groups))
 	}
-	if !groups[0].matches("shell") || groups[0].matches("read_file") {
+	if !groups[0].matches("shell") || groups[0].matches("read") {
 		t.Fatalf("matcher did not behave as expected")
 	}
 	h := groups[0].Hooks[0]
@@ -77,7 +77,7 @@ func TestRunnerBlocksAndPassesPayloadOnStdin(t *testing.T) {
 		t.Fatalf("DecodeEventMap: %v", err)
 	}
 	runner := &Runner{Config: cfg, CWD: dir, SessionID: "s1", TranscriptPath: "s1", Model: "m1"}
-	res := runner.Run(context.Background(), PreToolUse, "write_file", Payload{"tool_name": "write_file"})
+	res := runner.Run(context.Background(), PreToolUse, "write", Payload{"tool_name": "write"})
 	if !res.Block || res.Reason() != "no writes" {
 		t.Fatalf("result = %+v, want block reason", res)
 	}
@@ -85,7 +85,7 @@ func TestRunnerBlocksAndPassesPayloadOnStdin(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read payload: %v", err)
 	}
-	if !strings.Contains(string(payload), `"hook_event_name":"PreToolUse"`) || !strings.Contains(string(payload), `"tool_name":"write_file"`) {
+	if !strings.Contains(string(payload), `"hook_event_name":"PreToolUse"`) || !strings.Contains(string(payload), `"tool_name":"write"`) {
 		t.Fatalf("payload missing fields: %s", payload)
 	}
 }

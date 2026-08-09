@@ -27,27 +27,6 @@ type lspRuntime struct {
 	logger  *slog.Logger
 }
 
-// lspDescriptionSuffix is appended to the navigation tools' descriptions at
-// Specs() time so the model learns that lsp_* tools are the better answer for
-// symbol questions — without repeating that guidance across every lsp_* tool.
-// It is only active while LSP tools are enabled and registered, and tool specs
-// are cached at registry rebuild boundaries, so toggles take effect at the
-// next rebuild.
-const lspPreferSuffix = " Symbols: prefer lsp_*."
-
-func lspDescriptionSuffix(r *lspRuntime) func(name, base string) string {
-	return func(name, base string) string {
-		if r == nil || !r.enabled || len(r.summary.Names) == 0 {
-			return base
-		}
-		switch name {
-		case "grep", "rg", "glob":
-			return base + lspPreferSuffix
-		}
-		return base
-	}
-}
-
 // newLSPRuntime prepares the static tool surface without launching a language
 // server. Keeping the manager available while disabled makes /lsp enable a
 // session-local, immediate operation; servers remain lazy until a tool call.
@@ -67,7 +46,6 @@ func newLSPRuntime(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.
 	}
 	warnUnknownLSPTools(lspCfg.Tools, summary.Names, logger)
 	runtime := &lspRuntime{mgr: mgr, summary: summary, enabled: lspCfg.Enable, prewarm: lspCfg.Prewarm, logger: logger}
-	catalog.SetDescriptionSuffix(lspDescriptionSuffix(runtime))
 	runtime.startPrewarm()
 	return runtime, nil
 }

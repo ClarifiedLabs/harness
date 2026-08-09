@@ -16,7 +16,7 @@ func TestActivityRegistryTracksLatestNestedDelegateAndRemovesOnce(t *testing.T) 
 	nested := registry.Register(ActivityStart{ID: "child-nested", ParentID: "child-parent", Depth: 2, Agent: "plan"})
 	parent.MarkTurn(1, 1, agent.ContextEstimate{Total: 10, Window: 100})
 	nested.MarkTurn(2, 3, agent.ContextEstimate{Total: 40, Window: 100})
-	nested.MarkActivity("tool read_file")
+	nested.MarkActivity("tool read")
 
 	snapshot := registry.Snapshot()
 	if len(snapshot.Active) != 2 {
@@ -28,7 +28,7 @@ func TestActivityRegistryTracksLatestNestedDelegateAndRemovesOnce(t *testing.T) 
 	if snapshot.Recent.ID != "child-nested" || snapshot.Recent.ParentID != "child-parent" || snapshot.Recent.Depth != 2 {
 		t.Fatalf("latest nested delegate = %+v", snapshot.Recent)
 	}
-	if snapshot.Recent.Turn != 2 || snapshot.Recent.Attempt != 3 || snapshot.Recent.Activity != "tool read_file" {
+	if snapshot.Recent.Turn != 2 || snapshot.Recent.Attempt != 3 || snapshot.Recent.Activity != "tool read" {
 		t.Fatalf("latest nested activity = %+v", snapshot.Recent)
 	}
 
@@ -108,28 +108,31 @@ func TestActivityRegistrySanitizesAndBoundsRetainedText(t *testing.T) {
 }
 
 func TestSafeToolActivityUsesArgumentAllowlist(t *testing.T) {
-	read := safeToolActivity(llm.ToolCall{
-		Name:  "read_file",
-		Input: json.RawMessage(`{"path":"internal/delegate/activity.go","credential":"must-not-leak"}`),
-	})
-	if !strings.Contains(read, "path=\"internal/delegate/activity.go\"") || strings.Contains(read, "credential") {
-		t.Fatalf("read_file summary = %q", read)
+	for _, name := range []string{"read", "write", "view_image"} {
+		summary := safeToolActivity(llm.ToolCall{
+			Name:  name,
+			Input: json.RawMessage(`{"path":"internal/delegate/activity.go","credential":"must-not-leak"}`),
+		})
+		if want := `tool ` + name + ` path="internal/delegate/activity.go"`; summary != want {
+			t.Errorf("%s summary = %q, want %q", name, summary, want)
+		}
 	}
 
 	credentialPath := safeToolActivity(llm.ToolCall{
-		Name:  "read_file",
+		Name:  "read",
 		Input: json.RawMessage(`{"path":"https://user:password@example.test/file"}`),
 	})
-	if credentialPath != "tool read_file" {
+	if credentialPath != "tool read" {
 		t.Fatalf("credential-bearing path summary = %q, want tool name only", credentialPath)
 	}
 
-	command := safeToolActivity(llm.ToolCall{
-		Name:  "shell",
-		Input: json.RawMessage(`{"command":"curl -H 'Authorization: secret' https://example.test"}`),
-	})
-	if command != "tool shell" {
-		t.Fatalf("command summary = %q, want redacted tool name only", command)
+	for _, call := range []llm.ToolCall{
+		{Name: "shell", Input: json.RawMessage(`{"command":"curl -H 'Authorization: secret' https://example.test"}`)},
+		{Name: "edit", Input: json.RawMessage(`{"files":[{"path":"private/file"}]}`)},
+	} {
+		if summary := safeToolActivity(call); summary != "tool "+call.Name {
+			t.Errorf("%s summary = %q, want tool name only", call.Name, summary)
+		}
 	}
 
 	resultBody := "raw result secret"

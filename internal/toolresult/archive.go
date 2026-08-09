@@ -55,5 +55,5 @@ func PrepareTruncated(r llm.ToolResult, archiver Archiver) (llm.ToolResult, stri
 // one call.
 func ArchivedHint(path string) string {
 	quoted := strconv.Quote(path)
-	return fmt.Sprintf(`[full output archived at %s; use read_file {"path":%s,"offset":1,"limit":200} or rg {"args":["-n","<pattern>",%s]} to inspect it]`, quoted, quoted, quoted)
+	return fmt.Sprintf(`[full output archived at %s; use read {"path":%s,"offset":1,"limit":200} or a targeted shell command to inspect it]`, quoted, quoted)
 }

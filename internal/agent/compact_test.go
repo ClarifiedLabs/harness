@@ -297,11 +297,10 @@ func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
 	failed := toolResult("r2", "missing")
 	failed.Content[0].ResultError = true
 	messages := []llm.Message{
-		asstToolUse("r1", "read_file", `{"paths":["z.go","./a.go"]}`), toolResult("r1", "ok with one possible inline failure"),
-		asstToolUse("r2", "read_file", `{"path":"failed.go"}`), failed,
-		asstToolUse("w1", "write_file", `{"path":"a.go","content":"x"}`), toolResult("w1", "ok"),
+		asstToolUse("r1", "read", `{"paths":["z.go","./a.go"]}`), toolResult("r1", "ok with one possible inline failure"),
+		asstToolUse("r2", "read", `{"path":"failed.go"}`), failed,
+		asstToolUse("w1", "write", `{"path":"a.go","content":"x"}`), toolResult("w1", "ok"),
 		asstToolUse("e1", "edit", `{"files":[{"path":"edit.go","edits":[{"oldText":"a","newText":"b"}]}]}`), toolResult("e1", "ok"),
-		asstToolUse("p1", "apply_patch", `{"patch":"*** Begin Patch\n*** Add File: patch.go\n+x\n*** End Patch\n"}`), toolResult("p1", "ok"),
 		asstToolUse("u1", "shell", `{"args":["touch","ignored.go"]}`), toolResult("u1", "ok"),
 	}
 	prior := &llm.CompactionMetadata{ReadFiles: []string{"prior.go"}, ModifiedFiles: []string{"already.go"}}
@@ -309,7 +308,7 @@ func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
 	if got, want := strings.Join(reads, ","), "prior.go,z.go"; got != want {
 		t.Fatalf("read files = %q, want %q", got, want)
 	}
-	if got, want := strings.Join(modified, ","), "a.go,already.go,edit.go,patch.go"; got != want {
+	if got, want := strings.Join(modified, ","), "a.go,already.go,edit.go"; got != want {
 		t.Fatalf("modified files = %q, want %q", got, want)
 	}
 }
@@ -691,7 +690,7 @@ func TestMaybeCompactLongSinglePromptUsesTurnBoundariesAndLowWaterMark(t *testin
 	for i := 0; i < 12; i++ {
 		id := fmt.Sprintf("call_%02d", i)
 		transcript = append(transcript,
-			asstToolUse(id, "read_file", fmt.Sprintf(`{"path":"file_%02d.go"}`, i)),
+			asstToolUse(id, "read", fmt.Sprintf(`{"path":"file_%02d.go"}`, i)),
 			toolResult(id, fmt.Sprintf("result-%02d-%s", i, strings.Repeat("x", 5_500))),
 		)
 		if i == 1 {
@@ -762,7 +761,7 @@ func TestMaybeCompactLongSinglePromptUsesTurnBoundariesAndLowWaterMark(t *testin
 	// A small next turn remains below the 78%% trigger, proving the 65%% target
 	// provides hysteresis instead of causing per-turn compaction churn.
 	withNext := append(a.Transcript(),
-		asstToolUse("call_12", "read_file", `{"path":"small.go"}`),
+		asstToolUse("call_12", "read", `{"path":"small.go"}`),
 		toolResult("call_12", "small follow-up complete"),
 	)
 	a.SetTranscript(withNext)
@@ -782,7 +781,7 @@ func TestMaybeCompactLongSinglePromptUsesTurnBoundariesAndLowWaterMark(t *testin
 	for i := 13; i < 16; i++ {
 		id := fmt.Sprintf("call_%02d", i)
 		withMore = append(withMore,
-			asstToolUse(id, "read_file", fmt.Sprintf(`{"path":"file_%02d.go"}`, i)),
+			asstToolUse(id, "read", fmt.Sprintf(`{"path":"file_%02d.go"}`, i)),
 			toolResult(id, fmt.Sprintf("result-%02d-%s", i, strings.Repeat("y", 6_000))),
 		)
 	}
@@ -1239,7 +1238,7 @@ func TestContextWindowOverrideMovesDegradeBudget(t *testing.T) {
 		for i := 0; i < 6; i++ {
 			transcript = append(transcript,
 				userText(turnLabel(i)+" q"),
-				asstToolUse("t"+turnLabel(i), "read_file", `{}`),
+				asstToolUse("t"+turnLabel(i), "read", `{}`),
 				toolResult("t"+turnLabel(i), big),
 				asstText(turnLabel(i)+" done"),
 			)
@@ -1294,7 +1293,7 @@ func TestCompactSummarizesOversizedEarlierTurn(t *testing.T) {
 	huge := strings.Repeat("x", 200_000)
 	transcript := []llm.Message{
 		userText("inspect the file"),
-		asstToolUse("c1", "read_file", `{"path":"a.go"}`),
+		asstToolUse("c1", "read", `{"path":"a.go"}`),
 		toolResult("c1", huge),
 		asstText("looked"),
 	}
@@ -1347,7 +1346,7 @@ func TestCompactUnderKeepTurnsSummarizesOlderTurnsWhenOverBudget(t *testing.T) {
 		userText("older question"),
 		asstText("older answer"),
 		userText("current question"),
-		asstToolUse("c1", "read_file", `{"path":"a.go"}`),
+		asstToolUse("c1", "read", `{"path":"a.go"}`),
 		toolResult("c1", currentResult),
 	}
 	fp := llmtest.New("fake", summaryStep("OLDER SUMMARY", 40, 8))
@@ -1471,7 +1470,7 @@ func TestCompactValidationFailureLeavesTranscriptIntact(t *testing.T) {
 	hugeInput := `{"path":"` + strings.Repeat("x", 200_000) + `"}`
 	transcript := []llm.Message{
 		userText("go"),
-		asstToolUse("c1", "read_file", hugeInput), // no tool_result follows -> invalid
+		asstToolUse("c1", "read", hugeInput), // no tool_result follows -> invalid
 	}
 	if err := llm.ValidateTranscript(transcript); err == nil {
 		t.Fatal("test setup: transcript should be invalid (dangling tool_use)")

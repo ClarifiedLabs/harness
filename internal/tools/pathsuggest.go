@@ -31,7 +31,7 @@ type pathSuggestion struct {
 }
 
 // notExistingPathError appends similar existing path suggestions to a
-// not-exist error so the model can retarget without an exploratory list_dir.
+// not-exist error so the model can retarget without an exploratory directory lookup.
 // Other errors pass through unchanged.
 func notExistingPathError(path string, err error) error {
 	if !errors.Is(err, os.ErrNotExist) {

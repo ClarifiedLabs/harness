@@ -67,16 +67,10 @@ func TestOrientationGuardSteersToBatching(t *testing.T) {
 	results := []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultText: "ok"}}
 	for i := 0; i < orientationSteerThreshold; i++ {
 		input := json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))
-		guard.recordTools([]llm.ToolCall{{Name: "read_file", Input: input}}, results)
+		guard.recordTools([]llm.ToolCall{{Name: "read", Input: input}}, results)
 	}
-	got := guard.steerMessage()
-	if !strings.Contains(got, "Coissue") || !strings.Contains(got, "paths[]") || !strings.Contains(got, "shell") {
-		t.Fatalf("orientation steer = %q", got)
-	}
-	for _, unavailable := range []string{"search", "glob", "list_dir"} {
-		if strings.Contains(got, unavailable) {
-			t.Fatalf("orientation steer names unavailable tool %q: %q", unavailable, got)
-		}
+	if got := guard.steerMessage(); got != orientationSteer {
+		t.Fatalf("orientation steer = %q, want %q", got, orientationSteer)
 	}
 	if got := guard.steerMessage(); got != "" {
 		t.Fatalf("orientation steer repeated: %q", got)
@@ -92,7 +86,7 @@ func TestOrientationProgressClassifiesSingleAndBatchedLookups(t *testing.T) {
 	}{
 		{
 			name:  "single read",
-			calls: []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)}},
+			calls: []llm.ToolCall{{Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)}},
 			want:  1,
 		},
 		{
@@ -102,19 +96,19 @@ func TestOrientationProgressClassifiesSingleAndBatchedLookups(t *testing.T) {
 		},
 		{
 			name:  "read paths batch",
-			calls: []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(`{"paths":["a","b"]}`)}},
+			calls: []llm.ToolCall{{Name: "read", Input: json.RawMessage(`{"paths":["a","b"]}`)}},
 		},
 		{
 			name: "coissued reads",
 			calls: []llm.ToolCall{
-				{Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)},
-				{Name: "read_file", Input: json.RawMessage(`{"path":"b.go"}`)},
+				{Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)},
+				{Name: "read", Input: json.RawMessage(`{"path":"b.go"}`)},
 			},
 			want: 2,
 		},
 		{
 			name:  "batched shell lookups",
-			calls: []llm.ToolCall{{Name: "shell", Input: json.RawMessage(`{"command":"rg first internal; rg second internal"}`)}},
+			calls: []llm.ToolCall{{Name: "shell", Input: json.RawMessage(`{"steps":[{"argv":["rg","first","internal"]},{"argv":["rg","second","internal"]}]}`)}},
 		},
 	}
 	var guard turnGuard
@@ -130,12 +124,12 @@ func TestOrientationProgressClassifiesSingleAndBatchedLookups(t *testing.T) {
 
 func TestSemanticInspectionStagnationSteersOnceWithoutStopping(t *testing.T) {
 	reg := &tools.Registry{}
-	reg.Register(&recordTool{name: "read_file", readOnly: true})
+	reg.Register(&recordTool{name: "read", readOnly: true})
 	var guard turnGuard
 	var batching, phase int
 	for i := 0; i < semanticSteerThreshold+5; i++ {
-		calls := []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))}}
-		results := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "read_file", ResultText: fmt.Sprintf("evidence-%d", i)}}
+		calls := []llm.ToolCall{{Name: "read", Input: json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))}}
+		results := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "read", ResultText: fmt.Sprintf("evidence-%d", i)}}
 		progress := guard.aggregateTurnProgress(reg, i+1, calls, results)
 		guard.recordTurn(calls, results, &progress)
 		reason, _ := guard.nextSteer()
@@ -159,11 +153,11 @@ func TestSemanticInspectionStagnationSteersOnceWithoutStopping(t *testing.T) {
 
 func TestSemanticProgressSignalsResetInspectionStreak(t *testing.T) {
 	reg := tools.Default()
-	reg.Register(&recordTool{name: "read_file", readOnly: true})
+	reg.Register(&recordTool{name: "read", readOnly: true})
 	reg.Register(&recordTool{name: "edit", readOnly: false})
 	var guard turnGuard
-	inspect := []llm.ToolCall{{Name: "read_file", Input: json.RawMessage(`{"path":"a"}`)}}
-	okResult := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "read_file", ResultText: "evidence"}}
+	inspect := []llm.ToolCall{{Name: "read", Input: json.RawMessage(`{"path":"a"}`)}}
+	okResult := []llm.ContentBlock{{Kind: llm.BlockToolResult, ToolName: "read", ResultText: "evidence"}}
 	for i := 0; i < 4; i++ {
 		progress := guard.aggregateTurnProgress(reg, i+1, inspect, okResult)
 		guard.recordTurn(inspect, okResult, &progress)
@@ -217,7 +211,7 @@ func TestBoundedNewEvidenceDetectionIncludesRichContentDigest(t *testing.T) {
 }
 
 func TestSemanticProgressEventDoesNotEnterTranscript(t *testing.T) {
-	tool := &recordTool{name: "read_file", readOnly: true, run: func(_ context.Context, input json.RawMessage) (string, error) {
+	tool := &recordTool{name: "read", readOnly: true, run: func(_ context.Context, input json.RawMessage) (string, error) {
 		return string(input), nil
 	}}
 	reg := &tools.Registry{}
@@ -225,7 +219,7 @@ func TestSemanticProgressEventDoesNotEnterTranscript(t *testing.T) {
 	steps := make([]llmtest.Step, 0, semanticSteerThreshold+1)
 	for i := 0; i < semanticSteerThreshold; i++ {
 		steps = append(steps, llmtest.Step{
-			Events: []llm.StreamEvent{toolDone(0, fmt.Sprintf("id-%d", i), "read_file", fmt.Sprintf(`{"path":"file-%d.go"}`, i))},
+			Events: []llm.StreamEvent{toolDone(0, fmt.Sprintf("id-%d", i), "read", fmt.Sprintf(`{"path":"file-%d.go"}`, i))},
 			Stop:   llm.StopToolUse,
 		})
 	}
@@ -727,7 +721,7 @@ func TestIncrementalValidationCatchesNewAppends(t *testing.T) {
 		t.Fatalf("seed should be valid: %v", err)
 	}
 	// A valid whole turn appended after the validated prefix.
-	a.transcript = append(a.transcript, userText("q2"), asstToolUse("t1", "read_file", `{}`), toolResult("t1", "ok"))
+	a.transcript = append(a.transcript, userText("q2"), asstToolUse("t1", "read", `{}`), toolResult("t1", "ok"))
 	if err := a.validateTranscript("valid turn"); err != nil {
 		t.Fatalf("valid appended turn rejected: %v", err)
 	}

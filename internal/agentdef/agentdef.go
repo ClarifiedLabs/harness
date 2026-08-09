@@ -125,10 +125,10 @@ func Builtins() map[string]Definition {
 }
 
 func inspectionTools() []string {
-	names := []string{"read_file", "view_image", "update_todos"}
+	names := []string{"read", "view_image", "update_todos"}
 	// shell widens exploration (gh, builds, screenshots, live apps) for the
 	// read-only agents (explore, plan, review). None has first-class file-mutation
-	// tools (edit, write_file, apply_patch), so "don't modify the project" stays
+	// tools (edit and write), so "don't modify the project" stays
 	// a prompt-level contract, not an enforced gate.
 	names = append(names, "shell", "web_fetch")
 	return names
@@ -136,7 +136,7 @@ func inspectionTools() []string {
 
 func planTools() []string {
 	// shell comes from the shared inspection set; plan adds no first-class
-	// file-mutation tools (edit, write_file, apply_patch), so "don't modify the
+	// file-mutation tools (edit and write), so "don't modify the
 	// project" stays a prompt-level contract (prompts/agents/plan.txt).
 	names := slices.DeleteFunc(inspectionTools(), func(name string) bool { return name == "update_todos" })
 	return append(names, "write_tmp_file", "record_plan", "delegate", "background_jobs")

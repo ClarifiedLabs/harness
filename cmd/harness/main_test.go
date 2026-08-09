@@ -1505,7 +1505,7 @@ func TestRunDebugRequestDumpsPromptAndSkipsModelStream(t *testing.T) {
 	if got.MessageCount != len(got.Request.Messages) {
 		t.Fatalf("message_count = %d, request messages = %d", got.MessageCount, len(got.Request.Messages))
 	}
-	if !slices.Contains(got.ToolNames, "read_file") || !slices.Contains(got.ToolNames, "shell") || got.ToolCount != len(got.ToolNames) || len(got.Request.Tools) != got.ToolCount {
+	if !slices.Contains(got.ToolNames, "read") || !slices.Contains(got.ToolNames, "shell") || got.ToolCount != len(got.ToolNames) || len(got.Request.Tools) != got.ToolCount {
 		t.Fatalf("tool accounting names=%v count=%d request=%d", got.ToolNames, got.ToolCount, len(got.Request.Tools))
 	}
 	if got.Context.Total <= 0 || got.Context.Tools <= 0 || got.RequestBytes.Total <= 0 {
@@ -2147,7 +2147,7 @@ func TestRunRejectsCustomAgentWithoutUsefulDescription(t *testing.T) {
 		for _, mode := range []string{"startup", "config-check"} {
 			t.Run(tc.name+"/"+mode, func(t *testing.T) {
 				cfgPath := filepath.Join(t.TempDir(), "config.json")
-				body := `{"agents":{"custom_review":{"allowed_tools":["read_file"]` + tc.description + `}}}`
+				body := `{"agents":{"custom_review":{"allowed_tools":["read"]` + tc.description + `}}}`
 				if err := os.WriteFile(cfgPath, []byte(body), 0o644); err != nil {
 					t.Fatalf("write config: %v", err)
 				}
@@ -4634,14 +4634,15 @@ func TestRunLogsUnavailableToolsAtLaunch(t *testing.T) {
 			t.Fatalf("stderr missing %q:\n%s", want, got)
 		}
 	}
-	for _, name := range []string{"rg", "grep", "git", "git_readonly"} {
+	for _, name := range []string{"git", "git_readonly"} {
 		if slices.Contains(toolNames(fp.Requests[0]), name) {
 			t.Fatalf("request advertised unavailable tool %q: %v", name, toolNames(fp.Requests[0]))
 		}
 	}
-	// The removed typed search tool must not be advertised by auto.
-	if slices.Contains(toolNames(fp.Requests[0]), "search") {
-		t.Fatalf("default should not advertise search: %v", toolNames(fp.Requests[0]))
+	for _, removed := range []string{"rg", "grep", "glob", "search"} {
+		if slices.Contains(toolNames(fp.Requests[0]), removed) {
+			t.Fatalf("default advertised removed search wrapper %q: %v", removed, toolNames(fp.Requests[0]))
+		}
 	}
 }
 
@@ -4813,6 +4814,34 @@ func TestRunConfigAgentPromptOverrideKeepsTools(t *testing.T) {
 	}
 }
 
+func TestRunRejectsLegacyAllowedToolName(t *testing.T) {
+	fp := llmtest.New("fake")
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	cfg := `{
+		"agent":"legacy",
+		"agents":{
+			"legacy":{
+				"description":"Exercise clean-break validation",
+				"allowed_tools":["read_file"]
+			}
+		}
+	}`
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-config", cfgPath, "-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
+
+	if code := run(env); code != ui.ExitUsage {
+		t.Fatalf("exit code = %d, want usage; stderr=%q", code, errw.String())
+	}
+	if got := errw.String(); !strings.Contains(got, "unknown tools: read_file") {
+		t.Fatalf("stderr = %q, want legacy tool rejection", got)
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("legacy allowed_tools should fail before model request, got %d", len(fp.Requests))
+	}
+}
+
 func TestRunConfigAgentCanSetQualifiedModel(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
@@ -4822,7 +4851,7 @@ func TestRunConfigAgentCanSetQualifiedModel(t *testing.T) {
 			"style":{
 				"description":"Style review",
 				"model":"openai:gpt-5.5",
-				"allowed_tools":["read_file"],
+				"allowed_tools":["read"],
 				"prompt":"STYLE REVIEW PROMPT"
 			}
 		}
@@ -4838,8 +4867,8 @@ func TestRunConfigAgentCanSetQualifiedModel(t *testing.T) {
 	if len(proxy.requests) != 1 || proxy.requests[0].TargetID != "openai:gpt-5.5" {
 		t.Fatalf("proxy requests = %+v, want openai:gpt-5.5 target", proxy.requests)
 	}
-	if got := toolNames(proxy.requests[0].Request); !slices.Equal(got, []string{"read_file"}) {
-		t.Fatalf("agent tools = %v, want [read_file]", got)
+	if got := toolNames(proxy.requests[0].Request); !slices.Equal(got, []string{"read"}) {
+		t.Fatalf("agent tools = %v, want [read]", got)
 	}
 	if !strings.Contains(proxy.requests[0].Request.System, "STYLE REVIEW PROMPT") {
 		t.Fatalf("agent prompt missing from system: %q", proxy.requests[0].Request.System)
@@ -4990,11 +5019,11 @@ func TestRunDelegateNamedAgentUsesDefinition(t *testing.T) {
 func TestResolveDelegateLaunchToleratesPendingMCPTool(t *testing.T) {
 	catalog := tools.Catalog()
 	agents := map[string]agentdef.Definition{
-		"worker": {Name: "worker", AllowedTools: []string{"read_file", "mcp__remote__do"}},
+		"worker": {Name: "worker", AllowedTools: []string{"read", "mcp__remote__do"}},
 	}
 	// Discovery still pending (not applied): the undiscovered mcp__ name is tolerated.
 	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
-	rt := delegate.Runtime{Agent: "worker", System: "sys", ToolNames: []string{"read_file"}}
+	rt := delegate.Runtime{Agent: "worker", System: "sys", ToolNames: []string{"read"}}
 
 	launch, err := resolveDelegateLaunch(rt, "worker", agents, catalog, pending, protocol.Catalog{}, nil, func(s string) string { return s }, config.Config{})
 	if err != nil {
@@ -5004,8 +5033,8 @@ func TestResolveDelegateLaunchToleratesPendingMCPTool(t *testing.T) {
 	if slices.Contains(got, "mcp__remote__do") {
 		t.Fatalf("undiscovered MCP tool should be filtered from delegate tools: %v", got)
 	}
-	if !slices.Contains(got, "read_file") {
-		t.Fatalf("delegate should still receive read_file: %v", got)
+	if !slices.Contains(got, "read") {
+		t.Fatalf("delegate should still receive read: %v", got)
 	}
 }
 
@@ -5065,7 +5094,7 @@ func TestRunResumeRestoresAgent(t *testing.T) {
 }
 
 // TestRunREPLToolsCommandListsTools verifies that /tools prints built-in tools
-// (always including read_file and delegate) and does not trigger any model request.
+// (always including read and delegate) and does not trigger any model request.
 func TestRunREPLToolsCommandListsTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t,
@@ -5145,7 +5174,7 @@ func expectedExploreToolNames() []string {
 }
 
 func expectedInspectionToolNames() []string {
-	return []string{"read_file", "view_image", "shell", "web_fetch"}
+	return []string{"read", "view_image", "shell", "web_fetch"}
 }
 
 func expectedPlanToolNames() []string {

@@ -26,7 +26,7 @@ func TestCallActivityConservativeDefaultsAndBuiltins(t *testing.T) {
 	reg.Register(activityTestTool{name: "reader", readOnly: true})
 	reg.Register(activityTestTool{name: "unknown_effect", readOnly: false})
 	reg.Register(activityTestTool{name: "edit", readOnly: false})
-	reg.Register(activityTestTool{name: "read_file", readOnly: true})
+	reg.Register(activityTestTool{name: "read", readOnly: true})
 	reg.Register(activityTestTool{name: "background_jobs", readOnly: false})
 
 	tests := []struct {
@@ -40,7 +40,7 @@ func TestCallActivityConservativeDefaultsAndBuiltins(t *testing.T) {
 		{name: "read-only default", call: llm.ToolCall{Name: "reader"}, class: ActivityInspect, operations: 1},
 		{name: "non-read-only default", call: llm.ToolCall{Name: "unknown_effect"}, class: ActivityOther, operations: 1},
 		{name: "known mutation", call: llm.ToolCall{Name: "edit"}, class: ActivityMutate, operations: 1},
-		{name: "paths batch", call: llm.ToolCall{Name: "read_file", Input: json.RawMessage(`{"paths":["a","b"]}`)}, class: ActivityInspect, operations: 2, batched: true},
+		{name: "paths batch", call: llm.ToolCall{Name: "read", Input: json.RawMessage(`{"paths":["a","b"]}`)}, class: ActivityInspect, operations: 2, batched: true},
 		{name: "wait", call: llm.ToolCall{Name: "background_jobs", Input: json.RawMessage(`{"action":"wait"}`)}, class: ActivityWait, operations: 1},
 		{name: "coordinate", call: llm.ToolCall{Name: "background_jobs", Input: json.RawMessage(`{"action":"list"}`)}, class: ActivityCoordinate, operations: 1},
 	}
@@ -96,7 +96,7 @@ func TestInspectionBoundaryBlocksOpaqueShellBypass(t *testing.T) {
 		activity Activity
 		blocked  bool
 	}{
-		{name: "typed inspection", call: llm.ToolCall{Name: "read_file"}, activity: Activity{Class: ActivityInspect}, blocked: true},
+		{name: "typed inspection", call: llm.ToolCall{Name: "read"}, activity: Activity{Class: ActivityInspect}, blocked: true},
 		{name: "simple shell inspection", call: llm.ToolCall{Name: "shell"}, activity: Activity{Class: ActivityInspect}, blocked: true},
 		{name: "opaque shell", call: llm.ToolCall{Name: "shell"}, activity: Activity{Class: ActivityOther}, blocked: true},
 		{name: "typed mutation", call: llm.ToolCall{Name: "edit"}, activity: Activity{Class: ActivityMutate}},

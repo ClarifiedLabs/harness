@@ -593,7 +593,7 @@ func TestBuildRequestContextDoesNotFollowToolResult(t *testing.T) {
 		RequestContext: []string{"todo context"},
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "inspect"}}},
-			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"a.go"}`)}}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
 		},
 	}
@@ -677,7 +677,7 @@ func reasoningReplayRequest() llm.Request {
 				{Kind: llm.BlockThinking, Thinking: "first thought"},
 				{Kind: llm.BlockThinking, Thinking: "second thought"},
 				{Kind: llm.BlockText, Text: "reading the file"},
-				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
 			}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
 		},

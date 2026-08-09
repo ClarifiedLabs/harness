@@ -44,10 +44,9 @@ func Register(ctx context.Context, reg *tools.Registry, provider mcp.ToolProvide
 	}
 	allowSet := allowlistSet(allow)
 	sum := mcptools.Summary{Servers: map[string]int{"lsp": 0}}
-	// Chain lsp_* tools immediately after the navigation cluster (anchored at
-	// glob) so they sit next to the tools they complement instead of trailing the
-	// whole catalog. A missing anchor falls back to append.
-	anchor := "glob"
+	// Chain lsp_* tools after read/image inspection and before mutation tools.
+	// A missing view_image anchor falls back to append.
+	anchor := "view_image"
 	for _, d := range list.Tools {
 		if allowSet != nil && !allowSet[d.Name] {
 			continue

@@ -177,7 +177,7 @@ func TestStreamCompletedMessageTextFallbackBeforeToolUse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect that."}]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_file","arguments":"{\"path\":\"a.go\"}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}},"sequence_number":1}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"I will inspect that."}]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{\"path\":\"a.go\"}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}},"sequence_number":1}`+"\n\n"))
 	}))
 	t.Cleanup(srv.Close)
 	p := testProvider(t, srv, nil)
@@ -267,7 +267,7 @@ func TestStreamCapturesEncryptedReasoning(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"rs_1","type":"reasoning","encrypted_content":"ENC123","summary":[{"type":"summary_text","text":"thought"}]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read_file","arguments":"{}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}},"sequence_number":1}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"rs_1","type":"reasoning","encrypted_content":"ENC123","summary":[{"type":"summary_text","text":"thought"}]},{"id":"fc_1","type":"function_call","call_id":"call_1","name":"read","arguments":"{}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3}},"sequence_number":1}`+"\n\n"))
 	}))
 	t.Cleanup(srv.Close)
 	p := testProvider(t, srv, nil)

@@ -139,9 +139,9 @@ func TestTreeCompactionMaterializesBoundaryInsideContextReset(t *testing.T) {
 	at := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
 	before := []llm.Message{
 		treePrompt(at, strings.Repeat("old context ", 1000)),
-		{Role: llm.RoleAssistant, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "old-call", ToolName: "read_file", ToolInput: []byte(`{}`)}}},
+		{Role: llm.RoleAssistant, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "old-call", ToolName: "read", ToolInput: []byte(`{}`)}}},
 		{Role: llm.RoleUser, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "old-call", ResultText: "original old result"}}},
-		{Role: llm.RoleAssistant, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "kept-call", ToolName: "read_file", ToolInput: []byte(`{}`)}}},
+		{Role: llm.RoleAssistant, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "kept-call", ToolName: "read", ToolInput: []byte(`{}`)}}},
 		{Role: llm.RoleUser, Time: at.Add(time.Minute), Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "kept-call", ResultText: "kept result"}}},
 	}
 	tree, err := LinearTree(at, "", before)

@@ -1729,7 +1729,7 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 	reg.Register(mcpRefreshTool{name: "mcp__files__read"})
 	app.Agent.SetTools(reg)
 	app.DisabledTools = []tools.DisabledTool{
-		{Name: "rg", Reason: `"rg" binary not found`},
+		{Name: "git", Reason: `"git" binary not found`},
 	}
 
 	in := strings.NewReader("/tools\n/exit\n")
@@ -1748,7 +1748,7 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 		"  [search]",
 		"    mcp__search__lookup  refreshed tool",
 		"disabled tools:",
-		`  rg  ("rg" binary not found)`,
+		`  git  ("git" binary not found)`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/tools output missing %q:\n%s", want, got)
@@ -2271,8 +2271,8 @@ func TestREPLIdleCompactionFinishDuringActivePrompt(t *testing.T) {
 		llmtest.Step{
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
-				ToolID:    "grep-1",
-				ToolName:  "grep",
+				ToolID:    "shell-1",
+				ToolName:  "shell",
 				ToolInput: json.RawMessage(`{"pattern":"x"}`),
 			}},
 			Stop: llm.StopToolUse,
@@ -2931,7 +2931,7 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 	app.Reasoning = llm.ReasoningConfig{Profile: "max"}
 	app.Agent.SetReasoning(app.Reasoning)
 	catalog, _ := tools.CatalogWithOptions(tools.Options{})
-	planTools, err := catalog.Subset([]string{"read_file", "grep"})
+	planTools, err := catalog.Subset([]string{"read", "shell"})
 	if err != nil {
 		t.Fatalf("subset: %v", err)
 	}
@@ -2973,8 +2973,8 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 	for i, s := range fp.Requests[0].Tools {
 		names[i] = s.Name
 	}
-	if len(names) != 2 || names[0] != "read_file" || names[1] != "grep" {
-		t.Errorf("post-switch request should advertise [read_file grep], got %v", names)
+	if len(names) != 2 || names[0] != "read" || names[1] != "shell" {
+		t.Errorf("post-switch request should advertise [read shell], got %v", names)
 	}
 }
 
@@ -3175,9 +3175,9 @@ func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
 	catalog, _ := tools.CatalogWithOptions(tools.Options{})
 	toolSets := make(map[string]*tools.Registry)
 	for name, names := range map[string][]string{
-		"auto":    {"read_file"},
-		"explore": {"grep"},
-		"plan":    {"read_file", "grep"},
+		"auto":    {"read"},
+		"explore": {"shell"},
+		"plan":    {"read", "shell"},
 	} {
 		registry, err := catalog.Subset(names)
 		if err != nil {
@@ -3226,8 +3226,8 @@ func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
 	if app.AgentName != "explore" || app.System != "EXPLORE SYSTEM" {
 		t.Fatalf("first cycle selected agent=%q system=%q, want explore", app.AgentName, app.System)
 	}
-	if req := app.Agent.ContextRequest(); len(req.Tools) != 1 || req.Tools[0].Name != "grep" {
-		t.Fatalf("first cycle tools = %+v, want grep", req.Tools)
+	if req := app.Agent.ContextRequest(); len(req.Tools) != 1 || req.Tools[0].Name != "shell" {
+		t.Fatalf("first cycle tools = %+v, want shell", req.Tools)
 	}
 
 	writePipe(t, pw, "\x1b[9;2u")
@@ -3258,8 +3258,8 @@ func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
 	if got.agent != "auto" || got.request.Model != "claude-opus-4-8" || got.request.System != "AUTO SYSTEM" {
 		t.Fatalf("final prewarm snapshot = agent=%q model=%q system=%q", got.agent, got.request.Model, got.request.System)
 	}
-	if len(got.request.Tools) != 1 || got.request.Tools[0].Name != "read_file" {
-		t.Fatalf("final prewarm tools = %+v, want read_file", got.request.Tools)
+	if len(got.request.Tools) != 1 || got.request.Tools[0].Name != "read" {
+		t.Fatalf("final prewarm tools = %+v, want read", got.request.Tools)
 	}
 
 	writePipe(t, pw, "\x7f\x7f\x7f\x7f\x7f/exit\r")

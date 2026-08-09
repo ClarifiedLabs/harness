@@ -36,7 +36,7 @@ func TestREPLEditPreloadsLatestVisibleTurnAndSendsEditedPrompt(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("checking earlier context"), toolStep("list_dir", `{"path":"."}`, "call_1")},
+			Events: []llm.StreamEvent{textDelta("checking earlier context"), toolStep("read", `{"path":"."}`, "call_1")},
 			Stop:   llm.StopToolUse,
 			Usage:  llm.Usage{InputTokens: 10, OutputTokens: 2},
 		},
@@ -73,7 +73,7 @@ func TestREPLEditPreloadsLatestVisibleTurnAndSendsEditedPrompt(t *testing.T) {
 	if !strings.Contains(editorInitial, "latest answer") || !strings.Contains(editorInitial, "[turn: 2") {
 		t.Fatalf("editor preload should include the latest completed turn, got %q", editorInitial)
 	}
-	for _, excluded := range []string{"first prompt", "checking earlier context", "[list_dir", "[turn: 1", "[prompt:"} {
+	for _, excluded := range []string{"first prompt", "checking earlier context", "[read", "[turn: 1", "[prompt:"} {
 		if strings.Contains(editorInitial, excluded) {
 			t.Fatalf("editor preload should exclude %q from earlier prompt/turn output, got %q", excluded, editorInitial)
 		}

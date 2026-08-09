@@ -56,7 +56,7 @@ func TestBuiltins(t *testing.T) {
 	if !slices.Contains(explore.AllowedTools, "shell") {
 		t.Errorf("explore tools missing shell: %v", explore.AllowedTools)
 	}
-	for _, forbidden := range []string{"write_file", "edit", "apply_patch", "record_plan", "handoff", "create_goal", "update_goal", "delegate", "background_jobs"} {
+	for _, forbidden := range []string{"write", "edit", "record_plan", "handoff", "create_goal", "update_goal", "delegate", "background_jobs"} {
 		if slices.Contains(explore.AllowedTools, forbidden) {
 			t.Errorf("explore tools unexpectedly include %q: %v", forbidden, explore.AllowedTools)
 		}
@@ -104,7 +104,7 @@ func TestBuiltins(t *testing.T) {
 	if !slices.Contains(plan.AllowedTools, "shell") {
 		t.Errorf("plan tools missing shell: %v", plan.AllowedTools)
 	}
-	for _, forbidden := range []string{"edit", "write_file", "apply_patch"} {
+	for _, forbidden := range []string{"edit", "write"} {
 		if slices.Contains(plan.AllowedTools, forbidden) {
 			t.Errorf("plan tools unexpectedly include file-mutation tool %q: %v", forbidden, plan.AllowedTools)
 		}
@@ -126,7 +126,7 @@ func TestBuiltins(t *testing.T) {
 	if review.Model != "" || review.Reasoning != "" {
 		t.Errorf("review should inherit model/reasoning, got %q/%q", review.Model, review.Reasoning)
 	}
-	for _, forbidden := range []string{"write_file", "edit", "apply_patch", "record_plan", "handoff", "create_goal", "update_goal", "delegate", "background_jobs"} {
+	for _, forbidden := range []string{"write", "edit", "record_plan", "handoff", "create_goal", "update_goal", "delegate", "background_jobs"} {
 		if slices.Contains(review.AllowedTools, forbidden) {
 			t.Errorf("review tools unexpectedly include %q: %v", forbidden, review.AllowedTools)
 		}
@@ -140,12 +140,12 @@ func TestResolveNilKeepsBuiltins(t *testing.T) {
 	}
 }
 
-func TestBuiltinsIncludeReadFileAndOmitCatalogOnlyInspectionTools(t *testing.T) {
+func TestBuiltinsUseOnlyCurrentInspectionTools(t *testing.T) {
 	for name, agent := range Builtins() {
-		if !slices.Contains(agent.AllowedTools, "read_file") {
-			t.Fatalf("%s agent tools missing read_file: %v", name, agent.AllowedTools)
+		if !slices.Contains(agent.AllowedTools, "read") {
+			t.Fatalf("%s agent tools missing read: %v", name, agent.AllowedTools)
 		}
-		for _, forbidden := range []string{"list_dir", "glob", "search", "git", "git_readonly", "grep", "rg"} {
+		for _, forbidden := range []string{"read_file", "write_file", "apply_patch", "list_dir", "glob", "search", "git", "git_readonly", "grep", "rg"} {
 			if slices.Contains(agent.AllowedTools, forbidden) {
 				t.Fatalf("%s agent tools unexpectedly include %s: %v", name, forbidden, agent.AllowedTools)
 			}
@@ -170,9 +170,9 @@ func TestResolvePromptOnlyOverrideKeepsTools(t *testing.T) {
 
 // Field-level merge: overriding only the tools keeps the built-in prompt.
 func TestResolveToolsOnlyOverrideKeepsPrompt(t *testing.T) {
-	m := Resolve(map[string]FileDefinition{"plan": {AllowedTools: []string{"read_file"}}})
+	m := Resolve(map[string]FileDefinition{"plan": {AllowedTools: []string{"read"}}})
 	plan := m["plan"]
-	if !slices.Equal(plan.AllowedTools, []string{"read_file"}) {
+	if !slices.Equal(plan.AllowedTools, []string{"read"}) {
 		t.Errorf("tools = %v", plan.AllowedTools)
 	}
 	if plan.Prompt != Builtins()["plan"].Prompt {
@@ -186,7 +186,7 @@ func TestResolveToolsOnlyOverrideKeepsPrompt(t *testing.T) {
 func TestResolveMCPToolsOverride(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{
 		"plan": {MCPTools: "all"},
-		"ro":   {AllowedTools: []string{"read_file"}, MCPTools: "read-only"},
+		"ro":   {AllowedTools: []string{"read"}, MCPTools: "read-only"},
 	})
 	if m["plan"].MCPTools != MCPToolsAll {
 		t.Errorf("plan MCPTools = %q, want all", m["plan"].MCPTools)
@@ -264,9 +264,9 @@ func TestResolvePromptOnlyReviewOverrideKeepsReadOnlyDefaults(t *testing.T) {
 }
 
 func TestResolveNewAgentWithExplicitTools(t *testing.T) {
-	m := Resolve(map[string]FileDefinition{"ro": {AllowedTools: []string{"read_file", "grep"}}})
+	m := Resolve(map[string]FileDefinition{"ro": {AllowedTools: []string{"read", "shell"}}})
 	ro := m["ro"]
-	if !slices.Equal(ro.AllowedTools, []string{"read_file", "grep"}) {
+	if !slices.Equal(ro.AllowedTools, []string{"read", "shell"}) {
 		t.Errorf("tools = %v", ro.AllowedTools)
 	}
 	if ro.Prompt != "" {
@@ -373,7 +373,7 @@ func TestPlanToolsAllowShellButNotFileMutation(t *testing.T) {
 	if !slices.Contains(pt, "shell") {
 		t.Errorf("plan tools missing shell: %v", pt)
 	}
-	for _, forbidden := range []string{"edit", "write_file", "apply_patch"} {
+	for _, forbidden := range []string{"edit", "write"} {
 		if slices.Contains(pt, forbidden) {
 			t.Errorf("plan tools unexpectedly include %q: %v", forbidden, pt)
 		}

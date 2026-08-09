@@ -46,7 +46,7 @@ func TestReplayDimsStatusLinesWithANSI(t *testing.T) {
 	events := []Event{
 		{Type: EventUser, Prompt: 1, Text: "hello"},
 		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "world"},
-		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: "[read_file] path=a.go → 3 lines"},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: "[read] path=a.go → 3 lines"},
 		{Type: EventTurnComplete, Prompt: 1, Turn: 1, Display: "[turn: 1 · 1.0s]"},
 		{Type: EventPromptUsage, Prompt: 1, Display: "[prompt: 1 turn · 1.0k in / 0.1k out · 0.1s]"},
 	}
@@ -61,7 +61,7 @@ func TestReplayDimsStatusLinesWithANSI(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 	got := out.String()
-	for _, line := range []string{"[read_file] path=a.go → 3 lines", "[turn: 1 · 1.0s]", "[prompt: 1 turn"} {
+	for _, line := range []string{"[read] path=a.go → 3 lines", "[turn: 1 · 1.0s]", "[prompt: 1 turn"} {
 		if !strings.Contains(got, ansiDim+line) {
 			t.Fatalf("status line %q not dimmed:\n%q", line, got)
 		}
@@ -169,7 +169,7 @@ func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 	events := []Event{
 		{Type: EventUser, Prompt: 1, Text: "hello"},
 		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "world"},
-		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: "[read_file] path=a.go → 3 lines"},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: "[read] path=a.go → 3 lines"},
 		{Type: EventPromptUsage, Prompt: 1, Display: "[prompt: 1 turn · 1.0k in / 0.1k out · 0.1s]"},
 	}
 	for _, ev := range events {
@@ -183,7 +183,7 @@ func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 	if err := Replay(dir, &loud, ReplayOptions{}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if !strings.Contains(loud.String(), "[read_file]") {
+	if !strings.Contains(loud.String(), "[read]") {
 		t.Errorf("non-quiet replay should include status lines, got %q", loud.String())
 	}
 
@@ -193,7 +193,7 @@ func TestReplayQuietSuppressesStatusLines(t *testing.T) {
 		t.Fatalf("Replay quiet: %v", err)
 	}
 	got := quiet.String()
-	if strings.Contains(got, "[read_file]") || strings.Contains(got, "[turn:") {
+	if strings.Contains(got, "[read]") || strings.Contains(got, "[turn:") {
 		t.Errorf("quiet replay should suppress status lines, got %q", got)
 	}
 	if !strings.Contains(got, "> hello") {
@@ -261,7 +261,7 @@ func sampleSession() Session {
 			}},
 			{Role: llm.RoleAssistant, Time: msgTime, Content: []llm.ContentBlock{
 				{Kind: llm.BlockText, Text: "sure"},
-				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "list_dir", ToolInput: json.RawMessage(`{"path":"."}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"."}`)},
 			}},
 			{Role: llm.RoleUser, Time: msgTime, Content: []llm.ContentBlock{
 				{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "main.go"},
@@ -599,7 +599,7 @@ func TestSaveUsesSnapshotForTranscriptRewriteAndSkipsUnchanged(t *testing.T) {
 func TestSaveLoadPreservesParallelToolBatches(t *testing.T) {
 	s := sampleSession()
 	s.Messages[1].Content = append(s.Messages[1].Content,
-		llm.ContentBlock{Kind: llm.BlockToolUse, ToolUseID: "call_2", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"README.md"}`)},
+		llm.ContentBlock{Kind: llm.BlockToolUse, ToolUseID: "call_2", ToolName: "read", ToolInput: json.RawMessage(`{"path":"README.md"}`)},
 	)
 	s.Messages[2].Content = append(s.Messages[2].Content,
 		llm.ContentBlock{Kind: llm.BlockToolResult, ResultForID: "call_2", ResultText: "readme"},
@@ -1006,7 +1006,7 @@ func TestReplayPrintsUserFacingView(t *testing.T) {
 		{Type: EventAssistantDelta, Prompt: 1, Turn: 1, Text: "I'll check **now** and use [docs](https://docs.example.com).\n"},
 		{Type: EventReasoningSummary, Prompt: 1, Turn: 1, Text: "Checked **the repo**.\nNext [step](https://example.com)."},
 		{Type: EventTurnComplete, Prompt: 1, Turn: 1, Display: "[turn: 1 · 1.0s]"},
-		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: `[rg pattern="panic" .] → 2 lines, 80B`},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, Display: `[read pattern="panic" .] → 2 lines, 80B`},
 		{Type: EventToolDiff, Prompt: 1, Turn: 1, Display: "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-old\n+new"},
 		{Type: EventNotice, Prompt: 1, Display: "[compacted: 6 messages → summary]"},
 		{Type: EventBranch, Prompt: 1, Display: "[tree: old → new; working directory unchanged]"},
@@ -1022,7 +1022,7 @@ func TestReplayPrintsUserFacingView(t *testing.T) {
 		t.Fatalf("Replay: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"> fix it", "I'll check now and use docs <https://docs.example.com>.", "[reasoning]\n", "  Checked the repo.", "  Next step <https://example.com>.", "[turn: 1", `[rg pattern="panic" .]`, "--- a/f.txt", "-old\n+new", "[compacted:", "[tree: old", "[prompt:"} {
+	for _, want := range []string{"> fix it", "I'll check now and use docs <https://docs.example.com>.", "[reasoning]\n", "  Checked the repo.", "  Next step <https://example.com>.", "[turn: 1", `[read pattern="panic" .]`, "--- a/f.txt", "-old\n+new", "[compacted:", "[tree: old", "[prompt:"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("replay missing %q:\n%s", want, got)
 		}
@@ -1702,8 +1702,8 @@ func TestTimingsPrintsWallClockReport(t *testing.T) {
 		{Time: base.Add(200 * time.Millisecond), Type: EventModelRequest, Prompt: 1, Turn: 1, Attempt: 1, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestUpstreamAttemptFailed, StatusCode: 429, AttemptDurationMS: 250}},
 		{Time: base.Add(200 * time.Millisecond), Type: EventModelRequest, Prompt: 1, Turn: 1, Attempt: 1, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, StatusCode: 429, RetryDelayMS: 500}},
 		{Time: base.Add(950 * time.Millisecond), Type: EventModelRequest, Prompt: 1, Turn: 1, Attempt: 1, ModelRequest: &llm.ModelRequestEvent{State: llm.ModelRequestFailed, StatusCode: 529, AttemptDurationMS: 125}},
-		{Time: base.Add(1200 * time.Millisecond), Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read_file"},
-		{Time: base.Add(1500 * time.Millisecond), Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read_file"},
+		{Time: base.Add(1200 * time.Millisecond), Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read"},
+		{Time: base.Add(1500 * time.Millisecond), Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "call_1", Tool: "read"},
 		{Time: base.Add(1600 * time.Millisecond), Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1},
 		{Time: base.Add(2 * time.Second), Type: EventPromptUsage, Prompt: 1},
 	}
@@ -1718,7 +1718,7 @@ func TestTimingsPrintsWallClockReport(t *testing.T) {
 		t.Fatalf("Timings: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"prompt 1: total 2s", "first visible 1.2s", "turn 1 attempt 1: 1.5s", "payload 400", "model API issues: 2 failed attempts, 375ms provider time, 500ms scheduled retry wait (429×1, 529×1)", "tool read_file: 300ms", "gap 750ms"} {
+	for _, want := range []string{"prompt 1: total 2s", "first visible 1.2s", "turn 1 attempt 1: 1.5s", "payload 400", "model API issues: 2 failed attempts, 375ms provider time, 500ms scheduled retry wait (429×1, 529×1)", "tool read: 300ms", "gap 750ms"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("timings missing %q:\n%s", want, got)
 		}
@@ -1784,7 +1784,7 @@ func TestLatestTurnOutputReturnsLatestVisibleOutputWithoutUserPrompt(t *testing.
 		{Type: EventAssistantDelta, Prompt: 1, Turn: 2, Text: "new **answer**"},
 		{Type: EventReasoningSummary, Prompt: 1, Turn: 2, Text: "Checked state."},
 		{Type: EventTurnAttemptUsage, Prompt: 1, Turn: 2, Attempt: 1, Display: "[attempt usage is not editor output]"},
-		{Type: EventToolResult, Prompt: 1, Turn: 2, Display: `[read_file path="x"] → 12B`},
+		{Type: EventToolResult, Prompt: 1, Turn: 2, Display: `[read path="x"] → 12B`},
 		{Type: EventNotice, Prompt: 1, Turn: 2, Display: "[notice]"},
 		{Type: EventTurnComplete, Prompt: 1, Turn: 2, Display: "[turn: 2]"},
 		{Type: EventNotice, Prompt: 1, Display: "[compacted maintenance notice]"},
@@ -1805,7 +1805,7 @@ func TestLatestTurnOutputReturnsLatestVisibleOutputWithoutUserPrompt(t *testing.
 		"[reasoning]\n" +
 		"  Checked state.\n" +
 		"[end reasoning]\n" +
-		`[read_file path="x"] → 12B` + "\n" +
+		`[read path="x"] → 12B` + "\n" +
 		"[notice]\n" +
 		"[turn: 2]"
 	if got != want {
@@ -1870,7 +1870,7 @@ func TestLoadRecoversActiveToolDispatchWithoutReexecutingTool(t *testing.T) {
 			{Role: llm.RoleAssistant, Time: at.Add(time.Second), Content: []llm.ContentBlock{{
 				Kind:      llm.BlockToolUse,
 				ToolUseID: "call-1",
-				ToolName:  "write_file",
+				ToolName:  "write",
 				ToolInput: json.RawMessage(`{"path":"x"}`),
 			}}},
 		},

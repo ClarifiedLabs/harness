@@ -179,7 +179,7 @@ func TestRunConfigCheckValidatesLocalReferencesWithoutModelProxy(t *testing.T) {
 		"agents": {
 			"audit": {
 				"description": "Audit risky changes when review is requested.",
-				"allowed_tools": ["read_file"],
+				"allowed_tools": ["read"],
 				"prompt": "@system.txt"
 			}
 		}

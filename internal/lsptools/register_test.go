@@ -80,15 +80,16 @@ func (s stubNavTool) Run(context.Context, json.RawMessage) (string, error) {
 	return "", nil
 }
 
-func TestRegisterInsertsAfterNavigationAnchor(t *testing.T) {
+func TestRegisterInsertsAfterImageInspection(t *testing.T) {
 	reg := &tools.Registry{}
-	reg.Register(stubNavTool{name: "glob"})
-	reg.Register(stubNavTool{name: "grep"})
+	reg.Register(stubNavTool{name: "read"})
+	reg.Register(stubNavTool{name: "view_image"})
+	reg.Register(stubNavTool{name: "edit"})
 
 	if _, err := Register(context.Background(), reg, threeToolProvider()); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
-	want := []string{"glob", "lsp_definition", "lsp_references", "lsp_diagnostics", "grep"}
+	want := []string{"read", "view_image", "lsp_definition", "lsp_references", "lsp_diagnostics", "edit"}
 	if !slices.Equal(reg.Names(), want) {
 		t.Fatalf("registry names = %v, want %v", reg.Names(), want)
 	}

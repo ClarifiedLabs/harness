@@ -55,14 +55,14 @@ func (set *activeSkillSet) activate(path, body string) (status, digest string) {
 	return status, fmt.Sprintf("%x", sum[:8])
 }
 
-// activateSkillReadResults recognizes a successful, complete read_file of one
+// activateSkillReadResults recognizes a successful, complete read of one
 // SKILL.md. It pins the decoded instructions in request-only context for the
 // rest of the prompt and replaces the replayed result with a typed receipt.
 // The exact line-numbered tool output is archived when the session sink
 // supports artifacts; the source path remains a recovery path otherwise.
 func (a *Agent) activateSkillReadResults(calls []llm.ToolCall, results []llm.ContentBlock, active *activeSkillSet, sink EventSink) {
 	for i, call := range calls {
-		if i >= len(results) || call.Name != "read_file" {
+		if i >= len(results) || call.Name != "read" {
 			continue
 		}
 		result := &results[i]
@@ -75,7 +75,7 @@ func (a *Agent) activateSkillReadResults(calls []llm.ToolCall, results []llm.Con
 		}
 		status, digest := active.activate(path, body)
 		if activationSink, ok := sink.(SkillActivationEventSink); ok {
-			activationSink.SkillActivated(SkillActivationEvent{Source: "read_file", Status: strings.ReplaceAll(status, " ", "_")})
+			activationSink.SkillActivated(SkillActivationEvent{Source: "read", Status: strings.ReplaceAll(status, " ", "_")})
 		}
 		receipt := fmt.Sprintf(
 			"[skill activation receipt]\nstatus: %s\nsource: %s\nsha256: %s\ninstructions: pinned in request context for this prompt",

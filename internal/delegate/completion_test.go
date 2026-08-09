@@ -101,13 +101,13 @@ func TestCompletionContractSystemPromptIncludesCommonAndSpecificSchema(t *testin
 
 func TestRunnerUsesOnlyFinalAssistantCompletionReport(t *testing.T) {
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "read_file", out: "contents"})
+	childTools.Register(fakeChildTool{name: "read", out: "contents"})
 	early := completionBlock(`{"outcome":"complete","unresolved_requirements":0,"evidence":[],"unresolved_questions":[]}`)
 	provider := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{
 				{Kind: llm.EventTextDelta, Text: early},
-				{Kind: llm.EventToolCallDone, ToolID: "read", ToolName: "read_file", ToolInput: []byte(`{}`)},
+				{Kind: llm.EventToolCallDone, ToolID: "read", ToolName: "read", ToolInput: []byte(`{}`)},
 			},
 			Stop: llm.StopToolUse,
 		},

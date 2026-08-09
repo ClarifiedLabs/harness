@@ -36,7 +36,7 @@ func TestBuildRequestStatelessReplayAndGoogleSearch(t *testing.T) {
 						Kind:            llm.BlockInteractionStep,
 						InteractionStep: json.RawMessage(`{"type":"google_search_result","call_id":"search-1","signature":"result-sig","result":{"search_suggestions":"html"}}`),
 					},
-					{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"README.md"}`)},
+					{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"README.md"}`)},
 				},
 			},
 			{
@@ -50,7 +50,7 @@ func TestBuildRequestStatelessReplayAndGoogleSearch(t *testing.T) {
 			},
 		},
 		Tools: []llm.ToolSchema{{
-			Name:        "read_file",
+			Name:        "read",
 			Description: "read",
 			Parameters:  json.RawMessage(`{"type":"object"}`),
 		}},
@@ -135,7 +135,7 @@ func TestBuildRequestStatefulTail(t *testing.T) {
 			Role: llm.RoleUser,
 			Content: []llm.ContentBlock{{
 				Kind:        llm.BlockToolResult,
-				ToolName:    "read_file",
+				ToolName:    "read",
 				ResultForID: "call-1",
 				ResultText:  "ok",
 			}},
@@ -155,8 +155,8 @@ func TestBuildRequestStatefulTail(t *testing.T) {
 	if err := json.Unmarshal(got.Input[0], &result); err != nil {
 		t.Fatal(err)
 	}
-	if result.Name != "read_file" {
-		t.Fatalf("function result name = %q, want read_file", result.Name)
+	if result.Name != "read" {
+		t.Fatalf("function result name = %q, want read", result.Name)
 	}
 }
 

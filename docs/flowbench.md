@@ -13,7 +13,7 @@ calls. A turn-level scan found these recurring patterns:
 
 | Pattern | Occurrences | Sessions | Candidate deterministic flow |
 |---|---:|---:|---|
-| `rg` turn followed by a `read_file` turn | 688 | 160 | bounded contextual code search |
+| shell `rg` turn followed by a `read` turn | 688 | 160 | bounded contextual code search |
 | `shell` followed by another `shell` | 434 | 65 | ordered verification steps with compact receipts |
 | nonterminal `update_work`-only turn | 60 | 32 | coissue progress with useful work |
 | repeated git inspection | 2,318 git calls | 179 sessions with at least two | one workspace-summary workflow |
@@ -182,29 +182,34 @@ reads covering them, three successful directory-scoped argv-form `rg` searches
 through `shell` (two escaped literals and one regex), the exact two-step command
 result, requested marker evidence, and an unchanged fixture. Cosmetic command-
 step names are ignored. Candidate adoption additionally requires either a
-batched `read_file` or a turn coissuing multiple direct reads, plus at least one
+batched `read` call or a turn coissuing multiple direct reads, plus at least one
 turn that coissues independent repository lookups.
 `unknown_path_discovery` supplies only a root, recognizes successful scoped
 `rg --files` or `find` discovery through `shell` before any read, and requires
 successful batched or coissued reads of the first and last discovered paths,
-requested marker evidence, and an unchanged fixture. Metrics also record
-successful read paths, direct read
-operations, coissued read/lookup turns, search context before and after shared
-batch shaping, duplicate and budget-omitted lines, low-yield search calls,
-batch bytes before/after, and bounded-search calls.
+requested marker evidence, and an unchanged fixture. The v11 oracle records successful `read` paths, direct read operations,
+coissued read/lookup turns, shell `rg` query counts, and the exact shell
+discovery/search contracts needed by these fixtures. It does not consume the
+removed `inspect`/typed-search operations or their result telemetry.
 
 The standalone `read_scale_*` ladder isolates known-path reading from the search
 and command subcontracts. It supplies 2, 8, 18, 36, or 72 one-line files,
-requires every path to be covered successfully through direct `read_file`
-calls, checks first/middle/last marker evidence and fixture preservation, and
+requires every path to be covered successfully through direct `read` calls,
+checks first/middle/last marker evidence and fixture preservation, and
 counts adoption only when successful batched or coissued calls cover every
 fixture path. Run these cases separately rather than through the
 tool-accuracy suite when comparing read interfaces across increasing tool-call
 fan-out.
 
-Run records hash prompts, fixtures, binaries, and raw events and version their
-scoring oracle. Resume and baseline import reject stale record, prompt, oracle,
-or event-stream versions/hashes rather than reusing an unverified prior score.
+New v11 benchmark records score only the current callable surface: `read` for
+direct reads and `shell` for discovery/search commands. Removed callable names
+are not accepted as aliases, and legacy typed-search result telemetry is not
+used for new scores. A pre-break baseline that does not expose this surface is
+not a valid comparison baseline; rebuild or rerun it with the v11 callable
+contract. Run records hash prompts, fixtures, binaries, and raw events and
+version their scoring oracle. Resume and baseline import reject stale record,
+prompt, oracle, or event-stream versions/hashes rather than reusing an
+unverified prior score.
 They retain invalid infrastructure samples as immutable evidence, leave their
 matrix keys incomplete, and append a replacement on `-resume` rather than
 scoring or deleting the invalid sample. Child runs use an empty explicit Harness
@@ -412,8 +417,8 @@ overlapping source windows across coissued search results. A count-only search
 throttle is still unsupported: Terra and V4 Flash were search-heavy winners,
 while several regressors issued fewer searches than their baselines. The v7
 unknown-path adoption metric also undercounts valid direct coissuing: Sonnet
-issued two `read_file` calls together in one turn, but the metric recognizes
-only one `read_file paths[]` call.
+issued two `read` calls together in one turn, but the historical metric recognized
+only one `read paths[]` call.
 
 A shared-search-batch candidate (`cdce7da`, immediate-parent baseline
 `eb8c32f`) then ran the same eight-model, three-case matrix under the v8 oracle:
@@ -563,9 +568,9 @@ per-token charge because both configured providers are subscription based.
 ## Decision rule going forward
 
 In the earlier workflow campaign, only background wait cleared the complete
-promotion gate. Structured command steps and catalog-only raw search/git
-wrappers remain available because they are useful and do not force built-in
-agents down the rejected path. The legacy todo-coissuing experiment was pure steering and was removed after its measured
+promotion gate. Structured command steps and the `git` workflow remain
+available; the historical raw search wrappers were later removed, and current
+agents invoke host search commands through `shell`. The legacy todo-coissuing experiment was pure steering and was removed after its measured
 regression. The typed tool-accuracy package stopped at smoke first because edit
 precision failed; a focused guidance revision fixed that case. Longer focused
 confirmation cleared the smoke's Sonnet anomaly, but the resulting five-pair
@@ -586,7 +591,7 @@ oracle/infrastructure defect.
 `scripts/retentionbench` is a separate live-model matrix for the transcript
 retention experiment. It compares `age`, `disabled`, and `pressure` policies
 under both stateful and stateless request shapes. Every run must read more than
-ten deterministic files in order, exactly one `read_file` call per model turn,
+ten deterministic files in order, exactly one `read` call per model turn,
 then reproduce every marker. This provides an objective correctness oracle
 while creating old tool results large enough to exercise retention.
 

@@ -31,7 +31,7 @@ func TestAnalyzeCorpusRecursiveDiscoveryAndCutoff(t *testing.T) {
 	}
 
 	incomplete := filepath.Join(corpus, "root-b")
-	mustAppendAnalysisEvent(t, incomplete, Event{Time: base, Type: EventToolResult, Tool: "read_file"})
+	mustAppendAnalysisEvent(t, incomplete, Event{Time: base, Type: EventToolResult, Tool: "read"})
 	f, err := os.OpenFile(filepath.Join(incomplete, eventLog), os.O_APPEND|os.O_WRONLY, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -81,7 +81,7 @@ func TestAnalyzeCorpusCountsInBandCommandFailures(t *testing.T) {
 	root := t.TempDir()
 	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1}})
 	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}})
-	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "read_file", ResultError: true})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "read", ResultError: true})
 	report, err := AnalyzeCorpus(root, AnalyzeOptions{})
 	if err != nil {
 		t.Fatal(err)

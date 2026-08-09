@@ -172,44 +172,19 @@ func TestStatsOptimizationDiagnosticsAreAggregatedAndRedacted(t *testing.T) {
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
 				{Kind: llm.BlockThinking, Thinking: "reason", ThinkingSignature: "opaque"},
 				{Kind: llm.BlockText, Text: "answer"},
-				{Kind: llm.BlockToolUse, ToolUseID: "active-read", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"x.go"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "active-read", ToolName: "read", ToolInput: json.RawMessage(`{"path":"x.go"}`)},
 			}},
-			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "active-read", ToolName: "read_file", ResultText: "tool output"}}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "active-read", ToolName: "read", ResultText: "tool output"}}},
 		},
 	}
 	events := []Event{
-		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "read-1", Tool: "read_file", Input: skillInput},
-		{Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "read-1", Tool: "read_file", ResultError: true, ResultTruncated: true, ResultOriginalBytes: 1000, ResultShownBytes: 100, DurationMS: 12},
-		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "read-2", Tool: "read_file", Input: skillInput},
-		{Type: EventToolStart, Prompt: 1, Turn: 3, ToolID: "read-3", Tool: "read_file", Input: skillInput},
+		{Type: EventToolStart, Prompt: 1, Turn: 1, ToolID: "read-1", Tool: "read", Input: skillInput},
+		{Type: EventToolResult, Prompt: 1, Turn: 1, ToolID: "read-1", Tool: "read", ResultError: true, ResultTruncated: true, ResultOriginalBytes: 1000, ResultShownBytes: 100, DurationMS: 12},
+		{Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "read-2", Tool: "read", Input: skillInput},
+		{Type: EventToolStart, Prompt: 1, Turn: 3, ToolID: "read-3", Tool: "read", Input: skillInput},
 		{Type: EventToolStart, Prompt: 1, Turn: 4, ToolID: "steps", Tool: "shell", Input: json.RawMessage(`{"steps":[{"command":"SECRET shell"},{"argv":["SECRET-ARGV"]}]}`)},
 		{Type: EventSkillActivation, Prompt: 1, Turn: 4, Purpose: "explicit", Summary: "activated"},
-		{Type: EventSkillActivation, Prompt: 1, Turn: 4, Purpose: "read_file", Summary: "already_active"},
-		{Type: EventToolResult, Prompt: 1, Turn: 4, ToolID: "search", Tool: "search", ResultMetrics: map[string]int{
-			"context_lines_before_dedupe": 10,
-			"unique_context_lines":        6,
-		}},
-		{Type: EventToolResult, Prompt: 1, Turn: 4, ToolID: "flat-search", Tool: "search", ResultMetrics: map[string]int{
-			"context_lines":   20,
-			"results_bounded": 1,
-		}},
-		{Type: EventToolResult, Prompt: 1, Turn: 4, ToolID: "batch-owner", Tool: "search", ResultMetrics: map[string]int{
-			"search_batch_member":               1,
-			"search_batch_metrics_owner":        1,
-			"search_batch_calls":                2,
-			"search_batch_context_lines_before": 12,
-			"search_batch_unique_context_lines": 8,
-			"search_batch_context_lines_after":  6,
-			"search_batch_budget_lines_omitted": 2,
-			"search_batch_low_yield_calls":      1,
-			"search_batch_bytes_before":         1000,
-			"search_batch_bytes_after":          600,
-			"context_bounded":                   1,
-		}},
-		{Type: EventToolResult, Prompt: 1, Turn: 4, ToolID: "batch-member", Tool: "search", ResultMetrics: map[string]int{
-			"search_batch_member": 1,
-			"context_lines":       3,
-		}},
+		{Type: EventSkillActivation, Prompt: 1, Turn: 4, Purpose: "read", Summary: "already_active"},
 		{Type: EventModelRequest, Prompt: 1, Turn: 4, Context: &ContextSnapshot{
 			Total: 90, Window: 1000, System: 10, Tools: 20, Messages: 60, Source: "estimated",
 		}},
@@ -228,16 +203,13 @@ func TestStatsOptimizationDiagnosticsAreAggregatedAndRedacted(t *testing.T) {
 		"  tool inputs/results: 15 B / 11 B\n",
 		"  latest request estimate: 90 / 1000 tokens (estimated)\n",
 		"  result volume by tool (largest first):\n",
-		"    read_file: 1 results, 1 errors, 1 truncated, 100 B shown / 1000 B original\n",
+		"    read: 1 results, 1 errors, 1 truncated, 100 B shown / 1000 B original\n",
 		"  repeated normalized calls (inputs redacted):\n",
-		"    read_file: 2 duplicate executions across 1 repeated inputs (max 3 identical)\n",
+		"    read: 2 duplicate executions across 1 repeated inputs (max 3 identical)\n",
 		"  SKILL.md tool reads: 3 (1 unique paths, 2 re-reads)\n",
 		"  skill activations: 2\n",
 		"    explicit/activated: 1\n",
-		"    read_file/already_active: 1\n",
-		"  search context: 42 candidate source lines / 34 unique / 32 shown (8 duplicates suppressed, 2 omitted by shared limits)\n",
-		"  shared search batches: 1 (2 calls, 1 low-yield); 1000 B before / 600 B after\n",
-		"  bounded search results: 2\n",
+		"    read/already_active: 1\n",
 		"    step batches: 1 total (1 root, 0 delegates)\n",
 		"    step commands: 2 total (2 root, 0 delegates)\n",
 		"      step shell-string: 1 total (1 root, 0 delegates)\n",
@@ -249,6 +221,32 @@ func TestStatsOptimizationDiagnosticsAreAggregatedAndRedacted(t *testing.T) {
 	}
 	if strings.Contains(got, "SECRET") {
 		t.Fatalf("stats output leaked tool input: %s", got)
+	}
+}
+
+func TestCollectToolStatsUsesCurrentInspectionSurface(t *testing.T) {
+	events := []Event{
+		{Type: EventToolStart, Prompt: 1, Turn: 1, Tool: "read", Input: json.RawMessage(`{"path":"SKILL.md"}`)},
+		{Type: EventToolStart, Prompt: 1, Turn: 2, Tool: "git_readonly", Input: json.RawMessage(`{}`)},
+	}
+	for i, name := range []string{"read_file", "search", "rg", "grep", "glob", "list_dir"} {
+		events = append(events, Event{
+			Type: EventToolStart, Prompt: 1, Turn: i + 3, Tool: name,
+			Input: json.RawMessage(`{"path":"legacy/SKILL.md"}`),
+		})
+	}
+	stats, err := collectToolStats(events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.singleInspectTurns != 2 || stats.skillReads != 1 {
+		t.Fatalf("current inspection stats = single turns %d skill reads %d, want 2/1: %+v",
+			stats.singleInspectTurns, stats.skillReads, stats)
+	}
+	for _, name := range []string{"read_file", "search", "rg", "grep", "glob", "list_dir"} {
+		if stats.byName[name] != 1 {
+			t.Errorf("legacy tool %q generic call count = %d, want 1", name, stats.byName[name])
+		}
 	}
 }
 
@@ -284,7 +282,7 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 		Created:  base,
 		Updated:  base.Add(10 * time.Minute),
 		Usage:    UsageTotals{Usage: llm.Usage{InputTokens: 1000}, CostUSD: 1},
-	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "root", Tool: "read_file", Input: json.RawMessage(`{}`)}})
+	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "root", Tool: "read", Input: json.RawMessage(`{}`)}})
 
 	topDir, err := SaveChildMeta(rootDir, ChildMeta{
 		ID:                 "top",
@@ -348,7 +346,7 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 		Created:  base.Add(2 * time.Minute),
 		Updated:  base.Add(4 * time.Minute),
 		Usage:    UsageTotals{Usage: llm.Usage{InputTokens: 100}, CostUSD: 0.1},
-	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "nested-write", Tool: "write_file", Input: json.RawMessage(`{}`)}})
+	}, []Event{{Type: EventToolStart, Turn: 1, ToolID: "nested-write", Tool: "write", Input: json.RawMessage(`{}`)}})
 
 	var out bytes.Buffer
 	if err := Stats(rootDir, &out); err != nil {
@@ -357,9 +355,9 @@ func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"  tool calls: 3 total (1 root, 2 delegates)\n",
-		"    read_file: 1 total (1 root, 0 delegates)\n",
+		"    read: 1 total (1 root, 0 delegates)\n",
 		"    shell: 1 total (0 root, 1 delegates)\n",
-		"    write_file: 1 total (0 root, 1 delegates)\n",
+		"    write: 1 total (0 root, 1 delegates)\n",
 		"Usage (includes delegates)\n  uncached input: 1000\n",
 		"Delegates (2)\n",
 		"    completed: 1\n    failed: 1\n",
@@ -428,7 +426,7 @@ func TestStatsIncludesRunningChildWithoutCheckpoint(t *testing.T) {
 		{Time: base.Add(3 * time.Second), Type: EventUser, Prompt: 1, Text: "work"},
 		{Time: base.Add(4 * time.Second), Type: EventTurnAttemptUsage, Prompt: 1, Turn: 1, Attempt: 1, Usage: &childUsage},
 		{Time: base.Add(5 * time.Second), Type: EventTurnComplete, Prompt: 1, Turn: 1},
-		{Time: base.Add(6 * time.Second), Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "read", Tool: "read_file", Input: json.RawMessage(`{}`)},
+		{Time: base.Add(6 * time.Second), Type: EventToolStart, Prompt: 1, Turn: 2, ToolID: "read", Tool: "read", Input: json.RawMessage(`{}`)},
 	} {
 		if err := AppendEvent(childDir, ev); err != nil {
 			t.Fatalf("AppendEvent child: %v", err)
@@ -809,12 +807,12 @@ func TestStatsErrorsSection(t *testing.T) {
 				ErrorKind: string(llm.ToolErrorEditOldTextNotFound), ErrorExcerpt: "could not find oldText in a.go…"},
 			{Type: EventToolResult, Prompt: 1, Turn: 2, Tool: "frobnicate", ResultError: true,
 				Display: `[frobnicate] → error: unknown tool "frobnicate"`},
-			{Type: EventToolResult, Prompt: 1, Turn: 3, Tool: "read_file", ResultError: true,
-				Display: `[read_file path=/missing] → error: stat /missing: no such file or directory`},
-			{Type: EventToolResult, Prompt: 1, Turn: 4, Tool: "read_file", ResultError: true,
-				Display: `[read_file path=/missing] → error: stat /missing: no such file or directory`},
-			{Type: EventToolResult, Prompt: 1, Turn: 5, Tool: "read_file", ResultError: true,
-				Display: `[read_file path=/missing] → error: stat /missing: no such file or directory`},
+			{Type: EventToolResult, Prompt: 1, Turn: 3, Tool: "read", ResultError: true,
+				Display: `[read path=/missing] → error: stat /missing: no such file or directory`},
+			{Type: EventToolResult, Prompt: 1, Turn: 4, Tool: "read", ResultError: true,
+				Display: `[read path=/missing] → error: stat /missing: no such file or directory`},
+			{Type: EventToolResult, Prompt: 1, Turn: 5, Tool: "read", ResultError: true,
+				Display: `[read path=/missing] → error: stat /missing: no such file or directory`},
 			{Type: EventModelRequest, Prompt: 1, Turn: 6, ModelRequest: &llm.ModelRequestEvent{
 				State: llm.ModelRequestFailed, StatusCode: 500, Message: "boom",
 			}},
@@ -830,11 +828,11 @@ func TestStatsErrorsSection(t *testing.T) {
 		for _, want := range []string{
 			"failed tool results: 5/5 (100.0%)",
 			"model request failures: 1",
-			"by tool: read_file (3/3, 100.0%), edit (1/1, 100.0%), frobnicate (1/1, 100.0%)",
+			"by tool: read (3/3, 100.0%), edit (1/1, 100.0%), frobnicate (1/1, 100.0%)",
 			"by kind: path_not_found (3), edit_oldtext_not_found (1), provider_5xx (1), unknown_tool (1)",
 			"by model: claude-test (5/5, 100.0%)",
 			"repeated failures:",
-			"read_file: path_not_found (3 consecutive)",
+			"read: path_not_found (3 consecutive)",
 		} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("stats output missing %q:\n%s", want, out)
@@ -846,7 +844,7 @@ func TestStatsErrorsSection(t *testing.T) {
 		dir := filepath.Join(t.TempDir(), "session")
 		saveStatsFixture(t, dir, Session{Provider: "anthropic", Model: "claude-test"}, []Event{
 			{Type: EventUser, Prompt: 1, Text: "hi"},
-			{Type: EventToolResult, Prompt: 1, Turn: 1, Tool: "glob", Display: "[glob] → 2 lines, 10 B"},
+			{Type: EventToolResult, Prompt: 1, Turn: 1, Tool: "generic", Display: "[generic] → 2 lines, 10 B"},
 		})
 
 		var buf bytes.Buffer

@@ -48,7 +48,7 @@
           "id": "call_01C",
           "type": "function",
           "function": {
-            "name": "list_dir",
+            "name": "read",
             "arguments": "{}"
           }
         }
@@ -83,7 +83,7 @@
     {
       "type": "function",
       "function": {
-        "name": "list_dir",
+        "name": "read",
         "description": "List directory entries.",
         "parameters": {
           "type": "object",

@@ -20,9 +20,11 @@ const writeFileSchema = `{
 
 type writeFile struct{}
 
-func (writeFile) Name() string { return "write_file" }
+func (writeFile) Name() string { return "write" }
 
-func (writeFile) Description() string { return "Write a whole file, creating parents; edit for partial changes." }
+func (writeFile) Description() string {
+	return "Write a whole file, creating parents; edit for partial changes."
+}
 
 func (writeFile) Schema() json.RawMessage { return json.RawMessage(writeFileSchema) }
 

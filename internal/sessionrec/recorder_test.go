@@ -92,10 +92,10 @@ func TestRecorderToolResultErrorFields(t *testing.T) {
 	rec := New(Config{Dir: dir, Prompt: 1})
 	rec.ToolStart(llm.ToolCall{ID: "c1", Name: "edit"})
 	rec.ToolResult(llm.ToolResult{ForID: "c1", Text: "line1\nline2\nline3", IsError: true, ErrorKind: llm.ToolErrorEditOldTextNotFound})
-	rec.ToolStart(llm.ToolCall{ID: "c2", Name: "read_file"})
+	rec.ToolStart(llm.ToolCall{ID: "c2", Name: "read"})
 	// Multi-byte runes: the stored excerpt must never split one.
 	rec.ToolResult(llm.ToolResult{ForID: "c2", Text: strings.Repeat("é", 300), IsError: true, ErrorKind: llm.ToolErrorPathNotFound})
-	rec.ToolStart(llm.ToolCall{ID: "c3", Name: "glob"})
+	rec.ToolStart(llm.ToolCall{ID: "c3", Name: "custom_tool"})
 	rec.ToolResult(llm.ToolResult{ForID: "c3", Text: "ok"})
 	rec.Flush()
 	if err := rec.Err(); err != nil {
@@ -180,7 +180,7 @@ func TestRecorderNoopsOnEmptyDir(t *testing.T) {
 	rec.TextDelta("hello")
 	rec.AssistantPhase(llm.AssistantPhaseCommentary)
 	rec.ReasoningSummary("thinking")
-	rec.ToolStart(llm.ToolCall{ID: "c", Name: "read_file"})
+	rec.ToolStart(llm.ToolCall{ID: "c", Name: "read"})
 	rec.ToolResult(llm.ToolResult{ForID: "c", Text: "x"})
 	rec.ToolDiff(llm.ToolCall{ID: "c", Name: "edit"}, "a.go", "diff")
 	rec.Notice("note", 1)

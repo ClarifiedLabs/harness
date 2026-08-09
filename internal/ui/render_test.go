@@ -56,8 +56,8 @@ func TestToolSummaryLine(t *testing.T) {
 
 	r.ToolStart(llm.ToolCall{
 		ID:    "c1",
-		Name:  "grep",
-		Input: json.RawMessage(`{"args":["-R","-n","func main","."]}`),
+		Name:  "shell",
+		Input: json.RawMessage(`{"argv":["rg","-n","func main","."]}`),
 	})
 	r.ToolResult(llm.ToolResult{
 		ForID: "c1",
@@ -68,13 +68,13 @@ func TestToolSummaryLine(t *testing.T) {
 	if out.Len() != 0 {
 		t.Errorf("tool lines must go to errw, not out; out=%q", out.String())
 	}
-	if strings.Contains(got, "[tool: grep started") {
+	if strings.Contains(got, "[tool: shell started") {
 		t.Errorf("tool start should be hidden by default, got %q", got)
 	}
-	if !strings.Contains(got, "[grep]") {
-		t.Errorf("summary should include [grep], got %q", got)
+	if !strings.Contains(got, "[shell]") {
+		t.Errorf("summary should include [shell], got %q", got)
 	}
-	if !strings.Contains(got, `args=["-R","-n","func main","."]`) {
+	if !strings.Contains(got, `argv=["rg","-n","func main","."]`) {
 		t.Errorf("summary should show argv-style args, got %q", got)
 	}
 	if !strings.Contains(got, "→") {
@@ -125,13 +125,13 @@ func TestToolSummaryFinishesAssistantLine(t *testing.T) {
 	r := NewRenderer(&out, &errw, RenderOptions{})
 
 	r.TextDelta("calling a tool")
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "list_dir", Input: json.RawMessage(`{"path":"."}`)})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"."}`)})
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "a\nb\n"})
 
 	if got := out.String(); got != "calling a tool\n" {
 		t.Errorf("tool summary should force a newline after assistant text, got %q", got)
 	}
-	if got := errw.String(); !strings.Contains(got, "[list_dir]") {
+	if got := errw.String(); !strings.Contains(got, "[read]") {
 		t.Errorf("tool summary should still go to errw, got %q", got)
 	}
 }
@@ -141,7 +141,7 @@ func TestToolSummaryDoesNotDoubleSpaceAfterAssistantNewline(t *testing.T) {
 	r := NewRenderer(&out, &errw, RenderOptions{})
 
 	r.TextDelta("calling a tool\n")
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "list_dir", Input: json.RawMessage(`{"path":"."}`)})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"."}`)})
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "a\nb\n"})
 
 	if got := out.String(); got != "calling a tool\n" {
@@ -152,8 +152,8 @@ func TestToolSummaryDoesNotDoubleSpaceAfterAssistantNewline(t *testing.T) {
 func TestVerboseAddsSnippet(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Verbose: true})
-	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read_file"})
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
+	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read"})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)})
 	body := "line1\nline2\nline3\nline4\nline5\nline6\nline7\n"
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: body})
 
@@ -161,10 +161,10 @@ func TestVerboseAddsSnippet(t *testing.T) {
 	if !strings.Contains(got, "line1") || !strings.Contains(got, "line5") {
 		t.Errorf("verbose should include the first ~5 lines, got %q", got)
 	}
-	if !strings.Contains(got, "[tool: read_file started path=a.go]") {
+	if !strings.Contains(got, "[tool: read started path=a.go]") {
 		t.Errorf("verbose should include tool progress details, got %q", got)
 	}
-	if !strings.Contains(got, "[tool-call: read_file id=c1]") {
+	if !strings.Contains(got, "[tool-call: read id=c1]") {
 		t.Errorf("verbose should include streamed tool-call progress, got %q", got)
 	}
 	if strings.Contains(got, "line6") {
@@ -179,15 +179,15 @@ func TestQuietSuppressesStatusButKeepsUsage(t *testing.T) {
 	// Progress noise (TurnAttemptStart, tool lines, notices) is suppressed, but
 	// -quiet alone still prints the single per-prompt usage line (r25).
 	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
-	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read_file"})
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
+	r.ToolUseStart(llm.ToolCall{ID: "c1", Name: "read"})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)})
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "package main\n"})
 	r.Notice("[something happened]")
 	r.StartPromptRun()
 	r.PromptComplete(agent.PromptUsage{})
 
 	got := errw.String()
-	if strings.Contains(got, "waiting") || strings.Contains(got, "read_file") || strings.Contains(got, "something happened") {
+	if strings.Contains(got, "waiting") || strings.Contains(got, "read") || strings.Contains(got, "something happened") {
 		t.Errorf("quiet mode should suppress progress lines, got %q", got)
 	}
 	if !strings.Contains(got, "[prompt:") {
@@ -373,7 +373,7 @@ func TestUsageLineUnknownModelOmitsCost(t *testing.T) {
 func TestColorSuppressedWhenNotTTY(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Color: false})
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "list_dir", Input: json.RawMessage(`{"path":"."}`)})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"."}`)})
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "a\nb\n"})
 	if strings.Contains(errw.String(), "\x1b[") {
 		t.Errorf("no ANSI escapes when color disabled, got %q", errw.String())
@@ -383,7 +383,7 @@ func TestColorSuppressedWhenNotTTY(t *testing.T) {
 func TestColorEmittedWhenEnabled(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Color: true})
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "list_dir", Input: json.RawMessage(`{"path":"."}`)})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"."}`)})
 	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "a\nb\n"})
 	if !strings.Contains(errw.String(), "\x1b[") {
 		t.Errorf("expected ANSI dim escapes when color enabled, got %q", errw.String())
@@ -629,12 +629,12 @@ func TestMarkdownAssistantFlushesBeforeStatusLine(t *testing.T) {
 	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, ToolStream: true})
 
 	r.TextDelta("calling **tool**")
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "list_dir", Input: json.RawMessage(`{"path":"."}`)})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(`{"path":"."}`)})
 
 	if got := out.String(); got != "calling tool\n" {
 		t.Fatalf("assistant markdown should flush before status, got %q", got)
 	}
-	if got := errw.String(); !strings.Contains(got, "[tool: list_dir started path=.]") {
+	if got := errw.String(); !strings.Contains(got, "[tool: read started path=.]") {
 		t.Fatalf("status line missing after markdown flush, got %q", got)
 	}
 }
@@ -647,14 +647,14 @@ func TestLiveTableNotSplitByWaitCounter(t *testing.T) {
 	// and beginWait would Flush the markdown stream after a newline-terminated
 	// delta, splitting the buffered table into two separately-formatted
 	// halves.  The short early rows then lacked padding for the wide later
-	// rows (e.g. "explore (no edit/write_file)"), producing
+	// rows (e.g. "explore (no edit/write)"), producing
 	// "| independent | same |" live but "| independent                  | same |" on replay.
-	full := "| agent | baseline → candidate (-no-env, request_bytes)  | Δ total      | vs system    |\n| --- | --- | --- | --- |\n| auto | 8282+13980=22275 → 7580+14313=~21906 see below | -369 (-1.7%) | -5.0% system |\n| independent | same | -369 | -5.0% |\n| explore (no edit/write_file) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n"
+	full := "| agent | baseline → candidate (-no-env, request_bytes)  | Δ total      | vs system    |\n| --- | --- | --- | --- |\n| auto | 8282+13980=22275 → 7580+14313=~21906 see below | -369 (-1.7%) | -5.0% system |\n| independent | same | -369 | -5.0% |\n| explore (no edit/write) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n"
 	// Split the way the real session did: header+separator+first row end in
 	// one delta, the next delta continues with the second row.
 	deltas := []string{
 		"| agent | baseline → candidate (-no-env, request_bytes)  | Δ total      | vs system    |\n| --- | --- | --- | --- |\n| auto | 8282+13980=22275 → 7580+14313=~21906 see below | -369 (-1.7%) | -5.0% system |\n",
-		"| independent | same | -369 | -5.0% |\n| explore (no edit/write_file) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n",
+		"| independent | same | -369 | -5.0% |\n| explore (no edit/write) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n",
 	}
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Markdown: true, LiveStatus: true, Width: func() int { return 240 }})
@@ -672,7 +672,7 @@ func TestLiveTableNotSplitByWaitCounter(t *testing.T) {
 	if live != replay {
 		t.Fatalf("live vs replay mismatch:\nlive=%q\nreplay=%q", live, replay)
 	}
-	if !strings.Contains(live, "| independent                  | same") {
+	if !strings.Contains(live, "| independent             | same") {
 		t.Fatalf("live table not padded correctly, got %q", live)
 	}
 }
@@ -752,7 +752,7 @@ func TestTurnAttemptCompleteFlushesToolUseProgress(t *testing.T) {
 	r.StartPromptRun()
 
 	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
-	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
+	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read"})
 	if strings.Contains(errw.String(), "[tool-call:") {
 		t.Fatalf("tool-call progress should wait for model cost, got:\n%s", errw.String())
 	}
@@ -767,7 +767,7 @@ func TestTurnAttemptCompleteFlushesToolUseProgress(t *testing.T) {
 	}
 	got := errw.String()
 	waiting := strings.Index(got, "[turn: 1 waiting]")
-	toolCall := strings.Index(got, "[tool-call: read_file id=call_1]")
+	toolCall := strings.Index(got, "[tool-call: read id=call_1]")
 	if waiting < 0 || toolCall < 0 {
 		t.Fatalf("missing expected progress lines:\n%s", got)
 	}
@@ -818,7 +818,7 @@ func TestTimestampsOnlyBracketedStatusLines(t *testing.T) {
 
 	r.TextDelta("plain assistant text\n")
 	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
-	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
+	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read"})
 	r.Notice("unbracketed notice")
 	r.Notice("[bracketed notice]")
 
@@ -828,7 +828,7 @@ func TestTimestampsOnlyBracketedStatusLines(t *testing.T) {
 	got := errw.String()
 	for _, want := range []string{
 		"[16:15:34 turn: 1 waiting]",
-		"[16:15:34 tool-call: read_file id=call_1]",
+		"[16:15:34 tool-call: read id=call_1]",
 		"unbracketed notice\n",
 		"[16:15:34 bracketed notice]",
 	} {
@@ -919,7 +919,7 @@ func TestToolUseStreamEnabledWritesProgressOnlyToStderr(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{ToolStream: true})
 
-	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
+	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read"})
 	r.ToolUseDelta(0, `{"path":`)
 	r.ToolUseDelta(0, `"a.go"}`)
 	r.Notice("[done]")
@@ -928,7 +928,7 @@ func TestToolUseStreamEnabledWritesProgressOnlyToStderr(t *testing.T) {
 		t.Errorf("tool-call stream must not touch stdout, got %q", out.String())
 	}
 	got := errw.String()
-	if !strings.Contains(got, "[tool-call: read_file id=call_1]") {
+	if !strings.Contains(got, "[tool-call: read id=call_1]") {
 		t.Errorf("missing tool-call start line, got %q", got)
 	}
 	if strings.Contains(got, "[tool-call args]") || strings.Contains(got, `{"path"`) {
@@ -1018,7 +1018,7 @@ func TestToolUseStreamDisabledSuppressesRawArgs(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{ToolStream: false})
 
-	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
+	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read"})
 	r.ToolUseDelta(0, `{"path":"a.go"}`)
 
 	if out.Len() != 0 {
@@ -1220,7 +1220,7 @@ func TestLiveDelegateStatusSelectsLatestConcurrentNestedChild(t *testing.T) {
 	latest := registry.Register(delegate.ActivityStart{ID: "nested", ParentID: "first", Agent: "plan", Depth: 2})
 	third := registry.Register(delegate.ActivityStart{ID: "third", Agent: "auto", Depth: 1})
 	latest.MarkTurn(3, 2, agent.ContextEstimate{})
-	latest.MarkActivity("tool read_file path=\"internal/ui/render.go\"")
+	latest.MarkActivity("tool read path=\"internal/ui/render.go\"")
 	r := NewRenderer(&out, &errw, RenderOptions{
 		LiveStatus:       true,
 		DelegateActivity: registry,
@@ -1239,7 +1239,7 @@ func TestLiveDelegateStatusSelectsLatestConcurrentNestedChild(t *testing.T) {
 	r.StartPromptRun()
 	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	got := errw.String()
-	if !strings.Contains(got, "3 delegates · latest d2 plan: turn 3 attempt 2 · tool read_file") {
+	if !strings.Contains(got, "3 delegates · latest d2 plan: turn 3 attempt 2 · tool read") {
 		t.Fatalf("concurrent delegate status = %q", got)
 	}
 	if strings.Contains(got, "latest d3") || strings.Contains(got, "legacy") {
@@ -1283,7 +1283,7 @@ func TestLiveDelegateStatusPreservesIdentityAtNarrowUnicodeWidth(t *testing.T) {
 	var out, errw bytes.Buffer
 	registry := delegate.NewActivityRegistry(nil)
 	registration := registry.Register(delegate.ActivityStart{ID: strings.Repeat("durable", 20), Agent: "探索漢字レビュー担当"})
-	registration.MarkActivity("tool read_file path=\"非常に長いパス.go\"")
+	registration.MarkActivity("tool read path=\"非常に長いパス.go\"")
 	const terminalWidth = 18
 	r := NewRenderer(&out, &errw, RenderOptions{
 		LiveStatus:       true,
@@ -1353,11 +1353,11 @@ func TestLiveDelegateStatusUpdatesDuringPromptInput(t *testing.T) {
 	r.StartPromptRun()
 	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	r.SetInputLine("hello", 5)
-	registration.MarkActivity("tool read_file path=\"README.md\"")
+	registration.MarkActivity("tool read path=\"README.md\"")
 	errw.Reset()
 	r.tick()
 	got := errw.String()
-	if !strings.Contains(got, "d1 explore") || !strings.Contains(got, "tool read_file") || !strings.Contains(got, "> hello") {
+	if !strings.Contains(got, "d1 explore") || !strings.Contains(got, "tool read") || !strings.Contains(got, "> hello") {
 		t.Fatalf("during-prompt delegate status = %q", got)
 	}
 	if !strings.Contains(got, "\r\x1b[") {
@@ -1644,14 +1644,14 @@ func TestLiveCounterTicksDuringToolGap(t *testing.T) {
 	r := liveRenderer(&out, &errw, func() time.Time { return now })
 
 	r.StartPromptRun()
-	r.ToolStart(llm.ToolCall{ID: "c1", Name: "grep", Input: json.RawMessage(`{"args":["x"]}`)})
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "shell", Input: json.RawMessage(`{"argv":["rg","x"]}`)})
 	defer r.StopProgress()
 
 	got := errw.String()
-	if strings.Contains(got, "[tool: grep started") {
+	if strings.Contains(got, "[tool: shell started") {
 		t.Fatalf("tool start line should not scroll by default, got %q", got)
 	}
-	if !strings.Contains(got, `[tool: grep args=["x"] · 0s │ prompt 0s]`) {
+	if !strings.Contains(got, `[tool: shell argv=["rg","x"] · 0s │ prompt 0s]`) {
 		t.Fatalf("a counter should show the tool arguments while ticking during the tool gap, got %q", got)
 	}
 }
@@ -1672,7 +1672,7 @@ func TestLiveCounterResumesForStreamedToolCallAfterAssistantText(t *testing.T) {
 
 	errw.Reset()
 	now = now.Add(3 * time.Second)
-	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read_file"})
+	r.ToolUseStart(llm.ToolCall{ID: "call_1", Name: "read"})
 	now = now.Add(2 * time.Second)
 	r.tick()
 	defer r.StopProgress()
@@ -1684,7 +1684,7 @@ func TestLiveCounterResumesForStreamedToolCallAfterAssistantText(t *testing.T) {
 	if strings.Contains(got, "[tool-call:") {
 		t.Fatalf("tool-call status should not force durable tool-stream output, got %q", got)
 	}
-	if !strings.Contains(got, "[turn: tool call read_file · 2s │ prompt 5s]") {
+	if !strings.Contains(got, "[turn: tool call read · 2s │ prompt 5s]") {
 		t.Fatalf("counter should resume while streamed tool arguments finish, got %q", got)
 	}
 }

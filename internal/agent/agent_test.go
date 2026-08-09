@@ -2045,11 +2045,11 @@ func TestFailingToolFedBackAsError(t *testing.T) {
 	}
 }
 
-func TestTruncatedWriteFileArgsSuggestChunkedWrite(t *testing.T) {
+func TestTruncatedWriteArgsSuggestChunkedWrite(t *testing.T) {
 	truncated := `invalid JSON at byte offset 152340: unexpected end of JSON input; input preview "{\"path\":\"big.go\",\"content\":\"package main..."`
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{invalidToolDone(0, "call_big", "write_file", truncated)},
+			Events: []llm.StreamEvent{invalidToolDone(0, "call_big", "write", truncated)},
 			Stop:   llm.StopToolUse,
 		},
 		llmtest.Step{
@@ -2070,7 +2070,7 @@ func TestTruncatedWriteFileArgsSuggestChunkedWrite(t *testing.T) {
 	if got.ErrorKind != llm.ToolErrorInvalidArgs {
 		t.Errorf("kind = %q, want %q", got.ErrorKind, llm.ToolErrorInvalidArgs)
 	}
-	for _, want := range []string{"truncated", "write the file in chunks", "edit to append", "apply_patch"} {
+	for _, want := range []string{"truncated", "smaller chunks with write", "edit to append"} {
 		if !strings.Contains(got.Text, want) {
 			t.Errorf("result text missing %q: %q", want, got.Text)
 		}
@@ -2079,18 +2079,18 @@ func TestTruncatedWriteFileArgsSuggestChunkedWrite(t *testing.T) {
 
 func TestUnexpectedEOFEditArgsSuggestChunkedWrite(t *testing.T) {
 	got := invalidToolInputResult(llm.ToolCall{Name: "edit", InvalidInputError: "unexpected EOF"})
-	for _, want := range []string{"truncated", "write the file in chunks", "apply_patch"} {
+	for _, want := range []string{"truncated", "smaller chunks with write", "edit to append"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("result missing %q: %q", want, got)
 		}
 	}
 }
 
-func TestNonTruncatedWriteFileArgsGetNoChunkSuggestion(t *testing.T) {
+func TestNonTruncatedWriteArgsGetNoChunkSuggestion(t *testing.T) {
 	broken := `invalid JSON at byte offset 30: invalid character '}' looking for beginning of value; input preview "{\"path\":\"x.go\",}"`
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{invalidToolDone(0, "call_bad", "write_file", broken)},
+			Events: []llm.StreamEvent{invalidToolDone(0, "call_bad", "write", broken)},
 			Stop:   llm.StopToolUse,
 		},
 		llmtest.Step{
@@ -2107,14 +2107,14 @@ func TestNonTruncatedWriteFileArgsGetNoChunkSuggestion(t *testing.T) {
 	if len(sink.results) != 1 {
 		t.Fatalf("results = %+v, want one result", sink.results)
 	}
-	if strings.Contains(sink.results[0].Text, "write the file in chunks") {
+	if strings.Contains(sink.results[0].Text, "smaller chunks with write") {
 		t.Errorf("non-truncation error should not get the chunked-write sentence: %q", sink.results[0].Text)
 	}
 }
 
 func TestInvalidToolInputFedBackAsError(t *testing.T) {
 	var ran bool
-	tool := &recordTool{name: "rg", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+	tool := &recordTool{name: "probe", run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		ran = true
 		return "should not run", nil
 	}}
@@ -2125,9 +2125,9 @@ func TestInvalidToolInputFedBackAsError(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{
-				toolUseStart(0, "call_bad", "rg"),
+				toolUseStart(0, "call_bad", "probe"),
 				toolUseDelta(0, `{"args": [-i, vi, .]}`),
-				invalidToolDone(0, "call_bad", "rg", invalid),
+				invalidToolDone(0, "call_bad", "probe", invalid),
 			},
 			Stop: llm.StopToolUse,
 		},
@@ -2154,10 +2154,13 @@ func TestInvalidToolInputFedBackAsError(t *testing.T) {
 	if strings.HasPrefix(sink.results[0].Text, "error: ") {
 		t.Fatalf("internal error text must be unprefixed: %q", sink.results[0].Text)
 	}
-	for _, want := range []string{"invalid tool call arguments for rg", "valid JSON object", `{"args":["-n","PATTERN","."]}`} {
+	for _, want := range []string{"invalid tool call arguments for probe", "valid JSON object"} {
 		if !strings.Contains(sink.results[0].Text, want) {
 			t.Fatalf("error result %q missing %q", sink.results[0].Text, want)
 		}
+	}
+	if strings.Contains(sink.results[0].Text, `{"args"`) {
+		t.Fatalf("generic invalid-input result contains removed-tool hint: %q", sink.results[0].Text)
 	}
 
 	msgs := a.Transcript()
@@ -2181,7 +2184,7 @@ func TestInvalidToolInputFedBackAsError(t *testing.T) {
 	var carried bool
 	for _, m := range second.Messages {
 		for _, b := range m.Content {
-			if b.Kind == llm.BlockToolResult && strings.Contains(b.ResultText, "invalid tool call arguments for rg") {
+			if b.Kind == llm.BlockToolResult && strings.Contains(b.ResultText, "invalid tool call arguments for probe") {
 				carried = true
 			}
 		}
@@ -2589,7 +2592,7 @@ func TestTurnAttemptUsageEmittedForEachProviderReturn(t *testing.T) {
 func TestRunPromptRejectsInvalidStableTranscriptBeforeRequest(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("should not run")}, Stop: llm.StopEndTurn})
 	a := newAgent(fp, tools.Default(), Options{})
-	a.SetTranscript([]llm.Message{asstToolUse("dangling", "read_file", `{}`)})
+	a.SetTranscript([]llm.Message{asstToolUse("dangling", "read", `{}`)})
 	sink := &recordSink{}
 
 	err := a.RunPrompt(context.Background(), "next", sink)
@@ -2651,15 +2654,11 @@ func TestStreamSummaryRejectsInvalidRichContentBeforeProvider(t *testing.T) {
 // dispatch, so an agent switch immediately changes what the model sees and can
 // call.
 func TestSetToolsChangesAdvertisedAndDispatchableTools(t *testing.T) {
-	catalog, _ := tools.CatalogWithOptions(tools.Options{})
-	full, err := catalog.Subset([]string{"read_file", "grep"})
-	if err != nil {
-		t.Fatalf("subset: %v", err)
-	}
-	restricted, err := catalog.Subset([]string{"read_file"})
-	if err != nil {
-		t.Fatalf("subset: %v", err)
-	}
+	full := &tools.Registry{}
+	full.Register(&recordTool{name: "read", readOnly: true})
+	full.Register(&recordTool{name: "extra", readOnly: true})
+	restricted := &tools.Registry{}
+	restricted.Register(&recordTool{name: "read", readOnly: true})
 
 	fp := llmtest.New("fake",
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("a")}, Stop: llm.StopEndTurn},
@@ -2675,25 +2674,23 @@ func TestSetToolsChangesAdvertisedAndDispatchableTools(t *testing.T) {
 		t.Fatalf("RunPrompt: %v", err)
 	}
 
-	if names := specNames(fp.Requests[0].Tools); !slices.Contains(names, "grep") {
-		t.Errorf("first request should advertise grep, got %v", names)
+	if names := specNames(fp.Requests[0].Tools); !slices.Contains(names, "extra") {
+		t.Errorf("first request should advertise extra, got %v", names)
 	}
-	if names := specNames(fp.Requests[1].Tools); slices.Contains(names, "grep") {
-		t.Errorf("after SetTools, grep should no longer be advertised, got %v", names)
+	if names := specNames(fp.Requests[1].Tools); slices.Contains(names, "extra") {
+		t.Errorf("after SetTools, extra should no longer be advertised, got %v", names)
 	}
 
 	// A call to the now-removed tool must be undispatchable.
-	res := a.tools.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "grep", Input: json.RawMessage(`{}`)})
+	res := a.tools.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "extra", Input: json.RawMessage(`{}`)})
 	if !res.IsError || !strings.Contains(res.Text, "unknown tool") {
 		t.Errorf("removed tool should be undispatchable, got %+v", res)
 	}
 }
 
 func TestToolSpecsReturnsDeepCopy(t *testing.T) {
-	reg, err := tools.Catalog().Subset([]string{"read_file"})
-	if err != nil {
-		t.Fatalf("subset: %v", err)
-	}
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "read", readOnly: true})
 	a := newAgent(llmtest.New("fake"), reg, Options{})
 
 	specs := a.ToolSpecs()
@@ -2704,7 +2701,7 @@ func TestToolSpecsReturnsDeepCopy(t *testing.T) {
 	specs[0].Parameters[0] = 'x'
 
 	later := a.ToolSpecs()
-	if later[0].Name != "read_file" {
+	if later[0].Name != "read" {
 		t.Fatalf("cached tool name mutated to %q", later[0].Name)
 	}
 	if later[0].Parameters[0] == 'x' {
@@ -2712,7 +2709,7 @@ func TestToolSpecsReturnsDeepCopy(t *testing.T) {
 	}
 
 	req := a.ContextRequest()
-	if req.Tools[0].Name != "read_file" || req.Tools[0].Parameters[0] == 'x' {
+	if req.Tools[0].Name != "read" || req.Tools[0].Parameters[0] == 'x' {
 		t.Fatalf("ContextRequest used mutated specs: %+v", req.Tools[0])
 	}
 }
@@ -3257,7 +3254,7 @@ func TestUnclassifiedAPIErrorDoesNotEmitCompatibilityDiagnostic(t *testing.T) {
 func TestMidStreamRetryBudgetExhaustedDropsPartialText(t *testing.T) {
 	fail := llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("I'll inspect the repo.")},
-		Err:    &llm.APIError{Message: `tool "rg" produced invalid arguments: invalid JSON`, Retryable: true},
+		Err:    &llm.APIError{Message: `tool "probe" produced invalid arguments: invalid JSON`, Retryable: true},
 	}
 	fp := llmtest.New("fake", fail, fail, fail)
 	a := newAgent(fp, tools.Default(), Options{})
@@ -3847,7 +3844,7 @@ func TestTruncatedToolResultIncludesArchivePathInNextRequest(t *testing.T) {
 	if !strings.Contains(resultText, "/tmp/harness-session/artifacts/tool-results/0001-call_big.txt") {
 		t.Fatalf("next request lacks archive path:\n%s", dump(fp.Requests[1].Messages))
 	}
-	if !strings.Contains(resultText, `use read_file {"path":`) {
+	if !strings.Contains(resultText, `use read {"path":`) {
 		t.Fatalf("next request lacks read guidance:\n%s", dump(fp.Requests[1].Messages))
 	}
 	if len(sink.notices) == 0 || !strings.Contains(sink.notices[len(sink.notices)-1], "full output: artifacts/tool-results/0001-call_big.txt") {

@@ -76,7 +76,7 @@ func TestProbeFixtureAndScoreRequireOrderedSingleTurnReads(t *testing.T) {
 		events = append(events, session.Event{
 			Type:  session.EventToolStart,
 			Turn:  i + 1,
-			Tool:  "read_file",
+			Tool:  "read",
 			Input: input,
 		})
 	}
@@ -92,6 +92,14 @@ func TestProbeFixtureAndScoreRequireOrderedSingleTurnReads(t *testing.T) {
 	correct, reasons := scoreProbe(fixture, messages, events, nil)
 	if !correct {
 		t.Fatalf("valid probe rejected: %v", reasons)
+	}
+	removed := append([]session.Event(nil), events...)
+	for i := range removed {
+		removed[i].Tool = "read_file"
+	}
+	correct, reasons = scoreProbe(fixture, messages, removed, nil)
+	if correct || !containsReason(reasons, "unexpected tool call: read_file") {
+		t.Fatalf("removed read_file events score = %t, %v", correct, reasons)
 	}
 	events[1].Turn = events[0].Turn
 	correct, reasons = scoreProbe(fixture, messages, events, nil)

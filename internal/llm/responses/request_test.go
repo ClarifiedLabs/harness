@@ -491,7 +491,7 @@ func TestBuildRequestContextDoesNotFollowToolResultInput(t *testing.T) {
 		RequestContext: []string{"todo context"},
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "inspect"}}},
-			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"a.go"}`)}}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
 		},
 	}
@@ -597,7 +597,7 @@ func TestBuildInputReplaysReasoningBeforeToolCall(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
 				{Kind: llm.BlockReasoning, ReasoningID: "rs_1", ReasoningEncrypted: "enc-abc"},
-				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
 			}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
 		},
@@ -663,7 +663,7 @@ func TestBuildInputSkipsReasoningWhenReasoningDisabled(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
 				{Kind: llm.BlockReasoning, ReasoningID: "rs_1", ReasoningEncrypted: "enc-abc"},
-				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read_file", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "read", ToolInput: json.RawMessage(`{"path":"a.go"}`)},
 			}},
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
 		},

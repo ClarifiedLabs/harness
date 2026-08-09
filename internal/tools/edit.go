@@ -28,7 +28,7 @@ const editSchema = `{
       "items": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "File to edit; must already exist (use write_file to create)."},
+          "path": {"type": "string", "description": "File to edit; must already exist (use write to create)."},
           "edits": {
             "type": "array",
             "minItems": 1,
@@ -243,12 +243,12 @@ func planEditFiles(files []editFile) ([]plannedEditFile, int, int, error) {
 		info, err := os.Stat(file.Path)
 		if err != nil {
 			if errors.Is(err, fs.ErrNotExist) {
-				return nil, 0, 0, fmt.Errorf("%s does not exist; use write_file to create it", file.Path)
+				return nil, 0, 0, fmt.Errorf("%s does not exist; use write to create it", file.Path)
 			}
 			return nil, 0, 0, err
 		}
 		if info.IsDir() {
-			return nil, 0, 0, fmt.Errorf("%s is a directory; use list_dir", file.Path)
+			return nil, 0, 0, fmt.Errorf("%s is a directory; use read with a directory path or an appropriate shell lookup", file.Path)
 		}
 		data, err := os.ReadFile(file.Path)
 		if err != nil {
@@ -588,7 +588,7 @@ func editNotFoundError(path, content, oldText string, editIndex, totalEdits int)
 	if hint := firstDivergentLineHint(content, oldText); hint != "" {
 		msg += "; " + hint
 	}
-	msg += "; re-read the file, then re-issue with exact oldText; if the intent is to append or create, use write_file instead"
+	msg += "; re-read the file, then re-issue with exact oldText; if the intent is to append or create, use write instead"
 	return WithKind(fmt.Errorf("%s", msg), llm.ToolErrorEditOldTextNotFound)
 }
 
@@ -617,7 +617,7 @@ func firstDivergentLineHint(content, oldText string) string {
 
 // nearestRegionHint renders up to 3 numbered lines centered on the content line
 // most similar to oldText's first non-empty line, so the model can retarget the
-// edit without a full re-read. Line numbers match read_file's numbering (the
+// edit without a full re-read. Line numbers match read's numbering (the
 // content is LF-normalized, which preserves line count). Returns "" when no
 // line is similar enough to be useful.
 func nearestRegionHint(content, oldText string) string {
@@ -652,7 +652,7 @@ const nearestEditHintMinScore = 0.34
 // nearestSimilarLine finds the content line most similar to the first non-empty
 // line of oldText, used to give edit's not-found error a recovery hint instead
 // of forcing a re-read. Similarity is character-bigram Dice (stdlib only); the
-// returned line number is 1-based and aligns with read_file's numbering because
+// returned line number is 1-based and aligns with read's numbering because
 // content is LF-normalized (line count preserved).
 func nearestSimilarLine(content, oldText string) (lineNo int, text string, score float64, ok bool) {
 	needle := firstNonEmptyLine(oldText)
@@ -777,7 +777,7 @@ func formatEditSuccess(plans []plannedEditFile, replacements int) string {
 }
 
 // editSnippet renders a small numbered snippet of the changed regions so the
-// model can confirm the edit landed without a follow-up read_file. It expands
+// model can confirm the edit landed without a follow-up read. It expands
 // each region with context, merges adjacent ones, caps the region count, and
 // trims to a byte budget at a line boundary.
 func editSnippet(body string, regions []editRegion) string {

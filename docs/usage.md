@@ -387,7 +387,7 @@ The agent loop has several controls against runaway work:
   command while changing only downstream pipeline filters are likewise steered
   after four turns and stopped after twelve ignored repeats.
 - Three consecutive turns that each perform one repository lookup get a steer
-  to coissue independent top-level lookups or use `read_file paths[]`. Twelve inspection-only turns without mutation, verification,
+  to coissue independent top-level lookups or use `read paths[]`. Twelve inspection-only turns without mutation, verification,
   wait, or coordination progress get one phase-transition steer. These semantic
   guards are advisory and never hard-stop a run; explicit user steering resets
   their streaks.
@@ -418,7 +418,7 @@ qualifies. For example: `ctx … · compactions 1 (3 total) · 4.3s`. On an
 interactive TTY, active delegates are included in
 that same transient row as `delegate d1 <agent>: <activity>`. Concurrent runs
 show the count and most recently active child, for example
-`3 delegates · latest d2 plan: tool read_file path="docs/usage.md"`. Background
+`3 delegates · latest d2 plan: tool read path="docs/usage.md"`. Background
 and nested delegates use the same row while a model, tool, or prompt-work join
 wait is active. These rows are process-local display state, not durable output,
 and are absent from non-TTY output. The [Flags](#flags)
@@ -571,13 +571,9 @@ environment variables, JSON paths, types, and defaults. The concise
 | `agents_md_warn_bytes` | `integer` | - | - | - | `agents_md_warn_bytes` | 8192 | no | Harness agents md warn bytes setting. |
 | `tool_result_max_bytes` | `integer` | - | - | `HARNESS_TOOL_RESULT_MAX_BYTES` | `tool_result_max_bytes` | 0 (tool default) | no | Harness tool result max bytes setting. |
 | `tool_result_max_lines` | `integer` | - | - | `HARNESS_TOOL_RESULT_MAX_LINES` | `tool_result_max_lines` | 0 (tool default) | no | Harness tool result max lines setting. |
-| `rg_result_max_bytes` | `integer` | - | - | `HARNESS_RG_RESULT_MAX_BYTES` | `rg_result_max_bytes` | 0 (tool default) | no | Harness rg result max bytes setting. |
-| `rg_result_max_lines` | `integer` | - | - | `HARNESS_RG_RESULT_MAX_LINES` | `rg_result_max_lines` | 0 (tool default) | no | Harness rg result max lines setting. |
-| `grep_result_max_bytes` | `integer` | - | - | `HARNESS_GREP_RESULT_MAX_BYTES` | `grep_result_max_bytes` | 0 (tool default) | no | Harness grep result max bytes setting. |
-| `grep_result_max_lines` | `integer` | - | - | `HARNESS_GREP_RESULT_MAX_LINES` | `grep_result_max_lines` | 0 (tool default) | no | Harness grep result max lines setting. |
-| `read_file_default_limit` | `integer` | - | - | `HARNESS_READ_FILE_DEFAULT_LIMIT` | `read_file_default_limit` | 0 (tool default) | no | Harness read file default limit setting. |
-| `read_file_result_max_bytes` | `integer` | - | - | `HARNESS_READ_FILE_RESULT_MAX_BYTES` | `read_file_result_max_bytes` | 0 (tool default) | no | Harness read file result max bytes setting. |
-| `read_file_result_max_lines` | `integer` | - | - | `HARNESS_READ_FILE_RESULT_MAX_LINES` | `read_file_result_max_lines` | 0 (tool default) | no | Harness read file result max lines setting. |
+| `read_default_limit` | `integer` | - | - | `HARNESS_READ_DEFAULT_LIMIT` | `read_default_limit` | 0 (tool default) | no | Harness read default limit setting. |
+| `read_result_max_bytes` | `integer` | - | - | `HARNESS_READ_RESULT_MAX_BYTES` | `read_result_max_bytes` | 0 (tool default) | no | Harness read result max bytes setting. |
+| `read_result_max_lines` | `integer` | - | - | `HARNESS_READ_RESULT_MAX_LINES` | `read_result_max_lines` | 0 (tool default) | no | Harness read result max lines setting. |
 | `compact_keep_turns` | `integer` | - | - | - | `compact_keep_turns` | 0 (all retained) | no | Harness compact keep turns setting. |
 | `compact_keep_tokens` | `integer` | - | - | - | `compact_keep_tokens` | 20000 | no | Harness compact keep tokens setting. |
 | `compact_auto_enabled` | `boolean` | `true`, `false` | - | - | `compact_auto_enabled` | true | no | Harness compact auto enabled setting. |
@@ -661,12 +657,12 @@ environment variables, JSON paths, types, and defaults. The concise
   `compact_tool_result_max_bytes`, and `retention_floor_tokens`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
-  `HARNESS_TOOL_RESULT_MAX_LINES`. `rg` and `grep` default to 32 KB / 500 lines
-  and can be overridden with `rg_result_max_bytes`, `rg_result_max_lines`,
-  `grep_result_max_bytes`, and `grep_result_max_lines`, or the matching
-  `HARNESS_*` env vars. `read_file` defaults to 500 lines and a 32 KB result cap;
-  configure `read_file_default_limit`, `read_file_result_max_bytes`, and
-  `read_file_result_max_lines`, or matching `HARNESS_*` env vars. The delegate
+  `HARNESS_TOOL_RESULT_MAX_LINES`. `read` defaults to 500 lines and a 32 KB
+  result cap; configure `read_default_limit`, `read_result_max_bytes`, and
+  `read_result_max_lines`, or `HARNESS_READ_DEFAULT_LIMIT`,
+  `HARNESS_READ_RESULT_MAX_BYTES`, and `HARNESS_READ_RESULT_MAX_LINES`. The former
+  `read_file_*`, `rg_result_*`, and `grep_result_*` settings are removed; strict
+  config decoding rejects them rather than silently ignoring a stale limit. The delegate
   tool also has config-file-only `delegate_max_turns` (maximum per-child
   tool-enabled loop budget)
   `delegate_max_depth` (recursive depth cap, root depth `0`),
@@ -692,7 +688,7 @@ environment variables, JSON paths, types, and defaults. The concise
 
   ```text
   [delegate d1 explore] assistant: Checking the call path.
-  [delegate d2 plan depth=2] tool read_file path="docs/design.md" started
+  [delegate d2 plan depth=2] tool read path="docs/design.md" started
   [delegate d1 explore] completed · 3 turns
   ```
 
@@ -1648,9 +1644,9 @@ Five agents are built in:
 
 | agent | tools | behavior |
 |---|---|---|
-| `auto` | `read_file`, `view_image`, `edit`, `write_file`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
-| `explore` | `read_file`, `view_image`, `shell`, `web_fetch`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
-| `plan` | `read_file`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
+| `auto` | `read`, `view_image`, `edit`, `write`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
+| `explore` | `read`, `view_image`, `shell`, `web_fetch`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
+| `plan` | `read`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
 | `review` | the same read-only local and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
 | `independent` | the same local tools as `auto`, plus discovered MCP tools, `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
@@ -1669,7 +1665,7 @@ value. Other fields continue to merge onto a built-in of the same name:
     "plan": { "prompt": "@~/.config/harness/plan-prompt.md" },
     "security_review": {
       "description": "Use after implementation for an independent review of concrete security issues.",
-      "allowed_tools": ["read_file", "shell"],
+      "allowed_tools": ["read", "shell"],
       "mcp_tools": "read_only",
       "workspace_access": "read_only",
       "model": "anthropic:claude-opus-4-8",
@@ -1828,8 +1824,7 @@ entries/branches/leaves/depth, direct and delegate tool/command activity,
 calls per tool-bearing turn, standalone TODO/single-inspection turns, result
 size/truncation/timing totals and per-tool result volume, normalized repeated
 call aggregates with arguments redacted, command-step use, `SKILL.md`
-reads/activations, historical typed-search context/bounding and dedup-batch
-metrics when present, active-context
+reads/activations, active-context
 composition and the latest request estimate, parallel batches, compactions,
 and a hierarchical delegate breakdown with the highest direct-token children.
 A child that has metadata and replay events
@@ -1927,8 +1922,7 @@ physical agents. A success or different failure breaks a streak. Tool failures
 are attributed to the event-time model identity; older logs use the preceding
 `model_request` before falling back to session metadata. Summaries include
 tool-result denominators, separately counted in-band command failures and
-cancellations, an effective combined failure rate, and historical
-composite-inspect and typed-search batch diagnostics carried in old metrics.
+cancellations, and an effective combined failure rate.
 
 ### Session diagnostics
 
@@ -1944,11 +1938,6 @@ and failed results carry a structured `error_kind` plus a bounded, rune-safe
 `error_excerpt` (2 lines / 240 runes) for error analysis; skill activation records
 carry only source and status; neither includes
 skill bodies or adds model-visible content.
-Historical typed-search result metrics remain decodable so old sessions can
-report their batch owner, candidate/unique/shown lines, duplicate lines,
-low-yield siblings, and before/after bytes. The removed tool emits no new such
-records; source text and arguments in old sessions remain only in their ordinary
-transcripts.
 New tool start/result records also snapshot `model_target`, `provider`,
 `api_type`, and `model`, making attribution stable if a resumed session later
 switches models.
@@ -2016,8 +2005,8 @@ phase across all chunks and retries; it defaults to `300` seconds.
 Older raw messages are archived before replacement. The active transcript gets
 a synthetic user checkpoint containing the active prompt and steering text
 verbatim, the progress summary, the archive reference, and a deterministic
-cumulative index of successful supported `read_file`, `write_file`, `edit`, and
-`apply_patch` paths from compacted history. The index records requested paths at
+cumulative index of successful supported `read`, `write`, and `edit` paths from
+compacted history. The index records requested paths at
 tool-call success granularity—so a successful batched read includes paths that
 reported inline per-file errors—and does not infer effects from commands, Git,
 MCP, or custom tools. The model records semantic state only for meaningful
@@ -2071,7 +2060,7 @@ receive the one-shot `focus` field.
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "shell|apply_patch",
+        "matcher": "shell|edit",
         "hooks": [
           {
             "type": "command",

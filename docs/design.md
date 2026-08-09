@@ -12,9 +12,10 @@ codebase works today and evolves as harness gains capabilities.
   per package; no framework.
 - **Zero third-party Go dependencies.** Go stdlib only. SSE, diff application, HTML
   stripping, and retries are all small enough to own.
-- **Unix philosophy for tools.** When the job is already owned by a mature host CLI
-  (`grep`, `rg`, `git`, shell commands), expose a thin argv wrapper instead of
-  reimplementing optimized search or command semantics in the harness.
+- **Unix philosophy for tools.** When the job is already owned by a mature host
+  CLI, run it through `shell` instead of reimplementing optimized search or
+  command semantics. Keep a dedicated argv wrapper only where Harness owns a
+  distinct workflow contract, such as `git`.
 - **Provider and MCP access are isolated.** `harness` uses one provider-neutral
   message/streaming model and talks to `harness-model-proxy` over HTTP. The model
   proxy owns API keys, provider configs, model metadata, and concrete provider
@@ -126,7 +127,7 @@ internal/mcp             tools-only MCP slice: schema, client, server, stdio + s
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
 internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
-internal/otel            stdlib-only cumulative OTLP/HTTP JSON metrics exporter and live sink: `harness.prompt.*`, `harness.tokens.*`/`harness.cost.*`, `harness.tool.*`/`harness.tools_per_turn`/`harness.parallel.*`/`harness.commands.*`/`harness.search.*`/`harness.skill.*`/`harness.retention.*`/`harness.model.*`, plus `harness.session.*`/`harness.context.*`/`harness.delegate.*` at session exit (fleet + debug telemetry; see `internal/otel/sink.go`)
+internal/otel            stdlib-only cumulative OTLP/HTTP JSON metrics exporter and live sink: `harness.prompt.*`, `harness.tokens.*`/`harness.cost.*`, `harness.tool.*`/`harness.tools_per_turn`/`harness.parallel.*`/`harness.commands.*`/`harness.skill.*`/`harness.retention.*`/`harness.model.*`, plus `harness.session.*`/`harness.context.*`/`harness.delegate.*` at session exit (fleet + debug telemetry; see `internal/otel/sink.go`)
 internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
 internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, agent-oriented code-intelligence tools (§15a)
 internal/lsptools        harness-side adapter exposing short `lsp_*` tools over the LSP manager (§15a)
@@ -1758,7 +1759,7 @@ apply their wire-specific representation (§4.1).
 | unknown tool name | `unknown tool "<name>"` |
 | JSON type mismatch | `invalid arguments: invalid value for "<field>": expected <JSON type>; got <JSON type>` |
 | invalid JSON syntax | `invalid arguments: invalid JSON at byte <offset>: <detail>` |
-| malformed streamed tool-call args | `invalid tool call arguments for <name>: <detail>` plus a per-tool corrective hint: rg/grep get the `{"args":[...]}` shape, and a truncated (unterminated-JSON) `write_file`/`edit` call is told to write in chunks (write_file then edit to append) or switch to apply_patch |
+| malformed streamed tool-call args | `invalid tool call arguments for <name>: <detail>` plus a per-tool corrective hint: a truncated (unterminated-JSON) `write`/`edit` call is told to use a smaller `write`, then append with `edit` |
 | tool returned error | `<message>` |
 | tool panicked | `tool panicked: <recovered>` (also logged to stderr) |
 | tool exceeded the dispatch timeout | `tool timed out after <dur>` |
@@ -1805,23 +1806,20 @@ deadline via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
 A central cap in `Dispatch` (backstop for every tool): **64 KB or 1000 lines per
 result** by default, configurable with `tool_result_max_bytes` and
 `tool_result_max_lines`, or env `HARNESS_TOOL_RESULT_MAX_BYTES` and
-`HARNESS_TOOL_RESULT_MAX_LINES`. Noisy file-inspection tools install smaller
-defaults when no global cap is configured: `rg`/`grep` use 32 KB or 500 lines,
-and `read_file` uses a 500-line default window plus a 32 KB result cap. Per-tool
-caps are configurable with `rg_result_max_bytes` / `rg_result_max_lines`,
-`grep_result_max_bytes` / `grep_result_max_lines`, and
-`read_file_result_max_bytes` / `read_file_result_max_lines`. The first cap hit
+`HARNESS_TOOL_RESULT_MAX_LINES`. The `read` tool installs a smaller default when no global cap is configured: a
+500-line window plus a 32 KB result cap. Its per-tool settings are
+`read_default_limit`, `read_result_max_bytes`, and `read_result_max_lines`. The first cap hit
 adds a teaching marker:
 
 ```
-[truncated: showing first 1000 of 4213 lines; use read_file offset/limit or grep to narrow]
+[truncated: showing first 1000 of 4213 lines; use read with offset/limit or shell to narrow]
 ```
 
 Individual tools may also apply their own natural limits, but the central cap is the
 backstop for every result. Truncated results carry metadata so the UI can warn and write
 the full output to the session's `artifacts/tool-results/` directory. When an artifact
 is written, the model-visible result includes the absolute artifact path and advises
-using `read_file` with `offset`/`limit` or `rg` for targeted inspection. Foreground tool
+using `read` with `offset`/`limit` or a targeted `shell` command for inspection. Foreground tool
 results and completed background-job context share the registry's result preparation
 and the same archive-hint formatter, including per-tool limits, so this recovery
 behavior stays consistent between execution modes.
@@ -1887,7 +1885,7 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   including after compaction. A read failure aborts the prompt before a model
   call, eliminating the former activation round trip.
 - Implicit skill selection remains progressive: the model sees the compact
-  catalog and may issue one `read_file` call. A successful complete single-file
+  catalog and may issue one `read` call. A successful complete single-file
   read of `SKILL.md` from the beginning activates its decoded body for the rest
   of that prompt. The transcript result is replaced with a typed activation
   receipt containing source and digest; the exact line-numbered result is
@@ -1968,8 +1966,15 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   (for example `git status`, `git diff`, `git log`).
 - Relative paths resolve against the process cwd. No path restrictions — the harness is
   honest about its no-sandbox assumption.
+- **Registry surfaces are explicit.** `DefaultWithOptions` registers `read`,
+  `view_image`, `edit`, `write`, `shell`, and `web_fetch`, in that order.
+  `CatalogWithOptions` adds host-backed `git` and `git_readonly` when available
+  plus `write_tmp_file`; agent coordination and discovered MCP/LSP tools are
+  layered on separately. The removed names `read_file`, `write_file`,
+  `list_dir`, `glob`, `grep`, `rg`, and `apply_patch` are not constructible and
+  an `allowed_tools` entry naming one fails validation.
 
-### 9.1 `read_file`
+### 9.1 `read`
 
 > Read a file; use paths[] to batch; a directory lists entries.
 
@@ -1978,10 +1983,10 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 | `path` | string | single file; required unless `paths` is given |
 | `paths` | array of strings | multi-file mode; each file rendered under a `==> path <==` header with its own per-file line budget; `offset` is ignored |
 | `offset` | int | 1-based starting line (single-file mode only) |
-| `limit` | int | max lines, default 500 or `read_file_default_limit` |
+| `limit` | int | max lines, default 500 or `read_default_limit` |
 
-If a supplied path is a directory, `read_file` returns the same directories-first
-listing format as `list_dir`, capped at 200 entries. This repairs an accidental
+If a supplied path is a directory, `read` returns a directories-first,
+non-recursive listing capped at 200 entries. This repairs an accidental
 file/directory mismatch in one tool call without requiring a second dispatch.
 
 - **Parameter aliases (accepted silently; intentionally *not* in the schema):**
@@ -2011,8 +2016,8 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 - Files are streamed line-by-line and stop after the requested/default line
   window, so memory is bounded by the window and longest line regardless of file
   size.
-- Directory → `error: <path> is a directory; use list_dir`. Offset past EOF → error
-  stating the file's line count. Empty file → `(empty file)`.
+- Offset past EOF → error stating the file's line count. Empty file → `(empty
+  file)`. Directory reads ignore file windows and return the bounded listing.
 
 ### 9.1a `view_image`
 
@@ -2036,69 +2041,26 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   The agent checks the current model immediately before dispatch, so `/model` changes
   take effect without rebuilding the registry and unsupported calls perform no file I/O.
 
-### 9.2 `list_dir`
+### 9.3 Repository discovery and search
 
-> List one directory, non-recursive; glob filters base names.
-
-| param | type | notes |
-|---|---|---|
-| `path` | string | default `"."` |
-| `glob` | string | `path.Match` filter on base names |
-
-- Non-recursive by design — recursion belongs to `glob` (§9.2a, by name) and
-  `grep`/`rg`/host commands (by content), with `shell` (`find`) as the escape
-  hatch. No separate `find` tool: fewer tools means better model reliability.
-- One entry per line: type char, human-readable size, name (`/` suffix for dirs);
-  dirs-first, then alphabetical. 1000-entry cap with truncation marker.
-- Unreadable entries shown with `?` size; listing continues.
-
-### 9.2a `glob`
-
-> Find paths by glob; ** crosses directories.
-
-| param | type | notes |
-|---|---|---|
-| `pattern` | string, required | glob relative to `root` |
-| `root` | string | directory to search from, default `"."` |
-
-- Read-only recursive name search, complementing `list_dir` (one level) and
-  `grep`/`rg` (by content). `**` matches any number of path segments (including
-  zero); `*`/`?`/`[…]` match within a single segment via `filepath.Match`. Consecutive
-  `**` collapse, and a trailing `**` matches the remainder.
-- One entry per line — type char, human size, root-relative path (`/` suffix for
-  dirs) — sorted ascending by path. Empty result → `(no matches)`.
-- Two caps: the walk stops collecting after `globScanCap` (10000) matches, and the
-  sorted output is truncated to the first `listDirCap` (1000) with a
-  `[truncated: showing first 1000 of <N> matches; narrow the pattern or root]`
-  marker (the total gains a `+` when the scan cap was hit).
-- Catalog-only: built-in agents do not advertise it and use `shell` with host
-  commands such as `rg --files` or `find` for path discovery.
-
-### 9.3 Repository search and raw search commands
-
-- There is no typed repository-content search tool. Built-in agents use `shell`
-  with host commands such as `rg`, `rg --files`, and `find`; argv form is
-  preferred when quoting is unnecessary, and `steps[]` batches ordered commands.
-  This keeps the default model-facing surface aligned with the small built-in
-  agent tool lists.
+- There are no dedicated callable directory, glob, or repository-content search
+  tools. Built-in agents use `read` for a known file or one non-recursive
+  directory and `shell` with host commands such as `rg`, `rg --files`, `grep`,
+  `find`, and `ls` for recursive discovery and search. Prefer argv form when
+  quoting is unnecessary; use `command` only for shell syntax and `steps[]` for
+  ordered commands.
 - Three consecutive turns containing one unbatched orientation lookup trigger
-  one soft steering message recommending coissued `read_file` calls,
-  `read_file.paths[]` for known files, or batched repository lookups in one
-  `shell` call. It does not block execution.
-- Raw `grep` and optional `rg` are registered only in the complete tool catalog,
-  not the default set. Custom agents may explicitly whitelist them for native
-  CLI flags or background execution. Their input remains argv-style
-  `{"args":[...]}` with optional `stdin`, `cwd`, `timeout_seconds`, and
-  `background`; no shell expansion occurs. Background calls acquire a
-  `read_only` cwd lease.
-- Raw `rg` retains the max-column/max-filesize guards and raw `grep` retains
-  binary skipping and long-line clamping. Provider-hosted web search remains a
-  separate `Request.ServerTools` capability controlled by `web_search`.
-- Raw command process execution follows the same conventions as `shell`
-  (§9.7): own process group, timeout or ^C
-  kills the group, combined stdout+stderr, `[exit code: N]` trailer, and non-zero exit
-  is NOT an error result. For search this matters because no matches is commonly exit
-  code 1.
+  one soft steering message recommending coissued `read` calls, `read.paths[]`
+  for known files, or batched repository lookups in one `shell` call. It does not
+  block execution.
+- Host command semantics remain authoritative. Harness does not inject search
+  flags, clamp search lines, parse search context, or reinterpret no-match exit
+  status. As with every `shell` call, non-zero exit is model-visible command
+  output rather than a tool error. A background search is still a `shell` job and
+  defaults to an exclusive cwd lease unless the caller explicitly marks the
+  command's lease `read_only`.
+- Provider-hosted web search remains a separate `Request.ServerTools` capability
+  controlled by `web_search`.
 
 ### 9.4 `edit`
 
@@ -2107,7 +2069,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 | param | type | notes |
 |---|---|---|
 | `files` | array, required | one entry per file (repeats allowed; see below); each target file must already exist |
-| `files[].path` | string, required | must exist (use write_file to create) |
+| `files[].path` | string, required | must exist (use write to create) |
 | `files[].edits` | array, required | one or more replacements for that file |
 | `files[].edits[].oldText` | string, required | exact text to replace; must be unique in the original file unless `replaceAll` is set |
 | `files[].edits[].newText` | string, required | replacement text; empty string deletes oldText |
@@ -2129,7 +2091,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   non-empty `oldText` line, appends a nearest-region hint (up to 3 numbered
   lines centered on the most similar content line, with the similarity score),
   and tells the model to re-read the file and re-issue with exact `oldText` (or
-  use write_file when the intent is to append or create).
+  use `write` when the intent is to create or replace the whole file).
 - N>1 occurrences → error asking for more context to make `oldText` unique.
 - Every block is preflighted before writing, so one response reports all
   missing/ambiguous blocks for the file. Ambiguous errors list up to five start
@@ -2150,7 +2112,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 - Success reports `edited <file-count> file(s), <replacement-count> replacement(s)`
   followed by one line per file.
 
-### 9.5 `write_file`
+### 9.5 `write`
 
 > Write a whole file, creating parents; edit for partial changes.
 
@@ -2162,44 +2124,9 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 - `os.MkdirAll` parents (0755), write 0644, overwrite without ceremony (no permission
   system by design). Reports `created`/`overwrote`, bytes, lines.
 - A very large `content` can arrive as truncated streamed arguments; that
-  failure path (§8.2 malformed streamed args) tells the model to write the file
-  in chunks (write_file then edit to append) or switch to apply_patch.
+  failure path (§8.2 malformed streamed args) tells the model to use a smaller
+  `write`, then append additional content with `edit`.
 - Existing directory at path, or trailing `/` → error.
-
-### 9.6 `apply_patch`
-
-> Apply a Codex-format patch; prefer edit or write_file.
-
-| param | type | notes |
-|---|---|---|
-| `patch` | string | full `*** Begin Patch` / `*** End Patch` text |
-
-- **Catalog-only, not in the default tool set.** `edit` and `write_file` subsume
-  `apply_patch`, so `registerFileTools` omits it; it is registered only by
-  `CatalogWithOptions`. It is therefore absent from the `auto`/`independent` default
-  lists (derived from `DefaultNamesWithOptions`) and an agent opts back in by naming
-  `apply_patch` in its `allowed_tools` whitelist, which resolves against the full
-  catalog.
-- Parser accepts Codex patch operations only: `*** Add File: <path>`,
-  `*** Delete File: <path>`, `*** Update File: <path>`, and optional
-  `*** Move to: <path>` immediately after an update header. Classic `---` / `+++`
-  unified diffs are not accepted by this tool.
-- Tool input also accepts a bare JSON string containing the patch text for
-  compatibility with callers that model `apply_patch` as a freeform argument.
-  At least one non-empty patch value is required.
-- Parse failures are reported as invalid arguments with a format hint: provide
-  one raw patch envelope, avoid markdown fences, and prefix blank context lines
-  in update hunks with a space.
-- Update hunks use Codex's headerless body lines: `@@` chunk markers are optional,
-  context lines start with a space, deletions with `-`, and additions with `+`.
-- Matching tries exact lines first, then whitespace-normalized comparison, scanning
-  forward from the current file cursor. Pure insertion update hunks insert at EOF.
-- Patches apply in file order and stop at the first rejected file. Files applied
-  before the rejection remain changed; the rejected file is left untouched.
-  `*** Add File` on an existing path rejects with `use edit instead (or delete
-  the file first)` appended.
-- Success reports `Success. Updated the following files:` followed by `A`, `M`, or
-  `D` status lines.
 
 ### 9.7 `shell`
 
@@ -2316,9 +2243,8 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 ### 9.8 Shared process execution (`runProcess`)
 
-`shell` (§9.7), `grep`/`rg` (§9.3), and `git`/`git_readonly` (§9.9, §9.11) all
-run their subprocess through one shared `runProcess` helper, so they share identical
-process semantics. The §9.7 schema/description above describe `shell`'s surface;
+`shell` (§9.7) and `git`/`git_readonly` (§9.9, §9.11) run their subprocesses
+through one shared `runProcess` helper, so they share identical process semantics. The §9.7 schema/description above describe `shell`'s surface;
 this subsection records the common runner those argv tools point at.
 
 - **Own process group/session, no controlling TTY.** The child leads its own group, so
@@ -2702,8 +2628,7 @@ Tools that opt into the reusable background job contract hand the manager a job
 kind, description, optional canonical resource/access lease, and cancellable
 runner. The manager owns ids, status, list/get/wait/cancel, lease enforcement,
 one-shot notices, and request-only context delivery.
-`shell`, `grep`, `rg`,
-`web_fetch`, and `delegate` support this path via `background:true`; background
+`shell`, `web_fetch`, and `delegate` support this path via `background:true`; background
 delegate jobs still use the same launch validation, child transcript, private coordination stores,
 and token-accounting behavior as synchronous delegate.
 
@@ -2762,7 +2687,7 @@ and token-accounting behavior as synchronous delegate.
   Output uses the same per-tool truncation limits as foreground
   dispatch; when truncated, the full result is archived under
   `artifacts/tool-results/` and the request context includes the same absolute path and
-  targeted `read_file`/`rg` guidance as a foreground result.
+  targeted `read`/`shell` guidance as a foreground result.
 - A job may carry compact `Text` plus complete `OriginalText`. Automatic
   completion uses `Registry.PrepareResultWithOriginal`; `background_jobs`
   implements `ResultTool` so explicit get/wait output preserves the same
@@ -2835,20 +2760,10 @@ fields have Harness-owned defaults. `Registry.Specs` therefore retains those
 field descriptions instead of applying its normal prose-stripping policy.
 
 Registration is anchored, not appended: `Register` inserts each `lsp_*` tool
-immediately after `glob` (chaining each new tool after the previous one), so
-the LSP block sits adjacent to the navigation tools it complements instead of
-trailing the whole catalog; a missing anchor falls back to append.
-
-The per-tool " Symbols: prefer lsp_*." phrase was removed from every LSP tool
-description for context economy. The cross-reference moved to the navigation
-tools instead: when LSP tools are enabled and registered, the catalog's
-description-suffix hook appends a conditional " Symbols: prefer lsp_*." instruction
-to `glob`, `grep`, and `rg` at `Specs()` time (byte-identical
-descriptions when disabled or empty). The per-tool phrase removal also applies
-to the `harness lsp serve` shim surface, since both paths share the same static
-`internal/lspproxy` tool specs; that is intentional, while the conditional
-suffix itself is a harness-catalog behavior and is not part of the MCP shim
-surface.
+immediately after `view_image`, chaining each new tool after the previous one.
+The LSP block therefore stays adjacent to file inspection in both the default
+and complete catalogs; a missing anchor falls back to append. LSP tools keep
+their concise operation descriptions without adding cross-tool search steering.
 
 ### 9.17 `record_plan` and `handoff`
 
@@ -2983,13 +2898,13 @@ implementation agent's TODO list, and starts the implementation prompt.
   delegate is outstanding, the static waiting line is replaced by a single in-place
   line painted with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker`
   goroutine (with a stop-and-drain handshake): `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`,
-  `[tool: grep args=["x"] · 3s]`, `[context: compacting · 3s]`, or
+  `[tool: shell argv=["rg","x","."] · 3s]`, `[context: compacting · 3s]`, or
   `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
   arguments as the completed tool summary and the running context-window percentage
   and compact used/window token counts appended for model waits
   (`· ctx 30% 60.0k/200.0k`). Active delegate registry state is appended to the
   same row as `· delegate d1 explore: turn 2 · thinking`; concurrent children use
-  `· 3 delegates · latest d2 plan: tool read_file path="…"`. Join-required
+  `· 3 delegates · latest d2 plan: tool read path="…"`. Join-required
   background work keeps the normal wait lifecycle active until it terminalizes;
   delegate state alone never repaints over streamed or idle prompt text.
   Field-aware clipping drops the activity body before the stable display ID, and
@@ -3350,7 +3265,7 @@ Config accepts inline hooks:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "shell|apply_patch",
+        "matcher": "shell|edit",
         "hooks": [
           {"type": "command", "command": "./hooks/pre-tool.sh"}
         ]
@@ -3768,8 +3683,7 @@ type UsageTotals struct {
   totals, calls per tool-bearing turn, standalone TODO/single-inspection turns,
   result truncation/byte/timing totals and per-tool volume, redacted aggregates
   of repeated normalized calls, command-step shape, skill reads/activations,
-  historical typed-search selected-versus-unique context lines and bounded-result
-  counts when present, active transcript composition, the latest request estimate,
+  active transcript composition, the latest request estimate,
   and a hierarchical delegate
   breakdown with the five highest direct-token children.
   The session header includes build identity and the non-secret runtime profile
@@ -3912,7 +3826,7 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   intent or blockers not represented by it.
 - **Deterministic compacted-history files:** correlate each validated assistant
   tool-use message with its immediate result message. Successful supported
-  `read_file`, `write_file`, `edit`, and `apply_patch` calls contribute normalized,
+  `read`, `write`, and `edit` calls contribute normalized,
   sorted cumulative read/modified paths; modified wins over read. Batched reads are
   call-level and therefore retain every requested path even when one result is an
   inline per-file error. Commands, Git, MCP, malformed inputs, failed calls, and
@@ -4016,7 +3930,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | `internal/sse` | frame parsing tables; huge frames; truncated input |
 | providers | `httptest.Server` replaying `.sse` golden fixtures per dialect → assert ordered events; golden request-JSON tests (Responses input items, Chat role:tool hoisting, args-string vs object, system placement, `stream_options`, cache_control); tool-call reassembly tables (fragment splits, empty args → `{}`, interleaved parallel calls, invalid tail → invalid `Done` diagnostic); truncated stream; mid-stream cancellation; retry loop via injected sleeper (429-then-200, 400 immediate failure, budget exhaustion) |
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
-| tools | table-driven against `t.TempDir()`; `grep` wrapper against the host CLI; optional `rg` registration with a fake executable on PATH; `git` against a scratch `git init` repo (skipped if git absent); `shell` timeout via `sleep`; `apply_patch` at the tool level covers the Codex Add envelope, canonical `patch`, compatibility decoding paths, bare-string input, and conflicting-alias / parse-error format-hint paths, while `internal/tools/patch` covers parse + apply for create/update/delete/rename and first-rejection-leaves-file-untouched |
+| tools | table-driven against `t.TempDir()` for `read`, directory reads, `edit`, and `write`; `git` against a scratch `git init` repo (skipped if git is absent); host discovery commands and timeout/cancellation through `shell` |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |
 | delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, private child TODO/plan stores, child transcript persistence, metered usage folded into parent prompt totals |
 | background | job start/completion, one-shot context delivery, notices, cancellation/errors, child transcript path preservation |

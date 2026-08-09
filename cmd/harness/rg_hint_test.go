@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"harness/internal/sysprompt"
-	"harness/internal/tools"
 )
 
 func TestRgSystemHint_Content(t *testing.T) {
@@ -24,8 +23,11 @@ func TestBuild_IncludesRgHintWhenAvailable(t *testing.T) {
 		t.Fatalf("write fake rg: %v", err)
 	}
 	t.Setenv("PATH", dir+":"+os.Getenv("PATH"))
-	if !tools.RipgrepAvailable() {
-		t.Fatalf("RipgrepAvailable = false after adding fake rg to PATH=%q", os.Getenv("PATH"))
+	if !ripgrepAvailable() {
+		t.Fatalf("ripgrepAvailable = false after adding fake rg to PATH=%q", os.Getenv("PATH"))
+	}
+	if got := searchBackend(); got != "rg" {
+		t.Fatalf("searchBackend = %q, want rg", got)
 	}
 	out := sysprompt.Build(sysprompt.Options{
 		RuntimeHints: []string{rgSystemHint},
@@ -45,8 +47,11 @@ func TestBuild_IncludesRgHintWhenAvailable(t *testing.T) {
 func TestBuild_NoRgHintWhenUnavailable(t *testing.T) {
 	empty := t.TempDir()
 	t.Setenv("PATH", empty)
-	if tools.RipgrepAvailable() {
-		t.Fatalf("RipgrepAvailable = true with PATH=%q, want false", os.Getenv("PATH"))
+	if ripgrepAvailable() {
+		t.Fatalf("ripgrepAvailable = true with PATH=%q, want false", os.Getenv("PATH"))
+	}
+	if got := searchBackend(); got != "go" {
+		t.Fatalf("searchBackend = %q, want go", got)
 	}
 	out := sysprompt.Build(sysprompt.Options{
 		RuntimeHints: nil,

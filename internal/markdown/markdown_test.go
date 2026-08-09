@@ -823,7 +823,7 @@ func TestMidTableFlushSplitsWithDifferentWidths(t *testing.T) {
 	// guards against this, but this test documents the underlying Stream
 	// behavior so a future change is caught.
 	// Use the real session table text where later rows are wider than early rows:
-	full := "| agent | baseline → candidate (-no-env, request_bytes)  | Δ total      | vs system    |\n| --- | --- | --- | --- |\n| auto | 8282+13980=22275 → 7580+14313=~21906 see below | -369 (-1.7%) | -5.0% system |\n| independent | same | -369 | -5.0% |\n| explore (no edit/write_file) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n"
+	full := "| agent | baseline → candidate (-no-env, request_bytes)  | Δ total      | vs system    |\n| --- | --- | --- | --- |\n| auto | 8282+13980=22275 → 7580+14313=~21906 see below | -369 (-1.7%) | -5.0% system |\n| independent | same | -369 | -5.0% |\n| explore (no edit/write) | 8524+10236=18773 → 7822+10355=18190 | -583 (-3.1%) | -8.3% system |\n| plan | 8949+13062=22024 → 8247+13112=~21372 | -652 | -7.8% |\n\n"
 	whole := Render(full, Options{Enabled: true, Width: 240})
 	// Simulate a buggy live flush after the third row (auto) – exactly how the
 	// live renderer would have split the table before the fix.
@@ -840,11 +840,11 @@ func TestMidTableFlushSplitsWithDifferentWidths(t *testing.T) {
 		t.Fatal("mid-table Flush should produce different widths than whole-table Render (test assumes buggy behavior)")
 	}
 	// Whole-table render pads the short 'same' cell to the wide first column
-	if !strings.Contains(whole, "| independent                  | same") {
+	if !strings.Contains(whole, "| independent             | same") {
 		t.Fatalf("whole-table Render should pad second half, got %q", whole)
 	}
 	// Buggy split: the second half was formatted with only the short rows' widths
-	if strings.Contains(buggy.String(), "| independent                  | same") {
+	if strings.Contains(buggy.String(), "| independent             | same") {
 		t.Fatal("buggy mid-table flush unexpectedly produced padded second half")
 	}
 	if !strings.Contains(buggy.String(), "| independent | same") {

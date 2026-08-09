@@ -71,7 +71,7 @@ func TestValidateTranscript(t *testing.T) {
 				userText("do it"),
 				{Role: RoleAssistant, Content: []ContentBlock{
 					{Kind: BlockText, Text: "working"},
-					toolUse("a", "read_file"),
+					toolUse("a", "read"),
 					toolUse("b", "grep"),
 				}},
 				{Role: RoleUser, Content: []ContentBlock{
@@ -86,7 +86,7 @@ func TestValidateTranscript(t *testing.T) {
 			name: "tool_use with no following tool_result",
 			msgs: []Message{
 				userText("do it"),
-				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read_file")}},
+				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read")}},
 				asstText("done"),
 			},
 			wantErr: true,
@@ -96,7 +96,7 @@ func TestValidateTranscript(t *testing.T) {
 			msgs: []Message{
 				userText("do it"),
 				{Role: RoleAssistant, Content: []ContentBlock{
-					{Kind: BlockToolUse, ToolUseID: "a", ToolName: "read_file", ToolInput: []byte(`[]`)},
+					{Kind: BlockToolUse, ToolUseID: "a", ToolName: "read", ToolInput: []byte(`[]`)},
 				}},
 				{Role: RoleUser, Content: []ContentBlock{toolResult("a", "result")}},
 			},
@@ -107,7 +107,7 @@ func TestValidateTranscript(t *testing.T) {
 			msgs: []Message{
 				userText("do it"),
 				{Role: RoleAssistant, Content: []ContentBlock{
-					{Kind: BlockToolUse, ToolUseID: "a", ToolName: "read_file"},
+					{Kind: BlockToolUse, ToolUseID: "a", ToolName: "read"},
 				}},
 				{Role: RoleUser, Content: []ContentBlock{toolResult("a", "result")}},
 			},
@@ -117,7 +117,7 @@ func TestValidateTranscript(t *testing.T) {
 			name: "tool_use with nothing following",
 			msgs: []Message{
 				userText("do it"),
-				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read_file")}},
+				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read")}},
 			},
 			wantErr: true,
 		},
@@ -132,7 +132,7 @@ func TestValidateTranscript(t *testing.T) {
 		{
 			name: "tool_result id does not match tool_use id",
 			msgs: []Message{
-				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read_file")}},
+				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read")}},
 				{Role: RoleUser, Content: []ContentBlock{toolResult("z", "result")}},
 			},
 			wantErr: true,
@@ -140,7 +140,7 @@ func TestValidateTranscript(t *testing.T) {
 		{
 			name: "two results for one call",
 			msgs: []Message{
-				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read_file")}},
+				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read")}},
 				{Role: RoleUser, Content: []ContentBlock{
 					toolResult("a", "first"),
 					toolResult("a", "second"),
@@ -151,7 +151,7 @@ func TestValidateTranscript(t *testing.T) {
 		{
 			name: "tool_result in an assistant message",
 			msgs: []Message{
-				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read_file")}},
+				{Role: RoleAssistant, Content: []ContentBlock{toolUse("a", "read")}},
 				{Role: RoleAssistant, Content: []ContentBlock{toolResult("a", "result")}},
 			},
 			wantErr: true,

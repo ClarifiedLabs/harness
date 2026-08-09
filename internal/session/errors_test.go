@@ -36,8 +36,8 @@ func TestCollectErrors(t *testing.T) {
 		Display: `[frobnicate] → error: unknown tool "frobnicate"`})
 	// Three consecutive identical failures: the repeat-loop signature.
 	for i := range 3 {
-		append(Event{Time: at(3 + i), Type: EventToolResult, Prompt: 1, Turn: 4 + i, Tool: "read_file", ToolID: "r" + string(rune('1'+i)), ResultError: true,
-			Display: `[read_file path=/missing] → error: stat /missing: no such file or directory`})
+		append(Event{Time: at(3 + i), Type: EventToolResult, Prompt: 1, Turn: 4 + i, Tool: "read", ToolID: "r" + string(rune('1'+i)), ResultError: true,
+			Display: `[read path=/missing] → error: stat /missing: no such file or directory`})
 	}
 	// Failed model request: kind from status/code, no tool.
 	append(Event{Time: at(6), Type: EventModelRequest, Prompt: 1, Turn: 7, ModelRequest: &llm.ModelRequestEvent{
@@ -121,11 +121,11 @@ func TestCollectErrors(t *testing.T) {
 	if summary.FailedToolResults != 6 || summary.ModelRequestFailures != 1 {
 		t.Errorf("summary counts = %+v, want 6 tool + 1 model", summary)
 	}
-	if summary.ByKind[string(llm.ToolErrorPathNotFound)] != 3 || summary.ByTool["read_file"] != 3 || summary.ByModel["gpt-test"] != 5 {
+	if summary.ByKind[string(llm.ToolErrorPathNotFound)] != 3 || summary.ByTool["read"] != 3 || summary.ByModel["gpt-test"] != 5 {
 		t.Errorf("summary maps = %+v", summary)
 	}
-	if len(summary.Repeats) != 1 || summary.Repeats[0] != (ErrorRepeat{Tool: "read_file", Kind: string(llm.ToolErrorPathNotFound), Consecutive: 3}) {
-		t.Errorf("repeats = %+v, want one read_file/path_not_found run of 3", summary.Repeats)
+	if len(summary.Repeats) != 1 || summary.Repeats[0] != (ErrorRepeat{Tool: "read", Kind: string(llm.ToolErrorPathNotFound), Consecutive: 3}) {
+		t.Errorf("repeats = %+v, want one read/path_not_found run of 3", summary.Repeats)
 	}
 	if top, n := TopCount(summary.ByKind); top != string(llm.ToolErrorPathNotFound) || n != 3 {
 		t.Errorf("TopCount = %q/%d, want path_not_found/3", top, n)
@@ -166,7 +166,7 @@ func TestAnalyzeErrorsUsesEventTimeModelAndCompleteResultStreaks(t *testing.T) {
 		{Time: base.Add(2 * time.Second), Type: EventToolResult, Tool: "edit"},
 		{Time: base.Add(3 * time.Second), Type: EventToolResult, Tool: "edit", ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)},
 		{Time: base.Add(4 * time.Second), Type: EventModelRequest, ModelRequest: &llm.ModelRequestEvent{TargetID: "p:model-b", Provider: "p", APIType: "anthropic", Model: "model-b"}},
-		{Time: base.Add(5 * time.Second), Type: EventToolResult, Tool: "search", ResultError: true, ErrorKind: string(llm.ToolErrorRegexInvalid)},
+		{Time: base.Add(5 * time.Second), Type: EventToolResult, Tool: "read", ResultError: true, ErrorKind: string(llm.ToolErrorRegexInvalid)},
 	}
 	for _, event := range events {
 		if err := AppendEvent(dir, event); err != nil {
@@ -203,7 +203,7 @@ func TestAnalyzeErrorsReportsInBandCommandFailuresSeparately(t *testing.T) {
 		{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_succeeded": 1}},
 		{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1, "command_exit_code": 2}},
 		{Type: EventToolResult, Tool: "shell", ResultMetrics: map[string]int{"command_outcome_available": 1, "command_cancelled": 1}},
-		{Type: EventToolResult, Tool: "read_file", ResultError: true, ErrorKind: string(llm.ToolErrorPathNotFound)},
+		{Type: EventToolResult, Tool: "read", ResultError: true, ErrorKind: string(llm.ToolErrorPathNotFound)},
 	}
 	for _, event := range events {
 		if err := AppendEvent(dir, event); err != nil {
@@ -232,7 +232,7 @@ func TestAnalyzeErrorsIgnoresIncompleteTailAndHonorsBefore(t *testing.T) {
 	if err := AppendEvent(dir, Event{Time: base, Type: EventToolResult, Tool: "edit", ResultError: true, ErrorKind: string(llm.ToolErrorEditOldTextNotFound)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := AppendEvent(dir, Event{Time: base.Add(time.Minute), Type: EventToolResult, Tool: "search", ResultError: true, ErrorKind: string(llm.ToolErrorRegexInvalid)}); err != nil {
+	if err := AppendEvent(dir, Event{Time: base.Add(time.Minute), Type: EventToolResult, Tool: "read", ResultError: true, ErrorKind: string(llm.ToolErrorRegexInvalid)}); err != nil {
 		t.Fatal(err)
 	}
 	f, err := os.OpenFile(filepath.Join(dir, eventLog), os.O_APPEND|os.O_WRONLY, 0o644)

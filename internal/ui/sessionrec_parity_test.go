@@ -117,7 +117,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 	parent.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 1, Attempt: 1, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}})
 	child.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 1, Attempt: 1, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}})
 
-	call := llm.ToolCall{ID: "call-1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)}
+	call := llm.ToolCall{ID: "call-1", Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)}
 	parent.ToolStart(call)
 	child.ToolStart(call)
 

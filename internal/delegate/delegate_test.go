@@ -74,7 +74,7 @@ func newContinuationFixture(t *testing.T, contextWindow int, stateful bool, step
 	}
 	state := NewState(runtime)
 	catalog := &tools.Registry{}
-	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
+	catalog.Register(fakeChildTool{name: "read", out: "ok"})
 	runner := NewRunner(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		if name == "" {
 			name = "worker"
@@ -100,13 +100,13 @@ func newContinuationFixture(t *testing.T, contextWindow int, stateful bool, step
 }
 
 func TestDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
-	state := NewState(Runtime{ToolNames: []string{"read_file", "grep", "delegate"}})
+	state := NewState(Runtime{ToolNames: []string{"read", "shell", "delegate"}})
 	tool := New(state.Snapshot, nil, Options{
 		AgentCandidates: func(Runtime) []AgentCandidate {
 			return []AgentCandidate{
-				{Name: "auto", Description: "General work", ToolNames: []string{"read_file", "write_file", "delegate"}},
-				{Name: "plan", Description: "Plan broad changes", ToolNames: []string{"read_file", "grep", "delegate"}},
-				{Name: "style", Description: "Review style", ToolNames: []string{"read_file"}},
+				{Name: "auto", Description: "General work", ToolNames: []string{"read", "write", "delegate"}},
+				{Name: "plan", Description: "Plan broad changes", ToolNames: []string{"read", "shell", "delegate"}},
+				{Name: "style", Description: "Review style", ToolNames: []string{"read"}},
 			}
 		},
 	})
@@ -128,14 +128,14 @@ func TestDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 
 func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
 	long := strings.Repeat("verbose description ", 30)
-	state := NewState(Runtime{ToolNames: []string{"read_file"}})
+	state := NewState(Runtime{ToolNames: []string{"read"}})
 	tool := New(state.Snapshot, nil, Options{
 		AgentCandidates: func(Runtime) []AgentCandidate {
 			return []AgentCandidate{
-				{Name: "zeta", Description: "  Search\n across\tmodules  ", ToolNames: []string{"read_file"}},
-				{Name: "incompatible", Description: "Must not leak", ToolNames: []string{"write_file"}},
-				{Name: "blank", Description: " \n ", ToolNames: []string{"read_file"}},
-				{Name: "alpha", Description: long, ToolNames: []string{"read_file"}},
+				{Name: "zeta", Description: "  Search\n across\tmodules  ", ToolNames: []string{"read"}},
+				{Name: "incompatible", Description: "Must not leak", ToolNames: []string{"write"}},
+				{Name: "blank", Description: " \n ", ToolNames: []string{"read"}},
+				{Name: "alpha", Description: long, ToolNames: []string{"read"}},
 			}
 		},
 	})
@@ -177,10 +177,10 @@ func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
 
 func TestMissingToolsPreservesRequiredOrder(t *testing.T) {
 	got := MissingTools(
-		[]string{"read_file", "write_file", "apply_patch", "write_file", "shell"},
-		[]string{"read_file", "shell"},
+		[]string{"read", "write", "edit", "write", "shell"},
+		[]string{"read", "shell"},
 	)
-	want := []string{"write_file", "apply_patch"}
+	want := []string{"write", "edit"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("missing tools = %v, want %v", got, want)
 	}
@@ -188,10 +188,10 @@ func TestMissingToolsPreservesRequiredOrder(t *testing.T) {
 
 func TestMissingToolsExemptsAgentLocalCoordination(t *testing.T) {
 	got := MissingTools(
-		[]string{"read_file", updateTodosToolName, recordPlanToolName, handoffToolName, "write_file"},
-		[]string{"read_file"},
+		[]string{"read", updateTodosToolName, recordPlanToolName, handoffToolName, "write"},
+		[]string{"read"},
 	)
-	want := []string{"write_file"}
+	want := []string{"write"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("missing tools = %v, want %v", got, want)
 	}
@@ -220,10 +220,10 @@ func TestDelegateRebindsNestedDelegateSchemaToChildTools(t *testing.T) {
 		Model:     "claude-opus-4-8",
 		Registry:  llm.NewRegistry(nil),
 		Agent:     "auto",
-		ToolNames: []string{"read_file", "write_file", "delegate"},
+		ToolNames: []string{"read", "write", "delegate"},
 	})
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "read_file", out: "file contents"})
+	childTools.Register(fakeChildTool{name: "read", out: "file contents"})
 	var tool *Tool
 	tool = New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		return Launch{
@@ -238,8 +238,8 @@ func TestDelegateRebindsNestedDelegateSchemaToChildTools(t *testing.T) {
 	}, Options{
 		AgentCandidates: func(Runtime) []AgentCandidate {
 			return []AgentCandidate{
-				{Name: "auto", Description: "General work", ToolNames: []string{"read_file", "write_file", "delegate"}},
-				{Name: "style", Description: "Review style", ToolNames: []string{"read_file", "delegate"}},
+				{Name: "auto", Description: "General work", ToolNames: []string{"read", "write", "delegate"}},
+				{Name: "style", Description: "Review style", ToolNames: []string{"read", "delegate"}},
 			}
 		},
 	})
@@ -274,7 +274,7 @@ func TestDelegateRebindsNestedDelegateSchemaToChildTools(t *testing.T) {
 
 func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "read_file", out: "file contents"})
+	childTools.Register(fakeChildTool{name: "read", out: "file contents"})
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "final report"}},
 		Stop:   llm.StopEndTurn,
@@ -335,20 +335,20 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	if len(req.Messages) != 1 || req.Messages[0].Content[0].Text != "inspect the repo" {
 		t.Fatalf("child transcript = %+v", req.Messages)
 	}
-	if len(req.Tools) != 1 || req.Tools[0].Name != "read_file" {
-		t.Fatalf("child tools = %+v, want only read_file", req.Tools)
+	if len(req.Tools) != 1 || req.Tools[0].Name != "read" {
+		t.Fatalf("child tools = %+v, want only read", req.Tools)
 	}
 }
 
 func TestDelegateImplementationModeAddsStaticPromptAndPersistsMode(t *testing.T) {
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "write_file", out: "changed"})
+	childTools.Register(fakeChildTool{name: "write", out: "changed"})
 	work := func(id string) llmtest.Step {
 		return llmtest.Step{
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
 				ToolID:    id,
-				ToolName:  "write_file",
+				ToolName:  "write",
 				ToolInput: json.RawMessage(`{"path":"x"}`),
 			}},
 			Stop: llm.StopToolUse,
@@ -405,7 +405,7 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
 				ToolID:    "read-source",
-				ToolName:  "read_file",
+				ToolName:  "read",
 				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:       llm.StopToolUse,
@@ -896,8 +896,8 @@ func TestDelegateContinuationRejectsCompactCheckpointAboveLimit(t *testing.T) {
 
 func TestDelegateIgnoresLegacyToolsFieldAndUsesConfiguredTools(t *testing.T) {
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "read_file", out: "ok"})
-	childTools.Register(fakeChildTool{name: "rg", out: "ok"})
+	childTools.Register(fakeChildTool{name: "read", out: "ok"})
+	childTools.Register(fakeChildTool{name: "shell", out: "ok"})
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
 		Stop:   llm.StopEndTurn,
@@ -907,7 +907,7 @@ func TestDelegateIgnoresLegacyToolsFieldAndUsesConfiguredTools(t *testing.T) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
 	}, Options{MaxTurns: 2})
 
-	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect","tools":["read_file"]}`)); err != nil {
+	if _, err := tool.RunMetered(context.Background(), json.RawMessage(`{"task":"inspect","tools":["read"]}`)); err != nil {
 		t.Fatalf("RunMetered with legacy tools field: %v", err)
 	}
 	if len(fp.Requests) != 1 {
@@ -917,13 +917,13 @@ func TestDelegateIgnoresLegacyToolsFieldAndUsesConfiguredTools(t *testing.T) {
 	for i, tdef := range fp.Requests[0].Tools {
 		got[i] = tdef.Name
 	}
-	if want := []string{"read_file", "rg"}; !slices.Equal(got, want) {
+	if want := []string{"read", "shell"}; !slices.Equal(got, want) {
 		t.Fatalf("child tool schemas = %v, want configured tools %v", got, want)
 	}
 }
 
 func TestDelegateSchemaOmitsPerCallTools(t *testing.T) {
-	state := NewState(Runtime{ToolNames: []string{"read_file", "rg", "delegate"}})
+	state := NewState(Runtime{ToolNames: []string{"read", "shell", "delegate"}})
 	tool := New(state.Snapshot, nil, Options{MaxTurns: 37})
 
 	var schema struct {
@@ -1270,13 +1270,13 @@ func TestDelegatePersistsChildTranscript(t *testing.T) {
 
 func TestDelegatePersistsTurnLimitTermination(t *testing.T) {
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "read_file", out: "contents"})
+	childTools.Register(fakeChildTool{name: "read", out: "contents"})
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
 				ToolID:    "read",
-				ToolName:  "read_file",
+				ToolName:  "read",
 				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop: llm.StopToolUse,
@@ -1333,7 +1333,7 @@ func TestDelegatePersistsClosedTurnBeforeNextModelResponse(t *testing.T) {
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
 				ToolID:    "read-1",
-				ToolName:  "read_file",
+				ToolName:  "read",
 				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:       llm.StopToolUse,
@@ -1417,7 +1417,7 @@ func TestDelegatePersistsAllClosedTurnsInChildTree(t *testing.T) {
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
 				ToolID:    "read-1",
-				ToolName:  "read_file",
+				ToolName:  "read",
 				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:  llm.StopToolUse,
@@ -1427,7 +1427,7 @@ func TestDelegatePersistsAllClosedTurnsInChildTree(t *testing.T) {
 			Events: []llm.StreamEvent{{
 				Kind:      llm.EventToolCallDone,
 				ToolID:    "read-2",
-				ToolName:  "read_file",
+				ToolName:  "read",
 				ToolInput: json.RawMessage(`{}`),
 			}},
 			Stop:  llm.StopToolUse,
@@ -1616,7 +1616,7 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	sink.AssistantPhase("invalid")
 	sink.AssistantPhase(llm.AssistantPhaseCommentary)
 	sink.TextDelta("working")
-	sink.ToolStart(llm.ToolCall{ID: "call-1", Name: "read_file", Input: json.RawMessage(`{"path":"a.go"}`)})
+	sink.ToolStart(llm.ToolCall{ID: "call-1", Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)})
 	sink.ToolResult(llm.ToolResult{ForID: "call-1", Text: "package a\n\nfunc A() {}\n"})
 	sink.TurnComplete(agent.TurnUsage{Turn: 2, Usage: llm.Usage{InputTokens: 10, OutputTokens: 4}})
 	sink.TurnAttemptAbandoned(2, 3)
@@ -1670,7 +1670,7 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	}
 	// Tool and turn events record the same parent-fidelity Display lines the
 	// interactive renderer prints.
-	if got := events[5].Display; !strings.Contains(got, "[read_file]") || !strings.Contains(got, "path=a.go") || !strings.Contains(got, "3 lines") {
+	if got := events[5].Display; !strings.Contains(got, "[read]") || !strings.Contains(got, "path=a.go") || !strings.Contains(got, "3 lines") {
 		t.Fatalf("tool result display = %q, want parent-fidelity summary line", got)
 	}
 	if got := events[6].Display; !strings.HasPrefix(got, "[turn: 2 · ") {
@@ -1788,7 +1788,7 @@ func readDelegateChildEvents(t *testing.T, childDir string) []session.Event {
 
 func TestDelegateRejectsInvalidMaxTurns(t *testing.T) {
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "read_file", out: "ok"})
+	childTools.Register(fakeChildTool{name: "read", out: "ok"})
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	tool := New(func() Runtime {
 		return Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil)}
@@ -1826,13 +1826,13 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	activityRegistry := NewActivityRegistry(nil)
 	nested := New(originalState.Snapshot, nil, Options{MaxDepth: 3, ActivityRegistry: activityRegistry})
 	catalog := &tools.Registry{}
-	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
+	catalog.Register(fakeChildTool{name: "read", out: "ok"})
 	catalog.Register(nested)
 	runner := NewRunner(nil, nil, Options{MaxDepth: 3})
 	parent := Runtime{Depth: 0, MaxPromptTokens: 1234, MaxPromptCostUSD: 2.5, SessionPath: "session", CacheAffinityID: "parent-cache"}
 	launch := Launch{Tools: catalog, System: childSystemPrompt("root"), Agent: "explore"}
 
-	childTools, err := runner.childTools(parent, launch, "child-1", []string{"read_file", "delegate"})
+	childTools, err := runner.childTools(parent, launch, "child-1", []string{"read", "delegate"})
 	if err != nil {
 		t.Fatalf("childTools: %v", err)
 	}
@@ -1858,7 +1858,7 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 		t.Fatalf("child runtime cache affinity = %q, want %q", snapshot.CacheAffinityID, want)
 	}
 
-	continuedTools, err := runner.childToolsWithCacheAffinity(parent, launch, "child-2", "retained-cache", []string{"read_file", "delegate"})
+	continuedTools, err := runner.childToolsWithCacheAffinity(parent, launch, "child-2", "retained-cache", []string{"read", "delegate"})
 	if err != nil {
 		t.Fatalf("continued childTools: %v", err)
 	}
@@ -1984,7 +1984,7 @@ func TestDelegateDeepestChildDoesNotAdvertiseDelegate(t *testing.T) {
 	})
 	state := NewState(Runtime{Provider: fp, Model: "m", Registry: llm.NewRegistry(nil), Depth: 1})
 	catalog := &tools.Registry{}
-	catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
+	catalog.Register(fakeChildTool{name: "read", out: "ok"})
 	catalog.Register(New(state.Snapshot, nil, Options{MaxDepth: 2}))
 	tool := New(state.Snapshot, func(runtime Runtime, name string) (Launch, error) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: catalog}, nil
@@ -2000,8 +2000,8 @@ func TestDelegateDeepestChildDoesNotAdvertiseDelegate(t *testing.T) {
 	for i, spec := range fp.Requests[0].Tools {
 		got[i] = spec.Name
 	}
-	if !slices.Equal(got, []string{"read_file"}) {
-		t.Fatalf("deepest child tools = %v, want [read_file]", got)
+	if !slices.Equal(got, []string{"read"}) {
+		t.Fatalf("deepest child tools = %v, want [read]", got)
 	}
 }
 
@@ -2036,14 +2036,14 @@ func TestDelegatePropagatesRootTokenAndCostBudgets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			step := func(id string) llmtest.Step {
 				return llmtest.Step{
-					Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: id, ToolName: "read_file", ToolInput: json.RawMessage(`{}`)}},
+					Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: id, ToolName: "read", ToolInput: json.RawMessage(`{}`)}},
 					Stop:   llm.StopToolUse,
 					Usage:  tc.usage,
 				}
 			}
 			fp := llmtest.New("fake", step("one"), step("two"), step("three"))
 			catalog := &tools.Registry{}
-			catalog.Register(fakeChildTool{name: "read_file", out: "ok"})
+			catalog.Register(fakeChildTool{name: "read", out: "ok"})
 			runtime := tc.runtime
 			runtime.Provider = fp
 			runtime.Model = "priced"
@@ -2070,7 +2070,7 @@ func TestDelegatePropagatesRootTokenAndCostBudgets(t *testing.T) {
 
 func TestDelegatePassesRequestedAgentToResolver(t *testing.T) {
 	childTools := &tools.Registry{}
-	childTools.Register(fakeChildTool{name: "write_file", out: "ok"})
+	childTools.Register(fakeChildTool{name: "write", out: "ok"})
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "style report"}},
 		Stop:   llm.StopEndTurn,
@@ -2100,8 +2100,8 @@ func TestDelegatePassesRequestedAgentToResolver(t *testing.T) {
 	if req.Model != "style-model" || req.System != wantSystem {
 		t.Fatalf("request model/system = %q/%q", req.Model, req.System)
 	}
-	if len(req.Tools) != 1 || req.Tools[0].Name != "write_file" {
-		t.Fatalf("child tools = %+v, want configured write_file", req.Tools)
+	if len(req.Tools) != 1 || req.Tools[0].Name != "write" {
+		t.Fatalf("child tools = %+v, want configured write", req.Tools)
 	}
 }
 
@@ -2127,8 +2127,8 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 		t.Fatalf("after TurnAttemptComplete = %+v", got)
 	}
 
-	s.ToolStart(llm.ToolCall{ID: "t1", Name: "read_file"})
-	s.ToolStart(llm.ToolCall{ID: "t2", Name: "read_file"})
+	s.ToolStart(llm.ToolCall{ID: "t1", Name: "read"})
+	s.ToolStart(llm.ToolCall{ID: "t2", Name: "read"})
 	if got := p.Snapshot(); got.Tools != 2 {
 		t.Fatalf("after two ToolStart = %+v, want 2 tools", got)
 	}
@@ -2175,10 +2175,10 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 	childTools := &tools.Registry{}
 	toolStarted := make(chan struct{})
 	releaseTool := make(chan struct{})
-	childTools.Register(&blockingChildTool{name: "read_file", started: toolStarted, release: releaseTool})
+	childTools.Register(&blockingChildTool{name: "read", started: toolStarted, release: releaseTool})
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: "r1", ToolName: "read_file", ToolInput: json.RawMessage(`{}`)}},
+			Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: "r1", ToolName: "read", ToolInput: json.RawMessage(`{}`)}},
 			Stop:   llm.StopToolUse,
 		},
 		llmtest.Step{Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 11, OutputTokens: 5}},
@@ -2223,8 +2223,8 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 	if len(activity.Active) != 1 || activity.Recent.DisplayID != "d1" || activity.Recent.Agent != "explore" || activity.Recent.Turn != 1 {
 		t.Fatalf("live registry snapshot = %+v", activity)
 	}
-	if activity.Recent.Activity != "tool read_file" {
-		t.Fatalf("live registry activity = %q, want tool read_file", activity.Recent.Activity)
+	if activity.Recent.Activity != "tool read" {
+		t.Fatalf("live registry activity = %q, want tool read", activity.Recent.Activity)
 	}
 
 	close(releaseTool) // let the child tool finish so the run completes

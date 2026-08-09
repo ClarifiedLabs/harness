@@ -74,8 +74,8 @@ func TestSimilarExistingPathsFindsBoundedRecursiveCandidate(t *testing.T) {
 	}
 }
 
-// A mistyped read_file path (through any alias) names similar existing paths so
-// the model can retarget without an exploratory list_dir.
+// A mistyped read path (through any alias) names similar existing paths so
+// the model can retarget without an exploratory directory lookup.
 func TestReadFileNotFoundSuggestsSimilarPaths(t *testing.T) {
 	dir := t.TempDir()
 	mustWrite(t, filepath.Join(dir, "usage.md"), "# usage\n")

@@ -8,12 +8,10 @@ This page is the operational overview.
 
 | tool | purpose |
 |---|---|
-| `read_file` | read line-numbered file content; supports `offset`/`limit`, or `paths[]` for multi-file reads |
+| `read` | read line-numbered file content with `offset`/`limit`, batch known files with `paths[]`, or list a directory |
 | `view_image` | attach a local PNG, JPEG, WebP, or non-animated GIF to the next model request |
-| `list_dir` | list directory entries with type and size, non-recursive |
-| `glob` | recursively find files/dirs by glob, including `**` patterns; read-only |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
-| `write_file` | create or overwrite a file, creating parent directories |
+| `write` | create or overwrite a file, creating parent directories |
 | `shell` | run a shell command or direct argv program; co-issued calls may run concurrently (best-effort) |
 | `git` | run host git with `--no-pager`, including a compact `workspace_summary` workflow |
 | `git_readonly` | restricted git subcommands for read-only agents |
@@ -25,16 +23,17 @@ This page is the operational overview.
 | `record_plan` | Record a complete implementation plan for handoff to an implementation agent |
 | `handoff` | Handoff the recorded plan to an implementation agent (interactive plan agent; `agent` enum = exclusive agents `auto`, `independent`, plus custom `workspace_access: exclusive`; omit for default `auto`) |
 
-`apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
-default tool set — `edit` and `write_file` subsume it. It still ships in the tool
-catalog, so an agent can opt back in by naming `apply_patch` in its
-`allowed_tools` whitelist.
+The default registry is `read`, `view_image`, `edit`, `write`, `shell`, and
+`web_fetch`, in that order. The complete constructible catalog adds `git` and
+`git_readonly` when the host `git` binary is available, plus `write_tmp_file`.
+Coordination tools and discovered MCP/LSP tools are registered separately for
+the agents that expose them.
 
-`read_file` is part of the default tool set. `list_dir`, `glob`, `grep`, optional
-`rg`, `git`, and `git_readonly` remain in the Catalog for explicit
-`allowed_tools` whitelisting, but none of the built-in agent configurations
-advertise them. Use `shell` with host commands such as `rg`, `rg --files`,
-`find`, and `git --no-pager` for repository inspection with a built-in agent.
+The former callable names `read_file`, `write_file`, `list_dir`, `glob`, `grep`,
+`rg`, and `apply_patch` are removed from the catalog and cannot be restored with
+`allowed_tools`. Use `read` for files and directories, `write` for whole-file
+writes, `edit` for replacements, and `shell` with host commands such as `rg`,
+`rg --files`, `grep`, `find`, and `git --no-pager` for repository inspection.
 
 Models issue schema-visible top-level parallel-eligible calls together in one tool
 turn; Harness runs consecutive parallel-eligible calls concurrently
@@ -44,8 +43,8 @@ so co-issued `shell` calls may run concurrently best-effort on shared `cwd`/
 files — use distinct `cwd` or `background_lease` when ordering matters. No
 sandbox is added; harness inherits the host sandbox.
 
-`read_file` reads one file via `path` (with `offset`/`limit`), or several at once
-via `paths[]` — each file is rendered under a `==> path <==` header with its own
+`read` reads one file via `path` (with `offset`/`limit`), or several at once via
+`paths[]` — each file is rendered under a `==> path <==` header with its own
 per-file line budget. A directory path returns a bounded, non-recursive listing
 instead of a tool error. For cross-harness compatibility `path` also silently accepts
 the aliases `file`, `file_path`, `filePath`, `filename`, `filepath`,
@@ -63,16 +62,16 @@ has the corresponding base64 ceiling, and the complete retained request—manual
 user images plus nested rich tool-result images across prior rounds—is limited
 to 32 MiB encoded.
 When a single read is cut off at the line limit it ends with
-`[file truncated at line N; continue with offset=N+1]`. `glob` walks recursively
-from an optional `root`, where `**` matches across directory segments (and `*`/`?`/
-`[…]` match within one segment), returning matching paths with type and size sorted
-by path. `edit` takes an optional per-edit `replaceAll` flag that replaces every
+`[file truncated at line N; continue with offset=N+1]`. Recursive path discovery
+belongs to `shell` with a host command such as `rg --files` or `find`. `edit`
+takes an optional per-edit `replaceAll` flag that replaces every
 occurrence of `oldText` instead of requiring a unique match, reporting the
 replacement count.
 
 When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
 `mcp__<server>__<tool>`. When [LSP](lsp.md) is enabled, native `lsp_*` code
-intelligence tools are also registered. Most are read-only; `lsp_code_action`,
+intelligence tools are registered as a contiguous block immediately after
+`view_image`. Most are read-only; `lsp_code_action`,
 `lsp_format_document`, and `lsp_rename` apply validated language-server text
 edits and therefore remain mutating ordering barriers. Interactive sessions can
 inspect or change this process-local exposure with `/lsp`.
@@ -89,39 +88,25 @@ persistence, and continuation-cap behavior.
 Built-in agents intentionally use the general `shell` tool for repository
 search instead of a typed content-search tool. Prefer argv-form `rg` for content,
 `rg --files` or `find` for path discovery, and `shell.steps[]` when several
-ordered lookups belong in one process call. Independent `shell` or `read_file`
-calls can instead be coissued in one model turn. Native command semantics decide
+ordered lookups belong in one process call. Independent `shell` or `read` calls can instead be coissued in one model turn. Native command semantics decide
 regex syntax, ignore behavior, output shape, and exit status; scope the command
-to the relevant repository path and use `read_file` for targeted source context.
+to the relevant repository path and use `read` for targeted source context.
 
 After three consecutive turns containing one unbatched repository lookup,
-Harness adds a one-time soft reminder to coissue independent `read_file` calls,
-use `read_file paths[]` for known files, or batch repository lookups in one
-`shell` call. The reminder names only tools present in the built-in surface.
+Harness adds a one-time soft reminder to coissue independent `read` calls, use
+`read paths[]` for known files, or batch repository lookups in one `shell` call. The reminder names only tools present in the built-in surface.
 
-A `read_file` path that does not exist fails with `similar existing paths: <up
+A `read` path that does not exist fails with `similar existing paths: <up
 to 3>` appended. Harness first scans the same directory and one parent level for
 a mistyped directory, then uses a bounded four-level/1024-entry recursive
 fallback from the nearest existing directory, so a misplaced or mistyped path
 can be retargeted without another lookup round trip.
 
-Raw `grep` and optional `rg` wrappers remain in the constructible catalog for a
-custom agent that explicitly names them in `allowed_tools`; built-in agents do
-not advertise them. `grep`, `rg`, `git`, and direct-argv `shell` calls expect JSON arrays of
-strings for argv-style fields, not shell strings and not JSON-encoded arrays. The
-tools are thin wrappers around host CLIs, so native CLI semantics decide regex
-syntax, ignore behavior, output shape, and supported flags.
-
-Normal `rg` searches add `--max-columns=1024 --max-columns-preview
---max-filesize=10M` unless the caller's native `rg` args already set those
-limits. The wrapper rejects short `-r` forms because replacement output must use
-`--replace` explicitly.
-
-The host `grep` tool injects `-I` (skip binary files) unless the call already sets
-a binary policy (`-I`/`-a`/`--text`/`--binary-files`) or is a help/version
-invocation; `-I` is placed before any `--` operand separator. Matched lines longer
-than 1024 bytes are clamped in-process (host `grep` has no portable
-`--max-columns`), trailing them with `… [N chars clamped]`.
+Search commands run through `shell`, not dedicated wrappers. Direct-argv
+`shell` calls expect a JSON array of strings; `command` accepts a shell string
+when pipes, redirection, expansion, or other shell syntax is required. Harness
+does not rewrite host `rg`/`grep` arguments or results, so native CLI semantics
+decide regex syntax, ignore behavior, limits, output shape, and exit status.
 
 ## Command Execution
 
@@ -162,7 +147,7 @@ successful output or clipped failure output is archived through the normal
 session artifact path, so the model can inspect it without carrying it in every
 later request. `steps` is foreground-only.
 
-`shell`, `grep`, `rg`, and `web_fetch` can set `background:true` to return
+`shell` and `web_fetch` can set `background:true` to return
 a job id immediately. `delegate` can also run as a background child agent.
 Local background work carries a canonical resource lease. `shell`
 defaults to an `exclusive` lease on its canonical cwd; callers may set
@@ -173,8 +158,10 @@ makes it read-only. Legacy top-level `resource_key` and `access` inputs remain
 accepted but are not advertised. A delegate's access defaults from its selected
 agent, and its `scope` defaults to the canonical cwd. Built-in `explore`,
 `plan`, and `review` agents are read-only; `auto`, `independent`, custom, and
-implementation-mode delegates are exclusive by default. Background `grep` and
-`rg` automatically use a `read_only` lease on their cwd. Multiple read-only jobs may share a resource,
+implementation-mode delegates are exclusive by default. A background `shell`
+call defaults to an exclusive lease even when it runs a search command; callers
+may explicitly select `read_only` when the command cannot mutate the resource.
+Multiple read-only jobs may share a resource,
 while an exclusive job conflicts with every active lease for the same resource
 and reports the existing job id. Jobs on different resources remain concurrent.
 The lease is an exact-key match on the canonical path: it does not protect the
@@ -249,7 +236,7 @@ private child plans but cannot request an interactive handoff.
 
 ## File Mutation
 
-`edit`, `write_file`, and `apply_patch` are the built-in file mutation tools.
+`edit` and `write` are the built-in file mutation tools.
 A repeated `edit` `files[].path` is applied in order against the earlier
 entry's result rather than rejected; a stale `oldText` in a repeated entry
 fails with the ordinary not-found error and nothing is written.
@@ -461,17 +448,15 @@ Tool results are centrally capped at 64 KB or 1000 lines by default. Configure
 this with `tool_result_max_bytes` / `tool_result_max_lines`, or
 `HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`. Noisy file
 inspection tools have smaller defaults unless a global cap is configured:
-raw `rg`/`grep` use 32 KB or 500 lines, and `read_file` uses a 500-line default
-window plus a 32 KB result cap. Override them with `rg_result_max_bytes` /
-`rg_result_max_lines`, `grep_result_max_bytes` / `grep_result_max_lines`,
-`read_file_default_limit`, and `read_file_result_max_bytes` /
-`read_file_result_max_lines`; each has a matching `HARNESS_*` environment
-variable.
+`read` uses a 500-line default window plus a 32 KB result cap. Override it with
+`read_default_limit`, `read_result_max_bytes`, and `read_result_max_lines`, or
+`HARNESS_READ_DEFAULT_LIMIT`, `HARNESS_READ_RESULT_MAX_BYTES`, and
+`HARNESS_READ_RESULT_MAX_LINES`.
 
 Truncated results include a marker in the model-visible text, a warning in the
 UI, and the full output is archived under the session directory when available.
 The model-visible tool result includes the absolute artifact path so the next
-turn can inspect it with `read_file` or a targeted `shell` command. When live retention later
+turn can inspect it with `read` or a targeted `shell` command. When live retention later
 removes an old read-only result body, Harness leaves a typed receipt with the
 tool, status, byte counts, bounded head, and recovery path; the exact original
 is preserved in the same artifact store. If that artifact write fails, the

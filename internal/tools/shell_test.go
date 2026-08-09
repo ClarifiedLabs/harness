@@ -17,6 +17,13 @@ import (
 	"harness/internal/llm"
 )
 
+func makeExecutable(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func runShell(t *testing.T, args map[string]any) (string, error) {
 	return runTool(t, shell{}, args)
 }

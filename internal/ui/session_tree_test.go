@@ -146,7 +146,7 @@ func TestTreeEntryPreviewCondensesToolsWithoutLeakingPayloads(t *testing.T) {
 				{Kind: llm.BlockText, Text: "Checking the code"},
 				{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "delegate", ToolInput: json.RawMessage(`{"secret":"ONE"}`)},
 				{Kind: llm.BlockToolUse, ToolUseID: "call_2", ToolName: "delegate", ToolInput: json.RawMessage(`{"secret":"TWO"}`)},
-				{Kind: llm.BlockToolUse, ToolUseID: "call_3", ToolName: "rg", ToolInput: json.RawMessage(`{"secret":"THREE"}`)},
+				{Kind: llm.BlockToolUse, ToolUseID: "call_3", ToolName: "custom_tool", ToolInput: json.RawMessage(`{"secret":"THREE"}`)},
 			},
 		},
 		{
@@ -163,7 +163,7 @@ func TestTreeEntryPreviewCondensesToolsWithoutLeakingPayloads(t *testing.T) {
 	}}
 
 	got := treeEntryPreview(entry)
-	want := "Checking the code · delegate ×2, rg · 1 failed · 2 images (image/png, image/jpeg)"
+	want := "Checking the code · delegate ×2, custom_tool · 1 failed · 2 images (image/png, image/jpeg)"
 	if got != want {
 		t.Fatalf("preview = %q, want %q", got, want)
 	}

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -137,7 +136,6 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	discoverySucceeded := false
 	discoveryStarts := make(map[string]bool)
 	readStarts := make(map[string]directReadStart)
-	inspectReadStarts := make(map[string][]string)
 	successfulReadCallsByTurn := make(map[int]int)
 	successfulReadPathsByTurn := make(map[int][]string)
 	for _, ev := range events {
@@ -153,7 +151,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			m.Turns = ev.Turn
 		}
 		if ev.Type == session.EventToolResult {
-			if start, ok := readStarts[ev.ToolID]; !ev.ResultError && ev.Tool == "read_file" && ok {
+			if start, ok := readStarts[ev.ToolID]; !ev.ResultError && ev.Tool == "read" && ok {
 				m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, start.Paths...)
 				m.SuccessfulDirectReadPaths = append(m.SuccessfulDirectReadPaths, start.Paths...)
 				successfulReadCallsByTurn[start.Turn]++
@@ -167,22 +165,6 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			if discoveryStarts[ev.ToolID] && successfulDiscoveryResult(ev) {
 				discoverySucceeded = true
 			}
-			if ev.Tool == "inspect" {
-				if ev.ResultError && ev.ErrorKind == string(llm.ToolErrorBatchFailed) {
-					m.AllFailedInspectCalls++
-				}
-				if !ev.ResultError {
-					m.SuccessfulInspectCalls++
-				}
-				m.InspectOperationErrors += ev.ResultMetrics["operation_errors"]
-				if !ev.ResultError && ev.ResultMetrics["operation_errors"] == 0 {
-					m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, inspectReadStarts[ev.ToolID]...)
-				}
-				delete(inspectReadStarts, ev.ToolID)
-			}
-			if ev.Tool == "search" && !ev.ResultError {
-				observeSearchResultMetrics(&m, ev.ResultMetrics)
-			}
 			observeToolResult(&m, &editRecovery, ev)
 			continue
 		}
@@ -191,15 +173,15 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 		m.ToolCalls[ev.Tool]++
 		byTurn[ev.Turn] = append(byTurn[ev.Turn], ev.Tool)
-		if isDiscoveryTool(ev.Tool) {
-			discoveryStarts[ev.ToolID] = discoveryTargetsFixture(ev.Tool, ev.Input)
+		if discoveryStartTargetsFixture(ev) {
+			discoveryStarts[ev.ToolID] = true
 		}
 		lookupOperationsByTurn[ev.Turn] += repositoryLookupOperationCount(ev.Tool, ev.Input)
 		raw := string(ev.Input)
 		switch ev.Tool {
-		case "read_file":
+		case "read":
 			m.DirectReadCalls++
-			paths := readFilePaths(ev.Input)
+			paths := readPaths(ev.Input)
 			m.DirectReadOperations += len(paths)
 			m.DirectReadPaths = append(m.DirectReadPaths, paths...)
 			readStarts[ev.ToolID] = directReadStart{Turn: ev.Turn, Paths: paths}
@@ -211,26 +193,6 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			} else {
 				m.ReadBeforeDiscovery = true
 			}
-		case "inspect":
-			operationCount, readPaths := inspectOperationSummary(ev.Input)
-			m.InspectOperations += operationCount
-			readOperations := len(readPaths)
-			m.InspectReadOperations += readOperations
-			m.InspectReadPaths = append(m.InspectReadPaths, readPaths...)
-			inspectReadStarts[ev.ToolID] = readPaths
-			if readOperations > 0 {
-				if discoverySucceeded {
-					m.DiscoveryBeforeRead = true
-				} else {
-					m.ReadBeforeDiscovery = true
-				}
-			}
-		case "search": // Historical benchmark sessions.
-			m.UsedSearch = true
-			m.SearchQueries += searchQueryCount(ev.Input)
-		case "rg", "grep": // Catalog-only wrappers in historical/custom runs.
-			m.UsedSearch = true
-			m.SearchQueries++
 		case "shell":
 			commandInputs = append(commandInputs, strings.Join(flattenJSONStrings(ev.Input), " "))
 			if queries := shellRGSearchCount(ev.Input); queries > 0 {
@@ -277,7 +239,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	}
 	sort.Slice(turns, func(i, j int) bool { return turns[i].Turn < turns[j].Turn })
 	for i := 0; i+1 < len(turns); i++ {
-		if contains(turns[i].Names, "rg") && contains(turns[i+1].Names, "read_file") {
+		if contains(turns[i].Names, "rg") && contains(turns[i+1].Names, "read") {
 			m.RGToReadTransitions++
 		}
 		if contains(turns[i].Names, "shell") && contains(turns[i+1].Names, "shell") {
@@ -288,7 +250,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		lookups := lookupOperationsByTurn[tt.Turn]
 		reads := 0
 		for _, name := range tt.Names {
-			if name == "read_file" {
+			if name == "read" {
 				reads++
 			}
 		}
@@ -324,44 +286,6 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	return m, nil
 }
 
-func observeSearchResultMetrics(m *metrics, values map[string]int) {
-	if values["results_bounded"] != 0 || values["context_bounded"] != 0 {
-		m.SearchBoundedCalls++
-	}
-	if values["search_batch_member"] == 0 {
-		lines := values["context_lines"]
-		m.SearchContextLines += lines
-		m.SearchContextLinesBeforeBatch += lines
-		return
-	}
-	if values["search_batch_metrics_owner"] == 0 {
-		return
-	}
-	m.SearchContextLines += values["search_batch_context_lines_after"]
-	m.SearchContextLinesBeforeBatch += values["search_batch_context_lines_before"]
-	m.SearchDuplicateLines += values["search_batch_duplicate_lines_suppressed"]
-	m.SearchBudgetOmittedLines += values["search_batch_budget_lines_omitted"]
-	m.SearchBatches++
-	m.SearchBatchCalls += values["search_batch_calls"]
-	m.SearchLowYieldCalls += values["search_batch_low_yield_calls"]
-	m.SearchBatchBytesBefore += values["search_batch_bytes_before"]
-	m.SearchBatchBytesAfter += values["search_batch_bytes_after"]
-}
-
-func searchQueryCount(raw json.RawMessage) int {
-	var input struct {
-		Pattern string            `json:"pattern"`
-		Queries []json.RawMessage `json:"queries"`
-	}
-	if json.Unmarshal(raw, &input) != nil {
-		return 0
-	}
-	if strings.TrimSpace(input.Pattern) != "" {
-		return 1
-	}
-	return len(input.Queries)
-}
-
 func successfulKnownPathContracts(events []session.Event) (searches, commands int) {
 	type contractStart struct {
 		searches int
@@ -372,12 +296,7 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 		switch ev.Type {
 		case session.EventToolStart:
 			start := contractStart{}
-			switch ev.Tool {
-			case "search": // Historical benchmark sessions.
-				start.searches = exactKnownPathSearchInput(ev.Input)
-			case "inspect": // Historical benchmark sessions.
-				start.searches = exactKnownPathInspectSearchInput(ev.Input)
-			case "shell":
+			if ev.Tool == "shell" {
 				start.searches = exactKnownPathShellSearchInput(ev.Input)
 				start.command = exactKnownPathCommandInput(ev.Input)
 			}
@@ -390,9 +309,7 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 				continue
 			}
 			delete(starts, ev.ToolID)
-			if (ev.Tool == "search" && ev.ResultMetrics["query_errors"] == 0) ||
-				(ev.Tool == "inspect" && ev.ResultMetrics["operation_errors"] == 0) ||
-				(ev.Tool == "shell" && successfulShellResult(ev)) {
+			if ev.Tool == "shell" && successfulShellResult(ev) {
 				searches += start.searches
 			}
 			if ev.Tool == "shell" && start.command && successfulShellResult(ev) {
@@ -401,81 +318,6 @@ func successfulKnownPathContracts(events []session.Event) (searches, commands in
 		}
 	}
 	return searches, commands
-}
-
-func exactKnownPathInspectSearchInput(raw json.RawMessage) int {
-	var input struct {
-		Operations []struct {
-			Tool  string          `json:"tool"`
-			Input json.RawMessage `json:"input"`
-		} `json:"operations"`
-	}
-	if json.Unmarshal(raw, &input) != nil {
-		return 0
-	}
-	total := 0
-	for _, operation := range input.Operations {
-		if operation.Tool == "search" {
-			total += exactKnownPathSearchInput(operation.Input)
-		}
-	}
-	return total
-}
-
-func exactKnownPathSearchInput(raw json.RawMessage) int {
-	type query struct {
-		Pattern      string   `json:"pattern"`
-		Path         string   `json:"path"`
-		Paths        []string `json:"paths"`
-		Globs        []string `json:"globs"`
-		FixedStrings bool     `json:"fixed_strings"`
-	}
-	var input struct {
-		query
-		Queries []query `json:"queries"`
-	}
-	if json.Unmarshal(raw, &input) != nil {
-		return 0
-	}
-	queries := input.Queries
-	if input.Pattern != "" {
-		queries = []query{input.query}
-	}
-	if len(queries) == 0 || len(queries) > 3 {
-		return 0
-	}
-	want := map[string]bool{
-		"widget": false,
-		"state":  false,
-		"marker": false,
-	}
-	for _, q := range queries {
-		path := q.Path
-		if path == "" && len(q.Paths) == 1 {
-			path = q.Paths[0]
-		}
-		root := toolAccuracyFixture + "/known"
-		directoryScoped := normalizeFixturePath(path) == root && len(q.Globs) == 0
-		globScoped := (path == "" || normalizeFixturePath(path) == ".") && len(q.Globs) == 1 &&
-			normalizeFixturePath(q.Globs[0]) == root+"/*"
-		if !directoryScoped && !globScoped {
-			return 0
-		}
-		key := ""
-		switch {
-		case q.FixedStrings && q.Pattern == "Widget(", !q.FixedStrings && q.Pattern == `Widget\(`:
-			key = "widget"
-		case q.FixedStrings && q.Pattern == "State{", !q.FixedStrings && q.Pattern == `State\{`:
-			key = "state"
-		case !q.FixedStrings && q.Pattern == "Marker[0-9]+":
-			key = "marker"
-		}
-		if _, ok := want[key]; !ok || want[key] {
-			return 0
-		}
-		want[key] = true
-	}
-	return len(queries)
 }
 
 type shellMetricStep struct {
@@ -578,9 +420,7 @@ func exactKnownPathRGArgv(argv []string) (string, bool) {
 
 func repositoryLookupOperationCount(tool string, raw json.RawMessage) int {
 	switch tool {
-	case "search": // Historical benchmark sessions may carry several typed queries in one call.
-		return max(1, searchQueryCount(raw))
-	case "read_file", "glob", "list_dir", "rg", "grep": // Non-default names support archived/custom sessions.
+	case "read":
 		return 1
 	case "shell":
 		count := 0
@@ -597,6 +437,10 @@ func repositoryLookupOperationCount(tool string, raw json.RawMessage) int {
 	default:
 		return 0
 	}
+}
+
+func discoveryStartTargetsFixture(event session.Event) bool {
+	return event.Tool == "shell" && shellDiscoversFixture(event.Input)
 }
 
 func shellDiscoversFixture(raw json.RawMessage) bool {
@@ -740,13 +584,7 @@ func patternsCoverNames(patterns, names []string) bool {
 }
 
 func successfulDiscoveryResult(event session.Event) bool {
-	if event.ResultError {
-		return false
-	}
-	if event.Tool == "shell" {
-		return successfulShellResult(event)
-	}
-	return event.ResultMetrics["query_errors"] == 0
+	return event.Tool == "shell" && successfulShellResult(event)
 }
 
 func successfulShellResult(event session.Event) bool {
@@ -794,76 +632,6 @@ func exactKnownPathCommandInput(raw json.RawMessage) bool {
 	return true
 }
 
-func isDiscoveryTool(name string) bool {
-	// Typed names are retained only to analyze archived benchmark sessions.
-	return name == "shell" || name == "glob" || name == "list_dir" || name == "search"
-}
-
-func discoveryTargetsFixture(tool string, raw json.RawMessage) bool {
-	const root = toolAccuracyFixture + "/discovery"
-	names := contractFixturePaths("discovery", "shard-%02d-hidden.txt")
-	for i := range names {
-		names[i] = path.Base(names[i])
-	}
-	switch tool {
-	case "shell":
-		return shellDiscoversFixture(raw)
-	case "glob":
-		var input struct {
-			Root    string `json:"root"`
-			Pattern string `json:"pattern"`
-		}
-		if json.Unmarshal(raw, &input) != nil {
-			return false
-		}
-		pattern := normalizeFixturePath(input.Pattern)
-		switch normalizedRoot := normalizeFixturePath(input.Root); {
-		case normalizedRoot == root:
-		case normalizedRoot == "." && strings.HasPrefix(pattern, root+"/"):
-			pattern = strings.TrimPrefix(pattern, root+"/")
-		default:
-			return false
-		}
-		return globCoversNames(pattern, names)
-	case "list_dir":
-		var input struct {
-			Path string `json:"path"`
-			Glob string `json:"glob"`
-		}
-		if json.Unmarshal(raw, &input) != nil || normalizeFixturePath(input.Path) != root {
-			return false
-		}
-		return input.Glob == "" || globCoversNames(input.Glob, names)
-	case "search":
-		var input struct {
-			Queries []struct {
-				Pattern    string   `json:"pattern"`
-				Fixed      bool     `json:"fixed_strings"`
-				Case       string   `json:"case"`
-				Paths      []string `json:"paths"`
-				Globs      []string `json:"globs"`
-				Output     string   `json:"output"`
-				MaxMatches int      `json:"max_matches"`
-				MaxFiles   int      `json:"max_files"`
-			} `json:"queries"`
-		}
-		if json.Unmarshal(raw, &input) != nil {
-			return false
-		}
-		for _, query := range input.Queries {
-			if len(query.Paths) != 1 || normalizeFixturePath(query.Paths[0]) != root || len(query.Globs) != 0 ||
-				query.Output == "exists" || query.MaxFiles < len(names) ||
-				(query.MaxMatches > 0 && query.MaxMatches < len(names)) {
-				continue
-			}
-			if searchPatternCoversDiscovery(query.Pattern, query.Fixed, query.Case) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func globCoversNames(pattern string, names []string) bool {
 	if pattern == "**" || pattern == "**/*" {
 		return true
@@ -872,31 +640,6 @@ func globCoversNames(pattern string, names []string) bool {
 	for _, name := range names {
 		matched, err := path.Match(pattern, name)
 		if err != nil || !matched {
-			return false
-		}
-	}
-	return true
-}
-
-func searchPatternCoversDiscovery(pattern string, fixed bool, caseMode string) bool {
-	for i := 1; i <= 18; i++ {
-		content := fmt.Sprintf("Discover%02d\n", i)
-		if fixed {
-			if caseMode == "insensitive" || ((caseMode == "" || caseMode == "smart") && strings.ToLower(pattern) == pattern) {
-				if !strings.Contains(strings.ToLower(content), strings.ToLower(pattern)) {
-					return false
-				}
-			} else if !strings.Contains(content, pattern) {
-				return false
-			}
-			continue
-		}
-		expression := pattern
-		if caseMode == "insensitive" || (caseMode == "smart" && strings.ToLower(pattern) == pattern) {
-			expression = "(?i)" + expression
-		}
-		re, err := regexp.Compile(expression)
-		if err != nil || !re.MatchString(content) {
 			return false
 		}
 	}
@@ -918,7 +661,7 @@ func normalizeFixturePath(input string) string {
 	return clean
 }
 
-func readFilePaths(raw json.RawMessage) []string {
+func readPaths(raw json.RawMessage) []string {
 	var input struct {
 		Path  string   `json:"path"`
 		Paths []string `json:"paths"`
@@ -936,31 +679,6 @@ func readFilePaths(raw json.RawMessage) []string {
 	return paths
 }
 
-func inspectReadPaths(raw json.RawMessage) []string {
-	_, paths := inspectOperationSummary(raw)
-	return paths
-}
-
-func inspectOperationSummary(raw json.RawMessage) (int, []string) {
-	var input struct {
-		Operations []struct {
-			Tool  string          `json:"tool"`
-			Input json.RawMessage `json:"input"`
-		} `json:"operations"`
-	}
-	if json.Unmarshal(raw, &input) != nil {
-		return 0, nil
-	}
-	var paths []string
-	for _, operation := range input.Operations {
-		if operation.Tool != "read_file" {
-			continue
-		}
-		paths = append(paths, readFilePaths(operation.Input)...)
-	}
-	return len(input.Operations), paths
-}
-
 func successfulDriftReread(events []session.Event) bool {
 	const driftPath = toolAccuracyFixture + "/edit-drift.txt"
 	pending := make(map[string]string)
@@ -976,7 +694,7 @@ func successfulDriftReread(events []session.Event) bool {
 				continue
 			}
 			delete(pending, event.ToolID)
-			if !event.ResultError && (tool != "inspect" || event.ResultMetrics["operation_errors"] == 0) {
+			if !event.ResultError && tool == "read" {
 				return true
 			}
 		}
@@ -986,15 +704,10 @@ func successfulDriftReread(events []session.Event) bool {
 
 func toolReadsPath(tool string, raw json.RawMessage, want string) bool {
 	want = normalizeFixturePath(want)
-	var paths []string
-	switch tool {
-	case "read_file":
-		paths = readFilePaths(raw)
-	case "inspect":
-		paths = inspectReadPaths(raw)
-	default:
+	if tool != "read" {
 		return false
 	}
+	paths := readPaths(raw)
 	for _, candidate := range paths {
 		if normalizeFixturePath(candidate) == want {
 			return true

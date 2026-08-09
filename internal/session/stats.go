@@ -172,17 +172,6 @@ type toolStats struct {
 	resultShownBytes    int
 	resultTotalMS       int64
 	resultMaxMS         int64
-	searchNoMatches     int
-	searchContextLines  int
-	searchUniqueLines   int
-	searchShownLines    int
-	searchBudgetOmitted int
-	searchBatches       int
-	searchBatchCalls    int
-	searchLowYieldCalls int
-	searchBatchBytesIn  int
-	searchBatchBytesOut int
-	searchBoundedCalls  int
 	resultsByName       map[string]toolResultStats
 	callShapes          map[string]map[string]int
 	skillReads          int
@@ -631,43 +620,6 @@ func collectToolStats(events []Event) (toolStats, error) {
 				result.maxMS = max(result.maxMS, ev.DurationMS)
 				stats.resultsByName[ev.Tool] = result
 			}
-			if ev.Tool == "search" || ev.Tool == "rg" || ev.Tool == "grep" {
-				if strings.Contains(strings.ToLower(ev.Display), "no matches") {
-					stats.searchNoMatches++
-				}
-			}
-			if ev.Tool == "search" {
-				if ev.ResultMetrics["results_bounded"] != 0 || ev.ResultMetrics["context_bounded"] != 0 {
-					stats.searchBoundedCalls++
-				}
-				if ev.ResultMetrics["search_batch_member"] != 0 {
-					if ev.ResultMetrics["search_batch_metrics_owner"] == 0 {
-						continue
-					}
-					selected := ev.ResultMetrics["search_batch_context_lines_before"]
-					unique := ev.ResultMetrics["search_batch_unique_context_lines"]
-					shown := ev.ResultMetrics["search_batch_context_lines_after"]
-					stats.searchContextLines += selected
-					stats.searchUniqueLines += unique
-					stats.searchShownLines += shown
-					stats.searchBudgetOmitted += ev.ResultMetrics["search_batch_budget_lines_omitted"]
-					stats.searchBatches++
-					stats.searchBatchCalls += ev.ResultMetrics["search_batch_calls"]
-					stats.searchLowYieldCalls += ev.ResultMetrics["search_batch_low_yield_calls"]
-					stats.searchBatchBytesIn += ev.ResultMetrics["search_batch_bytes_before"]
-					stats.searchBatchBytesOut += ev.ResultMetrics["search_batch_bytes_after"]
-					continue
-				}
-				selected := ev.ResultMetrics["context_lines_before_dedupe"]
-				unique := ev.ResultMetrics["unique_context_lines"]
-				if selected == 0 {
-					selected = ev.ResultMetrics["context_lines"]
-					unique = selected
-				}
-				stats.searchContextLines += selected
-				stats.searchUniqueLines += unique
-				stats.searchShownLines += unique
-			}
 			continue
 		}
 		if ev.Type != EventToolStart {
@@ -684,7 +636,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 			key := [2]int{ev.Prompt, ev.Turn}
 			turnCalls[key] = append(turnCalls[key], ev.Tool)
 		}
-		if ev.Tool == "read_file" {
+		if ev.Tool == "read" {
 			for _, pathHash := range skillReadPathHashes(ev.Input) {
 				stats.skillReads++
 				stats.skillReadPaths[pathHash]++
@@ -765,7 +717,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 			stats.soloTodoTurns++
 		}
 		switch names[0] {
-		case "read_file", "search", "rg", "grep", "glob", "list_dir", "git_readonly":
+		case "read", "git_readonly":
 			stats.singleInspectTurns++
 		}
 	}
@@ -1074,17 +1026,6 @@ func (stats *toolStats) add(other toolStats) {
 	stats.resultShownBytes += other.resultShownBytes
 	stats.resultTotalMS += other.resultTotalMS
 	stats.resultMaxMS = max(stats.resultMaxMS, other.resultMaxMS)
-	stats.searchNoMatches += other.searchNoMatches
-	stats.searchContextLines += other.searchContextLines
-	stats.searchUniqueLines += other.searchUniqueLines
-	stats.searchShownLines += other.searchShownLines
-	stats.searchBudgetOmitted += other.searchBudgetOmitted
-	stats.searchBatches += other.searchBatches
-	stats.searchBatchCalls += other.searchBatchCalls
-	stats.searchLowYieldCalls += other.searchLowYieldCalls
-	stats.searchBatchBytesIn += other.searchBatchBytesIn
-	stats.searchBatchBytesOut += other.searchBatchBytesOut
-	stats.searchBoundedCalls += other.searchBoundedCalls
 	stats.skillReads += other.skillReads
 	for name, count := range other.byName {
 		stats.byName[name] += count
@@ -1400,21 +1341,6 @@ func writeOverallToolStats(w io.Writer, report statsReport) {
 		fmt.Fprintf(w, "  tool wall time: average %s / max %s\n",
 			formatDuration(time.Duration(all.resultTotalMS/int64(all.calls))*time.Millisecond),
 			formatDuration(time.Duration(all.resultMaxMS)*time.Millisecond))
-	}
-	if all.searchNoMatches > 0 {
-		fmt.Fprintf(w, "  search no-match results: %d\n", all.searchNoMatches)
-	}
-	if all.searchContextLines > 0 {
-		duplicates := max(all.searchContextLines-all.searchUniqueLines, 0)
-		fmt.Fprintf(w, "  search context: %d candidate source lines / %d unique / %d shown (%d duplicates suppressed, %d omitted by shared limits)\n",
-			all.searchContextLines, all.searchUniqueLines, all.searchShownLines, duplicates, all.searchBudgetOmitted)
-	}
-	if all.searchBatches > 0 {
-		fmt.Fprintf(w, "  shared search batches: %d (%d calls, %d low-yield); %d B before / %d B after\n",
-			all.searchBatches, all.searchBatchCalls, all.searchLowYieldCalls, all.searchBatchBytesIn, all.searchBatchBytesOut)
-	}
-	if all.searchBoundedCalls > 0 {
-		fmt.Fprintf(w, "  bounded search results: %d\n", all.searchBoundedCalls)
 	}
 	if len(all.resultsByName) > 0 {
 		fmt.Fprintln(w, "  result volume by tool (largest first):")

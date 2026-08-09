@@ -237,7 +237,7 @@ func TestAnalyzeV2UnpricedIncompleteAndMissingUsageCoverage(t *testing.T) {
 
 func TestAnalyzeV2StorageStatusesAndPrivacy(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
-	mustAppendAnalysisEvent(t, root, Event{Type: EventToolStart, Tool: "read_file"})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolStart, Tool: "read"})
 	if err := os.WriteFile(filepath.Join(root, treeFile), []byte("{malformed TOP SECRET TREE"), 0o644); err != nil {
 		t.Fatal(err)
 	}

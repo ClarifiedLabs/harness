@@ -88,7 +88,7 @@ func TestBuildResumeRecapCommentaryWithToolUseNoRecap(t *testing.T) {
 		recapPrompt("run it"),
 		{Role: llm.RoleAssistant, Phase: llm.AssistantPhaseCommentary, Content: []llm.ContentBlock{
 			{Kind: llm.BlockText, Text: "let me check"},
-			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read_file"},
+			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read"},
 		}},
 	}}
 	if recap := buildResumeRecap(s); recap != nil {
@@ -100,11 +100,11 @@ func TestBuildResumeRecapInterruptedTools(t *testing.T) {
 	s := &session.Session{Messages: []llm.Message{
 		recapPrompt("earlier task"),
 		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
-			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read_file"},
+			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read"},
 			{Kind: llm.BlockToolUse, ToolUseID: "call-2", ToolName: "search"},
 		}},
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{
-			{Kind: llm.BlockToolResult, ResultForID: "call-1", ToolName: "read_file", ResultError: true, ResultText: "interrupted"},
+			{Kind: llm.BlockToolResult, ResultForID: "call-1", ToolName: "read", ResultError: true, ResultText: "interrupted"},
 			{Kind: llm.BlockToolResult, ResultForID: "call-2", ToolName: "search", ResultError: true, ResultText: "interrupted"},
 		}},
 	}}
@@ -115,7 +115,7 @@ func TestBuildResumeRecapInterruptedTools(t *testing.T) {
 	if recap.kind != recapInterruptedTools {
 		t.Fatalf("kind = %v, want recapInterruptedTools", recap.kind)
 	}
-	want := "[turn interrupted during tool execution: read_file, search did not complete]"
+	want := "[turn interrupted during tool execution: read, search did not complete]"
 	if recap.trailer != want {
 		t.Fatalf("trailer = %q, want %q", recap.trailer, want)
 	}
@@ -127,7 +127,7 @@ func TestBuildResumeRecapToolsCompletedBeforeReply(t *testing.T) {
 	s := &session.Session{Messages: []llm.Message{
 		recapPrompt("read x"),
 		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
-			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read_file"},
+			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read"},
 		}},
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{
 			{Kind: llm.BlockToolResult, ResultForID: "call-1", ResultText: "file contents"},
@@ -224,7 +224,7 @@ func TestBuildResumeRecapSkipsToolUseOnlyAssistant(t *testing.T) {
 		recapPrompt("check then answer"),
 		recapAssistant(llm.AssistantPhaseCommentary, "checking the file"),
 		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
-			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read_file"},
+			{Kind: llm.BlockToolUse, ToolUseID: "call-1", ToolName: "read"},
 		}},
 		{Role: llm.RoleUser, Content: []llm.ContentBlock{
 			{Kind: llm.BlockToolResult, ResultForID: "call-1", ResultText: "data"},

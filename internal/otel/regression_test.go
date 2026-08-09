@@ -48,6 +48,60 @@ func metricIntTotal(t *testing.T, exp *Exporter, name string) int64 {
 	return total
 }
 
+func TestSanitizeToolNameUsesCurrentToolNamesOnly(t *testing.T) {
+	current := []string{
+		"read", "view_image", "edit", "write", "shell", "git", "web_fetch",
+		"git_readonly", "write_tmp_file", "delegate", "background_jobs",
+		"update_todos", "record_plan", "handoff",
+	}
+	for _, name := range current {
+		if got := sanitizeToolName(name); got != name {
+			t.Errorf("sanitizeToolName(%q) = %q, want current name preserved", name, got)
+		}
+	}
+
+	removed := []string{"read_file", "write_file", "apply_patch", "rg", "grep", "glob", "list_dir"}
+	for _, name := range removed {
+		if got := sanitizeToolName(name); got != "other" {
+			t.Errorf("sanitizeToolName(%q) = %q, want removed tool bucketed as other", name, got)
+		}
+	}
+}
+
+func TestSingleInspectTurnUsesCurrentToolNamesOnly(t *testing.T) {
+	for _, name := range []string{"read", "view_image", "web_fetch", "git_readonly"} {
+		if !isSingleInspectTurn([]string{name}) {
+			t.Errorf("isSingleInspectTurn(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"read_file", "rg", "grep", "glob", "list_dir", "write"} {
+		if isSingleInspectTurn([]string{name}) {
+			t.Errorf("isSingleInspectTurn(%q) = true, want false", name)
+		}
+	}
+}
+
+func TestSinkBatchedOperationsAttributedToRead(t *testing.T) {
+	exp := newTestExporter(t, "http://collector.invalid")
+	sink := NewSink(exp, nil, "provider", "model", "agent", false)
+	sink.TurnProgress(agent.TurnProgress{BatchedOperationCount: 3})
+
+	exp.mu.Lock()
+	defer exp.mu.Unlock()
+	metric := exp.metrics["harness.batched_operations"]
+	if metric == nil || len(metric.points) != 1 {
+		t.Fatalf("batched operations metric = %+v, want one point", metric)
+	}
+	for _, point := range metric.points {
+		for _, attr := range point.attrs {
+			if attr.Key == "tool" && attr.Value.StringValue == "read" {
+				return
+			}
+		}
+	}
+	t.Fatalf("batched operations attributes = %+v, want tool=read", metric.points)
+}
+
 func TestExporterResourceIdentityStaysProcessStable(t *testing.T) {
 	exp, err := NewExporter(
 		Config{Enabled: true, Endpoint: "http://collector.invalid", Hostname: "runtime-host", Timeout: time.Second},

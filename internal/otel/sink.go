@@ -147,7 +147,7 @@ func sanitizeToolName(name string) string {
 		return "unknown"
 	}
 	known := map[string]bool{
-		"read_file": true, "edit": true, "write_file": true, "apply_patch": true, "shell": true, "rg": true, "grep": true, "glob": true, "list_dir": true, "git_readonly": true, "delegate": true, "background_jobs": true, "update_todos": true, "handoff": true, "view_image": true, "web_fetch": true,
+		"read": true, "view_image": true, "edit": true, "write": true, "shell": true, "git": true, "web_fetch": true, "git_readonly": true, "write_tmp_file": true, "delegate": true, "background_jobs": true, "update_todos": true, "record_plan": true, "handoff": true,
 	}
 	if known[name] {
 		return truncate(name, 64)
@@ -196,7 +196,7 @@ func isSingleInspectTurn(toolNames []string) bool {
 		return false
 	}
 	switch normalized[0] {
-	case "read_file", "rg", "grep", "glob", "list_dir", "git_readonly":
+	case "read", "view_image", "web_fetch", "git_readonly":
 		return true
 	default:
 		return false
@@ -216,7 +216,7 @@ func (s *Sink) TurnProgress(p agent.TurnProgress) {
 		s.exp.RecordHistogram("harness.operations_per_turn", "{operation}", float64(p.Operations), s.baseAttrs(map[string]string{"activity_class": ac}), []float64{1, 2, 3, 4, 8, 16, 32})
 	}
 	if p.BatchedOperationCount > 0 {
-		s.exp.RecordSum("harness.batched_operations", "{operation}", int64(p.BatchedOperationCount), s.baseAttrs(map[string]string{"tool": "read_file"}))
+		s.exp.RecordSum("harness.batched_operations", "{operation}", int64(p.BatchedOperationCount), s.baseAttrs(map[string]string{"tool": "read"}))
 	}
 	if p.SingleLookupCount == 1 && p.ToolCalls == 1 {
 		s.exp.RecordSum("harness.single_lookup_turns", "{turn}", 1, s.baseAttrs(nil))
@@ -400,23 +400,6 @@ func (s *Sink) RecordCommands(input []byte) {
 	s.exp.RecordSum("harness.commands.total", "{command}", 1, s.baseAttrs(map[string]string{"mode": mode, "kind": kind}))
 	if len(p.Steps) > 0 {
 		s.exp.RecordHistogram("harness.commands.steps_per_batch", "{step}", float64(len(p.Steps)), s.baseAttrs(nil), []float64{1, 2, 3, 5, 8})
-	}
-}
-
-// RecordSearch records harness.search.* bounded-result signals.
-func (s *Sink) RecordSearch(tool string, display string, metrics map[string]int) {
-	if s == nil || s.exp == nil {
-		return
-	}
-	tool = sanitizeToolName(tool)
-	if tool != "rg" && tool != "grep" {
-		return
-	}
-	if strings.Contains(strings.ToLower(display), "no matches") {
-		s.exp.RecordSum("harness.search.no_matches", "{search}", 1, s.baseAttrs(map[string]string{"tool": tool}))
-	}
-	if metrics != nil && (metrics["results_bounded"] != 0 || metrics["context_bounded"] != 0) {
-		s.exp.RecordSum("harness.search.bounded_calls", "{search}", 1, s.baseAttrs(nil))
 	}
 }
 

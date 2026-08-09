@@ -93,7 +93,7 @@ func TestActivityFeedPublishesOnlyCuratedToolNoticeRetryAndReasoningData(t *test
 	sink.ReasoningSummary("safe summary")
 	sink.ToolStart(llm.ToolCall{
 		ID:    "call-secret",
-		Name:  "read_file",
+		Name:  "read",
 		Input: json.RawMessage(`{"path":"docs/design.md","token":"must-not-leak"}`),
 	})
 	sink.ToolResult(llm.ToolResult{ForID: "call-secret", IsError: true, Text: "raw secret result"})
@@ -131,7 +131,7 @@ func TestActivityFeedPublishesOnlyCuratedToolNoticeRetryAndReasoningData(t *test
 	}
 	for _, want := range []string{
 		"safe summary",
-		`tool read_file path="docs/design.md"`,
+		`tool read path="docs/design.md"`,
 		"stopped: prompt token budget 123 exceeded",
 		"retrying model request in 2s · attempt 2/4",
 	} {

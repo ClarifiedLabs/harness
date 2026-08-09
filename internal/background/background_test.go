@@ -149,7 +149,7 @@ func TestManagerTruncatedContextUsesForegroundPreparationAndArchiveHint(t *testi
 	for _, want := range []string{
 		"[truncated:",
 		"full output archived at \"/tmp/session/artifacts/tool-results/background.txt\"",
-		`use read_file {"path":`,
+		`use read {"path":`,
 	} {
 		if !strings.Contains(contexts[0], want) {
 			t.Fatalf("background context missing %q:\n%s", want, contexts[0])

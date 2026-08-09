@@ -235,6 +235,96 @@ func TestPrecedenceAndExactProvenance(t *testing.T) {
 	}
 }
 
+func TestReadLimitsPrecedence(t *testing.T) {
+	globalPath := writeConfig(t, `{"read_default_limit":10,"read_result_max_bytes":100,"read_result_max_lines":1000}`)
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectDir := filepath.Join(root, ".harness")
+	if err := os.Mkdir(projectDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	projectPath := filepath.Join(projectDir, "config.json")
+	if err := os.WriteFile(projectPath, []byte(`{"read_default_limit":20,"read_result_max_bytes":200,"read_result_max_lines":2000}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	options := LoadOptions{
+		LookupEnv:         lookup(nil),
+		DefaultConfigPath: globalPath,
+		WorkingDir:        root,
+	}
+	result, err := Load(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Config.ReadDefaultLimit != 20 || result.Config.ReadResultMaxBytes != 200 || result.Config.ReadResultMaxLines != 2000 {
+		t.Fatalf("project read limits = %d/%d/%d, want 20/200/2000", result.Config.ReadDefaultLimit, result.Config.ReadResultMaxBytes, result.Config.ReadResultMaxLines)
+	}
+	for _, key := range []string{"read_default_limit", "read_result_max_bytes", "read_result_max_lines"} {
+		if got := result.Sources[key]; got != (configmeta.Source{Kind: configmeta.SourceFile, Name: projectPath}) {
+			t.Errorf("%s source = %+v, want project file", key, got)
+		}
+	}
+
+	options.LookupEnv = lookup(map[string]string{
+		"HARNESS_READ_DEFAULT_LIMIT":    "30",
+		"HARNESS_READ_RESULT_MAX_BYTES": "300",
+		"HARNESS_READ_RESULT_MAX_LINES": "3000",
+	})
+	result, err = Load(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Config.ReadDefaultLimit != 30 || result.Config.ReadResultMaxBytes != 300 || result.Config.ReadResultMaxLines != 3000 {
+		t.Fatalf("environment read limits = %d/%d/%d, want 30/300/3000", result.Config.ReadDefaultLimit, result.Config.ReadResultMaxBytes, result.Config.ReadResultMaxLines)
+	}
+	for key, name := range map[string]string{
+		"read_default_limit":    "HARNESS_READ_DEFAULT_LIMIT",
+		"read_result_max_bytes": "HARNESS_READ_RESULT_MAX_BYTES",
+		"read_result_max_lines": "HARNESS_READ_RESULT_MAX_LINES",
+	} {
+		if got := result.Sources[key]; got != (configmeta.Source{Kind: configmeta.SourceEnvironment, Name: name}) {
+			t.Errorf("%s source = %+v, want environment %s", key, got, name)
+		}
+	}
+}
+
+func TestRemovedToolResultParametersAreUnavailable(t *testing.T) {
+	oldKeys := []string{
+		"read_file_default_limit",
+		"read_file_result_max_bytes",
+		"read_file_result_max_lines",
+		"rg_result_max_bytes",
+		"rg_result_max_lines",
+		"grep_result_max_bytes",
+		"grep_result_max_lines",
+	}
+	for _, key := range oldKeys {
+		if _, ok := Catalog().Lookup(key); ok {
+			t.Errorf("obsolete parameter %q remains in catalog", key)
+		}
+		path := writeConfig(t, `{"`+key+`":1}`)
+		if _, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: path}); err == nil || !strings.Contains(err.Error(), `unknown field "`+key+`"`) {
+			t.Errorf("obsolete file setting %q error = %v, want strict unknown-field rejection", key, err)
+		}
+	}
+
+	result := load(t, nil, map[string]string{
+		"HARNESS_READ_FILE_DEFAULT_LIMIT":    "1",
+		"HARNESS_READ_FILE_RESULT_MAX_BYTES": "2",
+		"HARNESS_READ_FILE_RESULT_MAX_LINES": "3",
+		"HARNESS_RG_RESULT_MAX_BYTES":        "4",
+		"HARNESS_RG_RESULT_MAX_LINES":        "5",
+		"HARNESS_GREP_RESULT_MAX_BYTES":      "6",
+		"HARNESS_GREP_RESULT_MAX_LINES":      "7",
+	}, "")
+	if result.Config.ReadDefaultLimit != 0 || result.Config.ReadResultMaxBytes != 0 || result.Config.ReadResultMaxLines != 0 {
+		t.Fatalf("obsolete environment variables affected read limits: %+v", result.Config)
+	}
+}
+
 func TestOTelHeadersPrecedenceExpansionAndRedaction(t *testing.T) {
 	path := writeConfig(t, `{"otel":{"headers":{"authorization":"file-${TOKEN}"}}}`)
 	tests := []struct {
@@ -541,7 +631,7 @@ func TestLSPPrewarmDefaultsAndOverride(t *testing.T) {
 }
 
 func TestSnapshotDoesNotAliasResolvedConfig(t *testing.T) {
-	result := load(t, nil, nil, writeConfig(t, `{"agents":{"custom":{"description":"Custom agent","allowed_tools":["read_file"]}}}`))
+	result := load(t, nil, nil, writeConfig(t, `{"agents":{"custom":{"description":"Custom agent","allowed_tools":["read"]}}}`))
 	snapshot := Snapshot(result)
 	snapshot.Sources["agents"] = configmeta.Source{Kind: configmeta.SourceFlag, Name: "--changed"}
 	snapshot.Values["agents"].(map[string]FileAgentConfig)["custom"] = FileAgentConfig{Description: "Changed"}

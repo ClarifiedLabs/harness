@@ -118,7 +118,7 @@ func TestExporter_NoPromptLeakage(t *testing.T) {
 	}
 	// Record with bounded labels only; payload must not contain prompt text
 	exp.RecordSum("harness.prompt.total", "{prompt}", 1, map[string]string{"termination_reason": "model_completed"})
-	exp.RecordSum("harness.tool.calls", "{call}", 1, map[string]string{"tool": "read_file", "activity_class": "inspect"})
+	exp.RecordSum("harness.tool.calls", "{call}", 1, map[string]string{"tool": "read", "activity_class": "inspect"})
 	if err := exp.Export(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -193,9 +193,9 @@ func TestSink_Detailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := NewSink(exp, nil, "openai", "gpt-4", "auto", false)
-	// Simulate 2 parallel read_file + 1 shell error via tool results
-	sink.ToolResultWithName("read_file", llm.ToolResult{}, 5, tools.Activity{Class: tools.ActivityInspect})
-	sink.ToolResultWithName("read_file", llm.ToolResult{}, 7, tools.Activity{Class: tools.ActivityInspect})
+	// Simulate 2 parallel read calls plus 1 shell error via tool results
+	sink.ToolResultWithName("read", llm.ToolResult{}, 5, tools.Activity{Class: tools.ActivityInspect})
+	sink.ToolResultWithName("read", llm.ToolResult{}, 7, tools.Activity{Class: tools.ActivityInspect})
 	sink.ToolResultWithName("shell", llm.ToolResult{IsError: true}, 100, tools.Activity{Class: tools.ActivityOther})
 	// Turn progress with 3 tools
 	sink.TurnProgress(agent.TurnProgress{ToolCalls: 3, Operations: 3})

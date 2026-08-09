@@ -22,7 +22,7 @@ func main() {
 			30_000,
 			"context window override used to make pressure epochs observable",
 		)
-		probeCount = flag.Int("probe-count", 12, "ordered read_file calls required per run")
+		probeCount = flag.Int("probe-count", 12, "ordered read calls required per run")
 		probeBytes = flag.Int("probe-bytes", 6_000, "approximate bytes in each probe file")
 		timeout    = flag.Duration("timeout", 15*time.Minute, "timeout per harness run")
 		dryRun     = flag.Bool("dry-run", false, "print the run matrix without calling harness")

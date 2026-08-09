@@ -653,7 +653,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// Skills discovery: scan project and user-level .agents/skills/ directories
 	// for SKILL.md files, build a catalog for the system prompt, and surface
 	// any warnings to stderr. Skills are disclosed via file-read activation so
-	// the model uses its existing read_file tool to load them on demand.
+	// the model uses its existing read tool to load them on demand.
 	var skillWarnings skills.Warnings
 	skillDirs := []skills.Dir{
 		{Path: filepath.Join(wd, ".agents", "skills"), Scope: skills.ScopeProject},
@@ -665,7 +665,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	skillsCatalog := skills.BuildCatalog(discoveredSkills)
 	var runtimeHints []string
-	if tools.RipgrepAvailable() {
+	if ripgrepAvailable() {
 		runtimeHints = append(runtimeHints, rgSystemHint)
 	}
 	var lspHint string
@@ -703,13 +703,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog, disabledTools := tools.CatalogWithOptions(tools.Options{
 		MaxResultBytes:                cfg.ToolResultMaxBytes,
 		MaxResultLines:                cfg.ToolResultMaxLines,
-		ReadFileDefaultLimit:          cfg.ReadFileDefaultLimit,
-		ReadFileResultBytes:           cfg.ReadFileResultMaxBytes,
-		ReadFileResultLines:           cfg.ReadFileResultMaxLines,
-		RGResultBytes:                 cfg.RGResultMaxBytes,
-		RGResultLines:                 cfg.RGResultMaxLines,
-		GrepResultBytes:               cfg.GrepResultMaxBytes,
-		GrepResultLines:               cfg.GrepResultMaxLines,
+		ReadDefaultLimit:              cfg.ReadDefaultLimit,
+		ReadResultBytes:               cfg.ReadResultMaxBytes,
+		ReadResultLines:               cfg.ReadResultMaxLines,
 		Background:                    backgroundManager,
 		DispatchTimeout:               time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
 		ShellTimeoutSeconds:           cfg.ShellTimeoutSeconds,
@@ -1864,8 +1860,13 @@ func enableInteractivePlanHandoff(agents map[string]agentdef.Definition) {
 	agents["plan"] = planning
 }
 
+func ripgrepAvailable() bool {
+	_, err := exec.LookPath("rg")
+	return err == nil
+}
+
 func searchBackend() string {
-	if tools.RipgrepAvailable() {
+	if ripgrepAvailable() {
 		return "rg"
 	}
 	return "go"

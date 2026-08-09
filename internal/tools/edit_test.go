@@ -204,8 +204,8 @@ func TestEditMissingFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for missing file")
 	}
-	if !strings.Contains(err.Error(), "write_file") {
-		t.Errorf("missing file should direct to write_file: %v", err)
+	if !strings.Contains(err.Error(), "write") {
+		t.Errorf("missing file should direct to write: %v", err)
 	}
 }
 
@@ -431,7 +431,7 @@ func TestEditNotFoundIncludesNearestLineHint(t *testing.T) {
 	if !strings.Contains(err.Error(), "3\tfunc calculateTotal(items []int) int {") || !strings.Contains(err.Error(), "4\t\treturn 0") {
 		t.Errorf("hint should render numbered region lines: %v", err)
 	}
-	if !strings.Contains(err.Error(), "re-read the file") || !strings.Contains(err.Error(), "write_file") {
+	if !strings.Contains(err.Error(), "re-read the file") || !strings.Contains(err.Error(), "write") {
 		t.Errorf("error should state the corrective action: %v", err)
 	}
 }
@@ -475,7 +475,7 @@ func TestNearestSimilarLine(t *testing.T) {
 }
 
 // r40: a successful edit returns a small numbered snippet of the changed region
-// so the model can confirm the change without a follow-up read_file.
+// so the model can confirm the change without a follow-up read.
 func TestEditSuccessIncludesVerificationSnippet(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.go")
@@ -561,7 +561,7 @@ func TestEditFailureKindsPreserveMessages(t *testing.T) {
 		if got := KindOf(err); got != llm.ToolErrorEditOldTextNotFound {
 			t.Errorf("kind = %q, want %q", got, llm.ToolErrorEditOldTextNotFound)
 		}
-		want := fmt.Sprintf("could not find oldText in %s; oldText must match exactly including whitespace and newlines; searched for %q; re-read the file, then re-issue with exact oldText; if the intent is to append or create, use write_file instead", p, "zzzzz qqqqq")
+		want := fmt.Sprintf("could not find oldText in %s; oldText must match exactly including whitespace and newlines; searched for %q; re-read the file, then re-issue with exact oldText; if the intent is to append or create, use write instead", p, "zzzzz qqqqq")
 		if err.Error() != want {
 			t.Errorf("message = %q, want exactly %q", err.Error(), want)
 		}

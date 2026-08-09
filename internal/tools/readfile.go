@@ -16,16 +16,15 @@ import (
 // file as binary (design §9.1).
 const binarySniffBytes = 8 * 1024
 
-// defaultReadFileLimit is the default number of lines returned (design §9.1).
-const defaultReadFileLimit = 500
+// defaultReadLimit is the default number of lines returned (design §9.1).
+const defaultReadLimit = 500
 
 // multiReadMinPerPathLimit floors the per-file budget in a multi-file read so
 // each file still shows a useful head even when many paths share the line cap.
 const multiReadMinPerPathLimit = 50
 
-// readFileDirectoryCap keeps an accidental directory read useful without
-// returning the much larger list_dir maximum.
-const readFileDirectoryCap = 200
+// readDirectoryCap bounds directory-form read output.
+const readDirectoryCap = 200
 
 const readFileSchema = `{
   "type": "object",
@@ -63,9 +62,11 @@ type readFileArgs struct {
 	Files         []string `json:"files"`
 }
 
-func (readFile) Name() string { return "read_file" }
+func (readFile) Name() string { return "read" }
 
-func (readFile) Description() string { return "Read a file; use paths[] to batch; a directory lists entries." }
+func (readFile) Description() string {
+	return "Read a file; use paths[] to batch; a directory lists entries."
+}
 
 func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema) }
 
@@ -119,7 +120,7 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 
 	defaultLimit := r.defaultLimit
 	if defaultLimit == 0 {
-		defaultLimit = defaultReadFileLimit
+		defaultLimit = defaultReadLimit
 	}
 
 	if len(args.Paths) > 0 {
@@ -185,7 +186,7 @@ func perPathLineBudget(explicitLimit, numPaths, defaultLimit int) int {
 
 // firstNonEmpty returns the first argument whose value is non-empty after
 // trimming surrounding whitespace, or "" if none qualify. It resolves
-// read_file's path aliases in a fixed precedence order.
+// read's path aliases in a fixed precedence order.
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {
 		if strings.TrimSpace(v) != "" {
@@ -205,7 +206,7 @@ func readOneFile(path string, offset, limit int) (string, error) {
 		return "", err
 	}
 	if info.IsDir() {
-		listing, err := renderDirectory(path, "", readFileDirectoryCap)
+		listing, err := renderDirectory(path, readDirectoryCap)
 		if err != nil {
 			return "", err
 		}
@@ -243,7 +244,7 @@ func readOneFile(path string, offset, limit int) (string, error) {
 	}
 	out := numberLines(lines, offset)
 	if truncated {
-		// Mirror list_dir's truncation notice so the model knows line N is not EOF
+		// Emit a truncation notice so the model knows line N is not EOF
 		// and can resume from the next line instead of assuming it read the whole file.
 		last := offset + len(lines) - 1
 		out += fmt.Sprintf("\n[file truncated at line %d; continue with offset=%d]", last, last+1)

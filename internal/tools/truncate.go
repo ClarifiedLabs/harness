@@ -8,11 +8,11 @@ import (
 // Central output caps, applied in Dispatch as a backstop for every tool by
 // default. A Registry can override these limits.
 const (
-	defaultMaxResultBytes      = 64 * 1024
-	defaultMaxResultLines      = 1000
-	defaultSearchResultBytes   = 32 * 1024
-	defaultSearchResultLines   = 500
-	defaultReadFileResultBytes = 32 * 1024
+	defaultMaxResultBytes    = 64 * 1024
+	defaultMaxResultLines    = 1000
+	defaultSearchResultBytes = 32 * 1024
+	defaultSearchResultLines = 500
+	defaultReadResultBytes   = 32 * 1024
 )
 
 type resultLimits struct {
@@ -69,7 +69,7 @@ func truncate(s string, limits resultLimits) (string, truncationInfo) {
 		if !strings.HasSuffix(kept, "\n") {
 			kept += "\n"
 		}
-		marker := fmt.Sprintf("[truncated: showing first %d of %d lines; use read_file offset/limit or grep to narrow]", limits.maxLines, totalLines)
+		marker := fmt.Sprintf("[truncated: showing first %d of %d lines; use read offset/limit or a targeted shell command to narrow]", limits.maxLines, totalLines)
 		// The byte cap is a payload-size backstop: re-apply it so that many
 		// large lines under the line cap cannot bust the 64KB limit.
 		out, byteTrunc := capBytes(kept+marker, len(s), limits.maxBytes)
@@ -99,7 +99,7 @@ func capBytes(s string, origBytes, maxBytes int) (string, truncationInfo) {
 	if len(s) <= maxBytes {
 		return s, info
 	}
-	marker := fmt.Sprintf("\n[truncated: showing first %s of %s; use read_file offset/limit or grep to narrow]", HumanBytes(maxBytes), HumanBytes(origBytes))
+	marker := fmt.Sprintf("\n[truncated: showing first %s of %s; use read offset/limit or a targeted shell command to narrow]", HumanBytes(maxBytes), HumanBytes(origBytes))
 	keep := maxBytes - len(marker)
 	if keep < 0 {
 		keep = 0

@@ -196,7 +196,7 @@ type RetentionEventSink interface {
 }
 
 // SkillActivationEvent is diagnostics-only telemetry for explicit and
-// read_file-driven skill activation.
+// read-driven skill activation.
 type SkillActivationEvent struct {
 	Source string
 	Status string
@@ -2780,14 +2780,12 @@ func invalidToolInputResult(call llm.ToolCall) string {
 	}
 	msg += ": " + call.InvalidInputError + ". Provide arguments as a valid JSON object matching the tool schema."
 	switch call.Name {
-	case "rg", "grep":
-		msg += ` For rg/grep, use {"args":["-n","PATTERN","."]}; do not use shell syntax or bare tokens inside JSON.`
-	case "write_file", "edit":
+	case "write", "edit":
 		// A huge file body is the common cause of truncated streamed args; the
 		// fix is smaller writes, not another monolithic retry.
 		if strings.Contains(call.InvalidInputError, "unexpected end of JSON input") ||
 			strings.Contains(call.InvalidInputError, "unexpected EOF") {
-			msg += " The arguments were truncated mid-JSON; write the file in chunks (write_file then edit to append), or switch to apply_patch for large inserts."
+			msg += " The arguments were truncated mid-JSON; write the file in smaller chunks with write, then use edit to append additional content."
 		}
 	}
 	return msg

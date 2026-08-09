@@ -220,7 +220,7 @@ func setupUnknownPathDiscovery(dir string) error {
 
 func readScalePrompt(count int) string {
 	paths := readScaleFixturePaths(count)
-	return fmt.Sprintf("Work directly; do not delegate or edit. Use read_file, not shell or cat, to read every one of these %d known files: %s. ", count, strings.Join(paths, ", ")) +
+	return fmt.Sprintf("Work directly; do not delegate or edit. Use read, not shell or cat, to read every one of these %d known files: %s. ", count, strings.Join(paths, ", ")) +
 		"Read efficiently; independent reads may be coissued in one turn. Report " + strings.Join(readScaleMarkers(count), ", ") + "."
 }
 
@@ -342,7 +342,7 @@ func scoreUnknownPathDiscovery(in scoreInput) score {
 func scoreReadScale(in scoreInput, count int) score {
 	result := requireOutput(in.Stdout, readScaleMarkers(count)...)
 	if !coversFixturePaths(in.Metrics.SuccessfulDirectReadPaths, readScaleFixturePaths(count)) {
-		result.Reasons = append(result.Reasons, "not all scale paths were read successfully through read_file")
+		result.Reasons = append(result.Reasons, "not all scale paths were read successfully through read")
 	}
 	if in.FixtureBefore != in.FixtureAfter {
 		result.Reasons = append(result.Reasons, "read-scale fixture was modified")
