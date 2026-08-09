@@ -1580,10 +1580,16 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
                 capture usage + stop reason
     append assistant message (text blocks + tool_use blocks, emission order)
     if stopReason == tool_use {
-        for each tool call, in order:              // read-only islands may run concurrently
+        for each tool call, in order:              // parallel-eligible islands may run concurrently
             result := registry.Dispatch(ctx, call) // always returns a result
             print one-line tool summary
         append ONE user message carrying all tool_result blocks, in call order
+        // Parallel eligibility is SupportsParallel (design §9 / tools.ParallelTool);
+        // shell is parallel-capable while remaining non-read-only. Hooks that
+        // match a call's name via Pre/PostToolUse force that call to run
+        // sequentially (per-target, not globally). Parallel I/O is best-effort
+        // on shared cwd/files — use distinct cwd or background_lease when
+        // ordering matters; no sandbox is added (inherited).
     }
     emit turn_complete(prompt, turn)
     if stopReason != tool_use { break }
@@ -1601,12 +1607,18 @@ prompt.
 
 - **Mostly-sequential tool execution.** Coding tools mutate a shared filesystem; deterministic
   ordering matching the model's emission order is worth far more than parallelism. Consecutive
-  read-only islands with 2+ calls dispatch concurrently, bounded at 8, unless
-  `PreToolUse` or `PostToolUse` hooks are configured; mutating calls remain ordering
-  barriers. Results, sink events, and transcript blocks stay in emission order. The
-  tool-result message records each actually selected concurrent island as one
-  `parallel_tool_batches` entry containing the complete ordered tool-use ID list; this
-  distinguishes separate islands in the same model-emitted call batch.
+  parallel-eligible islands with 2+ calls dispatch concurrently (spec §8).
+  Eligibility is `SupportsParallel` (`tools.ParallelTool`): read-only tools are
+  parallel-eligible by default, and `shell` is parallel-eligible while remaining
+  non-read-only (its `steps` still run serially within one call). A `PreToolUse` or
+  `PostToolUse` hook whose matcher matches a call's tool name forces that call to run
+  sequentially; hooks that match only other tools do not disable parallelism.
+  Parallel I/O on a shared `cwd`/file is best-effort and may race — use distinct
+  `cwd` or `background_lease` when ordering matters. No sandbox is added; harness
+  inherits the host sandbox. Results, sink events, and transcript blocks stay in
+  emission order. The tool-result message records each actually selected concurrent
+  island as one `parallel_tool_batches` entry containing the complete ordered tool-use
+  ID list; this distinguishes separate islands in the same model-emitted call batch.
 - **One result per call, always.** Required by both APIs (§4 invariant). `Dispatch`
   produces a result even on panic.
 - **Metered tools:** tools may optionally report token usage (currently synchronous
@@ -1783,7 +1795,7 @@ command-failure and effective-failure summaries.
 disables).** `Dispatch` runs each tool under a derived `context.WithTimeout` so a
 hung tool that ignores cancellation cannot stall a turn; on expiry it returns the
 `tool timed out after <dur>` error result above. It applies to both the
-sequential path and the concurrent read-only batch. A tool that reports its own
+sequential path and concurrent parallel batches. A tool that reports its own
 deadline via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
 `shell`'s `timeout_seconds` stays authoritative. An outer cancellation
 (`^C`) is reported as cancellation, not a dispatch timeout.
@@ -2097,7 +2109,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   `(no matches)` result. `RunResult.Metrics` records shown matches/files, source
   lines, and collection/context bounding for session analysis without entering
   model context.
-- After a concurrent read-only island completes, two or more successful,
+- After a concurrent parallel island completes, two or more successful,
   parseable, model-visible `search` results are shaped together. They retain one
   `tool_result` per `tool_use`; duplicate `(path, line)` context is assigned to
   the earliest sibling only. No additional aggregate line or byte cap is

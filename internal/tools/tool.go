@@ -104,6 +104,14 @@ type ProgressStarter interface {
 	StartProgress(input json.RawMessage) any
 }
 
+// ParallelTool optionally reports intra-turn parallelism eligibility.
+// A tool that implements it may run concurrently with other parallel-capable
+// calls in the same turn (design §8). When not implemented, dispatch falls
+// back to ReadOnly for backwards compatibility.
+type ParallelTool interface {
+	SupportsParallel(input json.RawMessage) bool
+}
+
 // FileMutationReporter is implemented by tools that can identify the file paths
 // they may mutate from their JSON input. The agent uses this for optional
 // user-facing before/after diff display; Dispatch and model-visible results do
@@ -686,6 +694,25 @@ func (r *Registry) CallReadOnly(call llm.ToolCall) bool {
 	input := call.Input
 	if len(input) == 0 {
 		input = json.RawMessage("{}")
+	}
+	return t.ReadOnly(input)
+}
+
+// SupportsParallel reports whether one call is eligible for intra-turn
+// parallel dispatch. When the tool implements ParallelTool the result comes
+// from SupportsParallel; otherwise it falls back to CallReadOnly for
+// backwards compatibility.
+func (r *Registry) SupportsParallel(call llm.ToolCall) bool {
+	t, ok := r.tools[call.Name]
+	if !ok {
+		return false
+	}
+	input := call.Input
+	if len(input) == 0 {
+		input = json.RawMessage("{}")
+	}
+	if pt, ok := t.(ParallelTool); ok {
+		return pt.SupportsParallel(input)
 	}
 	return t.ReadOnly(input)
 }

@@ -434,6 +434,29 @@ func (r *Runner) SetModel(model string) {
 	}
 }
 
+// HasHooksFor reports whether event has any groups that would run for target.
+// It respects matcher semantics (design §8): events that ignore matchers
+// match any target, otherwise the group's matcher must match target.
+func (r *Runner) HasHooksFor(event Event, target string) bool {
+	if r.Empty() {
+		return false
+	}
+	for _, g := range r.Config.Groups(event) {
+		if eventIgnoresMatcher(event) || g.matches(target) {
+			if len(g.Hooks) > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// HasMatchingHooks reports whether either PreToolUse or PostToolUse has a
+// matching hook for target.
+func (r *Runner) HasMatchingHooks(target string) bool {
+	return r.HasHooksFor(PreToolUse, target) || r.HasHooksFor(PostToolUse, target)
+}
+
 // HasEvent reports whether event has any configured groups.
 func (r *Runner) HasEvent(event Event) bool {
 	return !r.Empty() && len(r.Config.Groups(event)) > 0
@@ -441,6 +464,7 @@ func (r *Runner) HasEvent(event Event) bool {
 
 // Run executes every matching hook for event. For events whose matcher is not
 // meaningful in v1, pass an empty target and all groups will run.
+// Run is safe for concurrent use; Config must not be mutated after Runner creation.
 func (r *Runner) Run(ctx context.Context, event Event, target string, payload Payload) Result {
 	var out Result
 	if ctx.Err() != nil {

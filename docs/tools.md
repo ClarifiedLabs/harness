@@ -15,7 +15,7 @@ This page is the operational overview.
 | `search` | search contents by RE2 regex |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write_file` | create or overwrite a file, creating parent directories |
-| `shell` | run a shell command or direct argv program |
+| `shell` | run a shell command or direct argv program; co-issued calls may run concurrently (best-effort) |
 | `git` | run host git with `--no-pager`, including a compact `workspace_summary` workflow |
 | `git_readonly` | restricted git subcommands for read-only agents |
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
@@ -37,9 +37,13 @@ whitelisting, but none of the built-in agent configurations advertise them.
 Use `shell` with tools such as `rg` and `git --no-pager` when those operations
 are needed without a custom agent whitelist.
 
-Models issue schema-visible top-level read-only calls together in one tool
-turn; Harness runs consecutive read-only calls concurrently and preserves their
-input order.
+Models issue schema-visible top-level parallel-eligible calls together in one tool
+turn; Harness runs consecutive parallel-eligible calls concurrently
+and preserves their input order. Read-only tools are parallel-eligible by
+default; `shell` is also parallel-eligible (its `steps` still run serially),
+so co-issued `shell` calls may run concurrently best-effort on shared `cwd`/
+files — use distinct `cwd` or `background_lease` when ordering matters. No
+sandbox is added; harness inherits the host sandbox.
 
 `read_file` reads one file via `path` (with `offset`/`limit`), or several at once
 via `paths[]` — each file is rendered under a `==> path <==` header with its own

@@ -1,6 +1,7 @@
 // Package agent runs one user prompt as a loop of turns until the model stops
 // asking for tools, executing each turn's tool calls in emission order
-// (concurrently when they are all read-only) and upholding the transcript
+// (concurrently when eligible via SupportsParallel, best-effort
+// on shared cwd/files; no sandbox) and upholding the transcript
 // invariant after every mutation (design §8, §4).
 package agent
 
@@ -38,8 +39,7 @@ const streamRetries = 2
 // connect-level Retry-After guard.
 const maxStreamRetryAfter = time.Minute
 
-// maxParallelTools bounds concurrent read-only dispatch (spec §8).
-const maxParallelTools = 8
+
 
 // EventSink receives the prompt's observable events for rendering. The agent loop
 // owns the transcript and the control flow; the sink only reports. Phase 10's
@@ -2439,9 +2439,8 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 	}
 	var total llm.Usage
 
-	toolHooksActive := a.hooks != nil && (a.hooks.HasEvent(hooks.PreToolUse) || a.hooks.HasEvent(hooks.PostToolUse))
 	for i := 0; i < len(calls); {
-		if toolHooksActive || !a.tools.CallReadOnly(calls[i]) {
+		if !a.tools.SupportsParallel(calls[i]) || a.hooksHasMatchingHooks(calls[i].Name) {
 			block, usage := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, &richEncodedBytes)
 			blocks[i] = block
 			total = add(total, usage)
@@ -2450,7 +2449,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		}
 
 		start := i
-		for i < len(calls) && a.tools.CallReadOnly(calls[i]) {
+		for i < len(calls) && a.tools.SupportsParallel(calls[i]) && !a.hooksHasMatchingHooks(calls[i].Name) {
 			i++
 		}
 		if i-start == 1 {
@@ -2467,10 +2466,14 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		}
 		parallelBatches = append(parallelBatches, batch)
 
-		usage := a.dispatchReadOnlyBatch(ctx, batchCalls, blocks[start:i], sink, &richEncodedBytes)
+		usage := a.dispatchParallelBatch(ctx, batchCalls, blocks[start:i], sink, &richEncodedBytes)
 		total = add(total, usage)
 	}
 	return blocks, parallelBatches, total
+}
+
+func (a *Agent) hooksHasMatchingHooks(target string) bool {
+	return a.hooks != nil && a.hooks.HasMatchingHooks(target)
 }
 
 func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, richEncodedBytes *int) (llm.ContentBlock, llm.Usage) {
@@ -2485,23 +2488,20 @@ func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, p
 	return block, usage
 }
 
-func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
+func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
 	for _, call := range calls {
 		startToolProgress(a.tools, call, sink)
 		sink.ToolStart(call)
 	}
 
 	results := make([]llm.ToolResult, len(calls))
-	sem := make(chan struct{}, maxParallelTools)
 	var wg sync.WaitGroup
 	for i, call := range calls {
 		wg.Add(1)
-		go func() {
+		go func(idx int, c llm.ToolCall) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			results[i] = a.dispatchTool(ctx, call)
-		}()
+			results[idx] = a.dispatchTool(ctx, c)
+		}(i, call)
 	}
 	wg.Wait()
 	a.tools.PrepareReadOnlyBatch(calls, results)
@@ -2515,6 +2515,10 @@ func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall,
 		total = add(total, usage)
 	}
 	return total
+}
+
+func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
+	return a.dispatchParallelBatch(ctx, calls, blocks, sink, richEncodedBytes)
 }
 
 func safeToolResultForSink(r llm.ToolResult) llm.ToolResult {
