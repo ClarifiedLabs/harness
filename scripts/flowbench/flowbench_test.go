@@ -116,6 +116,13 @@ func TestToolAccuracyCasesRegistered(t *testing.T) {
 		!strings.Contains(knownPrompt, "Independent repository lookups may be issued together") {
 		t.Fatalf("known-path prompt lacks valid directory-scoped search guidance: %s", knownPrompt)
 	}
+	for _, count := range []int{2, 8, 18, 36, 72} {
+		name := fmt.Sprintf("read_scale_%03d", count)
+		c, ok := cases[name]
+		if !ok || c.Setup == nil || c.Score == nil || !strings.Contains(c.Prompt, fmt.Sprintf("item-%03d.txt", count)) {
+			t.Fatalf("scale case %q = %+v", name, c)
+		}
+	}
 }
 
 func TestRunInteractiveBenchmarkUsesPromptBoundaryHook(t *testing.T) {
@@ -720,6 +727,37 @@ func TestKnownAndUnknownPathScoresEnforceSeparateFlows(t *testing.T) {
 	}
 }
 
+func TestReadScaleScoreRequiresEveryReadAndExactFixture(t *testing.T) {
+	const count = 8
+	paths := readScaleFixturePaths(count)
+	valid := scoreInput{
+		Stdout:        "Scale001 Scale004 Scale008",
+		FixtureBefore: "same",
+		FixtureAfter:  "same",
+		Metrics:       metrics{SuccessfulDirectReadPaths: paths},
+	}
+	if got := scoreReadScale(valid, count); !got.Pass {
+		t.Fatalf("valid read-scale flow rejected: %v", got.Reasons)
+	}
+	for name, mutate := range map[string]func(*scoreInput){
+		"missing path": func(in *scoreInput) { in.Metrics.SuccessfulDirectReadPaths = paths[:len(paths)-1] },
+		"inspect only": func(in *scoreInput) {
+			in.Metrics.SuccessfulDirectReadPaths = nil
+			in.Metrics.SuccessfulReadPaths = paths
+		},
+		"missing marker": func(in *scoreInput) { in.Stdout = "Scale001 Scale008" },
+		"modified":       func(in *scoreInput) { in.FixtureAfter = "changed" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			bad := valid
+			mutate(&bad)
+			if got := scoreReadScale(bad, count); got.Pass {
+				t.Fatalf("invalid read-scale flow passed: %+v", bad)
+			}
+		})
+	}
+}
+
 func TestMinimumCorrectnessPassesScalesToSelectedModels(t *testing.T) {
 	for runs, want := range map[int]int{
 		0: 0,
@@ -925,6 +963,14 @@ func TestOrientationAdoptionAcceptsCoissuedDirectReads(t *testing.T) {
 	unknown := metrics{DiscoveryBeforeRead: true, ToolCalls: map[string]int{"read_file": 2}, CoissuedReadTurns: 1}
 	if !adopted("unknown_path_discovery", unknown) {
 		t.Fatal("coissued discovered-path reads did not count as adoption")
+	}
+	scalePaths := readScaleFixturePaths(36)
+	if !adopted("read_scale_036", metrics{SuccessfulCoissuedReadPaths: scalePaths}) {
+		t.Fatal("successful coissued read-scale coverage did not count as adoption")
+	}
+	if adopted("read_scale_036", metrics{CoissuedReadTurns: 1}) ||
+		adopted("read_scale_036", metrics{SuccessfulCoissuedReadPaths: scalePaths[:35]}) {
+		t.Fatal("read-scale adoption accepted unsuccessful or incomplete coissued reads")
 	}
 }
 

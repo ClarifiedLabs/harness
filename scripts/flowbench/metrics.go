@@ -76,8 +76,13 @@ type metrics struct {
 	DirectReadOperations          int            `json:"direct_read_operations"`
 	DirectReadPaths               []string       `json:"direct_read_paths,omitempty"`
 	SuccessfulReadPaths           []string       `json:"successful_read_paths,omitempty"`
+	SuccessfulDirectReadPaths     []string       `json:"successful_direct_read_paths,omitempty"`
+	SuccessfulBatchedReadPaths    []string       `json:"successful_batched_read_paths,omitempty"`
+	SuccessfulCoissuedReadPaths   []string       `json:"successful_coissued_read_paths,omitempty"`
 	BatchedReadCalls              int            `json:"batched_read_calls"`
+	SuccessfulBatchedReadCalls    int            `json:"successful_batched_read_calls"`
 	CoissuedReadTurns             int            `json:"coissued_read_turns"`
+	SuccessfulCoissuedReadTurns   int            `json:"successful_coissued_read_turns"`
 	CoissuedLookupTurns           int            `json:"coissued_lookup_turns"`
 	DiscoveryBeforeRead           bool           `json:"discovery_before_read"`
 	ReadBeforeDiscovery           bool           `json:"read_before_discovery"`
@@ -90,6 +95,11 @@ type metrics struct {
 type turnTools struct {
 	Turn  int
 	Names []string
+}
+
+type directReadStart struct {
+	Turn  int
+	Paths []string
 }
 
 func collectMetrics(sessionDir string) (metrics, error) {
@@ -126,8 +136,10 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	m.ExactKnownPathSearches, m.ExactKnownPathCommands = successfulKnownPathContracts(events)
 	discoverySucceeded := false
 	discoveryStarts := make(map[string]bool)
-	readStarts := make(map[string][]string)
+	readStarts := make(map[string]directReadStart)
 	inspectReadStarts := make(map[string][]string)
+	successfulReadCallsByTurn := make(map[int]int)
+	successfulReadPathsByTurn := make(map[int][]string)
 	for _, ev := range events {
 		if ev.Type == session.EventModelRequest && ev.ModelRequest != nil {
 			if ev.ModelRequest.TargetID != "" {
@@ -141,8 +153,15 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			m.Turns = ev.Turn
 		}
 		if ev.Type == session.EventToolResult {
-			if !ev.ResultError && ev.Tool == "read_file" {
-				m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, readStarts[ev.ToolID]...)
+			if start, ok := readStarts[ev.ToolID]; !ev.ResultError && ev.Tool == "read_file" && ok {
+				m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, start.Paths...)
+				m.SuccessfulDirectReadPaths = append(m.SuccessfulDirectReadPaths, start.Paths...)
+				successfulReadCallsByTurn[start.Turn]++
+				successfulReadPathsByTurn[start.Turn] = append(successfulReadPathsByTurn[start.Turn], start.Paths...)
+				if len(start.Paths) > 1 {
+					m.SuccessfulBatchedReadCalls++
+					m.SuccessfulBatchedReadPaths = append(m.SuccessfulBatchedReadPaths, start.Paths...)
+				}
 			}
 			delete(readStarts, ev.ToolID)
 			if discoveryStarts[ev.ToolID] && successfulDiscoveryResult(ev) {
@@ -183,7 +202,7 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			paths := readFilePaths(ev.Input)
 			m.DirectReadOperations += len(paths)
 			m.DirectReadPaths = append(m.DirectReadPaths, paths...)
-			readStarts[ev.ToolID] = paths
+			readStarts[ev.ToolID] = directReadStart{Turn: ev.Turn, Paths: paths}
 			if len(paths) > 1 {
 				m.BatchedReadCalls++
 			}
@@ -278,6 +297,10 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 		if reads > 1 {
 			m.CoissuedReadTurns++
+		}
+		if successfulReadCallsByTurn[tt.Turn] > 1 {
+			m.SuccessfulCoissuedReadTurns++
+			m.SuccessfulCoissuedReadPaths = append(m.SuccessfulCoissuedReadPaths, successfulReadPathsByTurn[tt.Turn]...)
 		}
 		if len(tt.Names) != 1 || tt.Names[0] != "update_todos" {
 			continue

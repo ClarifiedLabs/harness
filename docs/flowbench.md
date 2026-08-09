@@ -145,8 +145,10 @@ go run ./scripts/flowbench \
 
 Available cases are `search_context`, `command_steps`, `todo_coissue`,
 `git_workspace_summary`, `background_wait`, `edit_precision`,
-`edit_drift_recovery`, `known_path_batching`, and `unknown_path_discovery`. Use
-`-dry-run` to inspect ordering, `-resume` for validated completed records, and
+`edit_drift_recovery`, `known_path_batching`, `unknown_path_discovery`, and the
+`read_scale_002`, `read_scale_008`, `read_scale_018`, `read_scale_036`, and
+`read_scale_072` ladder. Use `-dry-run` to inspect ordering, `-resume` for
+validated completed records, and
 `-import-baseline-runs <runs.json>` to reuse a matching immutable baseline.
 
 The tool-accuracy suite runs its four synthetic, evidence-backed cases together:
@@ -190,6 +192,15 @@ successful read paths, direct read
 operations, coissued read/lookup turns, search context before and after shared
 batch shaping, duplicate and budget-omitted lines, low-yield search calls,
 batch bytes before/after, and bounded-search calls.
+
+The standalone `read_scale_*` ladder isolates known-path reading from the search
+and command subcontracts. It supplies 2, 8, 18, 36, or 72 one-line files,
+requires every path to be covered successfully through direct `read_file`
+calls, checks first/middle/last marker evidence and fixture preservation, and
+counts adoption only when successful batched or coissued calls cover every
+fixture path. Run these cases separately rather than through the
+tool-accuracy suite when comparing read interfaces across increasing tool-call
+fan-out.
 
 Run records hash prompts, fixtures, binaries, and raw events and version their
 scoring oracle. Resume and baseline import reject stale record, prompt, oracle,

@@ -302,7 +302,8 @@ func primaryValue(c benchmarkCase, m metrics) int {
 }
 
 func isToolAccuracyCase(name string) bool {
-	return strings.HasPrefix(name, "edit_") || name == "known_path_batching" || name == "unknown_path_discovery"
+	return strings.HasPrefix(name, "edit_") || strings.HasPrefix(name, "read_scale_") ||
+		name == "known_path_batching" || name == "unknown_path_discovery"
 }
 
 func adopted(name string, m metrics) bool {
@@ -326,9 +327,25 @@ func adopted(name string, m metrics) bool {
 			(m.BatchedReadCalls > 0 || m.CoissuedReadTurns > 0) && m.CoissuedLookupTurns > 0
 	case "unknown_path_discovery":
 		return m.DiscoveryBeforeRead && (m.BatchedReadCalls > 0 || m.CoissuedReadTurns > 0)
+	case "read_scale_002":
+		return adoptedReadScale(m, 2)
+	case "read_scale_008":
+		return adoptedReadScale(m, 8)
+	case "read_scale_018":
+		return adoptedReadScale(m, 18)
+	case "read_scale_036":
+		return adoptedReadScale(m, 36)
+	case "read_scale_072":
+		return adoptedReadScale(m, 72)
 	default:
 		return false
 	}
+}
+
+func adoptedReadScale(m metrics, count int) bool {
+	efficientPaths := append([]string(nil), m.SuccessfulBatchedReadPaths...)
+	efficientPaths = append(efficientPaths, m.SuccessfulCoissuedReadPaths...)
+	return coversFixturePaths(efficientPaths, readScaleFixturePaths(count))
 }
 
 func median(values []float64) float64 {

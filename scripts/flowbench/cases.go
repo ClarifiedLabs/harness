@@ -143,6 +143,16 @@ func allCases() map[string]benchmarkCase {
 			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
 		},
 	}
+	for _, count := range []int{2, 8, 18, 36, 72} {
+		count := count
+		cases = append(cases, benchmarkCase{
+			Name:          fmt.Sprintf("read_scale_%03d", count),
+			Prompt:        readScalePrompt(count),
+			Setup:         func(dir string) error { return setupReadScale(dir, count) },
+			Score:         func(in scoreInput) score { return scoreReadScale(in, count) },
+			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
+		})
+	}
 	out := make(map[string]benchmarkCase, len(cases))
 	for _, c := range cases {
 		out[c.Name] = c
@@ -208,7 +218,21 @@ func setupUnknownPathDiscovery(dir string) error {
 	return setupContractFiles(dir, "discovery", "shard-%02d-hidden.txt", "Discover%02d\n")
 }
 
+func readScalePrompt(count int) string {
+	paths := readScaleFixturePaths(count)
+	return fmt.Sprintf("Work directly; do not delegate or edit. Use read_file, not shell or cat, to read every one of these %d known files: %s. ", count, strings.Join(paths, ", ")) +
+		"Read efficiently; independent reads may be coissued in one turn. Report " + strings.Join(readScaleMarkers(count), ", ") + "."
+}
+
+func setupReadScale(dir string, count int) error {
+	return setupNumberedFiles(dir, readScaleSubdir(count), "item-%03d.txt", "Scale%03d\n", count)
+}
+
 func setupContractFiles(dir, subdir, nameFormat, bodyFormat string) error {
+	return setupNumberedFiles(dir, subdir, nameFormat, bodyFormat, 18)
+}
+
+func setupNumberedFiles(dir, subdir, nameFormat, bodyFormat string, count int) error {
 	if err := setupClean(dir); err != nil {
 		return err
 	}
@@ -216,7 +240,7 @@ func setupContractFiles(dir, subdir, nameFormat, bodyFormat string) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
-	for i := 1; i <= 18; i++ {
+	for i := 1; i <= count; i++ {
 		if err := os.WriteFile(filepath.Join(root, fmt.Sprintf(nameFormat, i)), []byte(fmt.Sprintf(bodyFormat, i)), 0o644); err != nil {
 			return err
 		}
@@ -315,9 +339,44 @@ func scoreUnknownPathDiscovery(in scoreInput) score {
 	return result
 }
 
+func scoreReadScale(in scoreInput, count int) score {
+	result := requireOutput(in.Stdout, readScaleMarkers(count)...)
+	if !coversFixturePaths(in.Metrics.SuccessfulDirectReadPaths, readScaleFixturePaths(count)) {
+		result.Reasons = append(result.Reasons, "not all scale paths were read successfully through read_file")
+	}
+	if in.FixtureBefore != in.FixtureAfter {
+		result.Reasons = append(result.Reasons, "read-scale fixture was modified")
+	}
+	result.Pass = len(result.Reasons) == 0
+	return result
+}
+
+func readScaleMarkers(count int) []string {
+	markers := []string{"Scale001"}
+	if middle := count / 2; middle > 1 {
+		markers = append(markers, fmt.Sprintf("Scale%03d", middle))
+	}
+	if count > 1 {
+		markers = append(markers, fmt.Sprintf("Scale%03d", count))
+	}
+	return markers
+}
+
+func readScaleSubdir(count int) string {
+	return fmt.Sprintf("read-scale-%03d", count)
+}
+
+func readScaleFixturePaths(count int) []string {
+	return numberedFixturePaths(readScaleSubdir(count), "item-%03d.txt", count)
+}
+
 func contractFixturePaths(subdir, nameFormat string) []string {
-	paths := make([]string, 0, 18)
-	for i := 1; i <= 18; i++ {
+	return numberedFixturePaths(subdir, nameFormat, 18)
+}
+
+func numberedFixturePaths(subdir, nameFormat string, count int) []string {
+	paths := make([]string, 0, count)
+	for i := 1; i <= count; i++ {
 		paths = append(paths, fmt.Sprintf("%s/%s/%s", toolAccuracyFixture, subdir, fmt.Sprintf(nameFormat, i)))
 	}
 	return paths
