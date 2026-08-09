@@ -58,7 +58,7 @@ func NewTool(store *Store, sessionDir func() string) *Tool {
 
 func (*Tool) Name() string { return "record_plan" }
 
-func (*Tool) Description() string { return "Record the self-contained implementation plan handoff requires." }
+func (*Tool) Description() string { return "Record a complete implementation plan for handoff to an implementation agent." }
 
 func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{

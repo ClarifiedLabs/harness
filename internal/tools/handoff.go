@@ -39,7 +39,9 @@ func NewHandoff(pending *handoff.Pending, plans *plan.Store, interactive bool, a
 
 func (*handoffTool) Name() string { return "handoff" }
 
-func (*handoffTool) Description() string { return "Give the recorded plan to an implementation agent; needs approval." }
+func (*handoffTool) Description() string { return "Handoff the recorded plan to an implementation agent." }
+
+func (*handoffTool) PreserveSchemaDescriptions() bool { return true }
 
 func (t *handoffTool) Schema() json.RawMessage {
 	return handoffSchema(t.agentNames)
@@ -79,7 +81,7 @@ func (t *handoffTool) Run(ctx context.Context, input json.RawMessage) (string, e
 // agent names are known, agent is constrained by an enum so the model cannot
 // invent a target. An omitted agent leaves target selection to the REPL.
 func handoffSchema(agentNames []string) json.RawMessage {
-	agent := map[string]any{"type": "string"}
+	agent := map[string]any{"type": "string", "description": "Implementation agent; omit for default (auto)."}
 	if len(agentNames) > 0 {
 		agent["enum"] = slices.Clone(agentNames)
 	}

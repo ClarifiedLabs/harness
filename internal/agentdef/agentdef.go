@@ -258,3 +258,17 @@ func Validate(agents map[string]Definition) error {
 func Names(agents map[string]Definition) []string {
 	return slices.Sorted(maps.Keys(agents))
 }
+
+// ImplementationAgentNames returns sorted names of agents whose WorkspaceAccess is exclusive.
+// Used for handoff targets: auto, independent and custom exclusive agents. Read-only builtins
+// (explore, plan, review) are excluded. If none (defensive), caller falls back to ["auto"].
+func ImplementationAgentNames(agents map[string]Definition) []string {
+	var out []string
+	for name, def := range agents {
+		if def.WorkspaceAccess == WorkspaceAccessExclusive {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
+}

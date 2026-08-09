@@ -2890,10 +2890,15 @@ artifact can be written. Delegate children receive private plan stores and write
 under their own child session directories.
 
 `handoff` (`internal/tools` + `internal/handoff`) accepts the
-optional `{agent}`. It is enabled only for the interactive root
-`plan` agent. It rejects one-shot mode, an absent/latest plan without a body or
-path, and unknown explicit agents. The configured agent names populate the
-`agent` enum. The tool records a synchronized pending `handoff.Request`; tools
+optional `{agent}` with description `Implementation agent; omit for default (auto).`.
+It is enabled only for the interactive root `plan` agent.
+Description: `Handoff the recorded plan to an implementation agent.`.
+It rejects one-shot mode, an absent/latest plan without a body or
+path, and unknown explicit agents. Only exclusive agents populate the
+`agent` enum: `auto`, `independent`, and any custom agent with
+`workspace_access: exclusive` (custom defaults to exclusive); `explore`,
+`plan`, and `review` are excluded. An omitted `agent` defaults to `auto`
+(`HandoffAgent`). The tool records a synchronized pending `handoff.Request`; tools
 never prompt or switch agents themselves.
 
 At the interactive boundary, Harness rejects a stale pending path, renders the
@@ -4117,8 +4122,8 @@ reviewer, or the wide-open default without separate binaries.
   model-compatible and validated like any effort. This lets a cheap implementation
   agent pair a smaller `model` with a lower `reasoning`.
 - **Plan → implementation handoff:** the `plan` agent writes a self-contained
-  artifact with `record_plan` (§9.17) and requests a handoff with
-  `handoff` (§9.17).
+  artifact with `record_plan` (`Record a complete implementation plan for handoff to an implementation agent.`, §9.17) and requests a handoff with
+  `handoff` (`Handoff the recorded plan to an implementation agent.`, §9.17). The `handoff` `agent` enum contains only exclusive agents (`auto`, `independent`, plus custom `workspace_access: exclusive`; `explore`/`plan`/`review` excluded); omit for default `auto`.
   At the next prompt boundary, or on manual `/handoff` (§10), the REPL prompts for
   approval, archives the planning transcript via `SaveCompaction`, switches to
   the target agent — default `auto`, overridable by

@@ -23,8 +23,8 @@ This page is the operational overview.
 | `update_todos` | replace the current advisory TODO list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
-| `record_plan` | Write a self-contained Markdown implementation plan (plan agent) |
-| `handoff` | Handoff a recorded plan for implementation (interactive plan agent) |
+| `record_plan` | Record a complete implementation plan for handoff to an implementation agent |
+| `handoff` | Handoff the recorded plan to an implementation agent (interactive plan agent; `agent` enum = exclusive agents `auto`, `independent`, plus custom `workspace_access: exclusive`; omit for default `auto`) |
 
 `apply_patch` (Codex-format add/delete/update/move patches) is no longer in the
 default tool set — `edit` and `write_file` subsume it. It still ships in the tool

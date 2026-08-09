@@ -386,3 +386,38 @@ func TestNamesSorted(t *testing.T) {
 		t.Errorf("Names = %v", got)
 	}
 }
+
+func TestImplementationAgentNamesExcludesReadOnly(t *testing.T) {
+	m := Builtins()
+	if got := ImplementationAgentNames(m); !slices.Equal(got, []string{"auto", "independent"}) {
+		t.Fatalf("Builtins exclusive = %v, want [auto independent]", got)
+	}
+	// custom exclusive (defaults to exclusive) is included
+	m2 := Resolve(map[string]FileDefinition{
+		"my-impl": {Description: "custom impl", Prompt: "impl"},
+		"my-read": {Description: "custom read", WorkspaceAccess: "read_only", Prompt: "read"},
+	})
+	got := ImplementationAgentNames(m2)
+	if !slices.Contains(got, "my-impl") {
+		t.Fatalf("my-impl missing from exclusive names: %v", got)
+	}
+	if slices.Contains(got, "my-read") {
+		t.Fatalf("my-read (read_only) leaked into exclusive names: %v", got)
+	}
+	if !slices.Contains(got, "auto") || !slices.Contains(got, "independent") {
+		t.Fatalf("exclusive names missing builtins: %v", got)
+	}
+	for _, name := range []string{"explore", "plan", "review"} {
+		if slices.Contains(got, name) {
+			t.Fatalf("read-only builtin %q leaked into exclusive names: %v", name, got)
+		}
+	}
+	wantSorted := slices.Clone(got)
+	slices.Sort(wantSorted)
+	if !slices.Equal(got, wantSorted) {
+		t.Fatalf("ImplementationAgentNames not sorted: %v", got)
+	}
+	if len(ImplementationAgentNames(map[string]Definition{})) != 0 {
+		t.Fatal("empty input should yield empty slice")
+	}
+}
