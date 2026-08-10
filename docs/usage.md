@@ -387,7 +387,7 @@ The agent loop has several controls against runaway work:
   command while changing only downstream pipeline filters are likewise steered
   after four turns and stopped after twelve ignored repeats.
 - Three consecutive turns that each perform one repository lookup get a steer
-  to coissue independent top-level lookups or use `read paths[]`. Twelve inspection-only turns without mutation, verification,
+  to coissue independent top-level lookups. Twelve inspection-only turns without mutation, verification,
   wait, or coordination progress get one phase-transition steer. These semantic
   guards are advisory and never hard-stop a run; explicit user steering resets
   their streaks.
@@ -2006,10 +2006,8 @@ Older raw messages are archived before replacement. The active transcript gets
 a synthetic user checkpoint containing the active prompt and steering text
 verbatim, the progress summary, the archive reference, and a deterministic
 cumulative index of successful supported `read`, `write`, and `edit` paths from
-compacted history. The index records requested paths at
-tool-call success granularity—so a successful batched read includes paths that
-reported inline per-file errors—and does not infer effects from commands, Git,
-MCP, or custom tools. The model records semantic state only for meaningful
+compacted history. The index records requested paths at tool-call success
+granularity and does not infer effects from commands, Git, MCP, or custom tools. The model records semantic state only for meaningful
 changes and unfinished mutation intent; it does not duplicate read-only
 inspected paths. The advisory TODO list persists separately; an unresolved list
 is re-injected after compaction, so summaries do not duplicate it.

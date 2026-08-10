@@ -324,9 +324,9 @@ func adopted(name string, m metrics) bool {
 		return m.ToolCalls["edit"] > 0 && m.ReadDriftAfterPhaseOne
 	case "known_path_batching":
 		return m.ExactKnownPathSearches >= 3 && m.ExactKnownPathCommands == 1 &&
-			(m.BatchedReadCalls > 0 || m.CoissuedReadTurns > 0) && m.CoissuedLookupTurns > 0
+			m.CoissuedReadTurns > 0 && m.CoissuedLookupTurns > 0
 	case "unknown_path_discovery":
-		return m.DiscoveryBeforeRead && (m.BatchedReadCalls > 0 || m.CoissuedReadTurns > 0)
+		return m.DiscoveryBeforeRead && m.CoissuedReadTurns > 0
 	case "read_scale_002":
 		return adoptedReadScale(m, 2)
 	case "read_scale_008":
@@ -343,9 +343,7 @@ func adopted(name string, m metrics) bool {
 }
 
 func adoptedReadScale(m metrics, count int) bool {
-	efficientPaths := append([]string(nil), m.SuccessfulBatchedReadPaths...)
-	efficientPaths = append(efficientPaths, m.SuccessfulCoissuedReadPaths...)
-	return coversFixturePaths(efficientPaths, readScaleFixturePaths(count))
+	return coversFixturePaths(m.SuccessfulCoissuedReadPaths, readScaleFixturePaths(count))
 }
 
 func median(values []float64) float64 {

@@ -77,7 +77,7 @@ func TestOrientationGuardSteersToBatching(t *testing.T) {
 	}
 }
 
-func TestOrientationProgressClassifiesSingleAndBatchedLookups(t *testing.T) {
+func TestOrientationProgressClassifiesSingleAndCoissuedLookups(t *testing.T) {
 	reg := tools.Default()
 	tests := []struct {
 		name  string
@@ -93,10 +93,6 @@ func TestOrientationProgressClassifiesSingleAndBatchedLookups(t *testing.T) {
 			name:  "single shell search",
 			calls: []llm.ToolCall{{Name: "shell", Input: json.RawMessage(`{"argv":["rg","needle","internal"]}`)}},
 			want:  1,
-		},
-		{
-			name:  "read paths batch",
-			calls: []llm.ToolCall{{Name: "read", Input: json.RawMessage(`{"paths":["a","b"]}`)}},
 		},
 		{
 			name: "coissued reads",

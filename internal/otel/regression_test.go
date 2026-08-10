@@ -81,27 +81,6 @@ func TestSingleInspectTurnUsesCurrentToolNamesOnly(t *testing.T) {
 	}
 }
 
-func TestSinkBatchedOperationsAttributedToRead(t *testing.T) {
-	exp := newTestExporter(t, "http://collector.invalid")
-	sink := NewSink(exp, nil, "provider", "model", "agent", false)
-	sink.TurnProgress(agent.TurnProgress{BatchedOperationCount: 3})
-
-	exp.mu.Lock()
-	defer exp.mu.Unlock()
-	metric := exp.metrics["harness.batched_operations"]
-	if metric == nil || len(metric.points) != 1 {
-		t.Fatalf("batched operations metric = %+v, want one point", metric)
-	}
-	for _, point := range metric.points {
-		for _, attr := range point.attrs {
-			if attr.Key == "tool" && attr.Value.StringValue == "read" {
-				return
-			}
-		}
-	}
-	t.Fatalf("batched operations attributes = %+v, want tool=read", metric.points)
-}
-
 func TestExporterResourceIdentityStaysProcessStable(t *testing.T) {
 	exp, err := NewExporter(
 		Config{Enabled: true, Endpoint: "http://collector.invalid", Hostname: "runtime-host", Timeout: time.Second},

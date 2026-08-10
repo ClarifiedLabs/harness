@@ -118,11 +118,9 @@ func reportExplicitSkillContexts(context []string, sink EventSink) {
 
 func (a *Agent) completeSkillRead(call llm.ToolCall, result string) (string, string, bool) {
 	var args struct {
-		Offset int      `json:"offset"`
-		Paths  []string `json:"paths"`
-		Files  []string `json:"files"`
+		Offset int `json:"offset"`
 	}
-	if json.Unmarshal(call.Input, &args) != nil || args.Offset > 1 || len(args.Paths) > 0 || len(args.Files) > 0 {
+	if json.Unmarshal(call.Input, &args) != nil || args.Offset > 1 {
 		return "", "", false
 	}
 	paths, ok := a.tools.ReadPaths(call)

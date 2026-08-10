@@ -297,7 +297,8 @@ func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
 	failed := toolResult("r2", "missing")
 	failed.Content[0].ResultError = true
 	messages := []llm.Message{
-		asstToolUse("r1", "read", `{"paths":["z.go","./a.go"]}`), toolResult("r1", "ok with one possible inline failure"),
+		asstToolUse("r1", "read", `{"path":"z.go"}`), toolResult("r1", "ok"),
+		asstToolUse("r3", "read", `{"path":"./a.go"}`), toolResult("r3", "ok"),
 		asstToolUse("r2", "read", `{"path":"failed.go"}`), failed,
 		asstToolUse("w1", "write", `{"path":"a.go","content":"x"}`), toolResult("w1", "ok"),
 		asstToolUse("e1", "edit", `{"files":[{"path":"edit.go","edits":[{"oldText":"a","newText":"b"}]}]}`), toolResult("e1", "ok"),

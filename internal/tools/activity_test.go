@@ -40,7 +40,7 @@ func TestCallActivityConservativeDefaultsAndBuiltins(t *testing.T) {
 		{name: "read-only default", call: llm.ToolCall{Name: "reader"}, class: ActivityInspect, operations: 1},
 		{name: "non-read-only default", call: llm.ToolCall{Name: "unknown_effect"}, class: ActivityOther, operations: 1},
 		{name: "known mutation", call: llm.ToolCall{Name: "edit"}, class: ActivityMutate, operations: 1},
-		{name: "paths batch", call: llm.ToolCall{Name: "read", Input: json.RawMessage(`{"paths":["a","b"]}`)}, class: ActivityInspect, operations: 2, batched: true},
+		{name: "read", call: llm.ToolCall{Name: "read", Input: json.RawMessage(`{"path":"a"}`)}, class: ActivityInspect, operations: 1},
 		{name: "wait", call: llm.ToolCall{Name: "background_jobs", Input: json.RawMessage(`{"action":"wait"}`)}, class: ActivityWait, operations: 1},
 		{name: "coordinate", call: llm.ToolCall{Name: "background_jobs", Input: json.RawMessage(`{"action":"list"}`)}, class: ActivityCoordinate, operations: 1},
 	}

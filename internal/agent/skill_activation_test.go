@@ -22,7 +22,7 @@ func TestCompleteSkillReadPinsInstructionsAndStoresReceipt(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	input := fmt.Sprintf(`{"path":%q}`, path)
+	input := fmt.Sprintf(`{"path":%q,"paths":["removed/SKILL.md"],"files":["removed/SKILL.md"]}`, path)
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{toolDone(0, "skill-read", "read", input)},

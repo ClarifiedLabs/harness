@@ -19,26 +19,17 @@ const binarySniffBytes = 8 * 1024
 // defaultReadLimit is the default number of lines returned (design §9.1).
 const defaultReadLimit = 500
 
-// multiReadMinPerPathLimit floors the per-file budget in a multi-file read so
-// each file still shows a useful head even when many paths share the line cap.
-const multiReadMinPerPathLimit = 50
-
 // readDirectoryCap bounds directory-form read output.
 const readDirectoryCap = 200
 
 const readFileSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path to read. Provide path or paths."},
-    "paths": {
-      "type": "array",
-      "items": {"type": "string"},
-      "minItems": 1,
-      "description": "Multiple files to read in one call, each under a \"==> path <==\" header with its own per-file line budget. Use instead of path to batch reads during orientation; offset is ignored in this mode."
-    },
-    "offset": {"type": "integer", "description": "1-based starting line (single-path reads only)."},
-    "limit": {"type": "integer", "description": "Maximum number of lines (default 500); with paths it is the per-file budget."}
-  }
+    "path": {"type": "string", "description": "File path to read."},
+    "offset": {"type": "integer", "description": "1-based starting line."},
+    "limit": {"type": "integer", "description": "Maximum number of lines (default 500)."}
+  },
+  "required": ["path"]
 }`
 
 type readFile struct {
@@ -46,26 +37,24 @@ type readFile struct {
 }
 
 type readFileArgs struct {
-	Path   string   `json:"path"`
-	Paths  []string `json:"paths"`
-	Offset int      `json:"offset"`
-	Limit  int      `json:"limit"`
+	Path   string `json:"path"`
+	Offset int    `json:"offset"`
+	Limit  int    `json:"limit"`
 
 	// Accepted aliases deliberately stay out of the model-facing schema.
-	FilePath      string   `json:"file_path"`
-	FilePathCamel string   `json:"filePath"`
-	File          string   `json:"file"`
-	Filename      string   `json:"filename"`
-	FilepathAlt   string   `json:"filepath"`
-	AbsolutePath  string   `json:"absolute_path"`
-	TargetFile    string   `json:"target_file"`
-	Files         []string `json:"files"`
+	FilePath      string `json:"file_path"`
+	FilePathCamel string `json:"filePath"`
+	File          string `json:"file"`
+	Filename      string `json:"filename"`
+	FilepathAlt   string `json:"filepath"`
+	AbsolutePath  string `json:"absolute_path"`
+	TargetFile    string `json:"target_file"`
 }
 
 func (readFile) Name() string { return "read" }
 
 func (readFile) Description() string {
-	return "Read a file; use paths[] to batch; a directory lists entries."
+	return "Read a file; a directory lists entries."
 }
 
 func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema) }
@@ -80,23 +69,14 @@ func decodeReadFileArgs(input json.RawMessage) (readFileArgs, error) {
 	if args.Path == "" {
 		args.Path = firstNonEmpty(args.FilePath, args.FilePathCamel, args.File, args.Filename, args.FilepathAlt, args.AbsolutePath, args.TargetFile)
 	}
-	if len(args.Paths) == 0 {
-		args.Paths = args.Files
-	}
 	if args.Offset < 0 {
 		return readFileArgs{}, badArgs("offset must be >= 1")
 	}
 	if args.Limit < 0 {
 		return readFileArgs{}, badArgs("limit must be >= 0")
 	}
-	if len(args.Paths) > 0 {
-		for i, path := range args.Paths {
-			if strings.TrimSpace(path) == "" {
-				return readFileArgs{}, badArgs("paths[%d] must not be empty", i)
-			}
-		}
-	} else if args.Path == "" {
-		return readFileArgs{}, badArgs("path or paths is required")
+	if args.Path == "" {
+		return readFileArgs{}, badArgs("path is required")
 	}
 	return args, nil
 }
@@ -105,9 +85,6 @@ func (readFile) ReadPaths(input json.RawMessage) ([]string, error) {
 	args, err := decodeReadFileArgs(input)
 	if err != nil {
 		return nil, err
-	}
-	if len(args.Paths) > 0 {
-		return append([]string(nil), args.Paths...), nil
 	}
 	return []string{args.Path}, nil
 }
@@ -121,10 +98,6 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 	defaultLimit := r.defaultLimit
 	if defaultLimit == 0 {
 		defaultLimit = defaultReadLimit
-	}
-
-	if len(args.Paths) > 0 {
-		return readManyFiles(args.Paths, args.Limit, defaultLimit)
 	}
 
 	offset := args.Offset
@@ -142,48 +115,6 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 	return out, nil
 }
 
-// readManyFiles reads each path from line 1 under its own "==> path <==" header,
-// applying a per-file line budget so the central dispatch cap does not truncate
-// later files. A per-file read error is reported inline so one bad path does not
-// waste the whole batch.
-func readManyFiles(paths []string, explicitLimit, defaultLimit int) (string, error) {
-	for i, p := range paths {
-		if strings.TrimSpace(p) == "" {
-			return "", badArgs("paths[%d] must not be empty", i)
-		}
-	}
-	perPath := perPathLineBudget(explicitLimit, len(paths), defaultLimit)
-
-	var b strings.Builder
-	for i, p := range paths {
-		if i > 0 {
-			b.WriteString("\n\n")
-		}
-		fmt.Fprintf(&b, "==> %s <==\n", p)
-		body, err := readOneFile(p, 1, perPath)
-		if err != nil {
-			fmt.Fprintf(&b, "error: %s", notExistingPathError(p, err).Error())
-			continue
-		}
-		b.WriteString(body)
-	}
-	return b.String(), nil
-}
-
-// perPathLineBudget chooses the line budget for each file in a multi-file read.
-// An explicit limit is honored as-is; otherwise the default budget is divided
-// across the paths so the combined output stays near the dispatch line cap and
-// later files are not dropped, with a floor so each file still shows a head.
-func perPathLineBudget(explicitLimit, numPaths, defaultLimit int) int {
-	if explicitLimit > 0 {
-		return explicitLimit
-	}
-	if numPaths <= 1 {
-		return defaultLimit
-	}
-	return max(defaultLimit/numPaths, multiReadMinPerPathLimit)
-}
-
 // firstNonEmpty returns the first argument whose value is non-empty after
 // trimming surrounding whitespace, or "" if none qualify. It resolves
 // read's path aliases in a fixed precedence order.
@@ -198,8 +129,7 @@ func firstNonEmpty(vals ...string) string {
 
 // readOneFile reads the [offset, offset+limit) window of a single file and
 // returns its line-numbered body, including the truncation notice (r14) when the
-// file continues past the window. It is shared by the single- and multi-path
-// read paths.
+// file continues past the window.
 func readOneFile(path string, offset, limit int) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {

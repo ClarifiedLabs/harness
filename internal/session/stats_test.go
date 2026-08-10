@@ -224,6 +224,17 @@ func TestStatsOptimizationDiagnosticsAreAggregatedAndRedacted(t *testing.T) {
 	}
 }
 
+func TestSkillReadPathHashesIgnoreRemovedArrayArguments(t *testing.T) {
+	canonical := skillReadPathHashes(json.RawMessage(`{"path":"current/SKILL.md"}`))
+	withRemoved := skillReadPathHashes(json.RawMessage(`{"path":"current/SKILL.md","paths":["removed/SKILL.md"],"files":["removed/SKILL.md"]}`))
+	if len(withRemoved) != 1 || len(canonical) != 1 || withRemoved[0] != canonical[0] {
+		t.Fatalf("skill hashes with removed arrays = %v, want canonical %v", withRemoved, canonical)
+	}
+	if got := skillReadPathHashes(json.RawMessage(`{"paths":["removed/SKILL.md"]}`)); len(got) != 0 {
+		t.Fatalf("removed paths-only input produced skill hashes: %v", got)
+	}
+}
+
 func TestCollectToolStatsUsesCurrentInspectionSurface(t *testing.T) {
 	events := []Event{
 		{Type: EventToolStart, Prompt: 1, Turn: 1, Tool: "read", Input: json.RawMessage(`{"path":"SKILL.md"}`)},

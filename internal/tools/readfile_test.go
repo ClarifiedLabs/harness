@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 )
@@ -18,9 +17,7 @@ func TestReadFileReportsCanonicalAndAliasPaths(t *testing.T) {
 		want  []string
 	}{
 		{name: "single", input: `{"path":"a.txt"}`, want: []string{"a.txt"}},
-		{name: "batch", input: `{"paths":["b.txt","a.txt"]}`, want: []string{"b.txt", "a.txt"}},
 		{name: "single alias", input: `{"file_path":"alias.txt"}`, want: []string{"alias.txt"}},
-		{name: "batch alias", input: `{"files":["x.txt","y.txt"]}`, want: []string{"x.txt", "y.txt"}},
 		{name: "canonical wins", input: `{"path":"canonical.txt","file_path":"alias.txt"}`, want: []string{"canonical.txt"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -28,7 +25,7 @@ func TestReadFileReportsCanonicalAndAliasPaths(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ReadPaths: %v", err)
 			}
-			if !slices.Equal(got, tc.want) {
+			if len(got) != 1 || got[0] != tc.want[0] {
 				t.Fatalf("ReadPaths = %v, want %v", got, tc.want)
 			}
 		})
@@ -37,6 +34,15 @@ func TestReadFileReportsCanonicalAndAliasPaths(t *testing.T) {
 
 func runReadFile(t *testing.T, args map[string]any) (string, error) {
 	return runTool(t, readFile{}, args)
+}
+
+func TestReadFileSchemaOnlyAdvertisesSingularPath(t *testing.T) {
+	if strings.Contains(readFileSchema, `"paths"`) || strings.Contains(readFileSchema, `"files"`) {
+		t.Fatalf("read schema advertises removed multi-path input: %s", readFileSchema)
+	}
+	if !strings.Contains(readFileSchema, `"required": ["path"]`) {
+		t.Fatalf("read schema does not require singular path: %s", readFileSchema)
+	}
 }
 
 func TestReadFileNumbering(t *testing.T) {
@@ -176,88 +182,6 @@ func TestReadFileMissingPathArg(t *testing.T) {
 	_, err := runReadFile(t, map[string]any{})
 	if err == nil {
 		t.Fatal("expected error for missing path arg")
-	}
-}
-
-// r36: paths[] reads several files in one call, each under a "==> path <=="
-// header.
-func TestReadFileMultiplePaths(t *testing.T) {
-	dir := t.TempDir()
-	a := filepath.Join(dir, "a.txt")
-	b := filepath.Join(dir, "b.txt")
-	mustWrite(t, a, "alpha\nbeta\n")
-	mustWrite(t, b, "one\n")
-
-	out, err := runReadFile(t, map[string]any{"paths": []string{a, b}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	want := "==> " + a + " <==\n1\talpha\n2\tbeta\n\n==> " + b + " <==\n1\tone"
-	if out != want {
-		t.Errorf("got:\n%q\nwant:\n%q", out, want)
-	}
-}
-
-// A per-file error must appear inline so one bad path does not abort the batch.
-func TestReadFileMultiplePathsInlineError(t *testing.T) {
-	dir := t.TempDir()
-	a := filepath.Join(dir, "a.txt")
-	missing := filepath.Join(dir, "nope.txt")
-	mustWrite(t, a, "alpha\n")
-
-	out, err := runReadFile(t, map[string]any{"paths": []string{a, missing}})
-	if err != nil {
-		t.Fatalf("batch read should not fail on one missing file: %v", err)
-	}
-	if !strings.Contains(out, "==> "+a+" <==\n1\talpha") {
-		t.Errorf("first file missing from output: %q", out)
-	}
-	if !strings.Contains(out, "==> "+missing+" <==\nerror:") {
-		t.Errorf("missing file should report an inline error: %q", out)
-	}
-}
-
-// With paths and no explicit limit, each file gets a divided budget so later
-// files are not dropped by the dispatch cap; the truncation notice fires per file.
-func TestReadFileMultiplePathsPerFileBudget(t *testing.T) {
-	dir := t.TempDir()
-	var paths []string
-	for f := 0; f < 4; f++ {
-		p := filepath.Join(dir, fmt.Sprintf("f%d.txt", f))
-		var b strings.Builder
-		for i := 1; i <= 400; i++ {
-			fmt.Fprintf(&b, "L%d\n", i)
-		}
-		mustWrite(t, p, b.String())
-		paths = append(paths, p)
-	}
-	out, err := runReadFile(t, map[string]any{"paths": paths})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	// 500-line default / 4 files = 125 lines budget each; every file is present
-	// and individually truncated.
-	if got := strings.Count(out, "==> "); got != 4 {
-		t.Errorf("expected 4 file headers, got %d", got)
-	}
-	if got := strings.Count(out, "[file truncated at line 125;"); got != 4 {
-		t.Errorf("expected each file truncated at line 125, got %d notices:\n%s", got, out)
-	}
-}
-
-func TestPerPathLineBudget(t *testing.T) {
-	tests := []struct {
-		explicit, numPaths, def, want int
-	}{
-		{explicit: 0, numPaths: 1, def: 1000, want: 1000},
-		{explicit: 0, numPaths: 4, def: 1000, want: 250},
-		{explicit: 0, numPaths: 100, def: 1000, want: multiReadMinPerPathLimit}, // floor
-		{explicit: 30, numPaths: 5, def: 1000, want: 30},                        // explicit wins
-	}
-	for _, tt := range tests {
-		if got := perPathLineBudget(tt.explicit, tt.numPaths, tt.def); got != tt.want {
-			t.Errorf("perPathLineBudget(%d,%d,%d) = %d, want %d", tt.explicit, tt.numPaths, tt.def, got, tt.want)
-		}
 	}
 }
 
@@ -498,36 +422,25 @@ func TestReadFileAliasPrecedence(t *testing.T) {
 	}
 }
 
-// `files` is accepted as an alias for the multi-file `paths` array.
-func TestReadFileFilesAliasForPaths(t *testing.T) {
-	dir := t.TempDir()
-	a := filepath.Join(dir, "a.txt")
-	b := filepath.Join(dir, "b.txt")
-	if err := os.WriteFile(a, []byte("aaa\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(b, []byte("bbb\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	out, err := runReadFile(t, map[string]any{"files": []string{a, b}})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if !strings.Contains(out, "==> "+a+" <==") || !strings.Contains(out, "==> "+b+" <==") {
-		t.Errorf("files alias should render multi-file headers, got %q", out)
-	}
-	if !strings.Contains(out, "1\taaa") || !strings.Contains(out, "1\tbbb") {
-		t.Errorf("files alias should read both files, got %q", out)
+func TestReadFileRejectsRemovedMultiPathArguments(t *testing.T) {
+	for _, args := range []map[string]any{
+		{"paths": []string{"a.txt", "b.txt"}},
+		{"files": []string{"a.txt", "b.txt"}},
+	} {
+		_, err := runReadFile(t, args)
+		if err == nil || !strings.Contains(err.Error(), "path is required") {
+			t.Errorf("removed multi-path input error = %v", err)
+		}
 	}
 }
 
-// With neither path/paths nor any alias, the required-arg error still fires.
-func TestReadFileNoPathOrPathsError(t *testing.T) {
+// With neither path nor any singular alias, the required-arg error still fires.
+func TestReadFileNoPathError(t *testing.T) {
 	_, err := runReadFile(t, map[string]any{"limit": 10})
 	if err == nil {
-		t.Fatal("expected error when no path/paths/alias is given")
+		t.Fatal("expected error when no path or alias is given")
 	}
-	if !strings.Contains(err.Error(), "path or paths is required") {
+	if !strings.Contains(err.Error(), "path is required") {
 		t.Errorf("unexpected error: %v", err)
 	}
 }

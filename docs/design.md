@@ -1887,10 +1887,9 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 - **Builtin instructions** (`prompts/system.txt`): concise agentic-coding guidance — read before
   editing; emit all currently known calls in one tool turn; assign independent calls
   the same `_stage` and dependencies increasing stages (omissions inherit from stage
-  1); use `read.paths[]` for known-file batches and `shell.steps[]` for tightly coupled
-  serial commands; rely on automatic same-file write/edit sequencing; defer calls with
-  output-dependent arguments to the next model turn; run focused verification; and stop
-  when done.
+  1); use `shell.steps[]` for tightly coupled serial commands; rely on automatic
+  same-file write/edit sequencing; defer calls with output-dependent arguments to the
+  next model turn; run focused verification; and stop when done.
 - **Environment context**, computed at startup:
 
   ```
@@ -1928,7 +1927,7 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   receipt containing source and digest; the exact line-numbered result is
   archived through the ordinary artifact path. Re-reading unchanged content
   does not duplicate active context, while changed content replaces it. Partial
-  or multi-file reads stay ordinary tool results and do not activate. If a
+  reads stay ordinary tool results and do not activate. If a
   configured artifact write fails, activation still succeeds but the complete
   original result remains in the transcript instead of being replaced.
 
@@ -2037,13 +2036,12 @@ func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall
 
 ### 9.1 `read`
 
-> Read a file; use paths[] to batch; a directory lists entries.
+> Read a file; a directory lists entries.
 
 | param | type | notes |
 |---|---|---|
-| `path` | string | single file; required unless `paths` is given |
-| `paths` | array of strings | multi-file mode; each file rendered under a `==> path <==` header with its own per-file line budget; `offset` is ignored |
-| `offset` | int | 1-based starting line (single-file mode only) |
+| `path` | string, required | file or directory to read |
+| `offset` | int | 1-based starting line |
 | `limit` | int | max lines, default 500 or `read_default_limit` |
 
 If a supplied path is a directory, `read` returns a directories-first,
@@ -2052,27 +2050,22 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 - **Parameter aliases (accepted silently; intentionally *not* in the schema):**
   `path` also accepts `file`, `file_path`, `filePath`, `filename`, `filepath`,
-  `absolute_path`, and `target_file`; `paths` also accepts `files`. These match the
-  names other harnesses give the parameter (Claude Code and Gemini CLI use
-  `file_path`, opencode `filePath`, Cursor `target_file`), so a model that emits the
-  other spelling still succeeds on the first call instead of wasting a round trip.
-  They are left out of the advertised schema to keep the model-facing surface
-  minimal and avoid nudging models off `path`; the canonical `path`/`paths` win
-  when both a canonical name and an alias are set.
+  `absolute_path`, and `target_file`. These match the names other harnesses give
+  the parameter (Claude Code and Gemini CLI use `file_path`, opencode `filePath`,
+  Cursor `target_file`), so a model that emits the other spelling still succeeds
+  on the first call instead of wasting a round trip. They are left out of the
+  advertised schema to keep the model-facing surface minimal and avoid nudging
+  models off `path`; the canonical `path` wins when both names are set.
 - Output is line-numbered (`cat -n` style: right-aligned number, tab, line). Line
   numbers make `edit` targeting and grep cross-referencing far more reliable.
-- **Not-found suggestions:** an ENOENT failure (single mode or inline per file in
-  `paths[]` mode) appends `similar existing paths: <up to 3>` from a bounded
+- **Not-found suggestions:** an ENOENT failure appends
+  `similar existing paths: <up to 3>` from a bounded
   same-directory name-similarity scan, plus a one-level parent scan when the
   directory itself is missing (a mistyped directory component); no walking
   (`similarExistingPaths`).
-- **Truncation notice:** when a single-file read is cut off at its line window the
-  result ends with `[file truncated at line N; continue with offset=N+1]`, so the
-  model knows to page rather than assuming it saw the whole file.
-- **Multi-file mode (`paths[]`):** each file is read from line 1 under its
-  `==> path <==` header. With no explicit `limit` the default window is split across
-  the files (`max(defaultLimit/len(paths), 50)` lines each); an explicit `limit`
-  applies per file. A per-file read error is reported inline and the batch continues.
+- **Truncation notice:** when a read is cut off at its line window the result ends
+  with `[file truncated at line N; continue with offset=N+1]`, so the model knows
+  to page rather than assuming it saw the whole file.
 - Binary sniff: first 8 KB containing NUL → `error: <path> appears to be binary`.
 - Files are streamed line-by-line and stop after the requested/default line
   window, so memory is bounded by the window and longest line regardless of file
@@ -2111,9 +2104,8 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   quoting is unnecessary; use `command` only for shell syntax and `steps[]` for
   ordered commands.
 - Three consecutive turns containing one unbatched orientation lookup trigger
-  one soft steering message recommending coissued `read` calls, `read.paths[]`
-  for known files, or batched repository lookups in one `shell` call. It does not
-  block execution.
+  one soft steering message recommending coissued `read` calls or batched
+  repository lookups in one `shell` call. It does not block execution.
 - Host command semantics remain authoritative. Harness does not inject search
   flags, clamp search lines, parse search context, or reinterpret no-match exit
   status. As with every `shell` call, non-zero exit is model-visible command
@@ -3890,10 +3882,9 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   intent or blockers not represented by it.
 - **Deterministic compacted-history files:** correlate each validated assistant
   tool-use message with its immediate result message. Successful supported
-  `read`, `write`, and `edit` calls contribute normalized,
-  sorted cumulative read/modified paths; modified wins over read. Batched reads are
-  call-level and therefore retain every requested path even when one result is an
-  inline per-file error. Commands, Git, MCP, malformed inputs, failed calls, and
+  `read`, `write`, and `edit` calls contribute normalized, sorted cumulative
+  read/modified paths; modified wins over read. Commands, Git, MCP, malformed
+  inputs, failed calls, and
   unsupported/custom tools are skipped. The JSON index is the authoritative
   recognized file-activity inventory in the active checkpoint and summary
   request. The model records semantic state only for meaningful changes and

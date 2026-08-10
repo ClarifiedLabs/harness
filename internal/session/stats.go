@@ -726,49 +726,34 @@ func collectToolStats(events []Event) (toolStats, error) {
 
 func skillReadPathHashes(input json.RawMessage) []string {
 	var args struct {
-		Path          string   `json:"path"`
-		Paths         []string `json:"paths"`
-		FilePath      string   `json:"file_path"`
-		FilePathCamel string   `json:"filePath"`
-		File          string   `json:"file"`
-		Filename      string   `json:"filename"`
-		FilepathAlt   string   `json:"filepath"`
-		AbsolutePath  string   `json:"absolute_path"`
-		TargetFile    string   `json:"target_file"`
-		Files         []string `json:"files"`
+		Path          string `json:"path"`
+		FilePath      string `json:"file_path"`
+		FilePathCamel string `json:"filePath"`
+		File          string `json:"file"`
+		Filename      string `json:"filename"`
+		FilepathAlt   string `json:"filepath"`
+		AbsolutePath  string `json:"absolute_path"`
+		TargetFile    string `json:"target_file"`
 	}
 	if json.Unmarshal(input, &args) != nil {
 		return nil
 	}
-	paths := args.Paths
-	if len(paths) == 0 {
-		paths = args.Files
+	path := args.Path
+	if path == "" {
+		path = firstNonEmptyString(
+			args.FilePath,
+			args.FilePathCamel,
+			args.File,
+			args.Filename,
+			args.FilepathAlt,
+			args.AbsolutePath,
+			args.TargetFile,
+		)
 	}
-	if len(paths) == 0 {
-		path := args.Path
-		if path == "" {
-			path = firstNonEmptyString(
-				args.FilePath,
-				args.FilePathCamel,
-				args.File,
-				args.Filename,
-				args.FilepathAlt,
-				args.AbsolutePath,
-				args.TargetFile,
-			)
-		}
-		if path != "" {
-			paths = []string{path}
-		}
+	if filepath.Base(filepath.Clean(path)) != "SKILL.md" {
+		return nil
 	}
-	hashes := make([]string, 0, len(paths))
-	for _, path := range paths {
-		if filepath.Base(filepath.Clean(path)) != "SKILL.md" {
-			continue
-		}
-		hashes = append(hashes, fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(path)))))
-	}
-	return hashes
+	return []string{fmt.Sprintf("%x", sha256.Sum256([]byte(filepath.Clean(path))))}
 }
 
 func firstNonEmptyString(values ...string) string {

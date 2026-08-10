@@ -8,7 +8,7 @@ This page is the operational overview.
 
 | tool | purpose |
 |---|---|
-| `read` | read line-numbered file content with `offset`/`limit`, batch known files with `paths[]`, or list a directory |
+| `read` | read line-numbered file content with `path` and optional `offset`/`limit`, or list a directory |
 | `view_image` | attach a local PNG, JPEG, WebP, or non-animated GIF to the next model request |
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write` | create or overwrite a file, creating parent directories |
@@ -44,14 +44,12 @@ continue. Results and transcript blocks always remain in emission order.
 `shell.steps` still run serially inside one call. No sandbox is added; Harness
 inherits the host sandbox.
 
-`read` reads one file via `path` (with `offset`/`limit`), or several at once via
-`paths[]` — each file is rendered under a `==> path <==` header with its own
-per-file line budget. A directory path returns a bounded, non-recursive listing
-instead of a tool error. For cross-harness compatibility `path` also silently accepts
-the aliases `file`, `file_path`, `filePath`, `filename`, `filepath`,
-`absolute_path`, and `target_file` (and `paths` accepts `files`); these are
-intentionally not listed in the tool schema, and the canonical name wins if both
-are supplied. `view_image` is the read-only binary-image counterpart: it accepts
+`read` reads one file via `path` with optional `offset`/`limit`. A directory
+path returns a bounded, non-recursive listing instead of a tool error. For
+cross-harness compatibility `path` also silently accepts the aliases `file`,
+`file_path`, `filePath`, `filename`, `filepath`, `absolute_path`, and
+`target_file`; these are intentionally not listed in the tool schema, and the
+canonical name wins if both are supplied. `view_image` is the read-only binary-image counterpart: it accepts
 `path` plus optional `detail` (`auto`, `low`, `high`, or `original`, default
 `high`), sniffs and validates the file content, and returns a rich image tool
 result without putting base64
@@ -95,8 +93,9 @@ regex syntax, ignore behavior, output shape, and exit status; scope the command
 to the relevant repository path and use `read` for targeted source context.
 
 After three consecutive turns containing one unbatched repository lookup,
-Harness adds a one-time soft reminder to coissue independent `read` calls, use
-`read paths[]` for known files, or batch repository lookups in one `shell` call. The reminder names only tools present in the built-in surface.
+Harness adds a one-time soft reminder to coissue independent `read` calls or
+batch repository lookups in one `shell` call. The reminder names only tools
+present in the built-in surface.
 
 A `read` path that does not exist fails with `similar existing paths: <up
 to 3>` appended. Harness first scans the same directory and one parent level for

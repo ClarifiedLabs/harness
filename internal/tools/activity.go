@@ -280,13 +280,7 @@ func builtinActivity(name string, input json.RawMessage) (Activity, bool) {
 		activity.Class = ActivityMutate
 		return activity, true
 	case "read":
-		var args struct {
-			Paths []string `json:"paths"`
-		}
-		_ = json.Unmarshal(input, &args)
 		activity.Class = ActivityInspect
-		activity.OperationCount = max(1, len(args.Paths))
-		activity.Batched = len(args.Paths) > 1
 		return activity, true
 	case "background_jobs":
 		var args struct {

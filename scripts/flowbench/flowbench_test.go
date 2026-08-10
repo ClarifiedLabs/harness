@@ -283,11 +283,11 @@ func TestDiscoveryTargetsFixtureThroughShell(t *testing.T) {
 	}
 }
 
-func TestReadPathsNormalizeAbsoluteFixturePaths(t *testing.T) {
+func TestReadPathNormalizesAbsoluteFixturePath(t *testing.T) {
 	input := json.RawMessage(`{"path":"/tmp/worktree/.flowbench-tool-accuracy/discovery/shard-01-hidden.txt"}`)
 	want := ".flowbench-tool-accuracy/discovery/shard-01-hidden.txt"
-	if got := readPaths(input); len(got) != 1 || got[0] != want {
-		t.Fatalf("absolute fixture path normalized to %v, want %q", got, want)
+	if got := readPath(input); got != want {
+		t.Fatalf("absolute fixture path normalized to %q, want %q", got, want)
 	}
 }
 
@@ -490,7 +490,7 @@ func TestToolAccuracyAcceptanceRequiresPositiveEfficiencyAndErrorReduction(t *te
 		for rep := 1; rep <= 3; rep++ {
 			records = append(records,
 				runRecord{Model: model, Repetition: rep, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 100, Turns: 4, ToolErrors: 2}},
-				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"read": 1, "shell": 4}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, BatchedReadCalls: 1, CoissuedLookupTurns: 1}},
+				runRecord{Model: model, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 90, Turns: 4, ToolErrors: 1, ToolCalls: map[string]int{"read": 2, "shell": 4}, ExactKnownPathSearches: 3, ExactKnownPathCommands: 1, CoissuedReadTurns: 1, CoissuedLookupTurns: 1}},
 			)
 		}
 	}

@@ -49,7 +49,7 @@ const commandRepeatSteerMsg = "[loop guard] The last several tool turns ran the 
 
 const errorStormSteerMsg = "[loop guard] Several consecutive tool calls have all failed. Re-read the latest error output and change your approach, or stop and report what is blocking you — do not keep retrying the same way."
 
-const orientationSteer = "[efficiency] The last several turns each performed one repository lookup. Coissue independent read calls in one turn; use read paths[] when the files are already known, or batch repository lookups in one shell call."
+const orientationSteer = "[efficiency] The last several turns each performed one repository lookup. Coissue independent read calls in one turn, or batch repository lookups in one shell call."
 
 const semanticProgressSteer = "[progress] The recent turns have remained in inspection without explicit progress. Synthesize the evidence, take the next concrete action appropriate to the task, validate the current result, or report the blocker."
 
@@ -86,7 +86,7 @@ const (
 )
 
 // ToolActivityCounts reports operation counts rather than just outer tool-call
-// counts, so a batched read/steps call remains visible as one model action.
+// counts, so a batched steps call remains visible as one model action.
 type ToolActivityCounts struct {
 	Inspect    int
 	Mutate     int

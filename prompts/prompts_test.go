@@ -53,6 +53,9 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 
 func TestSystemPromptToolStagingGuidance(t *testing.T) {
 	prompt := System()
+	if strings.Contains(prompt, "read.paths[]") || strings.Contains(prompt, "read paths[]") {
+		t.Errorf("system prompt retains removed multi-path read guidance")
+	}
 	for _, want := range []string{
 		"independent calls the same `_stage`",
 		"Calls in the same stage are parallel-eligible",

@@ -107,17 +107,3 @@ func TestReadFileNotFoundWithoutSimilarPaths(t *testing.T) {
 		t.Errorf("empty directory should not produce suggestions: %v", err)
 	}
 }
-
-func TestReadManyFilesInlineErrorSuggestsSimilarPaths(t *testing.T) {
-	dir := t.TempDir()
-	present := filepath.Join(dir, "usage.md")
-	mustWrite(t, present, "# usage\n")
-
-	out, err := runReadFile(t, map[string]any{"paths": []string{present, filepath.Join(dir, "ussage.md")}})
-	if err != nil {
-		t.Fatalf("batch read should not fail wholesale: %v", err)
-	}
-	if !strings.Contains(out, "error: ") || !strings.Contains(out, "similar existing paths: ") || !strings.Contains(out, "usage.md") {
-		t.Errorf("inline per-file error should suggest usage.md:\n%s", out)
-	}
-}

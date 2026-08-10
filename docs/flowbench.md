@@ -181,12 +181,12 @@ The orientation oracle uses the same minimal surface as the built-in agents.
 reads covering them, three successful directory-scoped argv-form `rg` searches
 through `shell` (two escaped literals and one regex), the exact two-step command
 result, requested marker evidence, and an unchanged fixture. Cosmetic command-
-step names are ignored. Candidate adoption additionally requires either a
-batched `read` call or a turn coissuing multiple direct reads, plus at least one
-turn that coissues independent repository lookups.
+step names are ignored. Candidate adoption additionally requires a turn
+coissuing multiple direct reads, plus at least one turn that coissues independent
+repository lookups.
 `unknown_path_discovery` supplies only a root, recognizes successful scoped
 `rg --files` or `find` discovery through `shell` before any read, and requires
-successful batched or coissued reads of the first and last discovered paths,
+successful coissued reads of the first and last discovered paths,
 requested marker evidence, and an unchanged fixture. The v11 oracle records successful `read` paths, direct read operations,
 coissued read/lookup turns, shell `rg` query counts, and the exact shell
 discovery/search contracts needed by these fixtures. It does not consume the
@@ -196,7 +196,7 @@ The standalone `read_scale_*` ladder isolates known-path reading from the search
 and command subcontracts. It supplies 2, 8, 18, 36, or 72 one-line files,
 requires every path to be covered successfully through direct `read` calls,
 checks first/middle/last marker evidence and fixture preservation, and
-counts adoption only when successful batched or coissued calls cover every
+counts adoption only when successful coissued calls cover every
 fixture path. Run these cases separately rather than through the
 tool-accuracy suite when comparing read interfaces across increasing tool-call
 fan-out.
@@ -418,7 +418,7 @@ throttle is still unsupported: Terra and V4 Flash were search-heavy winners,
 while several regressors issued fewer searches than their baselines. The v7
 unknown-path adoption metric also undercounts valid direct coissuing: Sonnet
 issued two `read` calls together in one turn, but the historical metric recognized
-only one `read paths[]` call.
+only the removed multi-path read form.
 
 A shared-search-batch candidate (`cdce7da`, immediate-parent baseline
 `eb8c32f`) then ran the same eight-model, three-case matrix under the v8 oracle:

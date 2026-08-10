@@ -76,10 +76,7 @@ type metrics struct {
 	DirectReadPaths               []string       `json:"direct_read_paths,omitempty"`
 	SuccessfulReadPaths           []string       `json:"successful_read_paths,omitempty"`
 	SuccessfulDirectReadPaths     []string       `json:"successful_direct_read_paths,omitempty"`
-	SuccessfulBatchedReadPaths    []string       `json:"successful_batched_read_paths,omitempty"`
 	SuccessfulCoissuedReadPaths   []string       `json:"successful_coissued_read_paths,omitempty"`
-	BatchedReadCalls              int            `json:"batched_read_calls"`
-	SuccessfulBatchedReadCalls    int            `json:"successful_batched_read_calls"`
 	CoissuedReadTurns             int            `json:"coissued_read_turns"`
 	SuccessfulCoissuedReadTurns   int            `json:"successful_coissued_read_turns"`
 	CoissuedLookupTurns           int            `json:"coissued_lookup_turns"`
@@ -97,8 +94,8 @@ type turnTools struct {
 }
 
 type directReadStart struct {
-	Turn  int
-	Paths []string
+	Turn int
+	Path string
 }
 
 func collectMetrics(sessionDir string) (metrics, error) {
@@ -152,14 +149,12 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 		if ev.Type == session.EventToolResult {
 			if start, ok := readStarts[ev.ToolID]; !ev.ResultError && ev.Tool == "read" && ok {
-				m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, start.Paths...)
-				m.SuccessfulDirectReadPaths = append(m.SuccessfulDirectReadPaths, start.Paths...)
-				successfulReadCallsByTurn[start.Turn]++
-				successfulReadPathsByTurn[start.Turn] = append(successfulReadPathsByTurn[start.Turn], start.Paths...)
-				if len(start.Paths) > 1 {
-					m.SuccessfulBatchedReadCalls++
-					m.SuccessfulBatchedReadPaths = append(m.SuccessfulBatchedReadPaths, start.Paths...)
+				if start.Path != "" {
+					m.SuccessfulReadPaths = append(m.SuccessfulReadPaths, start.Path)
+					m.SuccessfulDirectReadPaths = append(m.SuccessfulDirectReadPaths, start.Path)
+					successfulReadPathsByTurn[start.Turn] = append(successfulReadPathsByTurn[start.Turn], start.Path)
 				}
+				successfulReadCallsByTurn[start.Turn]++
 			}
 			delete(readStarts, ev.ToolID)
 			if discoveryStarts[ev.ToolID] && successfulDiscoveryResult(ev) {
@@ -181,13 +176,12 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		switch ev.Tool {
 		case "read":
 			m.DirectReadCalls++
-			paths := readPaths(ev.Input)
-			m.DirectReadOperations += len(paths)
-			m.DirectReadPaths = append(m.DirectReadPaths, paths...)
-			readStarts[ev.ToolID] = directReadStart{Turn: ev.Turn, Paths: paths}
-			if len(paths) > 1 {
-				m.BatchedReadCalls++
+			path := readPath(ev.Input)
+			if path != "" {
+				m.DirectReadOperations++
+				m.DirectReadPaths = append(m.DirectReadPaths, path)
 			}
+			readStarts[ev.ToolID] = directReadStart{Turn: ev.Turn, Path: path}
 			if discoverySucceeded {
 				m.DiscoveryBeforeRead = true
 			} else {
@@ -661,22 +655,14 @@ func normalizeFixturePath(input string) string {
 	return clean
 }
 
-func readPaths(raw json.RawMessage) []string {
+func readPath(raw json.RawMessage) string {
 	var input struct {
-		Path  string   `json:"path"`
-		Paths []string `json:"paths"`
+		Path string `json:"path"`
 	}
-	if json.Unmarshal(raw, &input) != nil {
-		return nil
+	if json.Unmarshal(raw, &input) != nil || input.Path == "" {
+		return ""
 	}
-	paths := append([]string(nil), input.Paths...)
-	if input.Path != "" {
-		paths = append(paths, input.Path)
-	}
-	for i := range paths {
-		paths[i] = normalizeFixturePath(paths[i])
-	}
-	return paths
+	return normalizeFixturePath(input.Path)
 }
 
 func successfulDriftReread(events []session.Event) bool {
@@ -707,13 +693,7 @@ func toolReadsPath(tool string, raw json.RawMessage, want string) bool {
 	if tool != "read" {
 		return false
 	}
-	paths := readPaths(raw)
-	for _, candidate := range paths {
-		if normalizeFixturePath(candidate) == want {
-			return true
-		}
-	}
-	return false
+	return readPath(raw) == want
 }
 
 type editRecoveryState struct {

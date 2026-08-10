@@ -215,9 +215,6 @@ func (s *Sink) TurnProgress(p agent.TurnProgress) {
 	if p.Operations > 0 {
 		s.exp.RecordHistogram("harness.operations_per_turn", "{operation}", float64(p.Operations), s.baseAttrs(map[string]string{"activity_class": ac}), []float64{1, 2, 3, 4, 8, 16, 32})
 	}
-	if p.BatchedOperationCount > 0 {
-		s.exp.RecordSum("harness.batched_operations", "{operation}", int64(p.BatchedOperationCount), s.baseAttrs(map[string]string{"tool": "read"}))
-	}
 	if p.SingleLookupCount == 1 && p.ToolCalls == 1 {
 		s.exp.RecordSum("harness.single_lookup_turns", "{turn}", 1, s.baseAttrs(nil))
 	}
