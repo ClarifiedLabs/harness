@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"harness/internal/tools"
 )
 
 func runUpdate(t *testing.T, tool *Tool, todos []Item) (string, error) {
@@ -72,6 +74,18 @@ func TestUpdateTodosRejectsInvalidListWithoutMutation(t *testing.T) {
 func TestUpdateTodosDescriptionFitsBudget(t *testing.T) {
 	if got := len((&Tool{store: NewStore()}).Description()); got > 80 {
 		t.Fatalf("update_todos description = %d bytes, budget 80", got)
+	}
+}
+
+func TestUpdateTodosPreservesSchemaDescriptions(t *testing.T) {
+	tool := NewTool(NewStore())
+	if !tool.PreserveSchemaDescriptions() {
+		t.Fatal("update_todos must opt into schema descriptions")
+	}
+	registry := &tools.Registry{}
+	registry.Register(tool)
+	if parameters := string(registry.Specs()[0].Parameters); !strings.Contains(parameters, `"description":"Complete replacement list."`) {
+		t.Fatalf("model-facing schema lost parameter description: %s", parameters)
 	}
 }
 

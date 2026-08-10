@@ -5152,7 +5152,7 @@ func TestRunREPLLSPToggleChangesModelToolSurfaceAndHint(t *testing.T) {
 		t.Fatalf("disabled request retained LSP runtime hint: %q", secondSystem)
 	}
 	for _, spec := range fp.Requests[0].Tools {
-		if spec.Name == "lsp_definition" && !strings.Contains(string(spec.Parameters), `"description":"1-based line number`) {
+		if spec.Name == "lsp_definition" && !strings.Contains(string(spec.Parameters), `"description":"1-based`) {
 			t.Fatalf("LSP schema guidance not disclosed to model: %s", spec.Parameters)
 		}
 	}

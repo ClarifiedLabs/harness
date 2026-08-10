@@ -26,10 +26,10 @@ var webFetchTimeoutUnit = time.Second
 const webFetchBackgroundSchema = `{
   "type": "object",
   "properties": {
-    "url": {"type": "string", "description": "Absolute http or https URL to fetch."},
-    "max_bytes": {"type": "integer", "description": "Maximum response bytes to read (default 256KB, cap 5MB)."},
-    "timeout_seconds": {"type": "integer", "description": "Maximum time to wait for the fetch, in seconds (default 30; no maximum)."},
-    "background": {"type": "boolean", "description": "When true, start the fetch as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."}
+    "url": {"type": "string", "description": "Absolute HTTP(S) URL."},
+    "max_bytes": {"type": "integer", "description": "Default: 256KB; maximum: 5MB."},
+    "timeout_seconds": {"type": "integer", "description": "Default: 30s; no maximum."},
+    "background": {"type": "boolean", "description": "Returns a job ID; dependents should wait once via background_jobs."}
   },
   "required": ["url"]
 }`
@@ -37,9 +37,9 @@ const webFetchBackgroundSchema = `{
 const webFetchSchema = `{
   "type": "object",
   "properties": {
-    "url": {"type": "string", "description": "Absolute http or https URL to fetch."},
-    "max_bytes": {"type": "integer", "description": "Maximum response bytes to read (default 256KB, cap 5MB)."},
-    "timeout_seconds": {"type": "integer", "description": "Maximum time to wait for the fetch, in seconds (default 30; no maximum)."}
+    "url": {"type": "string", "description": "Absolute HTTP(S) URL."},
+    "max_bytes": {"type": "integer", "description": "Default: 256KB; maximum: 5MB."},
+    "timeout_seconds": {"type": "integer", "description": "Default: 30s; no maximum."}
   },
   "required": ["url"]
 }`
@@ -58,6 +58,8 @@ func (t webFetch) Schema() json.RawMessage {
 	}
 	return json.RawMessage(webFetchSchema)
 }
+
+func (webFetch) PreserveSchemaDescriptions() bool { return true }
 
 // web_fetch issues a GET and mutates no workspace state.
 func (webFetch) ReadOnly(json.RawMessage) bool { return true }

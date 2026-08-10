@@ -20,25 +20,25 @@ import (
 const editSchema = `{
   "type": "object",
   "properties": {
-	"path": {"type": "string", "description": "Compatibility shorthand only when files has exactly one entry without its own path."},
+    "path": {"type": "string", "description": "Single-entry compatibility shorthand."},
     "files": {
       "type": "array",
       "minItems": 1,
-      "description": "Files to edit. A path may appear more than once; repeated entries apply in order against the earlier entries' results. All edits within one entry are matched against the same base content.",
+      "description": "Applied in order; duplicate paths see prior results. One entry shares a base.",
       "items": {
         "type": "object",
         "properties": {
-          "path": {"type": "string", "description": "File to edit; must already exist (use write to create)."},
+          "path": {"type": "string", "description": "Must exist."},
           "edits": {
             "type": "array",
             "minItems": 1,
-            "description": "One or more targeted replacements. Each oldText must be unique in the original file and edits must not overlap, unless replaceAll is set.",
+            "description": "Non-overlapping replacements against the entry base.",
             "items": {
               "type": "object",
               "properties": {
-                "oldText": {"type": "string", "description": "Exact text to replace. Must be unique in the original file unless replaceAll is true."},
-                "newText": {"type": "string", "description": "Replacement text; empty string deletes oldText."},
-                "replaceAll": {"type": "boolean", "description": "When true, replace every occurrence of oldText instead of requiring a unique match (default false)."}
+                "oldText": {"type": "string", "description": "Must be unique unless replaceAll."},
+                "newText": {"type": "string", "description": "Empty deletes."},
+                "replaceAll": {"type": "boolean", "description": "Replace every match; default false."}
               },
               "required": ["oldText", "newText"],
               "additionalProperties": false
@@ -120,6 +120,8 @@ func (edit) Name() string { return "edit" }
 func (edit) Description() string { return "Replace exact unique oldText; the file must already exist." }
 
 func (edit) Schema() json.RawMessage { return json.RawMessage(editSchema) }
+
+func (edit) PreserveSchemaDescriptions() bool { return true }
 
 func (edit) ReadOnly(json.RawMessage) bool { return false }
 

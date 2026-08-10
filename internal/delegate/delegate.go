@@ -1682,7 +1682,7 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 	if maxTurns <= 0 {
 		maxTurns = DefaultMaxTurns
 	}
-	agentDescription := "Agent; defaults to the current one."
+	agentDescription := "Agent; default: current."
 	agentNames := make([]string, 0, len(agents))
 	if len(agents) > 0 {
 		var catalog strings.Builder
@@ -1706,36 +1706,36 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 	properties := map[string]any{
 		"task": map[string]any{
 			"type":        "string",
-			"description": "Self-contained child prompt: objective, scope, constraints, report, and verification.",
+			"description": "Self-contained objective, scope, constraints, and expected report.",
 		},
 		"agent": agent,
 		"mode": map[string]any{
 			"type":        "string",
 			"enum":        []string{ModeImplementation},
-			"description": "Optional implementation mode for scoped mutating work; instructs the child to implement, verify, and report an exact handoff. Omit for exploration and review.",
+			"description": "Use for scoped mutating work; omit for exploration or review.",
 		},
 		"max_turns": map[string]any{
 			"type":        "integer",
 			"minimum":     1,
 			"maximum":     maxTurns,
-			"description": fmt.Sprintf("Optional turn budget; defaults to and cannot exceed the configured maximum of %d.", maxTurns),
+			"description": fmt.Sprintf("Default and maximum: %d.", maxTurns),
 		},
 		"continue_child_id": map[string]any{
 			"type":        "string",
-			"description": "Optional terminal sibling child ID to continue in a fresh child. Harness requires the same parent, agent, mode, turn budget, and runtime fingerprint plus resumable state below the context-pressure limit.",
+			"description": "Terminal sibling ID; must match prior runtime settings.",
 		},
 		"background": map[string]any{
 			"type":        "boolean",
-			"description": "Only independent, non-overlapping work while parent work remains; Harness joins automatically, so do not poll or duplicate.",
+			"description": "Only independent work; joined automatically.",
 		},
 		"scope": map[string]any{
 			"type":        "string",
-			"description": "Background-only workspace path scope. Defaults to the process cwd; give mutating sibling delegates distinct paths so they can run concurrently.",
+			"description": "Background workspace; default: cwd. Separate concurrent write scopes.",
 		},
 		"access": map[string]any{
 			"type":        "string",
 			"enum":        []string{tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive},
-			"description": "Background-only lease access. Defaults from the selected agent (explore/plan read_only; auto/independent exclusive); override only when the task contract is stricter.",
+			"description": "Background lease; defaults by agent. Override only when stricter.",
 		},
 	}
 	body := map[string]any{

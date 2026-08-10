@@ -17,20 +17,20 @@ const gitSchema = `{
       "type": "array",
       "items": {"type": "string"},
       "minItems": 1,
-      "description": "Arguments after \"git\". Must be a JSON array of strings, e.g. [\"status\",\"--porcelain\"], not a string or JSON-encoded array."
+      "description": "Literal arguments after git."
     },
     "workflow": {
       "type": "string",
       "enum": ["workspace_summary", "commit"],
-      "description": "Run a structured workspace survey or explicit-path commit. Mutually exclusive with args."
+      "description": "Structured survey or explicit-path commit; excludes args."
     },
-    "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
+    "cwd": {"type": "string", "description": "Default: process cwd."},
     "paths": {
       "type": "array",
       "items": {"type": "string"},
       "minItems": 1,
       "maxItems": 100,
-      "description": "Exact repository-relative file or directory paths for workflow commit; a directory stages and commits everything beneath it; '.', globs, and pathspec magic are rejected."
+      "description": "Commit paths; repository-relative, without globs or pathspec magic."
     },
     "message": {"type": "string", "description": "Conventional commit message for workflow commit."}
   }
@@ -68,6 +68,8 @@ func (gitTool) Name() string { return "git" }
 func (gitTool) Description() string { return "Run git without a shell or pager; args[] or a workflow." }
 
 func (gitTool) Schema() json.RawMessage { return json.RawMessage(gitSchema) }
+
+func (gitTool) PreserveSchemaDescriptions() bool { return true }
 
 func (gitTool) ReadOnly(input json.RawMessage) bool {
 	gi, err := decodeGitArgs(input)

@@ -177,9 +177,9 @@ type BackgroundJobStarter interface {
 	StartBackgroundJob(BackgroundJobRequest) (BackgroundJobInfo, error)
 }
 
-// SchemaDescriptionPreserver is an optional tool capability for the rare case
-// where JSON-schema field descriptions carry essential dynamic model-facing
-// metadata. Most tools omit it so Registry.Specs strips those descriptions.
+// SchemaDescriptionPreserver is an optional tool capability for concise,
+// model-facing JSON-schema field guidance. First-party tools opt in; adapters
+// for external schemas omit it so Registry.Specs strips unbounded prose.
 type SchemaDescriptionPreserver interface {
 	PreserveSchemaDescriptions() bool
 }

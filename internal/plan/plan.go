@@ -62,12 +62,14 @@ func (*Tool) Description() string {
 	return "Record a complete implementation plan for handoff to an implementation agent."
 }
 
+func (*Tool) PreserveSchemaDescriptions() bool { return true }
+
 func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "title": {"type": "string", "description": "Short plan title."},
-    "plan": {"type": "string", "description": "Self-contained implementation plan in Markdown."}
+    "title": {"type": "string", "description": "Short title."},
+    "plan": {"type": "string", "description": "Self-contained Markdown implementation plan."}
   },
   "required": ["title", "plan"]
 }`)

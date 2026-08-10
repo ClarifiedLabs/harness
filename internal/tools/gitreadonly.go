@@ -14,9 +14,9 @@ const gitReadonlySchema = `{
       "type": "array",
       "items": {"type": "string"},
       "minItems": 1,
-      "description": "Arguments after \"git\"; the first must be an allowed restricted subcommand. Must be a JSON array of strings, e.g. [\"log\",\"--oneline\"], not a string or JSON-encoded array."
+      "description": "First item must be an allowed read-only subcommand."
     },
-    "cwd": {"type": "string", "description": "Working directory (default: process cwd)."}
+    "cwd": {"type": "string", "description": "Default: process cwd."}
   },
   "required": ["args"]
 }`
@@ -72,6 +72,8 @@ func (gitReadonly) Name() string { return "git_readonly" }
 func (gitReadonly) Description() string { return "Read-only git queries only; no shell or pager." }
 
 func (gitReadonly) Schema() json.RawMessage { return json.RawMessage(gitReadonlySchema) }
+
+func (gitReadonly) PreserveSchemaDescriptions() bool { return true }
 
 func (gitReadonly) ReadOnly(json.RawMessage) bool { return true }
 

@@ -76,6 +76,18 @@ func TestBackgroundJobsToolDescriptionFitsBudget(t *testing.T) {
 	}
 }
 
+func TestBackgroundJobsPreservesSchemaDescriptions(t *testing.T) {
+	tool := NewJobsTool(nil)
+	if !tool.PreserveSchemaDescriptions() {
+		t.Fatal("background_jobs must opt into schema descriptions")
+	}
+	registry := &tools.Registry{}
+	registry.Register(tool)
+	if parameters := string(registry.Specs()[0].Parameters); !strings.Contains(parameters, `"description":"Default: list. Use wait, not polling, when completion matters."`) {
+		t.Fatalf("model-facing schema lost parameter description: %s", parameters)
+	}
+}
+
 type recordingArchiver struct {
 	result llm.ToolResult
 }

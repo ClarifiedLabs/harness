@@ -93,6 +93,16 @@ func TestRecordPlanDescriptionFitsBudget(t *testing.T) {
 	}
 }
 
+func TestRecordPlanPreservesSchemaDescriptions(t *testing.T) {
+	tool := NewTool(NewStore(), nil)
+	if !tool.PreserveSchemaDescriptions() {
+		t.Fatal("record_plan must opt into schema descriptions")
+	}
+	if schema := string(tool.Schema()); !strings.Contains(schema, `"description": "Self-contained Markdown implementation plan."`) {
+		t.Fatalf("schema lost parameter description: %s", schema)
+	}
+}
+
 func TestStoreReplaceCopiesLatestPlan(t *testing.T) {
 	store := NewStore()
 	p := &Plan{Title: "original", Path: "/tmp/plan"}

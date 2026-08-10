@@ -1991,21 +1991,28 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
 func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall) (llm.ToolResult, <-chan struct{})
 ```
 
-- **Model-facing descriptions are a single 80-byte functional minimum** (suffix-inclusive via `Registry.Specs`); operational detail lives in schemas, tool errors, and this document. **Schemas are hand-written JSON Schema constants.** `Tool.Schema` remains the
-  implementation contract for tool-owned fields. `Registry.Specs` first removes
-  annotation keywords (`description`, `title`, `$comment`, `example`, `examples`)
-  from actual schema nodes while preserving validation keywords and property names
-  that happen to equal an annotation keyword, then injects the optional positive-
-  integer `_stage` property at the root of every model-facing local function-tool
-  object schema.
+- **Top-level model-facing descriptions are a single 80-byte functional minimum**
+  (suffix-inclusive via `Registry.Specs`). First-party tools also opt into concise
+  parameter descriptions, each at most 80 bytes. Parameter prose is reserved for
+  behavior JSON Schema cannot express directly: defaults, ordering, cross-field
+  exclusions, side effects, units, and selection guidance. It does not restate
+  property names, types, enums, or requiredness. Operational detail lives in tool
+  errors and this document. **Schemas are hand-written JSON Schema constants.**
+  `Tool.Schema` remains the implementation contract for tool-owned fields.
+  `Registry.Specs` removes `description` by default, which bounds arbitrary custom
+  and MCP schemas; first-party tools implement `SchemaDescriptionPreserver` to retain
+  their budgeted guidance. Other annotation keywords (`title`, `$comment`, `example`,
+  `examples`) are always removed from actual schema nodes while validation keywords
+  and property names that happen to equal annotation keywords remain intact. The
+  registry then injects the optional positive-integer `_stage` property at the root
+  of every model-facing local function-tool object schema.
   `_stage` is reserved Harness metadata: a custom, MCP, or LSP schema cannot override
   its root definition, and execution copies are stripped before any tool adapter sees
   them. Provider adapters receive the augmented `Request.Tools` schemas normally and
   do not interpret stages. Provider-hosted `Request.ServerTools` are excluded because
-  they do not use the local registry or scheduler. `delegate` retains `description`
-  because its dynamic
-  compatible-agent catalog is essential. Enums and required-ness still deserve hand
-  tuning, and reflection fights you on exactly those fields.
+  they do not use the local registry or scheduler. `delegate` additionally retains
+  its bounded dynamic compatible-agent catalog. Enums and requiredness still deserve
+  hand tuning, and reflection fights you on exactly those fields.
 - **Tools self-validate args** after `json.Unmarshal` into a private struct (no stdlib
   JSON Schema validator; unknown extra keys are tolerated — models hallucinate them).
 - **Optional execution seams have one strict preference order:** rich, result,

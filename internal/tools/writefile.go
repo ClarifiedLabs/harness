@@ -12,8 +12,8 @@ import (
 const writeFileSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path to create or overwrite."},
-    "content": {"type": "string", "description": "Full file content (empty allowed)."}
+    "path": {"type": "string", "description": "Destination file."},
+    "content": {"type": "string", "description": "Complete content; empty allowed."}
   },
   "required": ["path", "content"]
 }`
@@ -27,6 +27,8 @@ func (writeFile) Description() string {
 }
 
 func (writeFile) Schema() json.RawMessage { return json.RawMessage(writeFileSchema) }
+
+func (writeFile) PreserveSchemaDescriptions() bool { return true }
 
 func (writeFile) ReadOnly(json.RawMessage) bool { return false }
 

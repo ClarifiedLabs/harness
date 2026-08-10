@@ -502,6 +502,75 @@ func TestBuiltInToolDescriptionsFitBudget(t *testing.T) {
 	}
 }
 
+func TestFirstPartySchemasPreserveConciseDescriptions(t *testing.T) {
+	catalog, _ := CatalogWithOptions(Options{Background: &fakeBackgroundStarter{}})
+	catalog.Register(NewHandoff(nil, nil, true, nil))
+	specs := make(map[string]llm.ToolSchema)
+	for _, spec := range catalog.Specs() {
+		specs[spec.Name] = spec
+	}
+
+	totalDescriptionBytes := 0
+	for _, name := range catalog.order {
+		tool := catalog.tools[name]
+		preserver, ok := tool.(SchemaDescriptionPreserver)
+		if !ok || !preserver.PreserveSchemaDescriptions() {
+			t.Errorf("%s does not opt into schema descriptions", name)
+			continue
+		}
+		rawDescriptions := collectSchemaDescriptions(t, tool.Schema())
+		modelDescriptions := collectSchemaDescriptions(t, specs[name].Parameters)
+		if len(rawDescriptions) == 0 {
+			t.Errorf("%s has no parameter descriptions", name)
+		}
+		if !slices.Equal(rawDescriptions, modelDescriptions) {
+			t.Errorf("%s model descriptions = %q, want %q", name, modelDescriptions, rawDescriptions)
+		}
+		for _, description := range rawDescriptions {
+			totalDescriptionBytes += len(description)
+			if len(description) > 80 {
+				t.Errorf("%s parameter description = %d bytes, budget 80: %q", name, len(description), description)
+			}
+			if strings.Contains(description, "\n") {
+				t.Errorf("%s parameter description is not one line: %q", name, description)
+			}
+		}
+	}
+	if totalDescriptionBytes > 1800 {
+		t.Errorf("first-party parameter descriptions = %d bytes, budget 1800", totalDescriptionBytes)
+	}
+}
+
+func collectSchemaDescriptions(t *testing.T, raw json.RawMessage) []string {
+	t.Helper()
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatalf("schema JSON: %v", err)
+	}
+	var descriptions []string
+	var walk func(any)
+	walk = func(value any) {
+		switch value := value.(type) {
+		case map[string]any:
+			if description, ok := value["description"].(string); ok {
+				descriptions = append(descriptions, description)
+			}
+			for key, child := range value {
+				if key != "description" {
+					walk(child)
+				}
+			}
+		case []any:
+			for _, child := range value {
+				walk(child)
+			}
+		}
+	}
+	walk(value)
+	slices.Sort(descriptions)
+	return descriptions
+}
+
 func TestDispatchPreservesMeteredToolUsage(t *testing.T) {
 	r := &Registry{}
 	r.Register(meteredFakeTool{

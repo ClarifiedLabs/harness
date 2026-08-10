@@ -83,17 +83,19 @@ func (*Tool) Description() string {
 	return "Replace the whole advisory TODO list; one in_progress at most."
 }
 
+func (*Tool) PreserveSchemaDescriptions() bool { return true }
+
 func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
     "todos": {
       "type": "array",
-      "description": "The complete replacement TODO list.",
+      "description": "Complete replacement list.",
       "items": {
         "type": "object",
         "properties": {
-          "step": {"type": "string", "description": "Concise action."},
+          "step": {"type": "string", "description": "Action to complete."},
           "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}
         },
         "required": ["step", "status"]

@@ -12,8 +12,8 @@ import (
 const viewImageSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Local PNG, JPEG, WebP, or non-animated GIF path to attach."},
-    "detail": {"type": "string", "enum": ["auto", "low", "high", "original"], "description": "Image detail level (default high)."}
+    "path": {"type": "string", "description": "Local image path."},
+    "detail": {"type": "string", "enum": ["auto", "low", "high", "original"], "description": "Default: high."}
   },
   "required": ["path"]
 }`
@@ -27,9 +27,13 @@ type viewImageArgs struct {
 
 func (viewImage) Name() string { return "view_image" }
 
-func (viewImage) Description() string { return "Attach a local PNG, JPEG, WebP, or GIF image to inspect." }
+func (viewImage) Description() string {
+	return "Attach a local PNG, JPEG, WebP, or GIF image to inspect."
+}
 
 func (viewImage) Schema() json.RawMessage { return json.RawMessage(viewImageSchema) }
+
+func (viewImage) PreserveSchemaDescriptions() bool { return true }
 
 func (viewImage) ReadOnly(json.RawMessage) bool { return true }
 

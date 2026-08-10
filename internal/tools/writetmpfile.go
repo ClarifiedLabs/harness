@@ -13,8 +13,8 @@ import (
 const writeTmpFileSchema = `{
   "type": "object",
   "properties": {
-    "name": {"type": "string", "description": "Relative file name under this run's private temp directory, e.g. \"plan.md\" or \"notes/draft.md\"."},
-    "content": {"type": "string", "description": "Full file content (empty allowed)."}
+    "name": {"type": "string", "description": "Relative path in this run's temp directory."},
+    "content": {"type": "string", "description": "Complete content; empty allowed."}
   },
   "required": ["name", "content"]
 }`
@@ -34,9 +34,13 @@ func newWriteTmpFile() *writeTmpFile { return &writeTmpFile{} }
 
 func (*writeTmpFile) Name() string { return "write_tmp_file" }
 
-func (*writeTmpFile) Description() string { return "Write a scratch file in this run's temp dir; returns its path." }
+func (*writeTmpFile) Description() string {
+	return "Write a scratch file in this run's temp dir; returns its path."
+}
 
 func (*writeTmpFile) Schema() json.RawMessage { return json.RawMessage(writeTmpFileSchema) }
+
+func (*writeTmpFile) PreserveSchemaDescriptions() bool { return true }
 
 func (*writeTmpFile) ReadOnly(json.RawMessage) bool { return false }
 

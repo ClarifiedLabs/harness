@@ -57,10 +57,10 @@ type toolSpec struct {
 const positionSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "line": {"type": "integer", "description": "1-based line number the symbol is on."},
-    "symbol": {"type": "string", "description": "The identifier text on that line to locate (preferred; avoids column math)."},
-    "column": {"type": "integer", "description": "Optional 1-based column override to use when symbol is absent or repeated."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based coordinate containing the target."},
+    "symbol": {"type": "string", "description": "Identifier text preferred; avoids column math."},
+    "column": {"type": "integer", "description": "1-based override when the identifier is absent or repeated."}
   },
   "required": ["path", "line"]
 }`
@@ -96,12 +96,12 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "line": {"type": "integer", "description": "1-based line number the symbol is on."},
-    "symbol": {"type": "string", "description": "The identifier text on that line to locate."},
-    "column": {"type": "integer", "description": "Optional 1-based column override when symbol is absent or repeated."},
-    "include_declaration": {"type": "boolean", "description": "Include the declaration itself (default true)."},
-    "max_results": {"type": "integer", "description": "Maximum references to return (default 100)."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based coordinate containing the target."},
+    "symbol": {"type": "string", "description": "Identifier text preferred; avoids column math."},
+    "column": {"type": "integer", "description": "1-based override when the identifier is absent or repeated."},
+    "include_declaration": {"type": "boolean", "description": "Defaults to true."},
+    "max_results": {"type": "integer", "description": "Defaults to 100."}
   },
   "required": ["path", "line"]
 }`,
@@ -125,11 +125,11 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "line": {"type": "integer", "description": "1-based line number at the completion position."},
-    "column": {"type": "integer", "description": "Optional 1-based column; defaults to the start of the line."},
-    "symbol": {"type": "string", "description": "Optional prefix text on the line; the completion cursor is placed immediately after it."},
-    "max_results": {"type": "integer", "description": "Maximum candidates to return (default 100)."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based completion coordinate."},
+    "column": {"type": "integer", "description": "1-based; defaults to the start of the line."},
+    "symbol": {"type": "string", "description": "Places the cursor immediately after this prefix."},
+    "max_results": {"type": "integer", "description": "Defaults to 100."}
   },
   "required": ["path", "line"]
 }`,
@@ -147,7 +147,7 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."}
   },
   "required": ["path"]
 }`,
@@ -159,9 +159,9 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "query": {"type": "string", "description": "Symbol name or fragment to search for."},
-    "path": {"type": "string", "description": "Any file in the target project, used to pick the language server/workspace."},
-    "max_results": {"type": "integer", "description": "Maximum symbols to return (default 100)."}
+    "query": {"type": "string", "description": "Name or fragment to match."},
+    "path": {"type": "string", "description": "Selects the target language server and workspace."},
+    "max_results": {"type": "integer", "description": "Defaults to 100."}
   },
   "required": ["query"]
 }`,
@@ -173,8 +173,8 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "timeout_ms": {"type": "integer", "description": "How long to wait for the server to publish diagnostics (default 3000)."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "timeout_ms": {"type": "integer", "description": "Wait for pushed diagnostics; defaults to 3000 ms."}
   },
   "required": ["path"]
 }`,
@@ -186,12 +186,12 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "line": {"type": "integer", "description": "1-based line number the callable is on."},
-    "symbol": {"type": "string", "description": "Callable identifier text on that line."},
-    "column": {"type": "integer", "description": "Optional 1-based column override."},
-    "direction": {"type": "string", "enum": ["incoming", "outgoing"], "description": "Whether to return callers or callees."},
-    "max_results": {"type": "integer", "description": "Maximum calls to return (default 100)."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based coordinate containing the callable."},
+    "symbol": {"type": "string", "description": "Identifier text preferred; avoids column math."},
+    "column": {"type": "integer", "description": "1-based override when the identifier is absent or repeated."},
+    "direction": {"type": "string", "enum": ["incoming", "outgoing"], "description": "Chooses which side of the call graph to return."},
+    "max_results": {"type": "integer", "description": "Defaults to 100."}
   },
   "required": ["path", "line", "direction"]
 }`,
@@ -203,12 +203,12 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "line": {"type": "integer", "description": "1-based line number the type is on."},
-    "symbol": {"type": "string", "description": "Type identifier text on that line."},
-    "column": {"type": "integer", "description": "Optional 1-based column override."},
-    "direction": {"type": "string", "enum": ["supertypes", "subtypes"], "description": "Which side of the type hierarchy to return."},
-    "max_results": {"type": "integer", "description": "Maximum types to return (default 100)."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based coordinate containing the target."},
+    "symbol": {"type": "string", "description": "Identifier text preferred; avoids column math."},
+    "column": {"type": "integer", "description": "1-based override when the identifier is absent or repeated."},
+    "direction": {"type": "string", "enum": ["supertypes", "subtypes"], "description": "Chooses which side of the hierarchy to return."},
+    "max_results": {"type": "integer", "description": "Defaults to 100."}
   },
   "required": ["path", "line", "direction"]
 }`,
@@ -220,10 +220,10 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "start_line": {"type": "integer", "description": "Optional 1-based inclusive start line; omit both bounds for the whole file."},
-    "end_line": {"type": "integer", "description": "Optional 1-based inclusive end line."},
-    "max_results": {"type": "integer", "description": "Maximum hints to return (default 100)."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "start_line": {"type": "integer", "description": "1-based inclusive bound; omit both bounds for the whole file."},
+    "end_line": {"type": "integer", "description": "1-based inclusive bound."},
+    "max_results": {"type": "integer", "description": "Defaults to 100."}
   },
   "required": ["path"]
 }`,
@@ -257,11 +257,11 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "line": {"type": "integer", "description": "1-based line number the symbol is on."},
-    "symbol": {"type": "string", "description": "The identifier text on that line to rename."},
-    "column": {"type": "integer", "description": "Optional 1-based column override when symbol is absent or repeated."},
-    "new_name": {"type": "string", "description": "The new name for the symbol."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based coordinate containing the target."},
+    "symbol": {"type": "string", "description": "Identifier text preferred; avoids column math."},
+    "column": {"type": "integer", "description": "1-based override when the identifier is absent or repeated."},
+    "new_name": {"type": "string", "description": "Replacement text sent to the language server."}
   },
   "required": ["path", "line", "new_name"]
 }`,
@@ -273,11 +273,11 @@ var toolSpecs = []toolSpec{
 		schema: `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "line": {"type": "integer", "description": "1-based line number the symbol is on."},
-    "symbol": {"type": "string", "description": "The identifier text on that line to rename."},
-    "column": {"type": "integer", "description": "Optional 1-based column override when symbol is absent or repeated."},
-    "new_name": {"type": "string", "description": "The new name for the symbol."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "line": {"type": "integer", "description": "1-based coordinate containing the target."},
+    "symbol": {"type": "string", "description": "Identifier text preferred; avoids column math."},
+    "column": {"type": "integer", "description": "1-based override when the identifier is absent or repeated."},
+    "new_name": {"type": "string", "description": "Replacement text sent to the language server."}
   },
   "required": ["path", "line", "new_name"]
 }`,
@@ -287,11 +287,11 @@ var toolSpecs = []toolSpec{
 const formattingSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "start_line": {"type": "integer", "description": "Optional 1-based inclusive start line; when set, range formatting is requested."},
-    "end_line": {"type": "integer", "description": "Optional 1-based inclusive end line."},
-    "tab_size": {"type": "integer", "description": "Formatting tab width (default 4)."},
-    "insert_spaces": {"type": "boolean", "description": "Use spaces rather than tabs (default true)."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "start_line": {"type": "integer", "description": "1-based inclusive bound; setting it requests range formatting."},
+    "end_line": {"type": "integer", "description": "1-based inclusive bound."},
+    "tab_size": {"type": "integer", "description": "Defaults to 4 columns."},
+    "insert_spaces": {"type": "boolean", "description": "Defaults to true."}
   },
   "required": ["path"]
 }`
@@ -304,12 +304,12 @@ func codeActionSchema(requireTitle bool) string {
 	return `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path, absolute or relative to the working directory."},
-    "start_line": {"type": "integer", "description": "Optional 1-based inclusive start line; omit both bounds for the whole file."},
-    "end_line": {"type": "integer", "description": "Optional 1-based inclusive end line."},
-    "kind": {"type": "string", "description": "Optional LSP action-kind filter such as quickfix, refactor, or source.organizeImports."},
-    "timeout_ms": {"type": "integer", "description": "Optional time to wait for fresh pushed diagnostics before requesting actions; default 0 uses the latest available diagnostics."},
-    "title": {"type": "string", "description": "Exact offered action title; required only when applying an action."}
+    "path": {"type": "string", "description": "Absolute or relative to the working directory."},
+    "start_line": {"type": "integer", "description": "1-based inclusive bound; omit both bounds for the whole file."},
+    "end_line": {"type": "integer", "description": "1-based inclusive bound."},
+    "kind": {"type": "string", "description": "LSP filter such as quickfix, refactor, or source.organizeImports."},
+    "timeout_ms": {"type": "integer", "description": "Wait for fresh pushed diagnostics; 0 uses the latest available."},
+    "title": {"type": "string", "description": "Must exactly match one offered action when applying."}
   },
   "required": [` + required + `]
 }`

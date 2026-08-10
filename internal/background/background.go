@@ -940,15 +940,17 @@ func (*JobsTool) Description() string {
 	return "Inspect, wait for, or cancel background jobs; wait once, never poll."
 }
 
+func (*JobsTool) PreserveSchemaDescriptions() bool { return true }
+
 func (*JobsTool) Schema() json.RawMessage {
 	return json.RawMessage(`{
   "type": "object",
   "properties": {
-    "action": {"type": "string", "enum": ["list", "get", "wait", "cancel"], "description": "Operation to perform. Use wait, not get/list polling, when later work depends on completion. Defaults to list."},
-    "id": {"type": "string", "description": "Background job id for get, cancel, or a targeted wait. Mutually exclusive with ids."},
-    "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true, "description": "Background job ids for wait. Mutually exclusive with id."},
-    "until": {"type": "string", "enum": ["first", "all"], "description": "Wait completion condition for the stable selected snapshot (default first). Use all to join every selected job."},
-    "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Wait timeout. Omit for ordinary dependency waits (default 120 seconds); do not use a short timeout as a status probe. There is no configured maximum."}
+    "action": {"type": "string", "enum": ["list", "get", "wait", "cancel"], "description": "Default: list. Use wait, not polling, when completion matters."},
+    "id": {"type": "string", "description": "One job for get/cancel/wait; excludes ids."},
+    "ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "uniqueItems": true, "description": "Jobs for wait; excludes id."},
+    "until": {"type": "string", "enum": ["first", "all"], "description": "Default: first; all waits for every selected job."},
+    "timeout_seconds": {"type": "integer", "minimum": 1, "description": "Default: 120s; no maximum. Do not use for polling."}
   }
 }`)
 }

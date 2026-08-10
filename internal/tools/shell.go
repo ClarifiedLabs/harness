@@ -96,32 +96,32 @@ const shellSchemaFmt = `{
       "type": "array",
       "items": {"type": "string"},
       "minItems": 1,
-      "description": "Program and arguments to run directly without a shell. Must be a JSON array of strings, e.g. [\"go\",\"test\",\"./...\"], not a shell string or JSON-encoded array. argv[0] is resolved via PATH; remaining items are passed literally."
+      "description": "Direct exec with literal arguments; prefer over command."
     },
-    "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
+    "command": {"type": "string", "description": "Use only when shell syntax is needed."},
     "steps": {
       "type": "array",
       "minItems": 1,
       "maxItems": 16,
-      "description": "Ordered commands to run serially. Use for related build, format, lint, and test verification. Mutually exclusive with top-level command/argv/stdin and unavailable in background mode.",
+      "description": "Serial commands; excludes top-level argv/command/stdin and background.",
       "items": {
         "type": "object",
         "properties": {
-          "name": {"type": "string", "description": "Concise receipt label; defaults to step N."},
-          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and literal arguments to run directly."},
-          "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
-          "stdin": {"type": "string", "description": "Written to this step's standard input."},
-          "cwd": {"type": "string", "description": "Working directory override for this step."},
-          "timeout_seconds": {"type": "integer", "description": "Timeout override for this step."}
+          "name": {"type": "string", "description": "Default: step N."},
+          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Direct exec with literal arguments."},
+          "command": {"type": "string", "description": "Use only when shell syntax is needed."},
+          "stdin": {"type": "string"},
+          "cwd": {"type": "string"},
+          "timeout_seconds": {"type": "integer"}
         }
       }
     },
-    "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
-    "name": {"type": "string", "description": "Concise command or step-batch label."},
-    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Output policy. For steps, auto and receipt return compact per-step receipts; full returns the combined step transcript."},
-    "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
-    "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
-    "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d; no maximum)."}
+    "stop_on_failure": {"type": "boolean", "description": "Default: true."},
+    "name": {"type": "string"},
+    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "auto/receipt are compact; full returns complete step output."},
+    "stdin": {"type": "string"},
+    "cwd": {"type": "string", "description": "Default: process cwd."},
+    "timeout_seconds": {"type": "integer", "description": "Default: %ds; no maximum."}
   }
 }`
 
@@ -132,39 +132,39 @@ const shellBackgroundSchemaFmt = `{
       "type": "array",
       "items": {"type": "string"},
       "minItems": 1,
-      "description": "Program and arguments to run directly without a shell. Must be a JSON array of strings, e.g. [\"go\",\"test\",\"./...\"], not a shell string or JSON-encoded array. argv[0] is resolved via PATH; remaining items are passed literally."
+      "description": "Direct exec with literal arguments; prefer over command."
     },
-    "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
+    "command": {"type": "string", "description": "Use only when shell syntax is needed."},
     "steps": {
       "type": "array",
       "minItems": 1,
       "maxItems": 16,
-      "description": "Ordered foreground commands to run serially. Mutually exclusive with top-level command/argv/stdin and background:true.",
+      "description": "Serial commands; excludes top-level argv/command/stdin and background.",
       "items": {
         "type": "object",
         "properties": {
-          "name": {"type": "string", "description": "Concise receipt label; defaults to step N."},
-          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and literal arguments to run directly."},
-          "command": {"type": "string", "description": "Shell command line to execute when shell syntax is required; prefer argv otherwise."},
-          "stdin": {"type": "string", "description": "Written to this step's standard input."},
-          "cwd": {"type": "string", "description": "Working directory override for this step."},
-          "timeout_seconds": {"type": "integer", "description": "Timeout override for this step."}
+          "name": {"type": "string", "description": "Default: step N."},
+          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Direct exec with literal arguments."},
+          "command": {"type": "string", "description": "Use only when shell syntax is needed."},
+          "stdin": {"type": "string"},
+          "cwd": {"type": "string"},
+          "timeout_seconds": {"type": "integer"}
         }
       }
     },
-    "stop_on_failure": {"type": "boolean", "description": "Stop after the first non-zero, timed out, cancelled, or unstartable step (default true)."},
-    "name": {"type": "string", "description": "Concise command or step-batch label."},
-    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "Output policy. For steps, auto and receipt return compact per-step receipts; full returns the combined step transcript."},
-    "stdin": {"type": "string", "description": "Written to the command's standard input. Omit for no stdin."},
-    "cwd": {"type": "string", "description": "Working directory (default: process cwd)."},
-    "timeout_seconds": {"type": "integer", "description": "Kill the command after this many seconds (default %d for background; no maximum)."},
-    "background": {"type": "boolean", "description": "When true, start the command as a process-local background job and return a job id immediately. If later work depends on completion, call background_jobs action=wait once; do not poll get/list."},
+    "stop_on_failure": {"type": "boolean", "description": "Default: true."},
+    "name": {"type": "string"},
+    "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "auto/receipt are compact; full returns complete step output."},
+    "stdin": {"type": "string"},
+    "cwd": {"type": "string", "description": "Default: process cwd."},
+    "timeout_seconds": {"type": "integer", "description": "Background default: %ds; no maximum."},
+    "background": {"type": "boolean", "description": "Returns a job ID; dependents should wait once via background_jobs."},
     "background_lease": {
       "type": "object",
-      "description": "Optional scheduling lease for a background job. This coordinates concurrent jobs; it does not restrict command behavior or make the command read-only.",
+      "description": "Scheduling only; does not restrict command behavior.",
       "properties": {
-        "resource_key": {"type": "string", "description": "Coordination resource. Defaults to the canonical cwd."},
-        "access": {"type": "string", "enum": ["read_only", "exclusive"], "description": "Lease sharing mode. Defaults to exclusive; use read_only only when this job will not mutate the coordinated resource."}
+        "resource_key": {"type": "string", "description": "Default: canonical cwd."},
+        "access": {"type": "string", "enum": ["read_only", "exclusive"], "description": "Default: exclusive; read_only only for non-mutating jobs."}
       },
       "additionalProperties": false
     }
@@ -180,6 +180,8 @@ type shell struct {
 func (shell) Name() string { return "shell" }
 
 func (shell) Description() string { return "Run a command or ordered steps; prefer argv." }
+
+func (shell) PreserveSchemaDescriptions() bool { return true }
 
 func (t shell) Schema() json.RawMessage {
 	fg := t.foregroundTimeout

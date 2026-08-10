@@ -45,6 +45,19 @@ func TestDelegateToolDescriptionFitsBudget(t *testing.T) {
 	}
 }
 
+func TestDelegatePreservesConciseSchemaDescriptions(t *testing.T) {
+	tool := NewTool(nil)
+	if !tool.PreserveSchemaDescriptions() {
+		t.Fatal("delegate must opt into schema descriptions")
+	}
+	registry := &tools.Registry{}
+	registry.Register(tool)
+	parameters := string(registry.Specs()[0].Parameters)
+	if !strings.Contains(parameters, `"description":"Only independent work; joined automatically."`) {
+		t.Fatalf("model-facing schema lost parameter description: %s", parameters)
+	}
+}
+
 func TestDelegateSequentialOnlyForValidForegroundCalls(t *testing.T) {
 	tool := &Tool{}
 	if !tool.RequiresSequential(json.RawMessage(`{"task":"inspect"}`)) {

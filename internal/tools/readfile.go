@@ -25,9 +25,9 @@ const readDirectoryCap = 200
 const readFileSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "File path to read."},
-    "offset": {"type": "integer", "description": "1-based starting line."},
-    "limit": {"type": "integer", "description": "Maximum number of lines (default 500)."}
+    "path": {"type": "string", "description": "File or directory."},
+    "offset": {"type": "integer", "description": "First line; 1-based."},
+    "limit": {"type": "integer", "description": "Maximum lines; default 500."}
   },
   "required": ["path"]
 }`
@@ -58,6 +58,8 @@ func (readFile) Description() string {
 }
 
 func (readFile) Schema() json.RawMessage { return json.RawMessage(readFileSchema) }
+
+func (readFile) PreserveSchemaDescriptions() bool { return true }
 
 func (readFile) ReadOnly(json.RawMessage) bool { return true }
 
