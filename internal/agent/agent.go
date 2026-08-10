@@ -1,7 +1,7 @@
 // Package agent runs one user prompt as a loop of turns until the model stops
-// asking for tools, executing each turn's tool calls in emission order
-// (concurrently when eligible via SupportsParallel, best-effort
-// on shared cwd/files; no sandbox) and upholding the transcript
+// asking for tools, executing each turn's tool calls with default parallelism,
+// explicit sequential barriers, and emission-ordered overlapping file mutations
+// (best-effort on shared cwd/files; no sandbox), while upholding the transcript
 // invariant after every mutation (design §8, §4).
 package agent
 
@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -2421,11 +2422,12 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 	return usage, wasted, modelReq.estimate, true
 }
 
-// dispatchCalls runs one turn's tool calls. Consecutive read-only calls
-// dispatch concurrently when tool hooks are inactive; mutating calls remain ordering
-// barriers. Sink events and the returned blocks are in emission order either way,
-// and the sink is only ever called from this goroutine (spec §8). The returned
-// parallel batches record the complete ordered membership of each concurrent island.
+// dispatchCalls runs one turn's tool calls. Ordinary calls form default-parallel
+// scheduling islands; explicit SequentialTool inputs and matching tool hooks are
+// island barriers. Overlapping reported file mutations gain predecessor edges in
+// emission order. Sink events and returned blocks remain ordered, and sink methods
+// are called only from this goroutine (design §8). Parallel metadata records a
+// complete island only when its dependency graph permits actual concurrency.
 func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptID, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
 	blocks := make([]llm.ContentBlock, len(calls))
 	var parallelBatches []llm.ParallelToolBatch
@@ -2439,7 +2441,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 
 	for i := 0; i < len(calls); {
 		if !a.tools.SupportsParallel(calls[i]) || a.hooksHasMatchingHooks(calls[i].Name) {
-			block, usage := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, &richEncodedBytes)
+			block, usage := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, a.hasLaterMutationConflict(calls, i), &richEncodedBytes)
 			blocks[i] = block
 			total = add(total, usage)
 			i++
@@ -2450,72 +2452,171 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		for i < len(calls) && a.tools.SupportsParallel(calls[i]) && !a.hooksHasMatchingHooks(calls[i].Name) {
 			i++
 		}
-		if i-start == 1 {
-			block, usage := a.dispatchSequentialCall(ctx, calls[start], promptID, turnID, sink, &richEncodedBytes)
-			blocks[start] = block
-			total = add(total, usage)
+		batchCalls := calls[start:i]
+		dependencies, concurrent := a.mutationDependencies(batchCalls)
+		if !concurrent {
+			for j, call := range batchCalls {
+				block, usage := a.dispatchSequentialCall(ctx, call, promptID, turnID, sink, a.hasLaterMutationConflict(calls, start+j), &richEncodedBytes)
+				blocks[start+j] = block
+				total = add(total, usage)
+			}
 			continue
 		}
 
-		batchCalls := calls[start:i]
 		batch := llm.ParallelToolBatch{ToolUseIDs: make([]string, len(batchCalls))}
 		for j, call := range batchCalls {
 			batch.ToolUseIDs[j] = call.ID
 		}
 		parallelBatches = append(parallelBatches, batch)
 
-		usage := a.dispatchParallelBatch(ctx, batchCalls, blocks[start:i], sink, &richEncodedBytes)
+		awaitActual := make([]bool, len(batchCalls))
+		for j := range batchCalls {
+			awaitActual[j] = a.hasLaterMutationConflict(calls, start+j)
+		}
+		usage := a.dispatchParallelBatch(ctx, batchCalls, dependencies, awaitActual, blocks[start:i], sink, &richEncodedBytes)
 		total = add(total, usage)
 	}
 	return blocks, parallelBatches, total
+}
+
+// mutationDependencies builds latest-writer edges for normalized mutation keys.
+// The boolean reports whether at least two calls can ever run concurrently.
+func (a *Agent) mutationDependencies(calls []llm.ToolCall) ([][]int, bool) {
+	dependencies := make([][]int, len(calls))
+	latest := make(map[string]int)
+	for i, call := range calls {
+		seenPredecessors := make(map[int]struct{})
+		keys := a.tools.MutationKeys(call)
+		for _, key := range keys {
+			if predecessor, ok := latest[key]; ok {
+				if _, seen := seenPredecessors[predecessor]; !seen {
+					dependencies[i] = append(dependencies[i], predecessor)
+					seenPredecessors[predecessor] = struct{}{}
+				}
+			}
+		}
+		for _, key := range keys {
+			latest[key] = i
+		}
+	}
+	if len(calls) < 2 {
+		return dependencies, false
+	}
+	// With edges only to earlier calls, model order is one complete dependency
+	// chain exactly when every call directly depends on its immediate predecessor.
+	for i := 1; i < len(calls); i++ {
+		if !slices.Contains(dependencies[i], i-1) {
+			return dependencies, true
+		}
+	}
+	return dependencies, false
+}
+
+func (a *Agent) hasLaterMutationConflict(calls []llm.ToolCall, index int) bool {
+	keys := a.tools.MutationKeys(calls[index])
+	if len(keys) == 0 {
+		return false
+	}
+	wanted := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		wanted[key] = struct{}{}
+	}
+	for _, call := range calls[index+1:] {
+		for _, key := range a.tools.MutationKeys(call) {
+			if _, ok := wanted[key]; ok {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (a *Agent) hooksHasMatchingHooks(target string) bool {
 	return a.hooks != nil && a.hooks.HasMatchingHooks(target)
 }
 
-func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, richEncodedBytes *int) (llm.ContentBlock, llm.Usage) {
+func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, awaitActualCompletion bool, richEncodedBytes *int) (llm.ContentBlock, llm.Usage) {
 	startToolProgress(a.tools, call, sink)
 	sink.ToolStart(call)
 	diffState := a.snapshotToolDiff(call)
-	r := a.dispatchOne(ctx, call, promptID, turnID, sink)
+	r, completion := a.dispatchOne(ctx, call, promptID, turnID, sink)
+	if awaitActualCompletion && completion != nil && (r.ErrorKind == llm.ToolErrorTimeout || r.ErrorKind == llm.ToolErrorCancelled) {
+		<-completion
+	}
+	diffEvents := a.captureToolDiff(diffState)
 	r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 	block, usage := a.finishToolResult(r, call.Name, sink)
 	clearToolProgress(call, sink)
-	a.emitToolDiff(call, diffState, sink)
+	emitToolDiff(call, diffEvents, sink)
 	return block, usage
 }
 
-func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
+type scheduledToolResult struct {
+	result     llm.ToolResult
+	diffEvents []toolDiffEvent
+}
+
+func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall, dependencies [][]int, awaitActual []bool, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
 	for _, call := range calls {
 		startToolProgress(a.tools, call, sink)
 		sink.ToolStart(call)
 	}
 
-	results := make([]llm.ToolResult, len(calls))
+	results := make([]scheduledToolResult, len(calls))
+	hasDependents := make([]bool, len(calls))
+	for _, predecessors := range dependencies {
+		for _, predecessor := range predecessors {
+			hasDependents[predecessor] = true
+		}
+	}
+	completed := make([]chan struct{}, len(calls))
+	guardFolded := make([]chan struct{}, len(calls))
+	for i := range completed {
+		completed[i] = make(chan struct{})
+		guardFolded[i] = make(chan struct{})
+	}
 	var wg sync.WaitGroup
 	for i, call := range calls {
 		wg.Add(1)
 		go func(idx int, c llm.ToolCall) {
 			defer wg.Done()
-			results[idx] = a.dispatchTool(ctx, c)
+			defer close(completed[idx])
+			for _, predecessor := range dependencies[idx] {
+				<-completed[predecessor]
+			}
+			diffState := a.snapshotToolDiff(c)
+			result, actualCompletion, foldFailureGuard := a.dispatchTool(ctx, c)
+			if (hasDependents[idx] || awaitActual[idx]) && actualCompletion != nil && (result.ErrorKind == llm.ToolErrorTimeout || result.ErrorKind == llm.ToolErrorCancelled) {
+				<-actualCompletion
+			}
+			// Capture and render after actual completion and before releasing
+			// same-path successors so each mutation retains its own incremental view.
+			results[idx].diffEvents = a.captureToolDiff(diffState)
+			// Failure-guard state and warning text follow emission order rather than
+			// worker completion order. Folding before completed closes also lets a
+			// same-path successor observe a successful mutation's reset.
+			if idx > 0 {
+				<-guardFolded[idx-1]
+			}
+			if foldFailureGuard && a.failGuard != nil {
+				result = a.failGuard.afterCall(a.tools, c, result)
+			}
+			results[idx].result = result
+			close(guardFolded[idx])
 		}(i, call)
 	}
 	wg.Wait()
 
 	var total llm.Usage
-	for i, r := range results {
-		r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
+	for i, scheduled := range results {
+		r := acceptRichResult(scheduled.result, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 		block, usage := a.finishToolResult(r, calls[i].Name, sink)
 		blocks[i] = block
 		clearToolProgress(calls[i], sink)
+		emitToolDiff(calls[i], scheduled.diffEvents, sink)
 		total = add(total, usage)
 	}
 	return total
-}
-
-func (a *Agent) dispatchReadOnlyBatch(ctx context.Context, calls []llm.ToolCall, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
-	return a.dispatchParallelBatch(ctx, calls, blocks, sink, richEncodedBytes)
 }
 
 func safeToolResultForSink(r llm.ToolResult) llm.ToolResult {
@@ -2548,25 +2649,37 @@ func decodedImageSize(data string) int {
 	return n
 }
 
-func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) llm.ToolResult {
+// dispatchTool executes a hook-free call. The boolean asks its caller to fold
+// the result into the failure guard; parallel workers order that fold by emission
+// index so completion timing cannot change guard semantics or warning text.
+func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) (llm.ToolResult, <-chan struct{}, bool) {
+	// Parallel workers bypass dispatchOne because hooks are island barriers, but
+	// malformed streamed calls and Kimi's hosted echo still need the same handling.
+	if call.InvalidInputError != "" {
+		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true, ErrorKind: llm.ToolErrorInvalidArgs}, nil, false
+	}
+	if a.isKimiWebSearchCall(call) {
+		text := strings.TrimSpace(string(call.Input))
+		if text == "" {
+			text = "{}"
+		}
+		return llm.ToolResult{ForID: call.ID, Text: text}, nil, false
+	}
 	if modality, ok := a.tools.RequiredModality(call); ok && !a.registry.SupportsInputModality(a.model, modality) {
 		return llm.ToolResult{
 			ForID:     call.ID,
 			Text:      fmt.Sprintf("tool %q requires %s input, but the current model does not advertise %s support", call.Name, modality, modality),
 			IsError:   true,
 			ErrorKind: llm.ToolErrorUnsupportedModality,
-		}
+		}, nil, false
 	}
 	if g := a.failGuard; g != nil {
 		if res, blocked := g.beforeCall(call); blocked {
-			return res
+			return res, nil, false
 		}
 	}
-	res := a.tools.Dispatch(ctx, call)
-	if g := a.failGuard; g != nil {
-		res = g.afterCall(a.tools, call, res)
-	}
-	return res
+	res, completion := a.tools.DispatchWithCompletion(ctx, call)
+	return res, completion, true
 }
 
 func acceptRichResult(r llm.ToolResult, encodedTotal *int, imageSupported bool) llm.ToolResult {
@@ -2644,6 +2757,12 @@ type toolDiffState struct {
 	before  []diff.Snapshot
 }
 
+type toolDiffEvent struct {
+	path   string
+	text   string
+	notice string
+}
+
 func (a *Agent) snapshotToolDiff(call llm.ToolCall) toolDiffState {
 	if !a.showDiffs {
 		return toolDiffState{}
@@ -2659,35 +2778,49 @@ func (a *Agent) snapshotToolDiff(call llm.ToolCall) toolDiffState {
 	}
 }
 
-func (a *Agent) emitToolDiff(call llm.ToolCall, state toolDiffState, sink EventSink) {
+// captureToolDiff performs all filesystem observation and rendering while the
+// call's dependency slot is still held. EventSink emission remains on the parent.
+func (a *Agent) captureToolDiff(state toolDiffState) []toolDiffEvent {
 	if !state.enabled {
-		return
+		return nil
 	}
 	after := diff.SnapshotPaths(state.paths)
+	var events []toolDiffEvent
 	for _, fd := range diff.RenderSnapshots(state.before, after, diff.Options{}) {
 		switch {
 		case fd.Err != nil:
-			sink.Notice(fmt.Sprintf("[diff: skipped %s: %v]", fd.Path, fd.Err))
+			events = append(events, toolDiffEvent{notice: fmt.Sprintf("[diff: skipped %s: %v]", fd.Path, fd.Err)})
 		case fd.BinarySkipped:
-			sink.Notice(fmt.Sprintf("[diff: skipped binary file %s]", fd.Path))
+			events = append(events, toolDiffEvent{notice: fmt.Sprintf("[diff: skipped binary file %s]", fd.Path)})
 		case strings.TrimSpace(fd.Text) != "":
-			if ds, ok := sink.(ToolDiffSink); ok {
-				ds.ToolDiff(call, fd.Path, fd.Text)
-			}
+			events = append(events, toolDiffEvent{path: fd.Path, text: fd.Text})
+		}
+	}
+	return events
+}
+
+func emitToolDiff(call llm.ToolCall, events []toolDiffEvent, sink EventSink) {
+	for _, event := range events {
+		if event.notice != "" {
+			sink.Notice(event.notice)
+			continue
+		}
+		if ds, ok := sink.(ToolDiffSink); ok {
+			ds.ToolDiff(call, event.path, event.text)
 		}
 	}
 }
 
-func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) llm.ToolResult {
+func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) (llm.ToolResult, <-chan struct{}) {
 	if call.InvalidInputError != "" {
-		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true, ErrorKind: llm.ToolErrorInvalidArgs}
+		return llm.ToolResult{ForID: call.ID, Text: invalidToolInputResult(call), IsError: true, ErrorKind: llm.ToolErrorInvalidArgs}, nil
 	}
 	if a.isKimiWebSearchCall(call) {
 		text := strings.TrimSpace(string(call.Input))
 		if text == "" {
 			text = "{}"
 		}
-		return llm.ToolResult{ForID: call.ID, Text: text}
+		return llm.ToolResult{ForID: call.ID, Text: text}, nil
 	}
 
 	var preContext []string
@@ -2709,11 +2842,14 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			if reason == "" {
 				reason = "blocked by PreToolUse hook"
 			}
-			return llm.ToolResult{ForID: call.ID, Text: reason, IsError: true, ErrorKind: llm.ToolErrorHookBlocked}
+			return llm.ToolResult{ForID: call.ID, Text: reason, IsError: true, ErrorKind: llm.ToolErrorHookBlocked}, nil
 		}
 	}
 
-	r := a.dispatchTool(ctx, call)
+	r, completion, foldFailureGuard := a.dispatchTool(ctx, call)
+	if foldFailureGuard && a.failGuard != nil {
+		r = a.failGuard.afterCall(a.tools, call, r)
+	}
 	if len(preContext) > 0 {
 		appendHookContext(&r, preContext)
 	}
@@ -2744,7 +2880,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			r.ErrorKind = llm.ToolErrorHookBlocked
 		}
 	}
-	return r
+	return r, completion
 }
 
 // kimiWebSearchToolName is Moonshot/Kimi's hosted builtin_function. Unlike other

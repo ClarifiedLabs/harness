@@ -44,7 +44,7 @@ type failRecord struct {
 // failureGuard is the per-prompt repeated-identical-failure state. It lives on
 // the Agent only while RunAdmittedPromptWithContext executes, so a user
 // re-prompting "run the tests again" always starts fresh. The mutex is
-// required because dispatchReadOnlyBatch dispatches calls concurrently.
+// required because default-parallel scheduling dispatches calls concurrently.
 type failureGuard struct {
 	mu      sync.Mutex
 	records map[failKey]failRecord

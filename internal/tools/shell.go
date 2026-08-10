@@ -198,8 +198,6 @@ func (t shell) Schema() json.RawMessage {
 
 func (shell) ReadOnly(json.RawMessage) bool { return false }
 
-func (shell) SupportsParallel(json.RawMessage) bool { return true }
-
 // hasBackgroundFlag reports whether the tool input JSON contains
 // "background": true, without decoding the rest of the tool-specific args.
 func hasBackgroundFlag(input json.RawMessage) bool {

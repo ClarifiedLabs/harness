@@ -28,7 +28,8 @@ type Tool interface {
 	Description() string     // model-facing, one line
 	Schema() json.RawMessage // JSON Schema for the input object
 	// ReadOnly reports whether Run with this input mutates workspace or repo
-	// state, so independent read-only calls may dispatch concurrently (spec §8).
+	// state. It is policy, retention, activity, and diagnostics metadata; dispatch
+	// concurrency is controlled independently (design §8).
 	ReadOnly(input json.RawMessage) bool
 	Run(ctx context.Context, input json.RawMessage) (string, error)
 }
@@ -104,18 +105,17 @@ type ProgressStarter interface {
 	StartProgress(input json.RawMessage) any
 }
 
-// ParallelTool optionally reports intra-turn parallelism eligibility.
-// A tool that implements it may run concurrently with other parallel-capable
-// calls in the same turn (design §8). When not implemented, dispatch falls
-// back to ReadOnly for backwards compatibility.
-type ParallelTool interface {
-	SupportsParallel(input json.RawMessage) bool
+// SequentialTool optionally opts specific inputs out of default-parallel
+// intra-turn dispatch. Implementations should return true only for concrete
+// ordering-sensitive inputs; ordinary tools are parallel-eligible by default.
+type SequentialTool interface {
+	RequiresSequential(input json.RawMessage) bool
 }
 
 // FileMutationReporter is implemented by tools that can identify the file paths
-// they may mutate from their JSON input. The agent uses this for optional
-// user-facing before/after diff display; Dispatch and model-visible results do
-// not depend on it.
+// they may mutate from their JSON input. The agent uses normalized path keys to
+// order overlapping mutations and the original paths for optional user-facing
+// before/after diff display; Dispatch and model-visible results do not depend on it.
 type FileMutationReporter interface {
 	MutatedPaths(input json.RawMessage) ([]string, error)
 }
@@ -198,7 +198,7 @@ type Registry struct {
 
 // SetDispatchGuard installs a dynamic semantic gate checked immediately before
 // a known tool runs. It is intended for workflow-state constraints, not
-// sandboxing or permissions; Tool.ReadOnly remains the dispatch authority.
+// sandboxing, permissions, or dispatch scheduling.
 func (r *Registry) SetDispatchGuard(guard func(llm.ToolCall, Activity) error) {
 	r.dispatchGuard = guard
 }
@@ -636,23 +636,23 @@ func (r *Registry) CallReadOnly(call llm.ToolCall) bool {
 	return t.ReadOnly(input)
 }
 
-// SupportsParallel reports whether one call is eligible for intra-turn
-// parallel dispatch. When the tool implements ParallelTool the result comes
-// from SupportsParallel; otherwise it falls back to CallReadOnly for
-// backwards compatibility.
+// SupportsParallel reports whether one call is eligible for default-parallel
+// intra-turn dispatch. Unknown calls are eligible because they can only produce
+// an unknown-tool error and cannot execute side effects. Registered tools are
+// eligible unless they explicitly opt the specific input out via SequentialTool.
 func (r *Registry) SupportsParallel(call llm.ToolCall) bool {
 	t, ok := r.tools[call.Name]
 	if !ok {
-		return false
+		return true
 	}
 	input := call.Input
 	if len(input) == 0 {
 		input = json.RawMessage("{}")
 	}
-	if pt, ok := t.(ParallelTool); ok {
-		return pt.SupportsParallel(input)
+	if st, ok := t.(SequentialTool); ok {
+		return !st.RequiresSequential(input)
 	}
-	return t.ReadOnly(input)
+	return true
 }
 
 // AllReadOnly reports whether every call resolves to a read-only invocation.
@@ -686,6 +686,28 @@ func (r *Registry) MutatedPaths(call llm.ToolCall) (paths []string, ok bool) {
 		return nil, false
 	}
 	return uniqueMutationPaths(paths), true
+}
+
+// MutationKeys returns deduplicated lexical absolute/clean path identities for
+// conflict-aware scheduling. Original caller paths remain available through
+// MutatedPaths for diff labels and compaction metadata. Invalid and unreported
+// calls return no keys because they cannot perform their intended mutation.
+func (r *Registry) MutationKeys(call llm.ToolCall) []string {
+	paths, ok := r.MutatedPaths(call)
+	if !ok {
+		return nil
+	}
+	keys := make([]string, 0, len(paths))
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		key := duplicatePathKey(path)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	return keys
 }
 
 // ReadPaths reports the requested file paths for a call when its tool provides
@@ -764,14 +786,20 @@ func uniqueMutationPaths(paths []string) []string {
 	return out
 }
 
-// Dispatch runs one tool call and always returns a result (design §8.2). It
-// runs Tool.Run in a goroutine, recovers
-// panics (inside that goroutine), maps unknown tools and decode/run errors to
-// is_error result strings, and applies the central output cap (design §8.3).
-// When SetDispatchTimeout has configured a positive ceiling, expiry returns a
-// timeout is_error result even for a tool that ignores its context; an outer
-// cancellation is reported as cancellation, not a dispatch timeout.
-func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.ToolResult) {
+// Dispatch runs one tool call and always returns a result (design §8.2).
+func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) llm.ToolResult {
+	res, _ := r.DispatchWithCompletion(parent, call)
+	return res
+}
+
+// DispatchWithCompletion is Dispatch plus a signal that closes when Tool.Run's
+// goroutine has actually returned. The result may arrive first after timeout or
+// cancellation; conflict-aware schedulers use the signal only when a later
+// mutation must not overtake a context-ignoring predecessor.
+func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolCall) (res llm.ToolResult, completion <-chan struct{}) {
+	completed := make(chan struct{})
+	close(completed)
+	completion = completed
 	res.ForID = call.ID
 
 	t, ok := r.tools[call.Name]
@@ -779,7 +807,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		res.Text = fmt.Sprintf("unknown tool %q", call.Name)
 		res.IsError = true
 		res.ErrorKind = llm.ToolErrorUnknownTool
-		return res
+		return res, completion
 	}
 
 	input := call.Input
@@ -793,7 +821,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 			res.Text = err.Error()
 			res.IsError = true
 			res.ErrorKind = llm.ToolErrorBlocked
-			return res
+			return res, completion
 		}
 	}
 
@@ -825,7 +853,10 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 		err      error
 	}
 	done := make(chan outcome, 1) // buffered: an abandoned Run can still send and exit
+	actualCompletion := make(chan struct{})
+	completion = actualCompletion
 	go func() {
+		defer close(actualCompletion)
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("tool %q panicked: %v", call.Name, rec)
@@ -877,7 +908,7 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 			res.Text = ctx.Err().Error()
 		}
 		res.IsError = true
-		return res
+		return res, completion
 	}
 
 	res.Usage = usage
@@ -903,20 +934,20 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) (res llm.
 			res.ErrorKind = KindOf(err)
 		}
 		res.IsError = true
-		return res
+		return res, completion
 	}
 
 	if err := llm.ValidateToolResultContent(content, false); err != nil {
 		res.Text = "invalid rich tool result: " + err.Error()
 		res.IsError = true
 		res.ErrorKind = llm.ToolErrorInvalidResult
-		return res
+		return res, completion
 	}
 	prepared := r.PrepareResultWithOriginal(call.Name, call.ID, out, original)
 	prepared.Content = append([]llm.ContentBlock(nil), content...)
 	prepared.Usage = usage
 	prepared.Metrics = maps.Clone(metrics)
-	return prepared
+	return prepared, completion
 }
 
 // PrepareResult applies the registry's configured limits and records the full

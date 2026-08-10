@@ -10,7 +10,7 @@ import (
 
 // ActivityClass describes tool activity for telemetry and bounded workflow
 // guards. It must never determine dispatch parallelism, permissions, or safety;
-// Tool.ReadOnly remains authoritative for dispatch.
+// default-parallel scheduling is controlled separately by SequentialTool.
 type ActivityClass string
 
 const (
@@ -40,7 +40,7 @@ type ActivityReporter interface {
 }
 
 // CallActivity classifies a call for telemetry and workflow accounting. Unknown
-// and non-read-only tools default to other; only Tool.ReadOnly controls
+// and non-read-only tools default to other; this classification does not control
 // concurrent dispatch.
 func (r *Registry) CallActivity(call llm.ToolCall) Activity {
 	input := call.Input

@@ -28,8 +28,8 @@ var toolNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 var emptySchema = json.RawMessage(`{"type":"object"}`)
 
 // Register lists the LSP provider's bare tools and registers short lsp_* tools
-// backed by provider calls. Read-only behavior comes from each provider
-// annotation; edit-applying LSP tools remain ordering barriers.
+// backed by provider calls. Read-only policy comes from each provider annotation;
+// all LSP calls inherit default-parallel scheduling.
 //
 // When allow is non-empty it is an allowlist of tool names to register; every
 // other discovered tool is skipped. Entries match against the bare provider name

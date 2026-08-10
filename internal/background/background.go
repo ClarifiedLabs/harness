@@ -936,7 +936,9 @@ func NewJobsTool(manager *Manager) *JobsTool {
 
 func (*JobsTool) Name() string { return "background_jobs" }
 
-func (*JobsTool) Description() string { return "Inspect, wait for, or cancel background jobs; wait once, never poll." }
+func (*JobsTool) Description() string {
+	return "Inspect, wait for, or cancel background jobs; wait once, never poll."
+}
 
 func (*JobsTool) Schema() json.RawMessage {
 	return json.RawMessage(`{
@@ -959,6 +961,15 @@ func (*JobsTool) ReadOnly(input json.RawMessage) bool {
 		return false
 	}
 	return args.Action == "" || args.Action == "list" || args.Action == "get" || args.Action == "wait"
+}
+
+// RequiresSequential preserves deterministic emission ordering for co-issued
+// cancellation requests. Observational and wait actions remain parallel-eligible.
+func (*JobsTool) RequiresSequential(input json.RawMessage) bool {
+	var args struct {
+		Action string `json:"action"`
+	}
+	return json.Unmarshal(input, &args) == nil && strings.TrimSpace(args.Action) == "cancel"
 }
 
 func (t *JobsTool) Run(ctx context.Context, input json.RawMessage) (string, error) {

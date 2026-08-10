@@ -337,7 +337,9 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 
 func (*Tool) Name() string { return "delegate" }
 
-func (*Tool) Description() string { return "Run a child agent on separable work; keep coupled work local." }
+func (*Tool) Description() string {
+	return "Run a child agent on separable work; keep coupled work local."
+}
 
 func (t *Tool) Schema() json.RawMessage {
 	if t == nil || t.runner == nil {
@@ -351,6 +353,14 @@ func (t *Tool) Schema() json.RawMessage {
 func (*Tool) PreserveSchemaDescriptions() bool { return true }
 
 func (*Tool) ReadOnly(json.RawMessage) bool { return false }
+
+// RequiresSequential keeps foreground children serialized because they share the
+// checkout and because progress correlation is per synchronous invocation.
+// Background delegates use resource leases and remain parallel-eligible.
+func (*Tool) RequiresSequential(input json.RawMessage) bool {
+	req, err := DecodeRunRequest(input, "delegate")
+	return err == nil && !req.Background
+}
 
 func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	result, err := t.RunMetered(ctx, input)

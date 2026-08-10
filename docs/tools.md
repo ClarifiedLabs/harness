@@ -35,13 +35,14 @@ The former callable names `read_file`, `write_file`, `list_dir`, `glob`, `grep`,
 writes, `edit` for replacements, and `shell` with host commands such as `rg`,
 `rg --files`, `grep`, `find`, and `git --no-pager` for repository inspection.
 
-Models issue schema-visible top-level parallel-eligible calls together in one tool
-turn; Harness runs consecutive parallel-eligible calls concurrently
-and preserves their input order. Read-only tools are parallel-eligible by
-default; `shell` is also parallel-eligible (its `steps` still run serially),
-so co-issued `shell` calls may run concurrently best-effort on shared `cwd`/
-files — use distinct `cwd` or `background_lease` when ordering matters. No
-sandbox is added; harness inherits the host sandbox.
+Models should issue independent schema-visible calls together in one tool turn.
+Registered calls are parallel-eligible by default, regardless of `ReadOnly`; a
+small set of workflow tools explicitly opts ordering-sensitive inputs out.
+Harness automatically queues overlapping built-in `write`/`edit` mutations in
+model emission order using normalized lexical paths, while unrelated calls may
+continue. Results and transcript blocks always remain in emission order.
+`shell.steps` still run serially inside one call. No sandbox is added; Harness
+inherits the host sandbox.
 
 `read` reads one file via `path` (with `offset`/`limit`), or several at once via
 `paths[]` — each file is rendered under a `==> path <==` header with its own
@@ -73,8 +74,9 @@ When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
 intelligence tools are registered as a contiguous block immediately after
 `view_image`. Most are read-only; `lsp_code_action`,
 `lsp_format_document`, and `lsp_rename` apply validated language-server text
-edits and therefore remain mutating ordering barriers. Interactive sessions can
-inspect or change this process-local exposure with `/lsp`.
+edits. All inherit default-parallel dispatch; Harness does not infer the remote
+paths an LSP operation may affect. Interactive sessions can inspect or change
+this process-local exposure with `/lsp`.
 
 ## Session Goals
 
@@ -438,9 +440,25 @@ configured surface; runtime validation still rejects any explicit unsupported na
 
 ## Parallelism
 
-Independent read-only tool calls can run concurrently when the model batches them
-in one tool turn. Mutating calls remain ordering barriers, and results are still
-recorded in the model's original call order.
+All co-issued registered tool calls are parallel by default, including mutating
+`shell`, git, MCP/LSP, `write_tmp_file`, and background delegate launches. A tool
+may implement an input-aware sequential opt-out for concrete shared-state
+ordering; built-in examples include `update_todos`, `record_plan`, `handoff`,
+foreground delegates, and `background_jobs` cancellation. A matching
+`PreToolUse` or `PostToolUse` hook also makes that target call a barrier.
+
+Built-in `write` and `edit` report mutation paths. Harness normalizes those paths
+lexically (`Abs` + `Clean`) and queues every overlapping mutation behind the
+latest earlier call, including mixed write/edit and multi-file edits. Unrelated
+members of the same scheduling island still overlap. Results, usage, sink events,
+and transcript blocks are emitted in the model's original call order even when
+execution completes differently.
+
+Conflict detection is intentionally best-effort. It does not infer read-versus-
+write dependencies, shell-hidden paths, git effects, symlink/hard-link aliases,
+or remote MCP/LSP effects. Use `shell.steps` for commands that intentionally need
+serial order, explicit background leases for coordinated jobs, or separate model
+turns when those effects depend on one another.
 
 ## Truncation And Artifacts
 

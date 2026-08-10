@@ -155,7 +155,7 @@ func (c *Conn) CallTool(ctx context.Context, name string, args json.RawMessage) 
 // holds the mutex across the dial+initialize so two callers cannot race two
 // half-open connections; this serializes reconnects, which is acceptable since
 // reconnects are rare and the steady state returns the cached client immediately.
-// Trusted read-only MCP tools may share this connection concurrently, so a
+// Default-parallel MCP calls may share this connection concurrently, so a
 // reconnect is deliberately a single contended operation rather than a reconnect
 // storm.
 func (c *Conn) ensure(ctx context.Context) (*mcp.Client, error) {

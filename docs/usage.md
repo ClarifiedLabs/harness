@@ -2099,12 +2099,12 @@ process. Diagnostics include only event/handler identity, target/tool id,
 deadline, elapsed time, bounded outcome, streak, and circuit state—never command
 text, stdin payload, stdout, or stderr.
 
-Tool hooks are evaluated per target: `PreToolUse`/`PostToolUse` only affect
-parallelism for calls whose tool name matches the hook's `matcher`. A hook that
-matches `edit` does not prevent parallel dispatch of co-issued `shell` calls;
-only calls whose own name matches a configured hook matcher are forced to run
-sequentially. `Run` is safe for concurrent use; `Config` must not be mutated
-after `Runner` creation.
+Tool calls are parallel-eligible by default. Hooks are evaluated per target:
+`PreToolUse`/`PostToolUse` only affect parallelism for calls whose tool name
+matches the hook's `matcher`. A hook that matches `edit` does not prevent
+parallel dispatch of co-issued `shell` calls; only calls whose own name matches
+a configured hook matcher are forced to run sequentially. `Run` is safe for
+concurrent use; `Config` must not be mutated after `Runner` creation.
 
 `hook_configs` files may contain either a `{"hooks": {...}}` wrapper or a bare
 event map, and relative `hook_configs` paths resolve against the config-file

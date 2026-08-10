@@ -26,8 +26,9 @@ const (
 	AssistantPhaseFinal      = "final_answer"
 )
 
-// ParallelToolBatch records one group of tool calls that the agent dispatched
-// concurrently. ToolUseIDs stay in the model's emission order.
+// ParallelToolBatch records one scheduling island whose dependency graph allowed
+// concurrency. Members may queue behind overlapping mutations; ToolUseIDs remain
+// in the model's emission order.
 type ParallelToolBatch struct {
 	ToolUseIDs []string `json:"tool_use_ids"`
 }

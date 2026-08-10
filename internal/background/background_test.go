@@ -14,6 +14,25 @@ import (
 	"harness/internal/tools"
 )
 
+func TestJobsToolOnlyCancelRequiresSequentialDispatch(t *testing.T) {
+	tool := NewJobsTool(NewManager(Options{}))
+	for _, action := range []string{"", "list", "get", "wait"} {
+		input, err := json.Marshal(map[string]string{"action": action})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tool.RequiresSequential(input) {
+			t.Errorf("action %q unexpectedly requires sequential dispatch", action)
+		}
+	}
+	if !tool.RequiresSequential(json.RawMessage(`{"action":"cancel","id":"job"}`)) {
+		t.Fatal("cancel must preserve co-issued state-change order")
+	}
+	if tool.RequiresSequential(json.RawMessage(`{"action":`)) {
+		t.Fatal("invalid input cannot perform cancellation and must not become a barrier")
+	}
+}
+
 func TestManagerStartBackgroundJobCompletesAndDrainsContext(t *testing.T) {
 	m := NewManager(Options{Now: func() time.Time {
 		return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)

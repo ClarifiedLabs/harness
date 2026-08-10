@@ -58,7 +58,9 @@ func NewTool(store *Store, sessionDir func() string) *Tool {
 
 func (*Tool) Name() string { return "record_plan" }
 
-func (*Tool) Description() string { return "Record a complete implementation plan for handoff to an implementation agent." }
+func (*Tool) Description() string {
+	return "Record a complete implementation plan for handoff to an implementation agent."
+}
 
 func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{
@@ -72,6 +74,9 @@ func (*Tool) Schema() json.RawMessage {
 }
 
 func (*Tool) ReadOnly(json.RawMessage) bool { return false }
+
+// RequiresSequential preserves artifact allocation and latest-plan ordering.
+func (*Tool) RequiresSequential(json.RawMessage) bool { return true }
 
 func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 	var args struct {

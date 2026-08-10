@@ -79,7 +79,9 @@ func NewTool(store *Store) *Tool { return &Tool{store: store} }
 
 func (*Tool) Name() string { return "update_todos" }
 
-func (*Tool) Description() string { return "Replace the whole advisory TODO list; one in_progress at most." }
+func (*Tool) Description() string {
+	return "Replace the whole advisory TODO list; one in_progress at most."
+}
 
 func (*Tool) Schema() json.RawMessage {
 	return json.RawMessage(`{
@@ -103,6 +105,9 @@ func (*Tool) Schema() json.RawMessage {
 }
 
 func (*Tool) ReadOnly(json.RawMessage) bool { return false }
+
+// RequiresSequential preserves model emission order for complete-list replacements.
+func (*Tool) RequiresSequential(json.RawMessage) bool { return true }
 
 func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 	var args struct {

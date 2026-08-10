@@ -21,10 +21,11 @@ harness -> Serena MCP child -> Serena tools
 ```
 
 With `lsp.enable=true`, harness registers the LSP tools at startup and launches
-one language server per `(server, workspace-root)` lazily, on first use. LSP
-read-only tools can join read-only parallel batches; mutating tools, such as
-`lsp_code_action`, `lsp_format_document`, and `lsp_rename`, remain ordering
-barriers.
+one language server per `(server, workspace-root)` lazily, on first use. All LSP
+tools inherit default-parallel dispatch. `lsp_code_action`,
+`lsp_format_document`, and `lsp_rename` are mutating policy-wise, but Harness does
+not infer their remote file effects for scheduling; use separate turns when one
+operation semantically depends on another.
 
 This is independent of `mcp.enable` and `mcp.local`; a custom local stdio MCP
 service can run at the same time.

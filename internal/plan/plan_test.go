@@ -18,6 +18,13 @@ func runRecord(t *testing.T, tool *Tool, args map[string]any) (string, error) {
 	return tool.Run(context.Background(), input)
 }
 
+func TestRecordPlanRequiresSequentialDispatch(t *testing.T) {
+	tool := NewTool(NewStore(), func() string { return t.TempDir() })
+	if !tool.RequiresSequential(json.RawMessage(`{}`)) {
+		t.Fatal("record_plan must preserve artifact and latest-plan order")
+	}
+}
+
 func TestRecordPlanWritesImmutableMarkdownAndUpdatesLatest(t *testing.T) {
 	dir := t.TempDir()
 	store := NewStore()

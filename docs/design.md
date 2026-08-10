@@ -259,11 +259,13 @@ Design notes:
   `ReasoningReplayDomain`. Request assembly replays them only when that domain
   matches the selected target; filtering is request-only and never rewrites the
   transcript. They are never treated as ordinary user-visible text.
-- **`ParallelToolBatches` is local execution metadata.** It appears on the user message
+- **`ParallelToolBatches` is local scheduling metadata.** It appears on the user message
   carrying tool results and is ignored by provider request builders. Each entry names,
-  in emission order, every tool-use ID in one group selected for concurrent dispatch.
-  Only groups of 2+ calls are recorded; no field means sequential execution or a
-  transcript written by an older harness version that did not record the distinction.
+  in emission order, every tool-use ID in one default-parallel scheduling island whose
+  dependency graph permits concurrency. Some members may be queued behind earlier
+  overlapping file mutations. A fully chained island is dispatched sequentially and
+  omitted; no field therefore means no possible intra-island concurrency or a transcript
+  written by an older harness version that did not record the distinction.
 - **Provider-hosted tools are separate from local tools.** `Request.Tools` carries
   function schemas backed by `internal/tools`; `Request.ServerTools` carries neutral
   provider-hosted declarations such as `web_search`. The model proxy resolves those
@@ -1581,16 +1583,16 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
                 capture usage + stop reason
     append assistant message (text blocks + tool_use blocks, emission order)
     if stopReason == tool_use {
-        for each tool call, in order:              // parallel-eligible islands may run concurrently
-            result := registry.Dispatch(ctx, call) // always returns a result
-            print one-line tool summary
+        partition calls around SequentialTool inputs and matching tool hooks
+        for each default-parallel island:
+            add latest-writer dependencies for normalized mutation path keys
+            run workers after their predecessors complete // Dispatch always returns a result
+            emit summaries/results in model order
         append ONE user message carrying all tool_result blocks, in call order
-        // Parallel eligibility is SupportsParallel (design §9 / tools.ParallelTool);
-        // shell is parallel-capable while remaining non-read-only. Hooks that
-        // match a call's name via Pre/PostToolUse force that call to run
-        // sequentially (per-target, not globally). Parallel I/O is best-effort
-        // on shared cwd/files — use distinct cwd or background_lease when
-        // ordering matters; no sandbox is added (inherited).
+        // Ordinary registered and unknown calls are parallel-eligible by default.
+        // Pre/PostToolUse hooks are per-target barriers. Hidden effects remain
+        // best-effort; use shell.steps, background leases, or separate turns when
+        // semantic ordering cannot be represented by mutation paths.
     }
     emit turn_complete(prompt, turn)
     if stopReason != tool_use { break }
@@ -1606,31 +1608,36 @@ TTY sinks can distinguish admission from actual delivery. It is not called for a
 failed validation rollback, a disabled steer, or input recovered for the next
 prompt.
 
-- **Mostly-sequential tool execution.** Coding tools mutate a shared filesystem; deterministic
-  ordering matching the model's emission order is worth far more than parallelism. Consecutive
-  parallel-eligible islands with 2+ calls dispatch concurrently (spec §8).
-  Eligibility is `SupportsParallel` (`tools.ParallelTool`): read-only tools are
-  parallel-eligible by default, and `shell` is parallel-eligible while remaining
-  non-read-only (its `steps` still run serially within one call). A `PreToolUse` or
-  `PostToolUse` hook whose matcher matches a call's tool name forces that call to run
-  sequentially; hooks that match only other tools do not disable parallelism.
-  Parallel I/O on a shared `cwd`/file is best-effort and may race — use distinct
-  `cwd` or `background_lease` when ordering matters. No sandbox is added; harness
-  inherits the host sandbox. Results, sink events, and transcript blocks stay in
-  emission order. The tool-result message records each actually selected concurrent
-  island as one `parallel_tool_batches` entry containing the complete ordered tool-use
-  ID list; this distinguishes separate islands in the same model-emitted call batch.
+- **Default-parallel, dependency-aware tool execution.** Every registered call is
+  parallel-eligible unless its tool's input-aware `SequentialTool` opt-out applies;
+  unknown calls also join islands because they can only return an error. Matching
+  `PreToolUse`/`PostToolUse` hooks remain per-target barriers. Within each island,
+  the scheduler scans calls in emission order and tracks the latest call for every
+  normalized `FileMutationReporter` key. A call depends on each distinct latest
+  predecessor touching one of its paths, then becomes latest for all its paths.
+  Thus overlapping `write`/`edit` calls, including multi-file calls and lexical
+  relative/absolute aliases, cannot overtake one another while unrelated calls run.
+  A failed, blocked, cancelled, or timed-out predecessor still releases successors
+  only after completion. Workers never call `EventSink` or mutate the rich-result
+  budget: starts, results, progress cleanup, diffs/notices, usage, and transcript
+  blocks are processed by the parent in emission order. `parallel_tool_batches`
+  records the complete ordered island only when its graph permits concurrency;
+  fully chained islands omit metadata. Hidden read/write, shell, git, symlink,
+  hard-link, MCP, and LSP effects remain best-effort; use `shell.steps`, background
+  leases, or separate turns for semantic ordering. No sandbox is added.
 - **One result per call, always.** Required by both APIs (§4 invariant). `Dispatch`
   produces a result even on panic.
 - **Metered tools:** tools may optionally report token usage (currently synchronous
   `delegate`). The agent adds that usage to the prompt/session total, while the normal
   tool result remains the only child output added to the parent transcript.
 - **File diffs:** unless `show_diffs` is disabled, the agent asks built-in file
-  mutation tools for their affected paths, snapshots those files immediately
-  before and after each sequential tool call, and emits a user-facing unified diff
-  event after the normal tool summary. The diff is generated by a stdlib-only line
-  renderer, not by repository `git diff`, so it works in non-git projects and shows
-  incremental per-call changes when the same file is edited repeatedly. Displayed
+  mutation tools for their affected paths. Each worker snapshots immediately before
+  its call and snapshots/renders immediately after dispatch, before releasing any
+  same-path successor. The parent later emits the captured unified diff after the
+  normal tool summary in emission order. The same capture/emission helpers serve
+  sequential calls. The diff is generated by a stdlib-only line renderer, not by
+  repository `git diff`, so it works in non-git projects and shows incremental
+  per-call changes when the same file is edited repeatedly. Displayed
   diffs are colored by `internal/term/highlight` with the selected immutable
   dark/light palette: subdued red/green line backgrounds, deterministic truecolor
   `+`/`-` sigils, and content syntax-highlighted in the mutated file's language
@@ -1700,8 +1707,9 @@ prompt.
     does not grow while blocked). Any successful call reporting mutated paths
     resets the whole map; read-only successes deliberately do not. Guard state
     is created and dropped inside `RunAdmittedPromptWithContext`, so a fresh
-    prompt always starts clean, and the map is mutex-protected because the
-    read-only batch path dispatches concurrently.
+    prompt always starts clean, and the map is mutex-protected because default-
+    parallel workers consult it concurrently. Result folding is serialized in
+    emission order so completion timing cannot change warnings or mutation resets.
   - *Prompt-token budget.* When `-max-prompt-tokens` is positive, before each next
     (paid) model request it compares the prompt's cumulative usage
     (input + cache-read + cache-write + output + reasoning) against the budget and
@@ -1794,10 +1802,14 @@ command-failure and effective-failure summaries.
 
 **Per-tool dispatch timeout backstop (`-tool-timeout`, default 600s, `<=0`
 disables).** `Dispatch` runs each tool under a derived `context.WithTimeout` so a
-hung tool that ignores cancellation cannot stall a turn; on expiry it returns the
-`tool timed out after <dur>` error result above. It applies to both the
-sequential path and concurrent parallel batches. A tool that reports its own
-deadline via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
+hung tool that ignores cancellation normally cannot stall a turn; on expiry it
+returns the `tool timed out after <dur>` error result above. Registry dispatch
+also exposes an actual-goroutine completion signal to the conflict scheduler. If
+a later same-path mutation depends on the timed-out call, that successor remains
+queued until actual completion so it cannot overtake a context-ignoring mutator;
+this narrow safety case may outlive the result timeout. The ceiling applies to
+both sequential and parallel scheduling. A tool that reports its own deadline
+via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
 `shell`'s `timeout_seconds` stays authoritative. An outer cancellation
 (`^C`) is reported as cancellation, not a dispatch timeout.
 
@@ -1851,9 +1863,10 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 `system = staticPrompt + envContext + AGENTS.md + skills + runtimeHints + agentPrompt`
 
 - **Builtin instructions** (`prompts/system.txt`): concise agentic-coding guidance — read before
-  editing, prefer `edit` with unique context, use tools rather than guessing file
-  contents, use `shell` with host search commands when paths are unknown, run
-  builds/tests via `shell`, stop when done.
+  editing, co-issue independent `read`/`write`/`edit`/`shell` calls by default,
+  use `read.paths[]` for known-file batches and `shell.steps[]` for intentional
+  command ordering, rely on automatic same-file write/edit sequencing, run focused
+  verification, and stop when done.
 - **Environment context**, computed at startup:
 
   ```
@@ -1920,6 +1933,14 @@ type RequiredInputModality interface {
     RequiredInputModality() string
 }
 
+type SequentialTool interface {
+    RequiresSequential(input json.RawMessage) bool
+}
+
+type FileMutationReporter interface {
+    MutatedPaths(input json.RawMessage) ([]string, error)
+}
+
 type MeteredTool interface {
     RunMetered(ctx context.Context, input json.RawMessage) (MeteredResult, error)
 }
@@ -1944,6 +1965,7 @@ type Registry struct{ /* ordered map */ }
 func (r *Registry) Register(t Tool)
 func (r *Registry) Specs() []llm.ToolSchema
 func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResult
+func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall) (llm.ToolResult, <-chan struct{})
 ```
 
 - **Model-facing descriptions are a single 80-byte functional minimum** (suffix-inclusive via `Registry.Specs`); operational detail lives in schemas, tool errors, and this document. **Schemas are hand-written JSON Schema constants.** `Tool.Schema` remains the
@@ -1961,9 +1983,17 @@ func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResu
   validated before they enter a transcript; errors and centrally rejected results
   have content cleared. `RequiredInputModality` is a separate static capability signal,
   so a tool can require image input regardless of whether all successful calls are rich.
-- **Read-only classification is per call.** Static read-only tools ignore the input;
-  argv-style tools can parse their arguments and return true only for safe subcommands
-  (for example `git status`, `git diff`, `git log`).
+- **Read-only classification is per call and independent from scheduling.** Static
+  read-only tools ignore the input; argv-style tools can parse their arguments and
+  return true only for safe subcommands (for example `git status`, `git diff`,
+  `git log`). `ReadOnly` remains policy, retention, activity, and diagnostics metadata;
+  it is not a concurrency gate.
+- **Scheduling is opt-out.** Ordinary and unknown calls are parallel-eligible.
+  `SequentialTool` may classify only concrete ordering-sensitive inputs as barriers;
+  empty input is normalized to `{}` first. `FileMutationReporter` serves both diff
+  observation and conflict scheduling. `MutatedPaths` preserves caller labels, while
+  scheduling keys are deduplicated lexical `filepath.Abs` + `filepath.Clean` identities.
+  Invalid/unreported calls have no keys; symlink and hard-link aliases are best-effort.
 - Relative paths resolve against the process cwd. No path restrictions — the harness is
   honest about its no-sandbox assumption.
 - **Registry surfaces are explicit.** `DefaultWithOptions` registers `read`,
@@ -2718,9 +2748,9 @@ contract maps the MCP tool shape onto the `Tool` interface:
   (nil/empty/`null`) becomes `{"type":"object"}`. Model-facing registration then
   applies the annotation stripping described at the start of §9.
 - **`ReadOnly(input)` is policy-controlled.** Harness trusts
-  `annotations.readOnlyHint:true` for enabled MCP registrations, so advertised
-  read-only tools can join read-only parallel islands (§8.1) and can be exposed
-  to agents whose `mcp_tools` mode is `read_only` (§14).
+  `annotations.readOnlyHint:true` for enabled MCP registrations so those tools can
+  be exposed to agents whose `mcp_tools` mode is `read_only` (§14). Scheduling is
+  default-parallel regardless of this annotation (§8.1).
 - **Result mapping** invokes the remote tool exactly once. Text blocks pass through;
   valid direct image blocks become provider-neutral rich image children while their
   text position is represented by `[image attached: <mime>]`. Audio, resource links,

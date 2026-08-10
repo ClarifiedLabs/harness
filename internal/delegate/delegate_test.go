@@ -45,6 +45,19 @@ func TestDelegateToolDescriptionFitsBudget(t *testing.T) {
 	}
 }
 
+func TestDelegateSequentialOnlyForValidForegroundCalls(t *testing.T) {
+	tool := &Tool{}
+	if !tool.RequiresSequential(json.RawMessage(`{"task":"inspect"}`)) {
+		t.Fatal("foreground delegate must remain serialized on the shared checkout")
+	}
+	if tool.RequiresSequential(json.RawMessage(`{"task":"inspect","background":true}`)) {
+		t.Fatal("background delegate should inherit default parallel scheduling")
+	}
+	if tool.RequiresSequential(json.RawMessage(`{"background":`)) {
+		t.Fatal("invalid delegate input cannot start a child and should not be a barrier")
+	}
+}
+
 func (f *fakeBackgroundStarter) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
 	f.req = req
 	return tools.BackgroundJobInfo{ID: "bg_delegate", Status: "running"}, nil

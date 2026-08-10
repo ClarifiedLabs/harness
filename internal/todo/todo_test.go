@@ -16,6 +16,13 @@ func runUpdate(t *testing.T, tool *Tool, todos []Item) (string, error) {
 	return tool.Run(context.Background(), input)
 }
 
+func TestUpdateTodosRequiresSequentialDispatch(t *testing.T) {
+	tool := NewTool(NewStore())
+	if !tool.RequiresSequential(json.RawMessage(`{"todos":[]}`)) {
+		t.Fatal("update_todos must preserve complete-list replacement order")
+	}
+}
+
 func TestUpdateTodosReplacesCompleteAdvisoryList(t *testing.T) {
 	store := NewStore()
 	tool := NewTool(store)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -46,6 +47,24 @@ type preservingFakeTool struct {
 }
 
 func (preservingFakeTool) PreserveSchemaDescriptions() bool { return true }
+
+type sequentialFakeTool struct {
+	fakeTool
+	requires func(json.RawMessage) bool
+}
+
+func (t sequentialFakeTool) RequiresSequential(input json.RawMessage) bool {
+	return t.requires(input)
+}
+
+type mutationFakeTool struct {
+	fakeTool
+	paths func(json.RawMessage) ([]string, error)
+}
+
+func (t mutationFakeTool) MutatedPaths(input json.RawMessage) ([]string, error) {
+	return t.paths(input)
+}
 
 type meteredFakeTool struct {
 	fakeTool
@@ -91,6 +110,65 @@ func (f richFakeTool) RunRich(context.Context, json.RawMessage) (RichResult, err
 }
 
 func (f richFakeTool) RequiredInputModality() string { return f.modality }
+
+func TestRegistrySupportsParallelDefaultsAndOptOut(t *testing.T) {
+	reg := &Registry{}
+	mutating := newOK("mutating", "ok")
+	mutating.readOnly = false
+	readonly := newOK("readonly", "ok")
+	readonly.readOnly = true
+	conditional := sequentialFakeTool{
+		fakeTool: newOK("conditional", "ok"),
+		requires: func(input json.RawMessage) bool {
+			var args struct {
+				Serial bool `json:"serial"`
+			}
+			return json.Unmarshal(input, &args) == nil && args.Serial
+		},
+	}
+	reg.Register(mutating)
+	reg.Register(readonly)
+	reg.Register(conditional)
+
+	for _, call := range []llm.ToolCall{
+		{Name: "mutating", Input: json.RawMessage(`{}`)},
+		{Name: "readonly", Input: json.RawMessage(`{}`)},
+		{Name: "conditional", Input: json.RawMessage(`{"serial":false}`)},
+		{Name: "missing", Input: json.RawMessage(`{}`)},
+	} {
+		if !reg.SupportsParallel(call) {
+			t.Errorf("SupportsParallel(%q) = false, want true", call.Name)
+		}
+	}
+	if reg.SupportsParallel(llm.ToolCall{Name: "conditional", Input: json.RawMessage(`{"serial":true}`)}) {
+		t.Fatal("SequentialTool serial input remained parallel-eligible")
+	}
+	if !reg.SupportsParallel(llm.ToolCall{Name: "conditional"}) {
+		t.Fatal("empty input was not normalized to an eligible object")
+	}
+}
+
+func TestRegistryMutationKeysNormalizeAndDeduplicate(t *testing.T) {
+	rel := filepath.Join("testdata", "..", "target.txt")
+	abs, err := filepath.Abs("target.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := &Registry{}
+	reg.Register(mutationFakeTool{
+		fakeTool: newOK("mutation", "ok"),
+		paths: func(json.RawMessage) ([]string, error) {
+			return []string{rel, abs, rel}, nil
+		},
+	})
+	keys := reg.MutationKeys(llm.ToolCall{Name: "mutation", Input: json.RawMessage(`{}`)})
+	if len(keys) != 1 || keys[0] != filepath.Clean(abs) {
+		t.Fatalf("MutationKeys = %v, want [%s]", keys, filepath.Clean(abs))
+	}
+	if got := reg.MutationKeys(llm.ToolCall{Name: "unknown"}); got != nil {
+		t.Fatalf("unknown MutationKeys = %v, want nil", got)
+	}
+}
 
 func TestRegistrySpecsOrdered(t *testing.T) {
 	r := &Registry{}

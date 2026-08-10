@@ -39,7 +39,9 @@ func NewHandoff(pending *handoff.Pending, plans *plan.Store, interactive bool, a
 
 func (*handoffTool) Name() string { return "handoff" }
 
-func (*handoffTool) Description() string { return "Handoff the recorded plan to an implementation agent." }
+func (*handoffTool) Description() string {
+	return "Handoff the recorded plan to an implementation agent."
+}
 
 func (*handoffTool) PreserveSchemaDescriptions() bool { return true }
 
@@ -48,6 +50,9 @@ func (t *handoffTool) Schema() json.RawMessage {
 }
 
 func (*handoffTool) ReadOnly(json.RawMessage) bool { return false }
+
+// RequiresSequential preserves ordering with other pending handoff requests.
+func (*handoffTool) RequiresSequential(json.RawMessage) bool { return true }
 
 func (t *handoffTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	if !t.interactive {

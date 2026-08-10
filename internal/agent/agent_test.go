@@ -300,20 +300,29 @@ func (s *archiveSink) SkillActivated(event SkillActivationEvent) {
 	s.activations = append(s.activations, event)
 }
 
-// recordTool is a fake tool whose Run is scriptable; it records the inputs it
-// received in call order. The mutex guards inputs because read-only turns now
-// dispatch Run concurrently.
+// recordTool is a fake tool whose Run is scriptable; it records inputs in
+// completion-independent entry order. The mutex guards default-parallel calls.
 type recordTool struct {
-	name     string
-	readOnly bool
-	run      func(ctx context.Context, input json.RawMessage) (string, error)
-	mu       sync.Mutex
-	inputs   []string
+	name       string
+	readOnly   bool
+	sequential bool
+	run        func(ctx context.Context, input json.RawMessage) (string, error)
+	mu         sync.Mutex
+	inputs     []string
 }
 
 type resultRecordTool struct {
 	recordTool
 	result tools.RunResult
+}
+
+type mutationRecordTool struct {
+	*recordTool
+	paths func(json.RawMessage) ([]string, error)
+}
+
+func (t *mutationRecordTool) MutatedPaths(input json.RawMessage) ([]string, error) {
+	return t.paths(input)
 }
 
 func (t *resultRecordTool) RunResult(context.Context, json.RawMessage) (tools.RunResult, error) {
@@ -324,6 +333,9 @@ func (t *recordTool) Name() string                  { return t.name }
 func (t *recordTool) Description() string           { return "fake tool" }
 func (t *recordTool) Schema() json.RawMessage       { return json.RawMessage(`{"type":"object"}`) }
 func (t *recordTool) ReadOnly(json.RawMessage) bool { return t.readOnly }
+func (t *recordTool) RequiresSequential(json.RawMessage) bool {
+	return t.sequential
+}
 func (t *recordTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	t.mu.Lock()
 	t.inputs = append(t.inputs, string(input))
@@ -1657,7 +1669,7 @@ func TestRunPromptContentAddsImagesBeforeText(t *testing.T) {
 	}
 }
 
-func TestParallelToolCallsSequentialInOrder(t *testing.T) {
+func TestDefaultParallelToolCallsPreserveObservableOrder(t *testing.T) {
 	tool := &recordTool{name: "echo", run: func(_ context.Context, in json.RawMessage) (string, error) {
 		return "ran " + string(in), nil
 	}}
@@ -1718,13 +1730,15 @@ func TestParallelToolCallsSequentialInOrder(t *testing.T) {
 	if resMsg.Content[0].ToolName != "echo" || resMsg.Content[1].ToolName != "echo" {
 		t.Errorf("results missing tool names:\n%s", dump([]llm.Message{resMsg}))
 	}
-	if len(resMsg.ParallelToolBatches) != 0 {
-		t.Errorf("sequential calls recorded as parallel: %+v", resMsg.ParallelToolBatches)
+	if len(resMsg.ParallelToolBatches) != 1 || !slices.Equal(resMsg.ParallelToolBatches[0].ToolUseIDs, []string{"call_a", "call_b"}) {
+		t.Errorf("parallel batch metadata = %+v, want [call_a call_b]", resMsg.ParallelToolBatches)
 	}
 
-	// Tools executed sequentially in emission order.
-	if len(tool.inputs) != 2 || tool.inputs[0] != `{"n":1}` || tool.inputs[1] != `{"n":2}` {
-		t.Errorf("tool execution order wrong: %v", tool.inputs)
+	tool.mu.Lock()
+	inputCount := len(tool.inputs)
+	tool.mu.Unlock()
+	if inputCount != 2 {
+		t.Errorf("tool executions = %d, want 2", inputCount)
 	}
 
 	// Loop re-called the provider after dispatching tools.
@@ -3518,10 +3532,241 @@ func barrierRun(n int) func(context.Context, json.RawMessage) (string, error) {
 	}
 }
 
-func TestAllReadOnlyStepDispatchesConcurrently(t *testing.T) {
+func TestIndependentWriteEditPathsStartConcurrently(t *testing.T) {
 	run := barrierRun(2)
-	t1 := &recordTool{name: "r1", readOnly: true, run: run}
-	t2 := &recordTool{name: "r2", readOnly: true, run: run}
+	pathReporter := func(input json.RawMessage) ([]string, error) {
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(input, &args); err != nil {
+			return nil, err
+		}
+		return []string{args.Path}, nil
+	}
+	reg := &tools.Registry{}
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "write", run: run}, paths: pathReporter})
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "edit", run: run}, paths: pathReporter})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	blocks, batches, _ := a.dispatchCalls(context.Background(), []llm.ToolCall{
+		{ID: "write-a", Name: "write", Input: json.RawMessage(`{"path":"a.txt"}`)},
+		{ID: "edit-b", Name: "edit", Input: json.RawMessage(`{"path":"b.txt"}`)},
+	}, 1, 1, &recordSink{})
+	if len(blocks) != 2 || blocks[0].ResultError || blocks[1].ResultError {
+		t.Fatalf("independent mutation results = %+v", blocks)
+	}
+	if len(batches) != 1 || !slices.Equal(batches[0].ToolUseIDs, []string{"write-a", "edit-b"}) {
+		t.Fatalf("parallel batches = %+v, want one ordered write/edit island", batches)
+	}
+}
+
+func TestSamePathMutationWaitsWhileUnrelatedCallRuns(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	successorStarted := make(chan struct{})
+	unrelatedStarted := make(chan struct{})
+
+	paths := func(input json.RawMessage) ([]string, error) {
+		var args struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(input, &args); err != nil {
+			return nil, err
+		}
+		return []string{args.Path}, nil
+	}
+	reg := &tools.Registry{}
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "write", run: func(context.Context, json.RawMessage) (string, error) {
+		close(firstStarted)
+		<-releaseFirst
+		return "", errors.New("first mutation failed")
+	}}, paths: paths})
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "edit", run: func(context.Context, json.RawMessage) (string, error) {
+		close(successorStarted)
+		return "edited", nil
+	}}, paths: paths})
+	reg.Register(&recordTool{name: "shell", run: func(context.Context, json.RawMessage) (string, error) {
+		close(unrelatedStarted)
+		return "ran", nil
+	}})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	done := make(chan []llm.ParallelToolBatch, 1)
+	go func() {
+		_, batches, _ := a.dispatchCalls(context.Background(), []llm.ToolCall{
+			{ID: "first", Name: "write", Input: json.RawMessage(`{"path":"same.txt"}`)},
+			{ID: "successor", Name: "edit", Input: json.RawMessage(`{"path":"same.txt"}`)},
+			{ID: "other", Name: "shell", Input: json.RawMessage(`{}`)},
+		}, 1, 1, &recordSink{})
+		done <- batches
+	}()
+	awaitSignal(t, firstStarted, "first mutation start")
+	awaitSignal(t, unrelatedStarted, "unrelated call start")
+	assertNotSignaled(t, successorStarted, "same-path successor started early")
+	close(releaseFirst)
+	awaitSignal(t, successorStarted, "same-path successor start")
+	batches := <-done
+	if len(batches) != 1 || !slices.Equal(batches[0].ToolUseIDs, []string{"first", "successor", "other"}) {
+		t.Fatalf("parallel batches = %+v, want mixed scheduling island", batches)
+	}
+}
+
+func TestTimedOutMutationDoesNotReleaseSuccessorBeforeActualCompletion(t *testing.T) {
+	firstStarted := make(chan struct{})
+	deadlineObserved := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	successorStarted := make(chan struct{})
+	paths := func(json.RawMessage) ([]string, error) { return []string{"same.txt"}, nil }
+	reg := &tools.Registry{}
+	reg.SetDispatchTimeout(20 * time.Millisecond)
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "first", run: func(ctx context.Context, _ json.RawMessage) (string, error) {
+		close(firstStarted)
+		go func() {
+			<-ctx.Done()
+			close(deadlineObserved)
+		}()
+		<-releaseFirst // deliberately ignore ctx until the test releases actual execution
+		return "late mutation", nil
+	}}, paths: paths})
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "successor", run: func(context.Context, json.RawMessage) (string, error) {
+		close(successorStarted)
+		return "successor mutation", nil
+	}}, paths: paths})
+	reg.Register(&recordTool{name: "unrelated", run: func(context.Context, json.RawMessage) (string, error) {
+		return "unrelated", nil
+	}})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	type dispatchOutcome struct {
+		blocks  []llm.ContentBlock
+		batches []llm.ParallelToolBatch
+	}
+	done := make(chan dispatchOutcome, 1)
+	go func() {
+		blocks, batches, _ := a.dispatchCalls(context.Background(), []llm.ToolCall{
+			{ID: "first", Name: "first", Input: json.RawMessage(`{}`)},
+			{ID: "successor", Name: "successor", Input: json.RawMessage(`{}`)},
+			{ID: "unrelated", Name: "unrelated", Input: json.RawMessage(`{}`)},
+		}, 1, 1, &recordSink{})
+		done <- dispatchOutcome{blocks: blocks, batches: batches}
+	}()
+	awaitSignal(t, firstStarted, "first mutation start")
+	awaitSignal(t, deadlineObserved, "first mutation dispatch timeout")
+	assertNotSignaled(t, successorStarted, "successor overtook timed-out mutation")
+	close(releaseFirst)
+	awaitSignal(t, successorStarted, "successor start after actual completion")
+	outcome := <-done
+	if len(outcome.blocks) != 3 || !outcome.blocks[0].ResultError || !strings.Contains(outcome.blocks[0].ResultText, "timed out after 20ms") || outcome.blocks[1].ResultError || outcome.blocks[2].ResultError {
+		t.Fatalf("timeout/successor results = %+v", outcome.blocks)
+	}
+	if len(outcome.batches) != 1 || !slices.Equal(outcome.batches[0].ToolUseIDs, []string{"first", "successor", "unrelated"}) {
+		t.Fatalf("parallel metadata = %+v, want mixed island", outcome.batches)
+	}
+}
+
+func TestMutationPathAliasesConflict(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	rel := filepath.Join("nested", "..", "file.txt")
+	abs, err := filepath.Abs("file.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependencies, concurrent := newAgent(llmtest.New("fake"), mutationRegistryForTest(), Options{}).mutationDependencies([]llm.ToolCall{
+		{ID: "relative", Name: "mutation", Input: json.RawMessage(fmt.Sprintf(`{"path":%q}`, rel))},
+		{ID: "absolute", Name: "mutation", Input: json.RawMessage(fmt.Sprintf(`{"path":%q}`, abs))},
+	})
+	if concurrent || len(dependencies[1]) != 1 || dependencies[1][0] != 0 {
+		t.Fatalf("alias dependencies = %v, concurrent=%v; want second depend on first", dependencies, concurrent)
+	}
+}
+
+func TestMultiFileMutationWaitsForEveryLatestPredecessor(t *testing.T) {
+	startedA := make(chan struct{})
+	startedB := make(chan struct{})
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	multiStarted := make(chan struct{})
+	paths := func(input json.RawMessage) ([]string, error) {
+		var args struct {
+			Paths []string `json:"paths"`
+		}
+		if err := json.Unmarshal(input, &args); err != nil {
+			return nil, err
+		}
+		return args.Paths, nil
+	}
+	reg := &tools.Registry{}
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "first-a", run: func(context.Context, json.RawMessage) (string, error) {
+		close(startedA)
+		<-releaseA
+		return "a", nil
+	}}, paths: paths})
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "first-b", run: func(context.Context, json.RawMessage) (string, error) {
+		close(startedB)
+		<-releaseB
+		return "b", nil
+	}}, paths: paths})
+	reg.Register(&mutationRecordTool{recordTool: &recordTool{name: "multi", run: func(context.Context, json.RawMessage) (string, error) {
+		close(multiStarted)
+		return "multi", nil
+	}}, paths: paths})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	done := make(chan struct{})
+	go func() {
+		a.dispatchCalls(context.Background(), []llm.ToolCall{
+			{ID: "a", Name: "first-a", Input: json.RawMessage(`{"paths":["a.txt"]}`)},
+			{ID: "b", Name: "first-b", Input: json.RawMessage(`{"paths":["b.txt"]}`)},
+			{ID: "multi", Name: "multi", Input: json.RawMessage(`{"paths":["a.txt","b.txt","a.txt"]}`)},
+		}, 1, 1, &recordSink{})
+		close(done)
+	}()
+	awaitSignal(t, startedA, "first a start")
+	awaitSignal(t, startedB, "first b start")
+	assertNotSignaled(t, multiStarted, "multi-file mutation started before predecessors")
+	close(releaseA)
+	assertNotSignaled(t, multiStarted, "multi-file mutation ignored b predecessor")
+	close(releaseB)
+	awaitSignal(t, multiStarted, "multi-file mutation start")
+	awaitSignal(t, done, "dispatch completion")
+}
+
+func mutationRegistryForTest() *tools.Registry {
+	reg := &tools.Registry{}
+	reg.Register(&mutationRecordTool{
+		recordTool: &recordTool{name: "mutation", run: func(context.Context, json.RawMessage) (string, error) { return "ok", nil }},
+		paths: func(input json.RawMessage) ([]string, error) {
+			var args struct {
+				Path string `json:"path"`
+			}
+			if err := json.Unmarshal(input, &args); err != nil {
+				return nil, err
+			}
+			return []string{args.Path}, nil
+		},
+	})
+	return reg
+}
+
+func awaitSignal(t *testing.T, ch <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", label)
+	}
+}
+
+func assertNotSignaled(t *testing.T, ch <-chan struct{}, label string) {
+	t.Helper()
+	select {
+	case <-ch:
+		t.Fatal(label)
+	default:
+	}
+}
+
+func TestOrdinaryMutatingToolsDispatchConcurrentlyByDefault(t *testing.T) {
+	run := barrierRun(2)
+	t1 := &recordTool{name: "r1", run: run}
+	t2 := &recordTool{name: "r2", run: run}
 	reg := &tools.Registry{}
 	reg.Register(t1)
 	reg.Register(t2)
@@ -3553,7 +3798,7 @@ func TestAllReadOnlyStepDispatchesConcurrently(t *testing.T) {
 	}
 	for _, b := range resMsg.Content {
 		if b.ResultError {
-			t.Errorf("read-only calls were not concurrent: %s", b.ResultText)
+			t.Errorf("ordinary mutating calls were not concurrent: %s", b.ResultText)
 		}
 	}
 	if len(resMsg.ParallelToolBatches) != 1 || !slices.Equal(resMsg.ParallelToolBatches[0].ToolUseIDs, []string{"a", "b"}) {
@@ -3565,6 +3810,87 @@ func TestAllReadOnlyStepDispatchesConcurrently(t *testing.T) {
 	}
 	if len(sink.results) != 2 || sink.results[0].ForID != "a" || sink.results[1].ForID != "b" {
 		t.Errorf("ToolResult order wrong: %+v", sink.results)
+	}
+}
+
+func TestParallelResultsUsageAndIDsRemainInEmissionOrder(t *testing.T) {
+	firstStarted := make(chan struct{})
+	secondFinished := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	first := &meteredRecordTool{
+		recordTool: &recordTool{name: "first", run: func(context.Context, json.RawMessage) (string, error) {
+			close(firstStarted)
+			<-releaseFirst
+			return "first result", nil
+		}},
+		usage: llm.Usage{InputTokens: 2, OutputTokens: 3},
+	}
+	second := &meteredRecordTool{
+		recordTool: &recordTool{name: "second", run: func(context.Context, json.RawMessage) (string, error) {
+			close(secondFinished)
+			return "second result", nil
+		}},
+		usage: llm.Usage{InputTokens: 5, OutputTokens: 7},
+	}
+	reg := &tools.Registry{}
+	reg.Register(first)
+	reg.Register(second)
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	sink := &recordSink{}
+	type dispatchOutcome struct {
+		blocks []llm.ContentBlock
+		usage  llm.Usage
+	}
+	done := make(chan dispatchOutcome, 1)
+	go func() {
+		blocks, _, usage := a.dispatchCalls(context.Background(), []llm.ToolCall{
+			{ID: "a", Name: "first", Input: json.RawMessage(`{}`)},
+			{ID: "b", Name: "second", Input: json.RawMessage(`{}`)},
+		}, 1, 1, sink)
+		done <- dispatchOutcome{blocks: blocks, usage: usage}
+	}()
+	awaitSignal(t, firstStarted, "first call start")
+	awaitSignal(t, secondFinished, "second call completion")
+	close(releaseFirst)
+	outcome := <-done
+	if got := idsFromCalls(sink.starts); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("ToolStart IDs = %v, want [a b]", got)
+	}
+	if got := idsFromResults(sink.results); !slices.Equal(got, []string{"a", "b"}) {
+		t.Fatalf("ToolResult IDs = %v, want [a b]", got)
+	}
+	if len(outcome.blocks) != 2 || outcome.blocks[0].ResultForID != "a" || outcome.blocks[1].ResultForID != "b" {
+		t.Fatalf("result blocks out of order: %+v", outcome.blocks)
+	}
+	if outcome.usage.InputTokens != 7 || outcome.usage.OutputTokens != 10 {
+		t.Fatalf("usage = %+v, want ordered aggregate 7/10", outcome.usage)
+	}
+}
+
+func TestParallelFailureGuardFoldsResultsInEmissionOrder(t *testing.T) {
+	mutationDone := make(chan struct{})
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "check", run: func(context.Context, json.RawMessage) (string, error) {
+		<-mutationDone // force reverse execution completion
+		return "", errors.New("check failed")
+	}})
+	reg.Register(&mutationRecordTool{
+		recordTool: &recordTool{name: "mutation", run: func(context.Context, json.RawMessage) (string, error) {
+			close(mutationDone)
+			return "changed", nil
+		}},
+		paths: func(json.RawMessage) ([]string, error) { return []string{"changed.txt"}, nil },
+	})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	a.failGuard = newFailureGuard()
+	a.dispatchCalls(context.Background(), []llm.ToolCall{
+		{ID: "failure", Name: "check", Input: json.RawMessage(`{}`)},
+		{ID: "mutation", Name: "mutation", Input: json.RawMessage(`{}`)},
+	}, 1, 1, &recordSink{})
+	a.failGuard.mu.Lock()
+	defer a.failGuard.mu.Unlock()
+	if len(a.failGuard.records) != 0 {
+		t.Fatalf("failure guard retained pre-mutation failure after ordered reset: %+v", a.failGuard.records)
 	}
 }
 
@@ -3631,12 +3957,12 @@ func TestToolHooksOmitParallelBatchMetadata(t *testing.T) {
 	}
 }
 
-func TestMixedStepDispatchesReadOnlyIslandsConcurrently(t *testing.T) {
+func TestSequentialToolSplitsDefaultParallelIslands(t *testing.T) {
 	firstRun := barrierRun(2)
 	secondRun := barrierRun(2)
 	r1 := &recordTool{name: "r1", readOnly: true, run: firstRun}
 	r2 := &recordTool{name: "r2", readOnly: true, run: firstRun}
-	mut := &recordTool{name: "mut", run: func(_ context.Context, _ json.RawMessage) (string, error) {
+	mut := &recordTool{name: "mut", sequential: true, run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		return "mutated", nil
 	}}
 	r3 := &recordTool{name: "r3", readOnly: true, run: secondRun}
@@ -3676,7 +4002,7 @@ func TestMixedStepDispatchesReadOnlyIslandsConcurrently(t *testing.T) {
 			t.Fatalf("result %d id = %q, want %q:\n%s", i, got, wantID, dump([]llm.Message{resMsg}))
 		}
 		if resMsg.Content[i].ResultError {
-			t.Fatalf("result %s errored; read-only islands were not concurrent: %s", wantID, resMsg.Content[i].ResultText)
+			t.Fatalf("result %s errored; default-parallel islands did not overlap: %s", wantID, resMsg.Content[i].ResultText)
 		}
 	}
 	if got := resMsg.ParallelToolBatches; len(got) != 2 ||
@@ -3689,6 +4015,36 @@ func TestMixedStepDispatchesReadOnlyIslandsConcurrently(t *testing.T) {
 	}
 	if got := idsFromResults(sink.results); !slices.Equal(got, []string{"a", "b", "c", "d", "e"}) {
 		t.Fatalf("ToolResult order = %v, want [a b c d e]", got)
+	}
+}
+
+func TestBuiltInWriteThenEditSamePathRunsInEmissionOrder(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ordered.txt")
+	writeInput := fmt.Sprintf(`{"path":%q,"content":"one\n"}`, path)
+	editInput := fmt.Sprintf(`{"files":[{"path":%q,"edits":[{"oldText":"one","newText":"two"}]}]}`, path)
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				toolDone(0, "write", "write", writeInput),
+				toolDone(1, "edit", "edit", editInput),
+			},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{})
+	if err := a.RunPrompt(context.Background(), "write then edit", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(body) != "two\n" {
+		t.Fatalf("final content = %q, want emission-ordered write then edit", body)
+	}
+	if batches := a.Transcript()[2].ParallelToolBatches; len(batches) != 0 {
+		t.Fatalf("fully serialized write/edit chain recorded as parallel: %+v", batches)
 	}
 }
 
@@ -3796,6 +4152,9 @@ func TestShowDiffsIncrementalSameFileToolCalls(t *testing.T) {
 	if string(got) != "foo\nbar\n" {
 		t.Fatalf("final content = %q, want original content restored", got)
 	}
+	if batches := a.Transcript()[2].ParallelToolBatches; len(batches) != 0 {
+		t.Fatalf("fully chained same-file edits recorded parallel metadata: %+v", batches)
+	}
 }
 
 func TestTruncatedToolResultIncludesArchivePathInNextRequest(t *testing.T) {
@@ -3901,7 +4260,7 @@ func TestMixedStepStaysSequential(t *testing.T) {
 	var mu sync.Mutex
 	var trace []string
 	mk := func(name string, ro bool) *recordTool {
-		return &recordTool{name: name, readOnly: ro, run: func(_ context.Context, _ json.RawMessage) (string, error) {
+		return &recordTool{name: name, readOnly: ro, sequential: name == "writer", run: func(_ context.Context, _ json.RawMessage) (string, error) {
 			mu.Lock()
 			trace = append(trace, "start:"+name)
 			mu.Unlock()

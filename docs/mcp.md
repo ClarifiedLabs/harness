@@ -325,9 +325,10 @@ allowed as a strict whitelist. One-shot runs use the tool list discovered before
 the model request; REPL runs may gain remote MCP tools after background discovery
 succeeds.
 
-When MCP is enabled, harness trusts `readOnlyHint` annotations from the
-configured MCP server path, so tools advertised as read-only can be exposed to
-`read_only` agents and join read-only parallel dispatch.
+When MCP is enabled, Harness trusts `readOnlyHint` annotations from the
+configured MCP server path so advertised read-only tools can be exposed to
+`read_only` agents. All MCP calls inherit default-parallel scheduling regardless
+of that policy annotation; Harness does not infer remote side effects.
 
 Two config-file-only keys (under the harness `mcp` block, no flag or env var)
 restrict the auto-exposed remote MCP surface:

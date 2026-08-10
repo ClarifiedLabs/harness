@@ -37,6 +37,14 @@ func runShellResult(t *testing.T, args map[string]any) (RunResult, error) {
 	return (shell{}).RunResult(context.Background(), input)
 }
 
+func TestShellInheritsDefaultParallelEligibility(t *testing.T) {
+	reg := &Registry{}
+	reg.Register(shell{})
+	if !reg.SupportsParallel(llm.ToolCall{Name: "shell", Input: json.RawMessage(`{"argv":["true"]}`)}) {
+		t.Fatal("shell should be parallel-eligible without an opt-in interface")
+	}
+}
+
 func TestShellEchoExitZero(t *testing.T) {
 	out, err := runShell(t, map[string]any{"command": "echo hello"})
 	if err != nil {

@@ -26,6 +26,13 @@ func recordedPlan() *plan.Store {
 	return store
 }
 
+func TestHandoffRequiresSequentialDispatch(t *testing.T) {
+	tool := NewHandoff(handoff.NewPending(), recordedPlan(), true, nil)
+	if !tool.RequiresSequential(json.RawMessage(`{}`)) {
+		t.Fatal("handoff must preserve pending-request order")
+	}
+}
+
 func TestHandoffRecordsLatestPlan(t *testing.T) {
 	pending := handoff.NewPending()
 	tool := NewHandoff(pending, recordedPlan(), true, []string{"auto", "independent"})
