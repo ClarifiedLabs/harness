@@ -1492,6 +1492,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/max-turns` | show the current per-prompt turn limit |
 | `/max-turns <n>` | change the turn limit for subsequent prompts in this REPL session; `n <= 0` means unlimited |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
+| `/tools --raw` | dump the active model-facing tool definitions as provider-neutral JSON, including normalized input schemas and any provider-hosted `server_tools`; `/tools raw` is also accepted |
 | `/lsp [status\|enable\|disable]` | inspect configured, available, and actually loaded language servers, or toggle native LSP tools for this REPL session |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |

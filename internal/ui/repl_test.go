@@ -1761,6 +1761,53 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 	}
 }
 
+func TestREPLToolsRawCommandDumpsModelFacingDefinitions(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	reg := &tools.Registry{}
+	reg.Register(mcpRefreshTool{name: "mcp__test__fresh"})
+	app.Agent.SetTools(reg)
+	app.Agent.SetServerTools([]llm.ServerTool{{
+		Name:       llm.ServerToolWebSearch,
+		Kind:       llm.ServerToolKindOpenAIWebSearch,
+		Parameters: json.RawMessage(`{"search_context_size":"low"}`),
+	}})
+
+	app.command("/tools --raw", nil)
+
+	if fp.RequestCount() != 0 {
+		t.Fatalf("/tools --raw should not invoke the agent, got %d requests", fp.RequestCount())
+	}
+	var got struct {
+		Tools       []llm.ToolSchema `json:"tools"`
+		ServerTools []llm.ServerTool `json:"server_tools"`
+	}
+	if err := json.Unmarshal(errw.Bytes(), &got); err != nil {
+		t.Fatalf("/tools --raw output is not JSON: %v\n%s", err, errw.String())
+	}
+	if len(got.Tools) != 1 {
+		t.Fatalf("tools = %d, want 1: %s", len(got.Tools), errw.String())
+	}
+	tool := got.Tools[0]
+	if tool.Name != "mcp__test__fresh" || tool.Description != "refreshed tool" {
+		t.Fatalf("tool definition = %+v", tool)
+	}
+	if !strings.Contains(string(tool.Parameters), `"_stage"`) {
+		t.Fatalf("tool parameters do not include model-facing execution metadata: %s", tool.Parameters)
+	}
+	if len(got.ServerTools) != 1 || got.ServerTools[0].Name != llm.ServerToolWebSearch || got.ServerTools[0].Kind != llm.ServerToolKindOpenAIWebSearch {
+		t.Fatalf("server_tools = %+v", got.ServerTools)
+	}
+	var serverParameters map[string]string
+	if err := json.Unmarshal(got.ServerTools[0].Parameters, &serverParameters); err != nil {
+		t.Fatalf("decode server tool parameters: %v", err)
+	}
+	if serverParameters["search_context_size"] != "low" {
+		t.Fatalf("server tool parameters = %s", got.ServerTools[0].Parameters)
+	}
+}
+
 func TestREPLLSPCommandShowsStatusAndAppliesRuntimeSelection(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")

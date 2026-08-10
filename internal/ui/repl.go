@@ -361,7 +361,7 @@ const helpText = `commands:
   /prompt          show the full system prompt, including runtime hints
   /usage           cumulative session tokens and cost
   /max-turns [n]   show or set turns per prompt for this session (<=0 is unlimited)
-  /tools           list available tools (built-in, MCP, and disabled)
+  /tools [--raw]   list available tools, or dump model-facing definitions as JSON
   /lsp [status|enable|disable]
                     inspect or toggle native LSP tools for this session
   /image [opts]    attach an image to the next prompt, list, or clear
@@ -2641,7 +2641,7 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 	case "/skills":
 		fmt.Fprintln(app.Errw, app.skillsSummary())
 	case "/tools":
-		fmt.Fprintln(app.Errw, app.toolsSummary())
+		app.toolsCommand(arg)
 	case "/lsp":
 		app.lspCommand(arg)
 	case "/vi":
@@ -5077,6 +5077,30 @@ func (app *App) skillsSummary() string {
 	}
 
 	return b.String()
+}
+
+func (app *App) toolsCommand(arg string) {
+	switch strings.ToLower(strings.TrimSpace(arg)) {
+	case "":
+		fmt.Fprintln(app.Errw, app.toolsSummary())
+	case "raw", "--raw":
+		req := app.Agent.ContextRequest()
+		dump := struct {
+			Tools       []llm.ToolSchema `json:"tools"`
+			ServerTools []llm.ServerTool `json:"server_tools,omitempty"`
+		}{
+			Tools:       req.Tools,
+			ServerTools: req.ServerTools,
+		}
+		data, err := json.MarshalIndent(dump, "", "  ")
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[tools failed: %v]\n", err)
+			return
+		}
+		_, _ = app.Errw.Write(append(data, '\n'))
+	default:
+		fmt.Fprintln(app.Errw, "usage: /tools [--raw]")
+	}
 }
 
 // toolsSummary renders the available tools for /tools: enabled built-in tools,
