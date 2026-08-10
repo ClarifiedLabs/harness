@@ -3439,7 +3439,7 @@ func TestKimiWebSearchToolCallPassesThroughArguments(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{
-				toolDone(0, "call_web", "$web_search", `{"query":"current docs"}`),
+				toolDone(0, "call_web", "$web_search", `{"query":"current docs","_stage":"provider-owned"}`),
 			},
 			Stop: llm.StopToolUse,
 		},
@@ -3459,14 +3459,14 @@ func TestKimiWebSearchToolCallPassesThroughArguments(t *testing.T) {
 	if len(sink.results) != 1 {
 		t.Fatalf("tool results = %+v, want one", sink.results)
 	}
-	if sink.results[0].IsError || sink.results[0].Text != `{"query":"current docs"}` {
+	if sink.results[0].IsError || sink.results[0].Text != `{"query":"current docs","_stage":"provider-owned"}` {
 		t.Fatalf("kimi web_search result = %+v, want passthrough arguments", sink.results[0])
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
 	}
 	msgs := fp.Requests[1].Messages
-	if len(msgs) == 0 || len(msgs[len(msgs)-1].Content) != 1 || msgs[len(msgs)-1].Content[0].ResultText != `{"query":"current docs"}` {
+	if len(msgs) == 0 || len(msgs[len(msgs)-1].Content) != 1 || msgs[len(msgs)-1].Content[0].ResultText != `{"query":"current docs","_stage":"provider-owned"}` {
 		t.Fatalf("second request messages = %s", dump(msgs))
 	}
 }
@@ -3529,6 +3529,222 @@ func barrierRun(n int) func(context.Context, json.RawMessage) (string, error) {
 		case <-time.After(2 * time.Second):
 			return "", errors.New("barrier timeout: calls were not concurrent")
 		}
+	}
+}
+
+func TestPlanToolStagesResolvesInheritanceAndPreservesUnannotatedInput(t *testing.T) {
+	calls := []llm.ToolCall{
+		{ID: "a", Name: "read", Input: json.RawMessage(` {"path":"a"} `)},
+		{ID: "b", Name: "read", Input: json.RawMessage(`{"_stage":3,"path":"b"}`)},
+		{ID: "c", Name: "read", Input: json.RawMessage(`{"path":"c"}`)},
+		{ID: "d", Name: "read", Input: json.RawMessage(`{"_stage":7,"path":"d"}`)},
+	}
+	execution, stages, err := planToolStages(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(execution[0].Input); got != ` {"path":"a"} ` {
+		t.Fatalf("unannotated input re-encoded: %q", got)
+	}
+	if got := string(execution[1].Input); got != `{"path":"b"}` {
+		t.Fatalf("explicit stage not stripped: %q", got)
+	}
+	if got := string(execution[2].Input); got != `{"path":"c"}` {
+		t.Fatalf("inherited-stage input changed: %q", got)
+	}
+	if got := string(execution[3].Input); got != `{"path":"d"}` {
+		t.Fatalf("later stage not stripped: %q", got)
+	}
+	wantStages := []callStage{{start: 0, end: 1}, {start: 1, end: 3}, {start: 3, end: 4}}
+	if !slices.Equal(stages, wantStages) {
+		t.Fatalf("stages = %+v, want %+v", stages, wantStages)
+	}
+	if string(calls[1].Input) != `{"_stage":3,"path":"b"}` {
+		t.Fatalf("raw call input mutated: %s", calls[1].Input)
+	}
+}
+
+type stageRecordSink struct {
+	recordSink
+	resultCount atomic.Int32
+}
+
+func (s *stageRecordSink) ToolResult(result llm.ToolResult) {
+	s.recordSink.ToolResult(result)
+	s.resultCount.Add(1)
+}
+
+func TestPlanToolStagesKeepsProviderInvalidInputInCurrentStage(t *testing.T) {
+	invalid := llm.ToolCall{
+		ID:                "bad",
+		Name:              "read",
+		Input:             llm.InvalidToolInputObject(errors.New("unexpected EOF")),
+		InvalidInputError: "unexpected EOF",
+	}
+	execution, stages, err := planToolStages([]llm.ToolCall{
+		{ID: "a", Name: "read", Input: json.RawMessage(`{"_stage":4}`)},
+		invalid,
+		{ID: "c", Name: "read", Input: json.RawMessage(`{}`)},
+	})
+	if err != nil {
+		t.Fatalf("provider invalid input replaced by stage error: %v", err)
+	}
+	if len(stages) != 1 || stages[0] != (callStage{start: 0, end: 3}) {
+		t.Fatalf("stages = %+v, want one inherited stage", stages)
+	}
+	if execution[1].InvalidInputError != invalid.InvalidInputError || string(execution[1].Input) != string(invalid.Input) {
+		t.Fatalf("provider invalid input changed: %+v", execution[1])
+	}
+}
+
+func TestDispatchCallsRunsStagesSeriallyAndCallsWithinStagesConcurrently(t *testing.T) {
+	stage1Started := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	stage2Started := []chan struct{}{make(chan struct{}), make(chan struct{})}
+	releaseStage1 := make(chan struct{})
+	releaseStage2 := make(chan struct{})
+	stage2Barrier := barrierRun(2)
+	reg := &tools.Registry{}
+	for i, name := range []string{"a", "b"} {
+		started := stage1Started[i]
+		reg.Register(&meteredRecordTool{
+			recordTool: &recordTool{name: name, run: func(context.Context, json.RawMessage) (string, error) {
+				close(started)
+				<-releaseStage1
+				return "stage 1", nil
+			}},
+			usage: llm.Usage{InputTokens: i + 1, OutputTokens: 1},
+		})
+	}
+	for i, name := range []string{"c", "d"} {
+		started := stage2Started[i]
+		reg.Register(&meteredRecordTool{
+			recordTool: &recordTool{name: name, run: func(ctx context.Context, input json.RawMessage) (string, error) {
+				close(started)
+				result, err := stage2Barrier(ctx, input)
+				<-releaseStage2
+				return result, err
+			}},
+			usage: llm.Usage{InputTokens: i + 3, OutputTokens: 1},
+		})
+	}
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	sink := &stageRecordSink{}
+	type dispatchOutcome struct {
+		blocks  []llm.ContentBlock
+		batches []llm.ParallelToolBatch
+		usage   llm.Usage
+	}
+	done := make(chan dispatchOutcome, 1)
+	calls := []llm.ToolCall{
+		{ID: "a", Name: "a", Input: json.RawMessage(`{"_stage":1}`)},
+		{ID: "b", Name: "b", Input: json.RawMessage(`{"_stage":1}`)},
+		{ID: "c", Name: "c", Input: json.RawMessage(`{"_stage":2}`)},
+		{ID: "d", Name: "d", Input: json.RawMessage(`{}`)},
+	}
+	go func() {
+		blocks, batches, usage := a.dispatchCalls(context.Background(), calls, 1, 1, sink)
+		done <- dispatchOutcome{blocks: blocks, batches: batches, usage: usage}
+	}()
+
+	awaitSignal(t, stage1Started[0], "stage-1 call a start")
+	awaitSignal(t, stage1Started[1], "stage-1 call b start")
+	assertNotSignaled(t, stage2Started[0], "stage 2 started before stage 1 settled")
+	assertNotSignaled(t, stage2Started[1], "stage 2 started before stage 1 settled")
+	close(releaseStage1)
+	awaitSignal(t, stage2Started[0], "stage-2 call c start")
+	awaitSignal(t, stage2Started[1], "stage-2 call d start")
+	if got := sink.resultCount.Load(); got != 2 {
+		t.Fatalf("stage 2 started after %d stage-1 results, want 2", got)
+	}
+	close(releaseStage2)
+	outcome := <-done
+	if got := idsFromCalls(sink.starts); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
+		t.Fatalf("ToolStart order = %v", got)
+	}
+	if got := idsFromResults(sink.results); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
+		t.Fatalf("ToolResult order = %v", got)
+	}
+	for i, block := range outcome.blocks {
+		if block.ResultError || block.ResultForID != calls[i].ID {
+			t.Fatalf("block %d = %+v", i, block)
+		}
+	}
+	if len(outcome.batches) != 2 ||
+		!slices.Equal(outcome.batches[0].ToolUseIDs, []string{"a", "b"}) ||
+		!slices.Equal(outcome.batches[1].ToolUseIDs, []string{"c", "d"}) {
+		t.Fatalf("parallel batches = %+v", outcome.batches)
+	}
+	if outcome.usage.InputTokens != 10 || outcome.usage.OutputTokens != 4 {
+		t.Fatalf("global usage = %+v, want input=10 output=4", outcome.usage)
+	}
+	for _, start := range sink.starts {
+		if strings.Contains(string(start.Input), "_stage") {
+			t.Fatalf("ToolStart saw scheduling metadata: %+v", start)
+		}
+	}
+}
+
+func TestRichResultBudgetRemainsGlobalAcrossStages(t *testing.T) {
+	tool := &richRecordTool{
+		recordTool: &recordTool{name: "image", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) {
+			return "legacy", nil
+		}},
+		modality: "image",
+		result: tools.RichResult{
+			Text: "attached",
+			Content: []llm.ContentBlock{{
+				Kind:           llm.BlockImage,
+				ImageMediaType: "image/png",
+				ImageData:      agentOnePixelPNG,
+			}},
+		},
+	}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	models := llm.NewRegistry(map[string]llm.ModelInfo{
+		"vision-model": {InputModalities: []string{"text", "image"}},
+	})
+	a := newAgent(llmtest.New("fake"), reg, Options{Model: "vision-model", Registry: models})
+	calls := []llm.ToolCall{
+		{ID: "first", Name: "image", Input: json.RawMessage(`{}`)},
+		{ID: "second", Name: "image", Input: json.RawMessage(`{}`)},
+	}
+	blocks := make([]llm.ContentBlock, len(calls))
+	richEncodedBytes := inputimage.MaxTotalEncodedBytes - len(agentOnePixelPNG)
+	crossStageDependencies := make([][]int, len(calls))
+	actualCompletions := make([]<-chan struct{}, len(calls))
+	for _, stage := range []callStage{{start: 0, end: 1}, {start: 1, end: 2}} {
+		a.dispatchCallStage(context.Background(), calls, stage, 1, 1, &recordSink{}, blocks, &richEncodedBytes, crossStageDependencies, actualCompletions)
+	}
+	if blocks[0].ResultError || len(blocks[0].ResultContent) != 1 {
+		t.Fatalf("first-stage rich result = %+v", blocks[0])
+	}
+	if !blocks[1].ResultError || len(blocks[1].ResultContent) != 0 || !strings.Contains(blocks[1].ResultText, "encoded total") {
+		t.Fatalf("second-stage rich result did not share budget: %+v", blocks[1])
+	}
+}
+
+func TestFailureGuardFoldingRemainsGlobalAcrossStages(t *testing.T) {
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "check", run: func(context.Context, json.RawMessage) (string, error) {
+		return "", errors.New("check failed")
+	}})
+	reg.Register(&mutationRecordTool{
+		recordTool: &recordTool{name: "mutation", run: func(context.Context, json.RawMessage) (string, error) {
+			return "changed", nil
+		}},
+		paths: func(json.RawMessage) ([]string, error) { return []string{"changed.txt"}, nil },
+	})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	a.failGuard = newFailureGuard()
+	a.dispatchCalls(context.Background(), []llm.ToolCall{
+		{ID: "failure", Name: "check", Input: json.RawMessage(`{"_stage":1}`)},
+		{ID: "mutation", Name: "mutation", Input: json.RawMessage(`{"_stage":2}`)},
+	}, 1, 1, &recordSink{})
+	a.failGuard.mu.Lock()
+	defer a.failGuard.mu.Unlock()
+	if len(a.failGuard.records) != 0 {
+		t.Fatalf("failure guard retained earlier-stage failure after mutation reset: %+v", a.failGuard.records)
 	}
 }
 
@@ -3614,6 +3830,7 @@ func TestTimedOutMutationDoesNotReleaseSuccessorBeforeActualCompletion(t *testin
 	deadlineObserved := make(chan struct{})
 	releaseFirst := make(chan struct{})
 	successorStarted := make(chan struct{})
+	unrelatedStarted := make(chan struct{})
 	paths := func(json.RawMessage) ([]string, error) { return []string{"same.txt"}, nil }
 	reg := &tools.Registry{}
 	reg.SetDispatchTimeout(20 * time.Millisecond)
@@ -3631,6 +3848,7 @@ func TestTimedOutMutationDoesNotReleaseSuccessorBeforeActualCompletion(t *testin
 		return "successor mutation", nil
 	}}, paths: paths})
 	reg.Register(&recordTool{name: "unrelated", run: func(context.Context, json.RawMessage) (string, error) {
+		close(unrelatedStarted)
 		return "unrelated", nil
 	}})
 	a := newAgent(llmtest.New("fake"), reg, Options{})
@@ -3641,14 +3859,15 @@ func TestTimedOutMutationDoesNotReleaseSuccessorBeforeActualCompletion(t *testin
 	done := make(chan dispatchOutcome, 1)
 	go func() {
 		blocks, batches, _ := a.dispatchCalls(context.Background(), []llm.ToolCall{
-			{ID: "first", Name: "first", Input: json.RawMessage(`{}`)},
-			{ID: "successor", Name: "successor", Input: json.RawMessage(`{}`)},
+			{ID: "first", Name: "first", Input: json.RawMessage(`{"_stage":1}`)},
+			{ID: "successor", Name: "successor", Input: json.RawMessage(`{"_stage":2}`)},
 			{ID: "unrelated", Name: "unrelated", Input: json.RawMessage(`{}`)},
 		}, 1, 1, &recordSink{})
 		done <- dispatchOutcome{blocks: blocks, batches: batches}
 	}()
 	awaitSignal(t, firstStarted, "first mutation start")
 	awaitSignal(t, deadlineObserved, "first mutation dispatch timeout")
+	awaitSignal(t, unrelatedStarted, "unrelated stage-2 call after timeout result")
 	assertNotSignaled(t, successorStarted, "successor overtook timed-out mutation")
 	close(releaseFirst)
 	awaitSignal(t, successorStarted, "successor start after actual completion")
@@ -3656,8 +3875,47 @@ func TestTimedOutMutationDoesNotReleaseSuccessorBeforeActualCompletion(t *testin
 	if len(outcome.blocks) != 3 || !outcome.blocks[0].ResultError || !strings.Contains(outcome.blocks[0].ResultText, "timed out after 20ms") || outcome.blocks[1].ResultError || outcome.blocks[2].ResultError {
 		t.Fatalf("timeout/successor results = %+v", outcome.blocks)
 	}
-	if len(outcome.batches) != 1 || !slices.Equal(outcome.batches[0].ToolUseIDs, []string{"first", "successor", "unrelated"}) {
-		t.Fatalf("parallel metadata = %+v, want mixed island", outcome.batches)
+	if len(outcome.batches) != 1 || !slices.Equal(outcome.batches[0].ToolUseIDs, []string{"successor", "unrelated"}) {
+		t.Fatalf("parallel metadata = %+v, want concurrent stage-2 island", outcome.batches)
+	}
+}
+
+func TestTimedOutNonconflictingStageReleasesLaterStageOnResult(t *testing.T) {
+	firstStarted := make(chan struct{})
+	deadlineObserved := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	laterStarted := make(chan struct{})
+	reg := &tools.Registry{}
+	reg.SetDispatchTimeout(20 * time.Millisecond)
+	reg.Register(&recordTool{name: "first", run: func(ctx context.Context, _ json.RawMessage) (string, error) {
+		close(firstStarted)
+		go func() {
+			<-ctx.Done()
+			close(deadlineObserved)
+		}()
+		<-releaseFirst
+		return "late", nil
+	}})
+	reg.Register(&recordTool{name: "later", run: func(context.Context, json.RawMessage) (string, error) {
+		close(laterStarted)
+		return "later", nil
+	}})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	done := make(chan []llm.ContentBlock, 1)
+	go func() {
+		blocks, _, _ := a.dispatchCalls(context.Background(), []llm.ToolCall{
+			{ID: "first", Name: "first", Input: json.RawMessage(`{"_stage":1}`)},
+			{ID: "later", Name: "later", Input: json.RawMessage(`{"_stage":2}`)},
+		}, 1, 1, &recordSink{})
+		done <- blocks
+	}()
+	awaitSignal(t, firstStarted, "stage-1 call start")
+	awaitSignal(t, deadlineObserved, "stage-1 timeout")
+	awaitSignal(t, laterStarted, "nonconflicting later stage start after timeout result")
+	close(releaseFirst)
+	blocks := <-done
+	if len(blocks) != 2 || !blocks[0].ResultError || !strings.Contains(blocks[0].ResultText, "timed out after 20ms") || blocks[1].ResultError {
+		t.Fatalf("staged timeout results = %+v", blocks)
 	}
 }
 
@@ -3760,6 +4018,167 @@ func assertNotSignaled(t *testing.T, ch <-chan struct{}, label string) {
 	case <-ch:
 		t.Fatal(label)
 	default:
+	}
+}
+
+func TestInvalidToolStagePlanRejectsWholeBatchBeforeToolsOrHooks(t *testing.T) {
+	tests := []struct {
+		name   string
+		inputs []string
+	}{
+		{name: "invalid value", inputs: []string{`{"_stage":"later","value":1}`, `{"value":2}`}},
+		{name: "decreasing stages", inputs: []string{`{"_stage":2,"value":1}`, `{"_stage":1,"value":2}`}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var runs atomic.Int32
+			tool := &recordTool{name: "capture", run: func(context.Context, json.RawMessage) (string, error) {
+				runs.Add(1)
+				return "ran", nil
+			}}
+			reg := &tools.Registry{}
+			reg.Register(tool)
+			hookMarker := filepath.Join(t.TempDir(), "hook-ran")
+			runner := testHookRunner(t, fmt.Sprintf(`{"PreToolUse":[{"hooks":[{"type":"command","command":%q}]}]}`, "printf ran > \""+hookMarker+"\"; printf '{}'"))
+			fp := llmtest.New("fake",
+				llmtest.Step{Events: []llm.StreamEvent{
+					toolDone(0, "a", "capture", tc.inputs[0]),
+					toolDone(1, "b", "capture", tc.inputs[1]),
+				}, Stop: llm.StopToolUse},
+				llmtest.Step{Events: []llm.StreamEvent{textDelta("recovered")}, Stop: llm.StopEndTurn},
+			)
+			a := newAgent(fp, reg, Options{Hooks: runner})
+			sink := &recordSink{}
+			if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+				t.Fatal(err)
+			}
+			mustValid(t, a.Transcript())
+			if runs.Load() != 0 || len(tool.inputs) != 0 {
+				t.Fatalf("tool ran for invalid stage plan: runs=%d inputs=%v", runs.Load(), tool.inputs)
+			}
+			if _, err := os.Stat(hookMarker); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("hook ran for invalid stage plan: stat err=%v", err)
+			}
+			if len(sink.starts) != 2 || len(sink.results) != 2 {
+				t.Fatalf("unbalanced sink events: starts=%d results=%d", len(sink.starts), len(sink.results))
+			}
+			for i, result := range sink.results {
+				if !result.IsError || result.ErrorKind != llm.ToolErrorInvalidArgs || !strings.Contains(result.Text, "non-decreasing") || result.ForID != []string{"a", "b"}[i] {
+					t.Fatalf("result %d = %+v", i, result)
+				}
+				if strings.Contains(string(sink.starts[i].Input), "_stage") {
+					t.Fatalf("ToolStart %d saw stage metadata: %s", i, sink.starts[i].Input)
+				}
+			}
+			resultMessage := a.Transcript()[2]
+			if len(resultMessage.Content) != 2 || len(resultMessage.ParallelToolBatches) != 0 {
+				t.Fatalf("invalid-plan result message = %+v", resultMessage)
+			}
+		})
+	}
+}
+
+func TestFullTurnPreservesRawStageAndStripsExecutionAndHookInput(t *testing.T) {
+	tool := &recordTool{name: "capture", run: func(context.Context, json.RawMessage) (string, error) { return "ok", nil }}
+	reg := &tools.Registry{}
+	reg.Register(tool)
+	hookInputPath := filepath.Join(t.TempDir(), "hook-input.json")
+	hookCommand := fmt.Sprintf("tee %q >/dev/null; printf '{}'", hookInputPath)
+	runner := testHookRunner(t, fmt.Sprintf(`{"PreToolUse":[{"hooks":[{"type":"command","command":%q}]}]}`, hookCommand))
+	const rawInput = `{"_stage":2,"value":"kept"}`
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "call", "capture", rawInput)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{Hooks: runner})
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
+		t.Fatal(err)
+	}
+	messages := a.Transcript()
+	mustValid(t, messages)
+	if got := string(messages[1].Content[0].ToolInput); got != rawInput {
+		t.Fatalf("assistant transcript input = %s, want raw %s", got, rawInput)
+	}
+	if len(fp.Requests) != 2 || len(fp.Requests[1].Messages) < 2 || string(fp.Requests[1].Messages[1].Content[0].ToolInput) != rawInput {
+		t.Fatalf("provider replay did not preserve raw stage input: %+v", fp.Requests)
+	}
+	if !slices.Equal(tool.inputs, []string{`{"value":"kept"}`}) {
+		t.Fatalf("tool inputs = %v", tool.inputs)
+	}
+	if len(sink.starts) != 1 || string(sink.starts[0].Input) != `{"value":"kept"}` {
+		t.Fatalf("ToolStart inputs = %+v", sink.starts)
+	}
+	payloadBytes, err := os.ReadFile(hookInputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		t.Fatalf("hook payload: %v\n%s", err, payloadBytes)
+	}
+	hookInput, ok := payload["tool_input"].(map[string]any)
+	if !ok || hookInput["value"] != "kept" {
+		t.Fatalf("hook tool_input = %#v", payload["tool_input"])
+	}
+	if _, exists := hookInput["_stage"]; exists {
+		t.Fatalf("hook saw reserved stage metadata: %#v", hookInput)
+	}
+	resultMessages := 0
+	for _, message := range messages {
+		if message.Role == llm.RoleUser && len(message.Content) > 0 && message.Content[0].Kind == llm.BlockToolResult {
+			resultMessages++
+		}
+	}
+	if resultMessages != 1 {
+		t.Fatalf("tool result user messages = %d, want one\n%s", resultMessages, dump(messages))
+	}
+}
+
+func TestCancellationInEarlierStageClosesAllCallsInOneValidResultMessage(t *testing.T) {
+	firstStarted := make(chan struct{})
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "first", run: func(ctx context.Context, _ json.RawMessage) (string, error) {
+		close(firstStarted)
+		<-ctx.Done()
+		return "", ctx.Err()
+	}})
+	reg.Register(&recordTool{name: "later", run: func(ctx context.Context, _ json.RawMessage) (string, error) {
+		<-ctx.Done()
+		return "", ctx.Err()
+	}})
+	a := newAgent(llmtest.New("fake"), reg, Options{})
+	calls := []llm.ToolCall{
+		{ID: "first", Name: "first", Input: json.RawMessage(`{"_stage":1}`)},
+		{ID: "later", Name: "later", Input: json.RawMessage(`{"_stage":2}`)},
+	}
+	a.transcript = []llm.Message{
+		a.textMessage(llm.RoleUser, "go"),
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+			{Kind: llm.BlockToolUse, ToolUseID: "first", ToolName: "first", ToolInput: calls[0].Input},
+			{Kind: llm.BlockToolUse, ToolUseID: "later", ToolName: "later", ToolInput: calls[1].Input},
+		}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	sink := &recordSink{}
+	done := make(chan []llm.ContentBlock, 1)
+	go func() {
+		blocks, _, _ := a.dispatchCalls(ctx, calls, 1, 1, sink)
+		done <- blocks
+	}()
+	awaitSignal(t, firstStarted, "stage-1 call start")
+	cancel()
+	blocks := <-done
+	a.transcript = append(a.transcript, llm.Message{Role: llm.RoleUser, Content: blocks})
+	mustValid(t, a.Transcript())
+	if len(blocks) != 2 || blocks[0].ResultForID != "first" || blocks[1].ResultForID != "later" || !blocks[0].ResultError || !blocks[1].ResultError {
+		t.Fatalf("cancellation blocks = %+v", blocks)
+	}
+	if len(sink.results) != 2 || sink.results[0].ErrorKind != llm.ToolErrorCancelled || sink.results[1].ErrorKind != llm.ToolErrorCancelled {
+		t.Fatalf("cancellation results = %+v", sink.results)
+	}
+	if len(a.Transcript()) != 3 || len(a.Transcript()[2].Content) != 2 {
+		t.Fatalf("transcript did not close in one result message: %s", dump(a.Transcript()))
 	}
 }
 
@@ -3975,11 +4394,11 @@ func TestSequentialToolSplitsDefaultParallelIslands(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{
-				toolDone(0, "a", "r1", `{}`),
-				toolDone(1, "b", "r2", `{}`),
-				toolDone(2, "c", "mut", `{}`),
-				toolDone(3, "d", "r3", `{}`),
-				toolDone(4, "e", "r4", `{}`),
+				toolDone(0, "a", "r1", `{"_stage":1}`),
+				toolDone(1, "b", "r2", `{"_stage":1}`),
+				toolDone(2, "c", "mut", `{"_stage":1}`),
+				toolDone(3, "d", "r3", `{"_stage":1}`),
+				toolDone(4, "e", "r4", `{"_stage":1}`),
 			},
 			Stop: llm.StopToolUse,
 		},
@@ -4015,6 +4434,11 @@ func TestSequentialToolSplitsDefaultParallelIslands(t *testing.T) {
 	}
 	if got := idsFromResults(sink.results); !slices.Equal(got, []string{"a", "b", "c", "d", "e"}) {
 		t.Fatalf("ToolResult order = %v, want [a b c d e]", got)
+	}
+	for _, tool := range []*recordTool{r1, r2, mut, r3, r4} {
+		if !slices.Equal(tool.inputs, []string{"{}"}) {
+			t.Fatalf("tool %s inputs = %v, want stage-free object", tool.name, tool.inputs)
+		}
 	}
 }
 
@@ -4118,8 +4542,8 @@ func TestShowDiffsIncrementalSameFileToolCalls(t *testing.T) {
 		t.Fatalf("write fixture: %v", err)
 	}
 
-	first := fmt.Sprintf(`{"files":[{"path":%q,"edits":[{"oldText":"bar","newText":"foo"}]}]}`, path)
-	second := fmt.Sprintf(`{"files":[{"path":%q,"edits":[{"oldText":"foo\nfoo","newText":"foo\nbar"}]}]}`, path)
+	first := fmt.Sprintf(`{"_stage":1,"files":[{"path":%q,"edits":[{"oldText":"bar","newText":"foo"}]}]}`, path)
+	second := fmt.Sprintf(`{"_stage":2,"files":[{"path":%q,"edits":[{"oldText":"foo\nfoo","newText":"foo\nbar"}]}]}`, path)
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Events: []llm.StreamEvent{

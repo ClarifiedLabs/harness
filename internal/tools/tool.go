@@ -521,6 +521,7 @@ func (r *Registry) Specs() []llm.ToolSchema {
 			preserveDescriptions = preserver.PreserveSchemaDescriptions()
 		}
 		parameters := modelSchemaWithPolicy(t.Schema(), preserveDescriptions)
+		parameters = modelSchemaWithExecutionMetadata(parameters)
 		specs = append(specs, llm.ToolSchema{
 			Name:        t.Name(),
 			Description: t.Description(),
@@ -802,6 +803,15 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 	completion = completed
 	res.ForID = call.ID
 
+	input, _, metadataErr := ExtractExecutionMetadata(call.Input)
+	if metadataErr != nil {
+		res.Text = "invalid arguments: " + metadataErr.Error()
+		res.IsError = true
+		res.ErrorKind = llm.ToolErrorInvalidArgs
+		return res, completion
+	}
+	call.Input = input
+
 	t, ok := r.tools[call.Name]
 	if !ok {
 		res.Text = fmt.Sprintf("unknown tool %q", call.Name)
@@ -810,10 +820,6 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 		return res, completion
 	}
 
-	input := call.Input
-	if len(input) == 0 {
-		input = json.RawMessage("{}")
-	}
 	if r.dispatchGuard != nil {
 		guardCall := call
 		guardCall.Input = input

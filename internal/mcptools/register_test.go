@@ -99,11 +99,11 @@ func TestRegister(t *testing.T) {
 	if specs[0].Description != "Create an issue." {
 		t.Fatalf("create_issue description = %q, want %q", specs[0].Description, "Create an issue.")
 	}
-	if string(specs[0].Parameters) != `{"properties":{"title":{}},"type":"object"}` {
+	if string(specs[0].Parameters) != `{"properties":{"_stage":{"type":"integer","minimum":1},"title":{}},"type":"object"}` {
 		t.Fatalf("create_issue schema = %q, want compact schema without descriptions", specs[0].Parameters)
 	}
-	if string(specs[1].Parameters) != `{"type":"object"}` {
-		t.Fatalf("list_issues schema = %q, want empty fallback", specs[1].Parameters)
+	if string(specs[1].Parameters) != `{"properties":{"_stage":{"type":"integer","minimum":1}},"type":"object"}` {
+		t.Fatalf("list_issues schema = %q, want staged empty fallback", specs[1].Parameters)
 	}
 }
 

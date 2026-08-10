@@ -51,6 +51,21 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 	}
 }
 
+func TestSystemPromptToolStagingGuidance(t *testing.T) {
+	prompt := System()
+	for _, want := range []string{
+		"independent calls the same `_stage`",
+		"Calls in the same stage are parallel-eligible",
+		"increasing `_stage` values for dependencies on earlier side effects",
+		"specify `_stage` on every call",
+		"later call's arguments depend on an earlier call's output, make that call in another model turn",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("system prompt missing tool staging guidance %q", want)
+		}
+	}
+}
+
 func TestPromptByteBudgets(t *testing.T) {
 	budgets := map[string]struct {
 		text string

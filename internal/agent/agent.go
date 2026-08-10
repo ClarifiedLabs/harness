@@ -2018,8 +2018,9 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		}
 
 		checkpoint(PromptCheckpointToolDispatch)
+		executionCalls := executionToolCalls(res.toolCalls)
 		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, promptID, turns, sink)
-		a.activateSkillReadResults(res.toolCalls, results, &activeSkills, sink)
+		a.activateSkillReadResults(executionCalls, results, &activeSkills, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
 			Role:                llm.RoleUser,
@@ -2032,7 +2033,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		}
 		sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(add(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext})
 		checkpoint(PromptCheckpointClosedTurn)
-		progress := guard.aggregateTurnProgress(a.tools, turns, res.toolCalls, results)
+		progress := guard.aggregateTurnProgress(a.tools, turns, executionCalls, results)
 
 		// Give a newly launched background delegate one subsequent parent model
 		// round for useful independent work. If work was already pending before
@@ -2051,7 +2052,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		// Runaway guardrails (design §8.1). The transcript now ends on a closed
 		// tool_use/tool_result pair, so injecting a steering RoleUser message or
 		// breaking here keeps the §4 invariant intact.
-		guard.recordTurn(res.toolCalls, results, &progress)
+		guard.recordTurn(executionCalls, results, &progress)
 
 		// Mid-prompt steering (design §8.1): drain input the user submitted while
 		// this turn was running and inject it as a single RoleUser message the
@@ -2422,15 +2423,89 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 	return usage, wasted, modelReq.estimate, true
 }
 
-// dispatchCalls runs one turn's tool calls. Ordinary calls form default-parallel
-// scheduling islands; explicit SequentialTool inputs and matching tool hooks are
-// island barriers. Overlapping reported file mutations gain predecessor edges in
-// emission order. Sink events and returned blocks remain ordered, and sink methods
-// are called only from this goroutine (design §8). Parallel metadata records a
-// complete island only when its dependency graph permits actual concurrency.
+type callStage struct {
+	start int
+	end   int
+}
+
+// planToolStages validates a complete emitted batch before dispatch and builds
+// stripped execution copies. Calls without _stage inherit the current stage;
+// malformed provider input keeps its assembler diagnostic and current stage.
+func planToolStages(calls []llm.ToolCall) ([]llm.ToolCall, []callStage, error) {
+	executionCalls := append([]llm.ToolCall(nil), calls...)
+	resolvedStages := make([]int, len(calls))
+	currentStage := 1
+	var planErr error
+	for i, call := range calls {
+		if call.InvalidInputError != "" || call.Name == kimiWebSearchToolName {
+			resolvedStages[i] = currentStage
+			continue
+		}
+		clean, metadata, err := tools.ExtractExecutionMetadata(call.Input)
+		executionCalls[i].Input = clean
+		if err != nil {
+			if planErr == nil {
+				planErr = fmt.Errorf("call %d (%q): %w", i+1, call.Name, err)
+			}
+			resolvedStages[i] = currentStage
+			continue
+		}
+		if metadata.HasStage {
+			if metadata.Stage < currentStage {
+				if planErr == nil {
+					planErr = fmt.Errorf("call %d (%q) decreases _stage from %d to %d", i+1, call.Name, currentStage, metadata.Stage)
+				}
+			} else {
+				currentStage = metadata.Stage
+			}
+		}
+		resolvedStages[i] = currentStage
+	}
+
+	stages := make([]callStage, 0, len(calls))
+	for start := 0; start < len(calls); {
+		end := start + 1
+		for end < len(calls) && resolvedStages[end] == resolvedStages[start] {
+			end++
+		}
+		stages = append(stages, callStage{start: start, end: end})
+		start = end
+	}
+	return executionCalls, stages, planErr
+}
+
+// executionToolCalls returns the same stripped copies used for dispatch to
+// post-dispatch classifiers and guards. dispatchCalls remains the authoritative
+// preflight gate and performs the complete validation before any side effect.
+func executionToolCalls(calls []llm.ToolCall) []llm.ToolCall {
+	executionCalls, _, _ := planToolStages(calls)
+	return executionCalls
+}
+
+func invalidStagePlanText(err error) string {
+	return "invalid tool stage plan: " + err.Error() + ". _stage must be an integer greater than or equal to 1, and explicit stages must be non-decreasing"
+}
+
+// dispatchCalls runs one turn's tool calls. It preflights Harness-owned stage
+// metadata, executes stages serially, and retains the existing default-parallel,
+// hook-barrier, and mutation-dependency scheduler within each stage. Sink events
+// and returned blocks remain in global emission order (design §8).
 func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptID, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
+	executionCalls, stages, planErr := planToolStages(calls)
 	blocks := make([]llm.ContentBlock, len(calls))
+	if planErr != nil {
+		text := invalidStagePlanText(planErr)
+		for i, call := range executionCalls {
+			sink.ToolStart(call)
+			result := llm.ToolResult{ForID: call.ID, Text: text, IsError: true, ErrorKind: llm.ToolErrorInvalidArgs}
+			blocks[i], _ = a.finishToolResult(result, call.Name, sink)
+		}
+		return blocks, nil, llm.Usage{}
+	}
+
 	var parallelBatches []llm.ParallelToolBatch
+	crossStageDependencies := a.crossStageMutationDependencies(executionCalls, stages)
+	actualCompletions := make([]<-chan struct{}, len(executionCalls))
 	richEncodedBytes, err := inputimage.ValidateMessages(a.transcript)
 	if err != nil {
 		// The full retained gate normally makes this unreachable. Treat an
@@ -2438,26 +2513,41 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		richEncodedBytes = inputimage.MaxTotalEncodedBytes
 	}
 	var total llm.Usage
+	for _, stage := range stages {
+		batches, usage := a.dispatchCallStage(ctx, executionCalls, stage, promptID, turnID, sink, blocks, &richEncodedBytes, crossStageDependencies, actualCompletions)
+		parallelBatches = append(parallelBatches, batches...)
+		total = add(total, usage)
+	}
+	return blocks, parallelBatches, total
+}
 
-	for i := 0; i < len(calls); {
+func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, stage callStage, promptID, turnID int, sink EventSink, blocks []llm.ContentBlock, richEncodedBytes *int, crossStageDependencies [][]int, actualCompletions []<-chan struct{}) ([]llm.ParallelToolBatch, llm.Usage) {
+	var parallelBatches []llm.ParallelToolBatch
+	var total llm.Usage
+	for i := stage.start; i < stage.end; {
 		if !a.tools.SupportsParallel(calls[i]) || a.hooksHasMatchingHooks(calls[i].Name) {
-			block, usage := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, a.hasLaterMutationConflict(calls, i), &richEncodedBytes)
+			waitForActualCompletions(crossStageDependencies[i], actualCompletions)
+			block, usage, completion := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, a.hasMutationConflictBefore(calls, i, stage.end), richEncodedBytes)
 			blocks[i] = block
+			actualCompletions[i] = completion
 			total = add(total, usage)
 			i++
 			continue
 		}
 
 		start := i
-		for i < len(calls) && a.tools.SupportsParallel(calls[i]) && !a.hooksHasMatchingHooks(calls[i].Name) {
+		for i < stage.end && a.tools.SupportsParallel(calls[i]) && !a.hooksHasMatchingHooks(calls[i].Name) {
 			i++
 		}
 		batchCalls := calls[start:i]
 		dependencies, concurrent := a.mutationDependencies(batchCalls)
 		if !concurrent {
 			for j, call := range batchCalls {
-				block, usage := a.dispatchSequentialCall(ctx, call, promptID, turnID, sink, a.hasLaterMutationConflict(calls, start+j), &richEncodedBytes)
-				blocks[start+j] = block
+				globalIndex := start + j
+				waitForActualCompletions(crossStageDependencies[globalIndex], actualCompletions)
+				block, usage, completion := a.dispatchSequentialCall(ctx, call, promptID, turnID, sink, a.hasMutationConflictBefore(calls, globalIndex, stage.end), richEncodedBytes)
+				blocks[globalIndex] = block
+				actualCompletions[globalIndex] = completion
 				total = add(total, usage)
 			}
 			continue
@@ -2471,12 +2561,12 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 
 		awaitActual := make([]bool, len(batchCalls))
 		for j := range batchCalls {
-			awaitActual[j] = a.hasLaterMutationConflict(calls, start+j)
+			awaitActual[j] = a.hasMutationConflictBefore(calls, start+j, stage.end)
 		}
-		usage := a.dispatchParallelBatch(ctx, batchCalls, dependencies, awaitActual, blocks[start:i], sink, &richEncodedBytes)
+		usage := a.dispatchParallelBatch(ctx, batchCalls, dependencies, awaitActual, blocks[start:i], sink, richEncodedBytes, start, crossStageDependencies[start:i], actualCompletions)
 		total = add(total, usage)
 	}
-	return blocks, parallelBatches, total
+	return parallelBatches, total
 }
 
 // mutationDependencies builds latest-writer edges for normalized mutation keys.
@@ -2512,7 +2602,34 @@ func (a *Agent) mutationDependencies(calls []llm.ToolCall) ([][]int, bool) {
 	return dependencies, false
 }
 
-func (a *Agent) hasLaterMutationConflict(calls []llm.ToolCall, index int) bool {
+func (a *Agent) crossStageMutationDependencies(calls []llm.ToolCall, stages []callStage) [][]int {
+	dependencies := make([][]int, len(calls))
+	stageIndexes := make([]int, len(calls))
+	for stageIndex, stage := range stages {
+		for i := stage.start; i < stage.end; i++ {
+			stageIndexes[i] = stageIndex
+		}
+	}
+	latest := make(map[string]int)
+	for i, call := range calls {
+		seen := make(map[int]struct{})
+		keys := a.tools.MutationKeys(call)
+		for _, key := range keys {
+			if predecessor, ok := latest[key]; ok && stageIndexes[predecessor] != stageIndexes[i] {
+				if _, duplicate := seen[predecessor]; !duplicate {
+					dependencies[i] = append(dependencies[i], predecessor)
+					seen[predecessor] = struct{}{}
+				}
+			}
+		}
+		for _, key := range keys {
+			latest[key] = i
+		}
+	}
+	return dependencies
+}
+
+func (a *Agent) hasMutationConflictBefore(calls []llm.ToolCall, index, end int) bool {
 	keys := a.tools.MutationKeys(calls[index])
 	if len(keys) == 0 {
 		return false
@@ -2521,7 +2638,7 @@ func (a *Agent) hasLaterMutationConflict(calls []llm.ToolCall, index int) bool {
 	for _, key := range keys {
 		wanted[key] = struct{}{}
 	}
-	for _, call := range calls[index+1:] {
+	for _, call := range calls[index+1 : end] {
 		for _, key := range a.tools.MutationKeys(call) {
 			if _, ok := wanted[key]; ok {
 				return true
@@ -2531,11 +2648,19 @@ func (a *Agent) hasLaterMutationConflict(calls []llm.ToolCall, index int) bool {
 	return false
 }
 
+func waitForActualCompletions(dependencies []int, completions []<-chan struct{}) {
+	for _, predecessor := range dependencies {
+		if completion := completions[predecessor]; completion != nil {
+			<-completion
+		}
+	}
+}
+
 func (a *Agent) hooksHasMatchingHooks(target string) bool {
 	return a.hooks != nil && a.hooks.HasMatchingHooks(target)
 }
 
-func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, awaitActualCompletion bool, richEncodedBytes *int) (llm.ContentBlock, llm.Usage) {
+func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, awaitActualCompletion bool, richEncodedBytes *int) (llm.ContentBlock, llm.Usage, <-chan struct{}) {
 	startToolProgress(a.tools, call, sink)
 	sink.ToolStart(call)
 	diffState := a.snapshotToolDiff(call)
@@ -2548,15 +2673,16 @@ func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, p
 	block, usage := a.finishToolResult(r, call.Name, sink)
 	clearToolProgress(call, sink)
 	emitToolDiff(call, diffEvents, sink)
-	return block, usage
+	return block, usage, completion
 }
 
 type scheduledToolResult struct {
-	result     llm.ToolResult
-	diffEvents []toolDiffEvent
+	result           llm.ToolResult
+	diffEvents       []toolDiffEvent
+	actualCompletion <-chan struct{}
 }
 
-func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall, dependencies [][]int, awaitActual []bool, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int) llm.Usage {
+func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall, dependencies [][]int, awaitActual []bool, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int, globalStart int, crossStageDependencies [][]int, actualCompletions []<-chan struct{}) llm.Usage {
 	for _, call := range calls {
 		startToolProgress(a.tools, call, sink)
 		sink.ToolStart(call)
@@ -2584,8 +2710,10 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 			for _, predecessor := range dependencies[idx] {
 				<-completed[predecessor]
 			}
+			waitForActualCompletions(crossStageDependencies[idx], actualCompletions)
 			diffState := a.snapshotToolDiff(c)
 			result, actualCompletion, foldFailureGuard := a.dispatchTool(ctx, c)
+			results[idx].actualCompletion = actualCompletion
 			if (hasDependents[idx] || awaitActual[idx]) && actualCompletion != nil && (result.ErrorKind == llm.ToolErrorTimeout || result.ErrorKind == llm.ToolErrorCancelled) {
 				<-actualCompletion
 			}
@@ -2609,6 +2737,7 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 
 	var total llm.Usage
 	for i, scheduled := range results {
+		actualCompletions[globalStart+i] = scheduled.actualCompletion
 		r := acceptRichResult(scheduled.result, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 		block, usage := a.finishToolResult(r, calls[i].Name, sink)
 		blocks[i] = block

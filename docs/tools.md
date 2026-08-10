@@ -440,25 +440,68 @@ configured surface; runtime validation still rejects any explicit unsupported na
 
 ## Parallelism
 
-All co-issued registered tool calls are parallel by default, including mutating
-`shell`, git, MCP/LSP, `write_tmp_file`, and background delegate launches. A tool
-may implement an input-aware sequential opt-out for concrete shared-state
-ordering; built-in examples include `update_todos`, `record_plan`, `handoff`,
-foreground delegates, and `background_jobs` cancellation. A matching
-`PreToolUse` or `PostToolUse` hook also makes that target call a barrier.
+Every local tool accepts the reserved optional top-level `_stage` integer. Within
+one assistant tool-use turn, execution starts at stage 1. An omitted `_stage`
+inherits the current stage, while an explicit value sets it without moving
+backward; explicit stages must therefore be positive and non-decreasing in model
+emission order. Gaps are accepted as labels; only the relative order matters.
+Harness validates the complete plan before dispatch, so an invalid value or a
+backward stage rejects every call in the batch before tools or hooks run. For
+example, these reads are independent and eligible to overlap:
+
+```json
+{"path":"go.mod","_stage":1}
+{"path":"README.md","_stage":1}
+```
+
+A dependent edit and verification can stay in that assistant turn by using later
+stages:
+
+```json
+{"path":"version.txt","content":"2\n","_stage":2}
+{"argv":["go","test","./..."],"_stage":3}
+```
+
+Harness does not start a stage until all earlier stages have returned results.
+Within one stage, co-issued registered calls are parallel-eligible by default,
+including mutating `shell`, git, MCP/LSP, `write_tmp_file`, and background
+delegate launches. A tool may implement an input-aware sequential opt-out for
+concrete shared-state ordering; built-in examples include `update_todos`,
+`record_plan`, `handoff`, foreground delegates, and `background_jobs`
+cancellation. Such calls are barriers inside their stage. A matching
+`PreToolUse` or `PostToolUse` hook also makes its target call a barrier.
 
 Built-in `write` and `edit` report mutation paths. Harness normalizes those paths
-lexically (`Abs` + `Clean`) and queues every overlapping mutation behind the
-latest earlier call, including mixed write/edit and multi-file edits. Unrelated
-members of the same scheduling island still overlap. Results, usage, sink events,
-and transcript blocks are emitted in the model's original call order even when
-execution completes differently.
+lexically (`Abs` + `Clean`) and queues every overlapping same-stage mutation
+behind the latest earlier call, including mixed write/edit and multi-file edits.
+Unrelated members of the stage still overlap. All stages remain one assistant
+turn and produce one user tool-result message; results, usage, sink events, and
+transcript blocks appear in the model's original call order even when execution
+completes differently.
+
+A timeout or cancellation result normally satisfies a stage barrier. When a
+reported mutation conflicts with a later-stage mutation, however, Harness also
+waits for the earlier tool's execution goroutine to return before starting the
+conflicting call. This prevents a context-ignoring timed-out mutation from
+finishing on top of its successor. Errors otherwise do not skip or cancel later
+stages. Likewise, a background launch result means that work was queued, not
+that the background job finished; use `background_jobs wait` and leases when
+later work must wait for completion.
 
 Conflict detection is intentionally best-effort. It does not infer read-versus-
 write dependencies, shell-hidden paths, git effects, symlink/hard-link aliases,
-or remote MCP/LSP effects. Use `shell.steps` for commands that intentionally need
-serial order, explicit background leases for coordinated jobs, or separate model
-turns when those effects depend on one another.
+or remote MCP/LSP effects. `_stage` orders separate tool calls whose arguments
+are already known. By contrast, `shell.steps` runs a tightly coupled serial
+command list inside one `shell` call. If a later call's arguments depend on an
+earlier result, wait for the next model turn rather than guessing them in a later
+stage. Unlike generic stages, `shell.steps` also owns command-batch behavior such
+as `stop_on_failure` and compact receipts. Use explicit background leases for
+coordinated jobs.
+
+`_stage` is Harness scheduling metadata, not a tool argument. Its top-level
+property name is reserved for built-in, custom, MCP, and LSP tools and is removed
+before execution, so custom and discovered tools must not assign it another
+meaning.
 
 ## Truncation And Artifacts
 

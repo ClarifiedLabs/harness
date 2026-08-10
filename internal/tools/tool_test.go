@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -186,8 +187,8 @@ func TestRegistrySpecsOrdered(t *testing.T) {
 			t.Errorf("specs[%d].Name = %q, want %q", i, s.Name, want[i])
 		}
 	}
-	if string(specs[0].Parameters) != `{"type":"object"}` {
-		t.Errorf("Parameters = %q, want compact schema", specs[0].Parameters)
+	if string(specs[0].Parameters) != `{"properties":{"_stage":{"type":"integer","minimum":1}},"type":"object"}` {
+		t.Errorf("Parameters = %q, want compact schema with execution stage", specs[0].Parameters)
 	}
 	if specs[0].Description != "ok tool" {
 		t.Errorf("Description not passed through: %q", specs[0].Description)
@@ -218,9 +219,190 @@ func TestRegistrySpecsStripSchemaDescriptions(t *testing.T) {
 	if strings.Contains(string(specs[0].Parameters), "description") {
 		t.Fatalf("schema descriptions were not stripped: %s", specs[0].Parameters)
 	}
-	want := `{"properties":{"name":{"type":"string"}},"type":"object"}`
+	want := `{"properties":{"_stage":{"type":"integer","minimum":1},"name":{"type":"string"}},"type":"object"}`
 	if string(specs[0].Parameters) != want {
 		t.Fatalf("schema = %s, want %s", specs[0].Parameters, want)
+	}
+}
+
+func TestRegistrySpecsAddReservedExecutionStage(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+		check  func(*testing.T, map[string]any)
+	}{
+		{name: "minimal object", schema: `{"type":"object"}`},
+		{name: "existing properties", schema: `{"type":"object","properties":{"path":{"type":"string","format":"path","default":"x"}},"required":["path"]}`},
+		{name: "closed object", schema: `{"type":"object","additionalProperties":false}`},
+		{
+			name:   "nested object unchanged",
+			schema: `{"type":"object","properties":{"nested":{"type":"object","properties":{"value":{"type":"string"}}}}}`,
+			check: func(t *testing.T, schema map[string]any) {
+				t.Helper()
+				properties := schema["properties"].(map[string]any)
+				nested := properties["nested"].(map[string]any)["properties"].(map[string]any)
+				if _, exists := nested[executionStageKey]; exists {
+					t.Fatalf("nested schema received reserved field: %v", nested)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := json.RawMessage(tc.schema)
+			tool := fakeTool{
+				name:   "schema",
+				desc:   "schema",
+				schema: tc.schema,
+				run:    func(context.Context, json.RawMessage) (string, error) { return "ok", nil },
+			}
+			r := &Registry{}
+			r.Register(tool)
+			before := append([]byte(nil), tool.Schema()...)
+			parameters := r.Specs()[0].Parameters
+			if !bytes.Equal(tool.Schema(), before) || !bytes.Equal(raw, before) {
+				t.Fatalf("raw tool schema changed: got %s want %s", tool.Schema(), before)
+			}
+			var schema map[string]any
+			if err := json.Unmarshal(parameters, &schema); err != nil {
+				t.Fatal(err)
+			}
+			properties, ok := schema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("properties missing: %s", parameters)
+			}
+			stage, ok := properties[executionStageKey].(map[string]any)
+			if !ok || stage["type"] != "integer" || stage["minimum"] != float64(1) {
+				t.Fatalf("reserved stage schema = %v", properties[executionStageKey])
+			}
+			if tc.name == "existing properties" {
+				if !slices.Equal(anyStrings(schema["required"]), []string{"path"}) || properties["path"].(map[string]any)["format"] != "path" || properties["path"].(map[string]any)["default"] != "x" {
+					t.Fatalf("existing schema keywords changed: %v", schema)
+				}
+			}
+			if tc.name == "closed object" && schema["additionalProperties"] != false {
+				t.Fatalf("additionalProperties changed: %v", schema)
+			}
+			if tc.check != nil {
+				tc.check(t, schema)
+			}
+		})
+	}
+}
+
+func anyStrings(value any) []string {
+	values, _ := value.([]any)
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if text, ok := value.(string); ok {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+func TestRegistrySpecsReservedExecutionStageWins(t *testing.T) {
+	const rawSchema = `{"type":"object","properties":{"_stage":{"type":"string","description":"custom meaning"},"value":{"type":"string"}},"required":["_stage","value"]}`
+	var seen string
+	tool := fakeTool{
+		name:   "custom",
+		desc:   "custom",
+		schema: rawSchema,
+		run: func(_ context.Context, input json.RawMessage) (string, error) {
+			seen = string(input)
+			return "ok", nil
+		},
+	}
+	r := &Registry{}
+	r.Register(tool)
+	parameters := string(r.Specs()[0].Parameters)
+	if strings.Contains(parameters, "custom meaning") || strings.Contains(parameters, `"_stage":{"type":"string"}`) {
+		t.Fatalf("tool-defined stage contract survived: %s", parameters)
+	}
+	if !strings.Contains(parameters, `"_stage":{"type":"integer","minimum":1}`) {
+		t.Fatalf("Harness stage contract missing: %s", parameters)
+	}
+	var modelSchema map[string]any
+	if err := json.Unmarshal([]byte(parameters), &modelSchema); err != nil {
+		t.Fatal(err)
+	}
+	if required := anyStrings(modelSchema["required"]); !slices.Equal(required, []string{"value"}) {
+		t.Fatalf("reserved stage remained required: %v", required)
+	}
+	if got := string(tool.Schema()); got != rawSchema {
+		t.Fatalf("raw schema = %s, want byte-identical %s", got, rawSchema)
+	}
+	res := r.Dispatch(context.Background(), llm.ToolCall{ID: "c", Name: "custom", Input: json.RawMessage(`{"_stage":2,"value":"kept"}`)})
+	if res.IsError || seen != `{"value":"kept"}` {
+		t.Fatalf("dispatch result=%+v input=%s", res, seen)
+	}
+}
+
+func TestExtractExecutionMetadata(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		wantClean string
+		wantStage int
+		wantHas   bool
+		wantErr   bool
+	}{
+		{name: "empty", input: "", wantClean: `{}`},
+		{name: "absent", input: ` {"value":1} `, wantClean: ` {"value":1} `},
+		{name: "positive", input: `{"_stage":2,"value":1}`, wantClean: `{"value":1}`, wantStage: 2, wantHas: true},
+		{name: "zero", input: `{"_stage":0}`, wantClean: `{}`, wantErr: true},
+		{name: "negative", input: `{"_stage":-1}`, wantClean: `{}`, wantErr: true},
+		{name: "fractional", input: `{"_stage":1.5}`, wantClean: `{}`, wantErr: true},
+		{name: "string", input: `{"_stage":"1"}`, wantClean: `{}`, wantErr: true},
+		{name: "boolean", input: `{"_stage":true}`, wantClean: `{}`, wantErr: true},
+		{name: "object", input: `{"_stage":{"value":1}}`, wantClean: `{}`, wantErr: true},
+		{name: "array", input: `{"_stage":[1]}`, wantClean: `{}`, wantErr: true},
+		{name: "null", input: `{"_stage":null}`, wantClean: `{}`, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			input := json.RawMessage(tc.input)
+			before := append([]byte(nil), input...)
+			clean, metadata, err := ExtractExecutionMetadata(input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if string(clean) != tc.wantClean {
+				t.Fatalf("clean = %q, want %q", clean, tc.wantClean)
+			}
+			if metadata.Stage != tc.wantStage || metadata.HasStage != tc.wantHas {
+				t.Fatalf("metadata = %+v, want stage=%d has=%v", metadata, tc.wantStage, tc.wantHas)
+			}
+			if !bytes.Equal(input, before) {
+				t.Fatalf("input mutated: got %q want %q", input, before)
+			}
+		})
+	}
+}
+
+func TestRegistryDispatchStripsOrRejectsExecutionStage(t *testing.T) {
+	var inputs []string
+	r := &Registry{}
+	r.Register(fakeTool{
+		name:   "capture",
+		desc:   "capture",
+		schema: `{"type":"object"}`,
+		run: func(_ context.Context, input json.RawMessage) (string, error) {
+			inputs = append(inputs, string(input))
+			return "ok", nil
+		},
+	})
+
+	valid := r.Dispatch(context.Background(), llm.ToolCall{ID: "valid", Name: "capture", Input: json.RawMessage(`{"_stage":3,"value":true}`)})
+	if valid.IsError || !slices.Equal(inputs, []string{`{"value":true}`}) {
+		t.Fatalf("valid dispatch=%+v inputs=%v", valid, inputs)
+	}
+	invalid := r.Dispatch(context.Background(), llm.ToolCall{ID: "invalid", Name: "capture", Input: json.RawMessage(`{"_stage":"later","value":true}`)})
+	if !invalid.IsError || invalid.ErrorKind != llm.ToolErrorInvalidArgs || !strings.Contains(invalid.Text, "_stage") {
+		t.Fatalf("invalid dispatch = %+v", invalid)
+	}
+	if len(inputs) != 1 {
+		t.Fatalf("tool ran for invalid stage: %v", inputs)
 	}
 }
 
