@@ -1885,11 +1885,13 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 `system = staticPrompt + envContext + AGENTS.md + skills + runtimeHints + agentPrompt`
 
 - **Builtin instructions** (`prompts/system.txt`): concise agentic-coding guidance — read before
-  editing; emit all currently known calls in one tool turn; assign independent calls
-  the same `_stage` and dependencies increasing stages (omissions inherit from stage
-  1); use `shell.steps[]` for tightly coupled serial commands; rely on automatic
-  same-file write/edit sequencing; defer calls with output-dependent arguments to the
-  next model turn; run focused verification; and stop when done.
+  editing; emit all currently known calls in one tool turn; `_stage` orders separate tool
+  calls: assign independent calls the same `_stage` and dependencies increasing stages
+  (omissions inherit from stage 1); prefer one shell call's `steps[]` for an ordered run of
+  shell commands (serial with stop_on_failure, one receipt), reserving increasing stages
+  for ordering across different tools; rely on automatic same-file write/edit sequencing;
+  defer calls with output-dependent arguments to the next model turn; run focused
+  verification; and stop when done.
 - **Environment context**, computed at startup:
 
   ```
