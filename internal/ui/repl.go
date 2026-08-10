@@ -246,8 +246,11 @@ type App struct {
 	// RunStream, when set, mirrors the durable session event stream and the
 	// prompt boundary envelopes to the JSON run stream on stdout (design §10,
 	// -format json run modes). nil keeps stdout human-facing.
-	RunStream            *runstream.Writer
-	OnSessionPathChanged func(string)
+	RunStream *runstream.Writer
+	// BeforeSessionPathChange reserves a newly rotated session path before App
+	// begins using it. nil leaves path ownership to the embedding.
+	BeforeSessionPathChange func(string) error
+	OnSessionPathChanged    func(string)
 	// OnPromptFinished observes completion after the per-prompt session save.
 	// It is primarily useful to coordinate embedders and tests whose process
 	// remains alive after a forced REPL exit.
@@ -4032,6 +4035,14 @@ func (app *App) refreshMCP(ctx context.Context) error {
 // clear resets the conversation and rotates to a fresh auto-save file (design
 // §10, §11). Cumulative usage resets with the conversation.
 func (app *App) clear() {
+	created := app.clock()()
+	path := session.DefaultPath(app.StateDir, created)
+	if app.BeforeSessionPathChange != nil {
+		if err := app.BeforeSessionPathChange(path); err != nil {
+			fmt.Fprintf(app.Errw, "[clear failed: lock new session: %v]\n", err)
+			return
+		}
+	}
 	app.RecordOTelSession()
 	if app.Background != nil {
 		app.Background.Clear()
@@ -4054,7 +4065,7 @@ func (app *App) clear() {
 	}
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
-	app.Created = app.clock()()
+	app.Created = created
 	cwd, _ := os.Getwd()
 	app.SessionTree = session.NewTree(app.Created, cwd, "", "")
 	app.PromptNumber = 0
@@ -4062,7 +4073,7 @@ func (app *App) clear() {
 	app.todoPromptStatusBeforeUsagePrompt = 0
 	app.planPromptStatusBeforeUsage = false
 	app.planPromptStatusBeforeUsagePrompt = 0
-	app.SessionPath = session.DefaultPath(app.StateDir, app.Created)
+	app.SessionPath = path
 	app.refreshOTelIdentity()
 	if app.OnSessionPathChanged != nil {
 		app.OnSessionPathChanged(app.SessionPath)

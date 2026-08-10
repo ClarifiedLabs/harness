@@ -2554,6 +2554,37 @@ func TestRunResumeFlagsWinWarning(t *testing.T) {
 	}
 }
 
+func TestRunResumeRejectsActiveSession(t *testing.T) {
+	dir := t.TempDir()
+	sessPath := filepath.Join(dir, "active")
+	prior := session.Session{
+		Provider: "anthropic",
+		Model:    "claude-opus-4-8",
+		Created:  time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC),
+	}
+	if err := prior.Save(sessPath); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := session.AcquireLock(sessPath)
+	if err != nil {
+		t.Fatalf("lock active session: %v", err)
+	}
+	defer lock.Close()
+
+	fp := llmtest.New("fake", okStep())
+	env, _, errw, _ := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-resume", sessPath, "-p", "continue"}, fp, "")
+	if code := run(env); code != ui.ExitRuntime {
+		t.Fatalf("resume active session exit = %d, want %d; stderr=%q", code, ui.ExitRuntime, errw.String())
+	}
+	if !strings.Contains(errw.String(), "is active in process") {
+		t.Fatalf("resume active session stderr = %q, want lock owner diagnostic", errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("active session resume made %d provider requests", len(fp.Requests))
+	}
+}
+
 func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 	dir := t.TempDir()
 	sessPath := filepath.Join(dir, "prior")

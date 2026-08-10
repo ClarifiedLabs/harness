@@ -1218,6 +1218,28 @@ func TestREPLClearResetsAndRotates(t *testing.T) {
 	}
 }
 
+func TestREPLClearLockFailurePreservesSession(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	originalPath := app.SessionPath
+	originalProxySessionID := app.Agent.ProxySessionID()
+	app.Agent.SetTranscript([]llm.Message{uiUserMsg("keep this"), uiAsstMsg("kept")})
+	app.SetUsage(session.UsageTotals{Usage: llm.Usage{InputTokens: 10}})
+	app.BeforeSessionPathChange = func(string) error { return errors.New("occupied") }
+
+	app.clear()
+
+	if app.SessionPath != originalPath {
+		t.Fatalf("session path changed after lock failure: %q != %q", app.SessionPath, originalPath)
+	}
+	if app.Agent.ProxySessionID() != originalProxySessionID || len(app.Agent.Transcript()) != 2 {
+		t.Fatalf("session state changed after lock failure: proxy=%q transcript=%+v", app.Agent.ProxySessionID(), app.Agent.Transcript())
+	}
+	if app.usage.InputTokens != 10 || !strings.Contains(errw.String(), "clear failed: lock new session: occupied") {
+		t.Fatalf("clear lock failure usage/stderr = %+v / %q", app.usage, errw.String())
+	}
+}
+
 func TestREPLUnknownCommand(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")

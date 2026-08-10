@@ -1739,9 +1739,14 @@ model can reconcile it with current progress.
   recovers that open call as an explicit `interrupted` error instead of
   automatically executing it again. Closed-turn checkpoints include the latest
   plan, advisory TODO list, usage, cache/proxy IDs, and a safe provider continuation anchor.
-- `-session <dir>` chooses an explicit session directory. `-resume <dir>` loads
-  its active tree path, latest plan, and TODO list, then continues, applying a newer
-  active-turn recovery record when present and printing the recovered boundary. Resume also prints a
+- `-session <dir>` chooses an explicit session directory. Active sessions hold a
+  non-blocking OS lock on `session.lock` for process ownership; the file contains
+  the owner PID for diagnostics, but the kernel lock is authoritative and is
+  released automatically if the process exits or crashes. Starting another
+  harness with `-resume <dir>` while that session is active fails without loading
+  or modifying it. `-resume <dir>` otherwise loads its active tree path, latest
+  plan, and TODO list, then continues, applying a newer active-turn recovery
+  record when present and printing the recovered boundary. Resume also prints a
   bounded recap of the last exchange to stderr before the first prompt — the
   most recent human prompt and assistant reply — with an explicit trailer when
   the prior session ended mid-turn (interrupted mid-reply, during tool

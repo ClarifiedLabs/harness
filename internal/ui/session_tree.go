@@ -174,11 +174,18 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 		fmt.Fprintf(app.Errw, "[%s failed: %v]\n", source, err)
 		return false
 	}
+	path := session.DefaultPathForID(app.StateDir, created, tree.Header.ID)
+	if app.BeforeSessionPathChange != nil {
+		if err := app.BeforeSessionPathChange(path); err != nil {
+			fmt.Fprintf(app.Errw, "[%s failed: lock new session: %v]\n", source, err)
+			return false
+		}
+	}
 	if app.Background != nil {
 		app.Background.Clear()
 	}
 	app.SessionTree = tree
-	app.SessionPath = session.DefaultPathForID(app.StateDir, created, tree.Header.ID)
+	app.SessionPath = path
 	app.Created = created
 	app.PromptNumber = 0
 	app.SetUsage(session.UsageTotals{})

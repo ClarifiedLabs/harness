@@ -4,6 +4,7 @@
 //	state.json       compact runtime state and active tree leaf
 //	tree.ndjson      canonical append-only conversation tree
 //	raw.ndjson       user-facing replay events
+//	session.lock     process ownership lock and owner PID metadata
 //	compactions/     raw messages removed from active context
 //	artifacts/       full tool outputs omitted from active context
 package session

@@ -380,10 +380,69 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	stdout = terminalOutput.Stdout()
 	stderr = terminalOutput.Stderr()
 
+	// Lock a resumed session before reading or repairing any of its files. The
+	// same lock remains active until the process exits or an interactive command
+	// rotates to a new session directory.
+	var activeSessionLock *session.Lock
+	var pendingSessionLock *session.Lock
+	var retiredSessionLocks []*session.Lock
+	defer func() {
+		if pendingSessionLock != nil {
+			_ = pendingSessionLock.Close()
+		}
+		if activeSessionLock != nil {
+			_ = activeSessionLock.Close()
+		}
+		for _, lock := range retiredSessionLocks {
+			_ = lock.Close()
+		}
+	}()
+	switchSessionLock := func(path string) error {
+		next, err := session.AcquireLock(path)
+		if err != nil {
+			return err
+		}
+		previous := activeSessionLock
+		activeSessionLock = next
+		if previous != nil {
+			_ = previous.Close()
+		}
+		return nil
+	}
+	prepareSessionLockChange := func(path string) error {
+		if pendingSessionLock != nil {
+			return errors.New("session: another path change is pending")
+		}
+		next, err := session.AcquireLock(path)
+		if err != nil {
+			return err
+		}
+		pendingSessionLock = next
+		return nil
+	}
+	commitSessionLockChange := func() {
+		if pendingSessionLock == nil {
+			return
+		}
+		previous := activeSessionLock
+		activeSessionLock = pendingSessionLock
+		pendingSessionLock = nil
+		if previous != nil {
+			// Canceled background children can finish their final checkpoint after a
+			// path rotation returns. Retain ownership of old roots until process exit
+			// so they cannot race a resume of the prior session.
+			retiredSessionLocks = append(retiredSessionLocks, previous)
+		}
+	}
+
 	// Load a resumed session up front: its saved agent selects the tool set and
 	// any agent-specific model target when no -agent flag overrides it.
 	var resumed *session.Session
 	if runOptions.Resume != "" {
+		if err := switchSessionLock(runOptions.Resume); err != nil {
+			fmt.Fprintf(stderr, "harness: resume %s: %v\n", runOptions.Resume, err)
+			return ui.ExitRuntime
+		}
 		s, err := session.Load(runOptions.Resume)
 		if err != nil {
 			fmt.Fprintf(stderr, "harness: resume %s: %v\n", runOptions.Resume, err)
@@ -427,6 +486,15 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			sessionPath = runOptions.Resume
 		} else {
 			sessionPath = session.DefaultPath(stateDir(getenv), created)
+		}
+	}
+	// Debug requests do not persist a new session. A debug request with -resume
+	// still holds the source lock because loading it may perform recovery and child
+	// cleanup. All ordinary runs lock their write destination before setup proceeds.
+	if !runOptions.DebugRequest && (runOptions.Resume == "" || filepath.Clean(sessionPath) != filepath.Clean(runOptions.Resume)) {
+		if err := switchSessionLock(sessionPath); err != nil {
+			fmt.Fprintf(stderr, "harness: session %s: %v\n", sessionPath, err)
+			return ui.ExitRuntime
 		}
 	}
 	resumeCloned := false
@@ -1358,10 +1426,12 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			}
 			return nil
 		}(),
-		StateDir: stateDir(getenv),
-		Created:  created,
-		Now:      now,
+		StateDir:                stateDir(getenv),
+		Created:                 created,
+		Now:                     now,
+		BeforeSessionPathChange: prepareSessionLockChange,
 		OnSessionPathChanged: func(path string) {
+			defer commitSessionLockChange()
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
 			snap.CacheAffinityID = ag.CacheAffinityID()
