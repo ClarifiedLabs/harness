@@ -3596,6 +3596,24 @@ func TestREPLContextDumpsCurrentRequest(t *testing.T) {
 	}
 }
 
+func TestREPLPromptShowsFullSystemPrompt(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	app.System = "base system\n\nEnvironment:\ncwd: /project\n\n[runtime hint]\nuse rg\n\nagent instructions"
+	app.Agent.SetSystem(app.System)
+
+	if code := Run(strings.NewReader("/prompt\n/exit\n"), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d", code, ExitOK)
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("/prompt should not invoke the model, got %d requests", fp.RequestCount())
+	}
+	if got := errw.String(); !strings.Contains(got, app.System+"\n") {
+		t.Fatalf("/prompt output omitted composed system prompt:\n%s", got)
+	}
+}
+
 func TestREPLContextSavesToFile(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{

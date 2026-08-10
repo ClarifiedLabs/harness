@@ -1487,6 +1487,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/clone` | copy the current branch into a new session with fresh usage accounting |
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
+| `/prompt` | show the full system prompt currently sent to the model, including environment, AGENTS.md, skills, runtime capability hints, and active-agent instructions |
 | `/usage` | cumulative input, cached input, output, reasoning tokens, cost, and successful compactions |
 | `/max-turns` | show the current per-prompt turn limit |
 | `/max-turns <n>` | change the turn limit for subsequent prompts in this REPL session; `n <= 0` means unlimited |

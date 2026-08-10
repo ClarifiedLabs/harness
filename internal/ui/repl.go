@@ -358,6 +358,7 @@ const helpText = `commands:
   /fork [entry]    branch before a prior prompt into a new session
   /clone           clone the current branch into a new session
   /context [file]  dump current model context, or save it as JSON
+  /prompt          show the full system prompt, including runtime hints
   /usage           cumulative session tokens and cost
   /max-turns [n]   show or set turns per prompt for this session (<=0 is unlimited)
   /tools           list available tools (built-in, MCP, and disabled)
@@ -2577,6 +2578,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		app.cloneCommand()
 	case "/context":
 		app.contextDump(arg)
+	case "/prompt":
+		fmt.Fprintln(app.Errw, app.System)
 	case "/usage":
 		fmt.Fprintln(app.Errw, app.usageSummary())
 	case "/max-turns":
@@ -2797,7 +2800,7 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 // knownCommands is the meta-command vocabulary used for "did you mean …?"
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
-	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/usage",
+	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/prompt", "/usage",
 	"/max-turns", "/tools", "/lsp", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
 }
