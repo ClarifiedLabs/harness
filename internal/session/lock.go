@@ -30,6 +30,54 @@ func (e *LockedError) Error() string {
 
 func (e *LockedError) Unwrap() error { return ErrLocked }
 
+// ProbeActivity reports whether dir's existing kernel lock is held without
+// creating the lock file or changing its diagnostic metadata. The result is a
+// point-in-time snapshot; callers that resume a session must still AcquireLock.
+func ProbeActivity(dir string) (ActivityStatus, error) {
+	path := filepath.Join(dir, lockFile)
+	before, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return ActivityInactive, nil
+	}
+	if err != nil {
+		return ActivityUnknown, fmt.Errorf("session: inspect lock %s: %w", path, err)
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return ActivityUnknown, fmt.Errorf("session: lock path is not a regular file: %s", path)
+	}
+
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return ActivityUnknown, fmt.Errorf("session: open lock probe %s: %w", path, err)
+	}
+	after, statErr := f.Stat()
+	if statErr != nil || !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		closeErr := f.Close()
+		if statErr == nil {
+			statErr = errors.New("lock path changed while opening")
+		}
+		return ActivityUnknown, errors.Join(fmt.Errorf("session: inspect opened lock %s: %w", path, statErr), closeErr)
+	}
+
+	lockErr := lockSessionFile(f)
+	if errors.Is(lockErr, errLockHeld) {
+		if closeErr := f.Close(); closeErr != nil {
+			return ActivityActive, fmt.Errorf("session: close active lock probe %s: %w", path, closeErr)
+		}
+		return ActivityActive, nil
+	}
+	if lockErr != nil {
+		closeErr := f.Close()
+		return ActivityUnknown, errors.Join(fmt.Errorf("session: probe lock %s: %w", path, lockErr), closeErr)
+	}
+	unlockErr := unlockSessionFile(f)
+	closeErr := f.Close()
+	if err := errors.Join(unlockErr, closeErr); err != nil {
+		return ActivityUnknown, fmt.Errorf("session: release lock probe %s: %w", path, err)
+	}
+	return ActivityInactive, nil
+}
+
 // Lock is exclusive process ownership of a session directory. The lock file is
 // intentionally persistent: unlinking it would allow a new process to lock a
 // different inode while the old inode remains locked. Close releases ownership.

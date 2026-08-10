@@ -17,6 +17,8 @@ var commandHandlers = map[string]commandHandler{
 	"config.list":     runConfigList,
 	"config.show":     runConfigShow,
 	"config.check":    runConfigCheck,
+	"session.ls":      runSessionList,
+	"session.resume":  runSessionResume,
 	"session.replay":  runSessionReplay,
 	"session.timings": runSessionTimings,
 	"session.stats":   runSessionStats,
@@ -54,8 +56,13 @@ func commandCatalog(env environment) cli.Catalog {
 				},
 			},
 			{
-				ID: "session", Name: "session", Summary: "Inspect recorded sessions.",
+				ID: "session", Name: "session", Aliases: []string{"sessions"}, Summary: "Inspect and resume recorded sessions.",
 				Commands: []cli.Command{
+					{ID: "session.ls", Name: "ls", Summary: "List recorded root sessions.", Runnable: true, Args: exactArgs(0, ""), Flags: []cli.Flag{
+						boolCLIFlag("all", []string{"a", "all"}, "include sessions from every working directory"),
+						boolCLIFlag("long", []string{"l", "long"}, "include status, timestamps, and initial prompt"),
+					}},
+					{ID: "session.resume", Name: "resume", Summary: "Resume a recorded session.", Runnable: true, Args: optionalDirArgs(), Flags: sessionResumeCLIFlags()},
 					{ID: "session.replay", Name: "replay", Summary: "Replay a recorded session.", Runnable: true, Args: exactArgs(1, "<session-dir>"), Flags: []cli.Flag{
 						boolCLIFlag("follow", []string{"f", "follow"}, "follow appended replay events"),
 						boolCLIFlag("quiet", []string{"q", "quiet"}, "suppress replay status lines"),
@@ -149,6 +156,17 @@ func mustConfigCLIFlag(id string) cli.Flag {
 		panic("missing config CLI flag " + id)
 	}
 	return flag
+}
+
+func sessionResumeCLIFlags() []cli.Flag {
+	rootFlags := config.CLIFlags()
+	flags := make([]cli.Flag, 0, len(rootFlags)-1)
+	for _, flag := range rootFlags {
+		if flag.ID != "resume" {
+			flags = append(flags, flag)
+		}
+	}
+	return flags
 }
 
 func sessionErrorCLIFlags() []cli.Flag {

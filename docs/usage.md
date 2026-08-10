@@ -1786,12 +1786,43 @@ model can reconcile it with current progress.
 Inspect saved sessions with:
 
 ```sh
+harness session ls [-a|--all] [-l|--long]
+harness session resume [root-options] [--] [session-dir]
 harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 harness session stats [--format text|json] ~/.local/state/harness/sessions/20260611T123456Z
 harness session analyze [--since D|--all] [--before RFC3339] [--format text|json] [--] [dir]
 harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--before RFC3339] [--format text|json] [dir]
 ```
+
+`session ls` lists recorded root sessions newest first. By default it includes
+only sessions whose persisted startup working directory matches the current
+working directory. `-a`/`--all` removes that working-directory filter, but still
+indexes only immediate sessions under the default
+`$XDG_STATE_HOME/harness/sessions` root; arbitrary directories previously chosen
+with root `-session` are not indexed. The short form prints one full session path
+per line. `-l`/`--long` also prints the point-in-time `active`, `inactive`, or
+`unknown` kernel-lock status, RFC3339 start and end columns, and a bounded initial
+prompt preview. Prompt previews collapse whitespace to one line and clip
+rune-safely. `START` is the persisted creation time. For an inactive or unknown
+session, `END` is the latest durable state save and is only an approximation, not
+proof of a clean exit; active sessions show `-`. The activity check does not
+create or rewrite `session.lock`, and the lock acquired by resume remains the
+authoritative race-safe decision.
+
+`session resume <session-dir>` forwards the source path, including paths outside
+the default root, through the normal root resume flow. With no path, it opens a
+searchable, paged picker over the same-working-directory sessions. Each entry
+shows its prompt first, followed by an aligned start/end/session detail row on
+stderr, leaving stdout available for resumed text or JSON output. Sessions saved
+with an unsupported schema version are skipped silently; malformed or unreadable
+sessions still produce warnings. Active sessions remain selectable, but may then
+fail the normal final resume lock. Piped stdin requires an explicit source path so
+the picker never consumes prompt or NDJSON input. Existing root options are
+accepted before the optional source path; Go flag parsing stops at the first
+positional argument, so use `--` for a source path beginning with `-`. A distinct
+forwarded `-session <destination>` retains the existing clone behavior: resume the
+selected source branch into the destination with fresh usage accounting.
 
 `session replay --follow` first renders the existing complete `raw.ndjson`
 records, then renders complete records as they are appended. It uses the same

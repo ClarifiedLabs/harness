@@ -2156,7 +2156,7 @@ func transcriptsEqualMessages(a, b []llm.Message) bool {
 // DefaultPath returns <stateDir>/harness/sessions/<timestamp>/.
 func DefaultPath(stateDir string, at time.Time) string {
 	name := at.UTC().Format("20060102T150405Z")
-	return filepath.Join(stateDir, "harness", "sessions", name)
+	return filepath.Join(DefaultRoot(stateDir), name)
 }
 
 // DefaultPathForID disambiguates a newly extracted session created in the same
@@ -2169,5 +2169,5 @@ func DefaultPathForID(stateDir string, at time.Time, id string) string {
 	if id != "" {
 		name += "-" + id
 	}
-	return filepath.Join(stateDir, "harness", "sessions", name)
+	return filepath.Join(DefaultRoot(stateDir), name)
 }
