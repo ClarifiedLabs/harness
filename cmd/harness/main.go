@@ -723,15 +723,18 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// any warnings to stderr. Skills are disclosed via file-read activation so
 	// the model uses its existing read tool to load them on demand.
 	var skillWarnings skills.Warnings
-	skillDirs := []skills.Dir{
-		{Path: filepath.Join(wd, ".agents", "skills"), Scope: skills.ScopeProject},
-		{Path: filepath.Join(homeDir(getenv), ".agents", "skills"), Scope: skills.ScopeUser},
-	}
+	skillDirs := skills.AncestorSkillDirs(wd, homeDir(getenv))
 	discoveredSkills := skills.Discover(skillDirs, &skillWarnings)
 	for _, w := range skillWarnings {
 		fmt.Fprintf(stderr, "skills: %s\n", w)
 	}
-	skillsCatalog := skills.BuildCatalog(discoveredSkills)
+	effectiveContextWindow := llm.EffectiveContextWindow(cfg.ContextWindow, modelRegistry.ContextWindow(registryModel))
+	skillCatalogBudget := skills.CatalogBudget(effectiveContextWindow)
+	skillsCatalog, skillCatalogReport := skills.BuildCatalogBudgeted(discoveredSkills, skillCatalogBudget)
+	if skillCatalogReport.Omitted > 0 || skillCatalogReport.TruncatedCount > 0 {
+		fmt.Fprintf(stderr, "skills: catalog budget omitted %d and truncated %d of %d skills\n",
+			skillCatalogReport.Omitted, skillCatalogReport.TruncatedCount, skillCatalogReport.Total)
+	}
 	var runtimeHints []string
 	if ripgrepAvailable() {
 		runtimeHints = append(runtimeHints, rgSystemHint)
@@ -1553,6 +1556,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 		otelSink := otel.NewSink(exp, toolRegistry, cfg.Provider, cfg.Model, agentName, false)
 		otelSink.SetIdentity(sessionID, cfg.Provider, cfg.Model, agentName)
+		otelSink.RecordSkillCatalog(skillCatalogReport)
 		app.SetOTel(otelSink)
 		defer func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)

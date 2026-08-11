@@ -167,6 +167,28 @@ func TestExplicitSkillContextReportsActivationWithoutToolRound(t *testing.T) {
 	}
 }
 
+func TestCompleteSkillReadAcceptsNormalizedSkillPaths(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{})
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "skill scheme", path: "skill://focused/SKILL.md"},
+		{name: "case insensitive basename", path: filepath.Join(t.TempDir(), "skill.md")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			call := llm.ToolCall{Name: "read", Input: []byte(fmt.Sprintf(`{"path":%q}`, tc.path))}
+			path, body, ok := a.completeSkillRead(call, "1\tfull body")
+			if !ok || body != "full body" {
+				t.Fatalf("completeSkillRead = path %q body %q ok %v", path, body, ok)
+			}
+			if strings.HasPrefix(path, "skill://") {
+				t.Fatalf("normalized path retained skill scheme: %q", path)
+			}
+		})
+	}
+}
+
 func TestPartialSkillReadDoesNotActivate(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "SKILL.md")
 	var body strings.Builder

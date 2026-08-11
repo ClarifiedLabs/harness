@@ -116,6 +116,20 @@ func reportExplicitSkillContexts(context []string, sink EventSink) {
 	}
 }
 
+func normalizeSkillReadPath(p string) string {
+	p = strings.TrimSpace(p)
+	if strings.HasPrefix(p, "skill://") {
+		p = strings.TrimPrefix(p, "skill://")
+	}
+	return p
+}
+
+func isSkillReadPath(p string) bool {
+	norm := normalizeSkillReadPath(p)
+	base := filepath.Base(filepath.Clean(norm))
+	return strings.EqualFold(base, "SKILL.md") || strings.HasPrefix(strings.TrimSpace(p), "skill://")
+}
+
 func (a *Agent) completeSkillRead(call llm.ToolCall, result string) (string, string, bool) {
 	var args struct {
 		Offset int `json:"offset"`
@@ -128,9 +142,10 @@ func (a *Agent) completeSkillRead(call llm.ToolCall, result string) (string, str
 		return "", "", false
 	}
 	path := paths[0]
-	if filepath.Base(filepath.Clean(path)) != "SKILL.md" {
+	if !isSkillReadPath(path) {
 		return "", "", false
 	}
+	path = normalizeSkillReadPath(path)
 	if absolute, err := filepath.Abs(path); err == nil {
 		path = absolute
 	} else {

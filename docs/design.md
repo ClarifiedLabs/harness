@@ -1911,17 +1911,22 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   `AGENTS.md`, skills, and agent prompts are still composed around it.
   `~/.agents/AGENTS.md` is appended before the current working directory's
   `AGENTS.md`; missing files are ignored and other read failures fail startup.
-  The skills catalog includes its activation/read instruction once and caps each
-  description at 160 runes. Process-specific `rg`/LSP/Serena hints follow it. When ripgrep is on `PATH`, a short runtime hint ("When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`.") is appended to `RuntimeHints`. The
+  The skills catalog is rendered as `## Skills` / `### Available skills` (`name: description (file: /abs/SKILL.md)`) / `### How to use skills` with discovery, trigger (`$Name` or matching description, multiple mentions → all), missing-skill, progressive-disclosure (read `SKILL.md` completely via `read`, resolve relatives from its directory, read only routed `references/`, prefer scripts), and coordination guidance; within the always-resident catalog each description is the first sentence or 160 runes and a character budget equal to 2% of the startup model's effective context window fair-shares remaining chars round-robin (omitting extras with an omission notice); unknown windows fall back to 8,000 characters. Process-specific `rg`/LSP/Serena hints follow it. When ripgrep is on `PATH`, a short runtime hint ("When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`.") is appended to `RuntimeHints`. The
   active agent prompt is always the final section.
   `@~/path` expands through the current user's home directory; relative `@file`
   references in the config file resolve from that config file's directory.
   `-no-env` drops the env block.
-- Explicit `$skillName` mentions are resolved before provider work. Harness reads
+- Explicit mentions are resolved before provider work: `$skillName`, exact
+  word-bounded plain names, and `skill://` / `…/SKILL.md` path mentions
+  (punctuation-tolerant, `$$` escapes to literal `$`) each activate their skill;
+  Harness reads
   the complete `SKILL.md` once, wraps it as typed request-only active-skill
   context, and keeps that exact context on every request for the prompt,
   including after compaction. A read failure aborts the prompt before a model
-  call, eliminating the former activation round trip.
+  call, eliminating the former activation round trip. Discovery scans existing
+  `.agents/skills` roots from the Git project root through `cwd`, outer to inner,
+  then the user root; project scope beats user scope and the nearest project root
+  wins equal-scope name collisions.
 - Implicit skill selection remains progressive: the model sees the compact
   catalog and may issue one `read` call. A successful complete single-file
   read of `SKILL.md` from the beginning activates its decoded body for the rest
@@ -1931,7 +1936,10 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   does not duplicate active context, while changed content replaces it. Partial
   reads stay ordinary tool results and do not activate. If a
   configured artifact write fails, activation still succeeds but the complete
-  original result remains in the transcript instead of being replaced.
+  original result remains in the transcript instead of being replaced. Catalog
+  omission and truncation counts are emitted as
+  `harness.skill.catalog_omitted` and `harness.skill.catalog_truncated` when
+  OpenTelemetry is enabled; startup also prints a concise budget warning.
 
 ## 9. Tool set (`internal/tools`)
 

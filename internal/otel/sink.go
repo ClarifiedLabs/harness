@@ -10,6 +10,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/llm"
+	"harness/internal/skills"
 	"harness/internal/tools"
 )
 
@@ -397,6 +398,21 @@ func (s *Sink) RecordCommands(input []byte) {
 	s.exp.RecordSum("harness.commands.total", "{command}", 1, s.baseAttrs(map[string]string{"mode": mode, "kind": kind}))
 	if len(p.Steps) > 0 {
 		s.exp.RecordHistogram("harness.commands.steps_per_batch", "{step}", float64(len(p.Steps)), s.baseAttrs(nil), []float64{1, 2, 3, 5, 8})
+	}
+}
+
+// RecordSkillCatalog records startup catalog budget pressure without paths,
+// names, descriptions, or other prompt content.
+func (s *Sink) RecordSkillCatalog(report skills.CatalogReport) {
+	if s == nil || s.exp == nil {
+		return
+	}
+	attrs := s.baseAttrs(nil)
+	if report.Omitted > 0 {
+		s.exp.RecordSum("harness.skill.catalog_omitted", "{skill}", int64(report.Omitted), attrs)
+	}
+	if report.TruncatedCount > 0 {
+		s.exp.RecordSum("harness.skill.catalog_truncated", "{skill}", int64(report.TruncatedCount), attrs)
 	}
 }
 

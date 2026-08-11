@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -13,6 +14,67 @@ type skillMentionResolution struct {
 	Context []string
 	Unknown string
 	Err     error
+}
+
+func normalizeSkillPath(p string) string {
+	if strings.HasPrefix(p, "skill://") {
+		p = strings.TrimPrefix(p, "skill://")
+	}
+	return strings.TrimSpace(p)
+}
+
+func pathIsSkill(p string) bool {
+	norm := normalizeSkillPath(p)
+	if strings.HasPrefix(p, "skill://") {
+		return true
+	}
+	base := filepath.Base(filepath.Clean(norm))
+	return strings.EqualFold(base, "SKILL.md")
+}
+
+func stripTrailingPunct(s string) string {
+	for len(s) > 0 {
+		switch s[len(s)-1] {
+		case '.', ',', ';', ':', ')', ']', '"', '\'', '!', '?':
+			s = s[:len(s)-1]
+		default:
+			return s
+		}
+	}
+	return s
+}
+
+func entryMatchesPath(skill skills.Skill, raw string) bool {
+	norm := stripTrailingPunct(strings.TrimSpace(raw))
+	if norm == "" {
+		return false
+	}
+	cleanNorm := filepath.Clean(normalizeSkillPath(norm))
+	if filepath.Clean(skill.Location) == cleanNorm {
+		return true
+	}
+	if strings.EqualFold(filepath.Base(cleanNorm), "SKILL.md") {
+		dir := filepath.Dir(cleanNorm)
+		if dir != "." && dir != "/" {
+			parts := strings.FieldsFunc(cleanNorm, func(r rune) bool { return r == '/' || r == '\\' })
+			for _, part := range parts {
+				if part == skill.Name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func extractSkillTokens(prompt string) []string {
+	return strings.FieldsFunc(prompt, func(r rune) bool {
+		return !('a' <= r && r <= 'z' ||
+			'A' <= r && r <= 'Z' ||
+			'0' <= r && r <= '9' ||
+			r == '.' || r == '_' || r == '/' || r == ':' ||
+			r == '$' || r == '\\' || r == '-')
+	})
 }
 
 func resolveSkillMentions(prompt string, available map[string]skills.Skill) skillMentionResolution {
@@ -39,6 +101,33 @@ func resolveSkillMentions(prompt string, available map[string]skills.Skill) skil
 			seen[name] = true
 		}
 		i = end - 1
+	}
+	// Add path/scheme mentions and exact, word-bounded plain names. Explicit
+	// `$name` selections above remain primary; seen also acts as the blocked plain
+	// name set so aliases do not activate the same skill twice.
+	for _, raw := range extractSkillTokens(prompt) {
+		if strings.HasPrefix(raw, "$") {
+			continue
+		}
+		tok := stripTrailingPunct(raw)
+		if skill, ok := available[tok]; ok {
+			if !seen[skill.Name] {
+				selected = append(selected, skill)
+				seen[skill.Name] = true
+			}
+			continue
+		}
+		if !pathIsSkill(tok) {
+			continue
+		}
+		for _, name := range sortedSkillNames(available) {
+			skill := available[name]
+			if !seen[skill.Name] && entryMatchesPath(skill, tok) {
+				selected = append(selected, skill)
+				seen[skill.Name] = true
+				break
+			}
+		}
 	}
 	if len(selected) > 0 {
 		context, err := explicitSkillContext(selected)

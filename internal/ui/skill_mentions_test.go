@@ -137,3 +137,45 @@ func TestSortedSkillNamesSortsAndTreatsEmptyAsDisabled(t *testing.T) {
 		t.Fatalf("sortedSkillNames = %v, want %v", got, want)
 	}
 }
+func TestResolveSkillMentionsSkillScheme(t *testing.T) {
+	skill := testSkill(t, "my-skill", "does stuff", "MY BODY")
+	available := map[string]skills.Skill{"my-skill": skill}
+
+	res := resolveSkillMentions("please use skill://my-skill/SKILL.md for this", available)
+	if len(res.Context) != 1 || !strings.Contains(res.Context[0], "MY BODY") {
+		t.Fatalf("skill:// should activate: %+v", res)
+	}
+	res = resolveSkillMentions("read "+skill.Location+".", available)
+	if len(res.Context) != 1 {
+		t.Fatalf("absolute SKILL.md path should activate: %+v", res)
+	}
+	res = resolveSkillMentions("use $$skill://my-skill/SKILL.md", available)
+	if len(res.Context) != 0 {
+		t.Fatalf("escaped skill:// should not activate: %+v", res)
+	}
+}
+
+func TestResolveSkillMentionsPlainNameFallback(t *testing.T) {
+	commit := testSkill(t, "commit", "Create commits", "COMMIT BODY")
+	review := testSkill(t, "review", "Review changes", "REVIEW BODY")
+	available := map[string]skills.Skill{"commit": commit, "review": review}
+
+	res := resolveSkillMentions("please (review), then commit.", available)
+	if len(res.Context) != 2 {
+		t.Fatalf("plain-name contexts = %d, want 2: %+v", len(res.Context), res)
+	}
+	joined := strings.Join(res.Context, "\n")
+	if strings.Index(joined, "name: review") > strings.Index(joined, "name: commit") {
+		t.Fatalf("plain names should preserve prompt order:\n%s", joined)
+	}
+
+	res = resolveSkillMentions("commitment should not trigger", available)
+	if len(res.Context) != 0 {
+		t.Fatalf("plain name must be word bounded: %+v", res)
+	}
+
+	res = resolveSkillMentions("$commit then commit", available)
+	if len(res.Context) != 1 {
+		t.Fatalf("explicit and plain aliases should dedupe: %+v", res)
+	}
+}

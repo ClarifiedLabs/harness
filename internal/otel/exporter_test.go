@@ -13,6 +13,7 @@ import (
 	"harness/internal/agent"
 	"harness/internal/buildinfo"
 	"harness/internal/llm"
+	"harness/internal/skills"
 	"harness/internal/tools"
 )
 
@@ -211,6 +212,31 @@ func TestSink_Detailed(t *testing.T) {
 	}
 	if !strings.Contains(text, "harness.tool.errors") {
 		t.Fatalf("missing tool.errors: %s", text)
+	}
+}
+
+func TestSink_RecordSkillCatalog(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(Config{Enabled: true, Endpoint: srv.URL, Timeout: 2 * time.Second}, buildinfo.Metadata{Version: "test"}, "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := NewSink(exp, nil, "openai", "gpt-4", "auto", false)
+	sink.RecordSkillCatalog(skills.CatalogReport{Total: 10, Included: 7, Omitted: 3, TruncatedCount: 4})
+	if err := exp.Export(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	text := string(body)
+	for _, name := range []string{"harness.skill.catalog_omitted", "harness.skill.catalog_truncated"} {
+		if !strings.Contains(text, name) {
+			t.Fatalf("missing %s: %s", name, text)
+		}
 	}
 }
 

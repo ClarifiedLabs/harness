@@ -326,12 +326,18 @@ func TestBuildCatalogShape(t *testing.T) {
 		"a": {Name: "a", Description: "desc a", Location: "/path/a/SKILL.md"},
 	}
 	out := BuildCatalog(m)
-	if !strings.HasPrefix(out, "Available skills (when a skill matches or is explicitly named") {
-		t.Errorf("missing header: %q", out)
+	if !strings.Contains(out, "## Skills") {
+		t.Errorf("missing ## Skills header: %q", out)
+	}
+	if !strings.Contains(out, "### Available skills") {
+		t.Errorf("missing Available skills heading: %q", out)
+	}
+	if !strings.Contains(out, "### How to use skills") {
+		t.Errorf("missing How to use heading: %q", out)
 	}
 	// Sorted: a before b.
-	aIdx := strings.Index(out, "- a: desc a (/path/a/SKILL.md)")
-	bIdx := strings.Index(out, "- b: desc b (/path/b/SKILL.md)")
+	aIdx := strings.Index(out, "- a: desc a (file: /path/a/SKILL.md)")
+	bIdx := strings.Index(out, "- b: desc b (file: /path/b/SKILL.md)")
 	if aIdx < 0 || bIdx < 0 {
 		t.Fatalf("both skills missing: %q", out)
 	}
@@ -348,7 +354,7 @@ func TestBuildCatalogOneLinesDescriptions(t *testing.T) {
 		"s": {Name: "s", Description: "first line\nsecond   line", Location: "/p/q.r"},
 	}
 	out := BuildCatalog(m)
-	if !strings.Contains(out, "- s: first line second line (/p/q.r)") {
+	if !strings.Contains(out, "- s: first line second line (file: /p/q.r)") {
 		t.Errorf("description should be collapsed to one line: %q", out)
 	}
 }
@@ -358,7 +364,7 @@ func TestBuildCatalogTruncatesToFirstSentence(t *testing.T) {
 		"s": {Name: "s", Description: "Do the thing. Then a long tail of extra detail that should not ride in the always-resident prompt.", Location: "/p/q.r"},
 	}
 	out := BuildCatalog(m)
-	if !strings.Contains(out, "- s: Do the thing. (/p/q.r)") {
+	if !strings.Contains(out, "- s: Do the thing. (file: /p/q.r)") {
 		t.Errorf("catalog should keep only the first sentence: %q", out)
 	}
 	if strings.Contains(out, "long tail") {
@@ -441,5 +447,174 @@ body`)
 	got := Discover([]Dir{{Path: root, Scope: ScopeUser}}, &w)
 	if _, ok := got["my-skill"]; !ok {
 		t.Errorf("nested skill not discovered: %v", got)
+	}
+}
+
+func TestAncestorSkillDirsFindsNearestShadow(t *testing.T) {
+	tmp := t.TempDir()
+	outer := filepath.Join(tmp, "a")
+	inner := filepath.Join(outer, "b")
+	// .git at outer to define project root.
+	if err := os.MkdirAll(filepath.Join(outer, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(outer, ".agents", "skills", "dup", "SKILL.md"), `---
+name: dup
+description: outer
+---
+outer`)
+	writeFile(t, filepath.Join(inner, ".agents", "skills", "dup", "SKILL.md"), `---
+name: dup
+description: inner
+---
+inner`)
+	writeFile(t, filepath.Join(outer, ".agents", "skills", "outer-only", "SKILL.md"), `---
+name: outer-only
+description: outer bar
+---
+bar`)
+	dirs := AncestorSkillDirs(inner, t.TempDir())
+	var w Warnings
+	got := Discover(dirs, &w)
+	if got["dup"].Description != "inner" {
+		t.Errorf("nearest should shadow outer, got %q", got["dup"].Description)
+	}
+	if _, ok := got["outer-only"]; !ok {
+		t.Errorf("outer ancestor skill not found")
+	}
+}
+
+func TestAncestorSkillDirsDedupesAndCoversAncestors(t *testing.T) {
+	tmp := t.TempDir()
+	outer := filepath.Join(tmp, "proj")
+	inner := filepath.Join(outer, "pkg")
+	if err := os.MkdirAll(filepath.Join(outer, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(inner, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(outer, ".agents", "skills", "a", "SKILL.md"), `---
+name: a
+description: a
+---
+a`)
+	writeFile(t, filepath.Join(inner, ".agents", "skills", "b", "SKILL.md"), `---
+name: b
+description: b
+---
+b`)
+	dirs := AncestorSkillDirs(inner, "")
+	if len(dirs) < 2 {
+		t.Fatalf("dirs = %v, want at least 2", dirs)
+	}
+	seen := make(map[string]bool)
+	for _, d := range dirs {
+		if seen[d.Path] {
+			t.Errorf("duplicate dir %q", d.Path)
+		}
+		seen[d.Path] = true
+	}
+	var w Warnings
+	got := Discover(dirs, &w)
+	if _, ok := got["a"]; !ok {
+		t.Errorf("ancestor skill a missing")
+	}
+	if _, ok := got["b"]; !ok {
+		t.Errorf("inner skill b missing")
+	}
+}
+
+func TestCatalogBudgetUsesContextWindowPercentage(t *testing.T) {
+	tests := []struct {
+		name          string
+		contextWindow int
+		want          int
+	}{
+		{name: "unknown falls back", contextWindow: 0, want: 8000},
+		{name: "negative falls back", contextWindow: -1, want: 8000},
+		{name: "400k window", contextWindow: 400_000, want: 8000},
+		{name: "one million window", contextWindow: 1_000_000, want: 20_000},
+		{name: "small positive window", contextWindow: 49, want: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CatalogBudget(tc.contextWindow); got != tc.want {
+				t.Fatalf("CatalogBudget(%d) = %d, want %d", tc.contextWindow, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildCatalogBudgetTruncatesRoundRobin(t *testing.T) {
+	m := make(map[string]Skill)
+	for i := 0; i < 5; i++ {
+		name := "s" + string(rune('a'+i))
+		m[name] = Skill{Name: name, Description: strings.Repeat("y", 100), Location: "/p/" + name + "/SKILL.md"}
+	}
+	out, rep := BuildCatalogBudgeted(m, 200)
+	if rep.Total != 5 || rep.Included != 5 {
+		t.Errorf("report = %+v", rep)
+	}
+	if rep.TruncatedCount == 0 {
+		t.Errorf("want truncation under tight budget, rep=%+v out=%q", rep, out)
+	}
+	if !strings.Contains(out, "## Skills") || !strings.Contains(out, "### Available skills") {
+		t.Errorf("missing headings: %q", out)
+	}
+	if strings.Contains(out, "more skills not shown") {
+		t.Errorf("should not omit when sumMin fits: %q", out)
+	}
+}
+
+func TestBuildCatalogBudgetOmission(t *testing.T) {
+	m := make(map[string]Skill)
+	for i := 0; i < 10; i++ {
+		name := "s" + string(rune('a'+i))
+		m[name] = Skill{Name: name, Description: "desc", Location: "/p/" + name + "/SKILL.md"}
+	}
+	out, rep := BuildCatalogBudgeted(m, 10)
+	if rep.Omitted == 0 {
+		t.Fatalf("want omission, rep=%+v", rep)
+	}
+	if !strings.Contains(out, "more skills not shown") {
+		t.Errorf("missing omission notice: %q", out)
+	}
+	if rep.Included+rep.Omitted != rep.Total {
+		t.Errorf("included+omitted != total: %+v", rep)
+	}
+}
+
+func TestBuildCatalogBudgetOmissionCharsBounded(t *testing.T) {
+	m := make(map[string]Skill)
+	for i := 0; i < 3; i++ {
+		name := "s" + string(rune('a'+i))
+		m[name] = Skill{Name: name, Description: strings.Repeat("z", 200), Location: "/p/" + name + "/SKILL.md"}
+	}
+	budget := 50
+	out, rep := BuildCatalogBudgeted(m, budget)
+	_ = rep
+	// Available-skills section lines should respect budget: count rune length of "- name" lines only.
+	// Extract lines between headings.
+	lines := strings.Split(out, "\n")
+	sum := 0
+	inAvailable := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "### Available skills") {
+			inAvailable = true
+			continue
+		}
+		if strings.HasPrefix(line, "### How to use") {
+			break
+		}
+		if inAvailable && strings.HasPrefix(line, "- ") {
+			sum += utf8.RuneCountInString(line + "\n")
+		}
+	}
+	if sum > budget {
+		t.Errorf("available skill lines exceed budget: sum=%d budget=%d report=%+v out=%q", sum, budget, rep, out)
 	}
 }

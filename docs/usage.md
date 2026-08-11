@@ -1427,7 +1427,8 @@ Lines starting with `/` are commands; `//` sends a literal leading slash. At an
 interactive TTY prompt, lines starting with `!` run a local shell command and
 return to the prompt without contacting the model; `!!` sends a literal leading
 `!`. In one-shot mode, initial `-i` prompts, non-TTY/scripted input, pasted text, and edited prompts,
-`!text` is literal prompt text. In a normal typed prompt, `$name` mentions the
+`!text` is literal prompt text. In a normal typed prompt, `$name`, an exact
+word-bounded plain skill name, `skill://name`, or `…/SKILL.md` mentions the
 named skill anywhere in the text; Harness reads that skill's complete
 `SKILL.md` before the first model request and supplies it as request-only
 context. A failed read aborts the prompt before model work. `$$` escapes a
