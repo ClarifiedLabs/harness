@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"maps"
 	"net/http"
+	"net/http/cookiejar"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,7 +103,10 @@ func NewHTTPTransport(opts HTTPOptions) *HTTPTransport {
 	}
 	client := opts.Client
 	if client == nil {
+		// cookiejar.New with nil options cannot fail.
+		jar, _ := cookiejar.New(nil)
 		client = &http.Client{
+			Jar: jar,
 			CheckRedirect: func(_ *http.Request, via []*http.Request) error {
 				if len(via) >= httpMaxRedirects {
 					return fmt.Errorf("mcp: stopped after %d redirects", httpMaxRedirects)

@@ -10,6 +10,10 @@ Harness and the proxy speak MCP streamable HTTP (JSON-RPC 2.0, revision
 `2025-06-18`). The proxy is a shared daemon that many harness sessions can reuse.
 Harness never starts that daemon for you. A separate `mcp.local` path can
 explicitly spawn one configured local stdio MCP service from the harness process.
+The shared HTTP client stores reverse-proxy cookies in memory and returns them on
+later requests to the matching origin, allowing cookie-based affinity for an MCP
+proxy behind a load balancer. Cookies last for the harness process and are not
+persisted across restarts.
 
 ## Enabling MCP
 

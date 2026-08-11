@@ -100,6 +100,36 @@ func TestHTTPCallJSONResponse(t *testing.T) {
 	}
 }
 
+func TestHTTPTransportDefaultClientStoresProxyCookies(t *testing.T) {
+	const affinityCookie = "replica-b"
+	var requestNumber int
+	var secondCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestNumber++
+		m := decodeReq(t, r)
+		if requestNumber == 1 {
+			http.SetCookie(w, &http.Cookie{Name: "harness_proxy_affinity", Value: affinityCookie})
+		} else if cookie, err := r.Cookie("harness_proxy_affinity"); err == nil {
+			secondCookie = cookie.Value
+		}
+		writeJSONResponse(w, m.ID, json.RawMessage(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	tr := NewHTTPTransport(HTTPOptions{Endpoint: srv.URL})
+	defer tr.Close()
+
+	if _, err := tr.Call(context.Background(), "initialize", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("first Call: %v", err)
+	}
+	if _, err := tr.Call(context.Background(), "tools/list", json.RawMessage(`{}`)); err != nil {
+		t.Fatalf("second Call: %v", err)
+	}
+	if secondCookie != affinityCookie {
+		t.Fatalf("second request affinity cookie = %q, want %q", secondCookie, affinityCookie)
+	}
+}
+
 func TestHTTPCallDynamicHeadersOverrideStatic(t *testing.T) {
 	var gotAuth, gotContentType string
 	calls := 0
