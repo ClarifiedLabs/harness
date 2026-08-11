@@ -1220,6 +1220,12 @@ See the official [NGINX upstream hash](https://nginx.org/en/docs/http/ngx_http_u
 and [Envoy route hash-policy](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#config-route-v3-routeaction-hashpolicy-header)
 references for the complete surrounding configuration.
 
+Harness also accepts reverse-proxy affinity cookies. The model-proxy HTTP
+client stores them in memory and returns them on later requests to the matching
+origin. Cookies are scoped to one harness process and are not persisted across
+restarts; cookie affinity therefore pins all model-proxy traffic from that
+process, while `X-Harness-Session` supports finer logical-session routing.
+
 Stickiness improves WebSocket continuation hit rate but is never required for
 correctness. HTTP stored continuations work on any replica; a Codex
 `store:false` socket miss returns 409 and the CLI resends complete history once.

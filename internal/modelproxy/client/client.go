@@ -9,6 +9,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
 
@@ -58,7 +59,11 @@ func New(baseURL string, httpClient *http.Client, opts ...Option) (*Client, erro
 		return nil, fmt.Errorf("model proxy URL %q must use http or https", baseURL)
 	}
 	if httpClient == nil {
-		httpClient = http.DefaultClient
+		jar, err := cookiejar.New(nil)
+		if err != nil {
+			return nil, fmt.Errorf("model proxy cookie jar: %w", err)
+		}
+		httpClient = &http.Client{Jar: jar}
 	}
 	c := &Client{baseURL: baseURL, http: httpClient}
 	for _, opt := range opts {

@@ -37,6 +37,41 @@ func TestCatalogSendsAuthorizationHeader(t *testing.T) {
 	}
 }
 
+func TestDefaultClientStoresProxyCookies(t *testing.T) {
+	const affinityCookie = "replica-a"
+	var streamCookie string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			http.SetCookie(w, &http.Cookie{Name: "harness_proxy_affinity", Value: affinityCookie})
+			_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+		case "/v1/stream":
+			if cookie, err := r.Cookie("harness_proxy_affinity"); err == nil {
+				streamCookie = cookie.Value
+			}
+			w.Header().Set("content-type", protocol.ContentTypeNDJSON)
+			_ = json.NewEncoder(w).Encode(protocol.StreamEnvelope{Event: &llm.StreamEvent{Kind: llm.EventDone}})
+		default:
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := c.Catalog(context.Background()); err != nil {
+		t.Fatalf("Catalog: %v", err)
+	}
+	if _, err := llmtest.Drain(c.Provider("openai:test").Stream(context.Background(), llm.Request{Model: "test"})); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if streamCookie != affinityCookie {
+		t.Fatalf("stream affinity cookie = %q, want %q", streamCookie, affinityCookie)
+	}
+}
+
 func TestCatalogAndRegistry(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
