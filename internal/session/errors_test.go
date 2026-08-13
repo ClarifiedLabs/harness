@@ -223,6 +223,64 @@ func TestAnalyzeErrorsReportsInBandCommandFailuresSeparately(t *testing.T) {
 	}
 }
 
+func TestAnalyzeErrorsCountsBackgroundCommandDiagnosticsWithoutSecondToolResult(t *testing.T) {
+	dir := t.TempDir()
+	if err := (Session{Provider: "p", Model: "m"}).Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	events := []Event{
+		{Type: EventToolResult, Tool: "shell"}, // background launch receipt
+		{Type: EventBackgroundJobResult, Tool: "shell", ResultMetrics: map[string]int{
+			"command_outcome_available": 1,
+			"command_failed":            1,
+			"command_steps_total":       3,
+			"command_steps_failed":      1,
+		}},
+	}
+	for _, event := range events {
+		if err := AppendEvent(dir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analysis, err := AnalyzeErrors(dir, ErrorFilter{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary := analysis.Summary
+	if summary.ToolResults != 1 || summary.CommandResults != 1 || summary.FailedCommandResults != 1 ||
+		summary.EffectiveFailedResults != 1 || summary.EffectiveFailureRate != 1 {
+		t.Fatalf("background command summary = %+v", summary)
+	}
+}
+
+func TestAnalyzeErrorsFiltersBackgroundDiagnosticsByLaunchAgent(t *testing.T) {
+	dir := t.TempDir()
+	if err := (Session{Agent: "switched-agent", Provider: "p", Model: "m"}).Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := AppendEvent(dir, Event{
+		Type: EventBackgroundJobResult, Agent: "launch-agent", Tool: "shell",
+		ResultMetrics: map[string]int{"command_outcome_available": 1, "command_failed": 1},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	launch, err := AnalyzeErrors(dir, ErrorFilter{Agent: "launch-agent"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if launch.Summary.CommandResults != 1 || launch.Summary.FailedCommandResults != 1 {
+		t.Fatalf("launch-agent summary = %+v", launch.Summary)
+	}
+	switched, err := AnalyzeErrors(dir, ErrorFilter{Agent: "switched-agent"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if switched.Summary.CommandResults != 0 {
+		t.Fatalf("switched-agent received launch diagnostics: %+v", switched.Summary)
+	}
+}
+
 func TestAnalyzeErrorsIgnoresIncompleteTailAndHonorsBefore(t *testing.T) {
 	dir := t.TempDir()
 	if err := (Session{Provider: "p", Model: "m"}).Save(dir); err != nil {

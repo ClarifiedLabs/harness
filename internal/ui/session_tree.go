@@ -182,6 +182,8 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 		}
 	}
 	if app.Background != nil {
+		app.stopBackgroundJobs()
+		app.saveOrWarn(app.SessionPath)
 		app.Background.Clear()
 	}
 	app.SessionTree = tree

@@ -459,6 +459,38 @@ func TestShellStepsStopOnFailure(t *testing.T) {
 	}
 }
 
+func TestShellStepsCancellationStopsEvenWhenFailuresContinue(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "must-not-run")
+	input, err := json.Marshal(map[string]any{
+		"stop_on_failure": false,
+		"steps": []map[string]any{
+			{"name": "cancelled", "command": "printf should-not-start"},
+			{"name": "later", "argv": []string{"touch", marker}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := (shell{}).RunResult(ctx, input)
+	if err != nil {
+		t.Fatalf("cancelled batch must report a result: %v", err)
+	}
+	if !strings.Contains(result.Text, "FAIL cancelled") || !strings.Contains(result.Text, "cancelled") ||
+		!strings.Contains(result.Text, "SKIP 1 remaining step") {
+		t.Fatalf("cancelled receipt:\n%s", result.Text)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("later step ran after cancellation: %v", err)
+	}
+	if result.Metrics[CommandMetricCancelled] != 1 || result.Metrics[CommandMetricStepsCancelled] != 1 ||
+		result.Metrics[CommandMetricStepsExecuted] != 1 || result.Metrics[CommandMetricStepsSkipped] != 1 {
+		t.Fatalf("cancelled batch metrics = %+v", result.Metrics)
+	}
+}
+
 func TestShellStepsCanContinueAfterFailure(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "continued")
@@ -612,12 +644,20 @@ func (f *fakeBackgroundStarter) StartBackgroundJob(req BackgroundJobRequest) (Ba
 
 func TestShellBackgroundStartsJob(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
-	out, err := runTool(t, shell{background: starter}, map[string]any{
+	input, err := json.Marshal(map[string]any{
 		"command":    "echo background",
 		"background": true,
 	})
 	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := (shell{background: starter}).RunResult(context.Background(), input)
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	out := started.Text
+	if started.BackgroundJobID != "bg_test" {
+		t.Fatalf("background job ID = %q, want bg_test", started.BackgroundJobID)
 	}
 	if !strings.HasPrefix(out, "background job bg_test started (resource: ") ||
 		!strings.HasSuffix(out, ", access: exclusive)") {
@@ -667,6 +707,63 @@ func TestShellBackgroundArgvStartsJob(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, "background argv") || !strings.Contains(result.Text, "[exit code: 0]") {
 		t.Fatalf("background result = %q", result.Text)
+	}
+}
+
+func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
+	starter := &fakeBackgroundStarter{}
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "continued")
+	out, err := runTool(t, shell{background: starter, backgroundTimeout: 7}, map[string]any{
+		"name":            "background checks",
+		"background":      true,
+		"output_mode":     "receipt",
+		"stop_on_failure": false,
+		"cwd":             dir,
+		"steps": []map[string]any{
+			{"name": "stdin and cwd", "command": "cat; pwd", "stdin": "background batch input\n"},
+			{"name": "expected failure", "command": "printf 'bad step output'; exit 7"},
+			{"name": "continues", "argv": []string{"touch", marker}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("start background steps: %v", err)
+	}
+	if !strings.HasPrefix(out, "background job bg_test started") {
+		t.Fatalf("start output = %q", out)
+	}
+	if starter.req.Description != "background checks" {
+		t.Fatalf("job description = %q, want batch name", starter.req.Description)
+	}
+
+	result, err := starter.req.Run(context.Background(), "bg_test")
+	if err != nil {
+		t.Fatalf("background steps: %v", err)
+	}
+	for _, want := range []string{
+		"Batch background checks",
+		"PASS stdin and cwd",
+		"FAIL expected failure",
+		"PASS continues",
+	} {
+		if !strings.Contains(result.Text, want) {
+			t.Errorf("background receipt missing %q:\n%s", want, result.Text)
+		}
+	}
+	for _, want := range []string{"background batch input", dir, "bad step output"} {
+		if !strings.Contains(result.OriginalText, want) {
+			t.Errorf("background original missing %q:\n%s", want, result.OriginalText)
+		}
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("stop_on_failure:false did not continue: %v", err)
+	}
+	metrics := result.Metrics
+	if metrics[CommandMetricOutcomeAvailable] != 1 || metrics[CommandMetricFailed] != 1 ||
+		metrics[CommandMetricStepsTotal] != 3 || metrics[CommandMetricStepsExecuted] != 3 ||
+		metrics[CommandMetricStepsFailed] != 1 || metrics[CommandMetricStepsSkipped] != 0 ||
+		metrics[CommandMetricSucceeded] != 0 {
+		t.Fatalf("background step metrics = %+v", metrics)
 	}
 }
 
@@ -836,6 +933,33 @@ func TestShellReceiptTimeoutPreservesOriginalWhenWaitIncomplete(t *testing.T) {
 	}
 	if !strings.Contains(result.OriginalText, "wait did not finish") {
 		t.Fatalf("original should carry the partial-reap signal:\n%s", result.OriginalText)
+	}
+}
+
+func TestShellStepsReceiptPreservesOriginalWhenWaitIncomplete(t *testing.T) {
+	oldUnit := processTimeoutUnit
+	oldGrace := processReapGrace
+	processTimeoutUnit = 25 * time.Millisecond
+	processReapGrace = 25 * time.Millisecond
+	oldKill := killProcessGroup
+	killProcessGroup = func(int) {}
+	t.Cleanup(func() {
+		processTimeoutUnit = oldUnit
+		processReapGrace = oldGrace
+		killProcessGroup = oldKill
+	})
+
+	result, err := runShellResult(t, map[string]any{
+		"steps": []map[string]any{
+			{"name": "slow", "command": `echo started; sleep 5`, "timeout_seconds": 1},
+		},
+		"output_mode": "receipt",
+	})
+	if err != nil {
+		t.Fatalf("step timeout must report a result: %v", err)
+	}
+	if result.OriginalText == "" || !strings.Contains(result.OriginalText, "wait did not finish") {
+		t.Fatalf("incomplete step wait must retain full original: %+v", result)
 	}
 }
 

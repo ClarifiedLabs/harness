@@ -4045,6 +4045,8 @@ func (app *App) clear() {
 	}
 	app.RecordOTelSession()
 	if app.Background != nil {
+		app.stopBackgroundJobs()
+		app.saveOrWarn(app.SessionPath)
 		app.Background.Clear()
 	}
 	// Echo the totals being discarded so a /clear never silently wipes the
@@ -4797,13 +4799,42 @@ func (app *App) backgroundRequestContext(archiver agent.ToolResultArchiver) []st
 	if app.Background == nil {
 		return nil
 	}
-	return app.Background.DrainCompletedContext(archiver)
+	contexts := app.Background.DrainCompletedContext(archiver)
+	if sink, ok := archiver.(interface {
+		BackgroundJobDiagnostic(background.CompletedDiagnostic) error
+	}); ok {
+		for _, diagnostic := range app.Background.PeekCompletedDiagnostics() {
+			if err := sink.BackgroundJobDiagnostic(diagnostic); err == nil {
+				app.Background.AcknowledgeCompletedDiagnostic(diagnostic.ID)
+			}
+		}
+	}
+	return contexts
+}
+
+func (app *App) recordCompletedBackgroundDiagnostics() {
+	if app == nil || app.Background == nil {
+		return
+	}
+	diagnostics := app.Background.PeekCompletedDiagnostics()
+	if len(diagnostics) == 0 {
+		return
+	}
+	sink := newAccumulatingSink(app.Renderer, app, app.PromptNumber)
+	for _, diagnostic := range diagnostics {
+		if err := sink.BackgroundJobDiagnostic(diagnostic); err == nil {
+			app.Background.AcknowledgeCompletedDiagnostic(diagnostic.ID)
+		}
+	}
+	// Avoid FlushEvents here because it would redundantly drain the manager.
+	sink.rec.Flush()
 }
 
 func (app *App) pollBackgroundNotices() {
 	if app.Background == nil {
 		return
 	}
+	app.recordCompletedBackgroundDiagnostics()
 	for _, notice := range app.Background.DrainNotices() {
 		if app.Renderer != nil {
 			app.Renderer.Notice(notice)
@@ -4860,10 +4891,19 @@ func (app *App) planPromptStatusPrintedBeforeUsageForPrompt(prompt int) bool {
 	return app.planPromptStatusBeforeUsage && app.planPromptStatusBeforeUsagePrompt == prompt
 }
 
+const backgroundShutdownWait = time.Second
+
 func (app *App) stopBackgroundJobs() {
-	if app.Background != nil {
-		app.Background.Shutdown()
+	if app.Background == nil {
+		return
 	}
+	app.recordCompletedBackgroundDiagnostics()
+	if forceExitRequested(app.ForceExit) {
+		app.Background.Shutdown()
+	} else {
+		app.Background.ShutdownAndWait(backgroundShutdownWait)
+	}
+	app.recordCompletedBackgroundDiagnostics()
 }
 
 func (app *App) agentHasTool(name string) bool {
@@ -5603,6 +5643,7 @@ func (s *accumulatingSink) FlushEvents() {
 	if s == nil || s.rec == nil {
 		return
 	}
+	s.drainBackgroundJobDiagnostics()
 	s.rec.Flush()
 }
 
@@ -5747,6 +5788,17 @@ func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	name := s.pendingNames[res.ForID]
 	delete(s.pendingNames, res.ForID)
+	if res.BackgroundJobID != "" && s.app != nil && s.app.Background != nil {
+		if identity, ok := s.rec.PendingToolIdentity(res.ForID); ok {
+			s.app.Background.SetDiagnosticIdentity(res.BackgroundJobID, background.DiagnosticIdentity{
+				Agent:       identity.Agent,
+				ModelTarget: identity.ModelTarget,
+				Provider:    identity.Provider,
+				APIType:     identity.APIType,
+				Model:       identity.Model,
+			})
+		}
+	}
 	pendingOTel := s.pendingOTel[res.ForID]
 	delete(s.pendingOTel, res.ForID)
 	if s.otel != nil {
@@ -5778,6 +5830,41 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
 	s.r.ToolDiff(call, path, text)
 	s.rec.ToolDiff(call, path, text)
+}
+
+func (s *accumulatingSink) BackgroundJobDiagnostic(diagnostic background.CompletedDiagnostic) error {
+	if s == nil || s.rec == nil {
+		return nil
+	}
+	var identity sessionrec.ExecutionIdentity
+	if diagnostic.Identity != nil {
+		identity = sessionrec.ExecutionIdentity{
+			Agent:       diagnostic.Identity.Agent,
+			ModelTarget: diagnostic.Identity.ModelTarget,
+			Provider:    diagnostic.Identity.Provider,
+			APIType:     diagnostic.Identity.APIType,
+			Model:       diagnostic.Identity.Model,
+		}
+	}
+	return s.rec.BackgroundJobResultWithIdentity(
+		diagnostic.ID,
+		diagnostic.Kind,
+		diagnostic.Status,
+		diagnostic.Duration,
+		diagnostic.Metrics,
+		identity,
+	)
+}
+
+func (s *accumulatingSink) drainBackgroundJobDiagnostics() {
+	if s == nil || s.app == nil || s.app.Background == nil {
+		return
+	}
+	for _, diagnostic := range s.app.Background.PeekCompletedDiagnostics() {
+		if err := s.BackgroundJobDiagnostic(diagnostic); err == nil {
+			s.app.Background.AcknowledgeCompletedDiagnostic(diagnostic.ID)
+		}
+	}
 }
 
 func (s *accumulatingSink) ArchiveToolResult(res llm.ToolResult) (agent.ToolResultArchive, error) {

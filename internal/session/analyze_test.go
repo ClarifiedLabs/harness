@@ -92,6 +92,27 @@ func TestAnalyzeCorpusCountsInBandCommandFailures(t *testing.T) {
 	}
 }
 
+func TestAnalyzeCorpusCountsBackgroundCommandDiagnosticsWithoutSecondToolResult(t *testing.T) {
+	root := t.TempDir()
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolStart, Tool: "shell"})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult, Tool: "shell"})
+	mustAppendAnalysisEvent(t, root, Event{Type: EventBackgroundJobResult, Tool: "shell", ResultMetrics: map[string]int{
+		"command_outcome_available": 1,
+		"command_failed":            1,
+		"command_steps_total":       2,
+		"command_steps_failed":      1,
+	}})
+	report, err := AnalyzeCorpus(root, AnalyzeOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := report.Execution
+	if got.ToolCalls != 1 || got.ToolResults != 1 || got.CommandResults != 1 ||
+		got.CommandFailures != 1 || got.EffectiveFailures != 1 {
+		t.Fatalf("background execution = %+v", got)
+	}
+}
+
 func TestAnalyzeCorpusBoundsDiscoveryDepth(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	mustAppendAnalysisEvent(t, root, Event{Type: EventPromptUsage, Prompt: 1})

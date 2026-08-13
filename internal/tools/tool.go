@@ -57,9 +57,10 @@ type MeteredTool interface {
 // should be archived for targeted recovery. Usage makes this a complete
 // alternative dispatch path rather than an ambiguous mix with MeteredTool.
 type RunResult struct {
-	Text         string
-	OriginalText string
-	Usage        llm.Usage
+	Text            string
+	OriginalText    string
+	Usage           llm.Usage
+	BackgroundJobID string
 	// Metrics is diagnostics-only aggregate telemetry. It is persisted with the
 	// tool-result event but never enters model-visible transcript content.
 	Metrics map[string]int
@@ -151,14 +152,18 @@ type BackgroundJobRequest struct {
 // BackgroundJobResult is the model-facing outcome of a completed background
 // tool job. TranscriptPath is for jobs, such as delegate agents, that persist a
 // separate transcript. Usage carries nested model spend back to the parent prompt.
-// Progress, when non-nil, is an opaque closure (func() agent.DelegateProgressSnapshot)
-// reporting the job's live activity while it runs; it is consumed via type
-// assertion by the renderer only. Keeping it `any` avoids a tools -> agent cycle.
+// Metrics carries the same diagnostics-only aggregate telemetry as RunResult;
+// the background manager retains it for completion diagnostics without adding it
+// to model-visible context. Progress, when non-nil, is an opaque closure
+// (func() agent.DelegateProgressSnapshot) reporting the job's live activity while
+// it runs; it is consumed via type assertion by the renderer only. Keeping it
+// `any` avoids a tools -> agent cycle.
 type BackgroundJobResult struct {
 	Text           string
 	OriginalText   string
 	TranscriptPath string
 	Usage          llm.Usage
+	Metrics        map[string]int
 	Progress       any
 }
 
@@ -175,6 +180,22 @@ type BackgroundJobInfo struct {
 // into tools that opt into background execution.
 type BackgroundJobStarter interface {
 	StartBackgroundJob(BackgroundJobRequest) (BackgroundJobInfo, error)
+}
+
+// BackgroundDiagnosticIdentity identifies the execution that launched a job.
+type BackgroundDiagnosticIdentity struct {
+	Agent       string
+	ModelTarget string
+	Provider    string
+	APIType     string
+	Model       string
+}
+
+// BackgroundJobDiagnosticIdentitySetter is the optional diagnostics capability
+// exposed by a background starter. Parent and delegate sinks use it to retain
+// launch attribution without depending on the concrete manager package.
+type BackgroundJobDiagnosticIdentitySetter interface {
+	SetDiagnosticIdentity(string, BackgroundDiagnosticIdentity) bool
 }
 
 // SchemaDescriptionPreserver is an optional tool capability for concise,
@@ -851,12 +872,13 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 	defer cancel()
 
 	type outcome struct {
-		out      string
-		original string
-		content  []llm.ContentBlock
-		usage    llm.Usage
-		metrics  map[string]int
-		err      error
+		out             string
+		original        string
+		content         []llm.ContentBlock
+		usage           llm.Usage
+		metrics         map[string]int
+		backgroundJobID string
+		err             error
 	}
 	done := make(chan outcome, 1) // buffered: an abandoned Run can still send and exit
 	actualCompletion := make(chan struct{})
@@ -876,7 +898,10 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 		}
 		if rt, ok := t.(ResultTool); ok {
 			result, err := rt.RunResult(ctx, input)
-			done <- outcome{out: result.Text, original: result.OriginalText, usage: result.Usage, metrics: result.Metrics, err: err}
+			done <- outcome{
+				out: result.Text, original: result.OriginalText, usage: result.Usage,
+				metrics: result.Metrics, backgroundJobID: result.BackgroundJobID, err: err,
+			}
 			return
 		}
 		if mt, ok := t.(MeteredTool); ok {
@@ -893,10 +918,11 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 	var content []llm.ContentBlock
 	var usage llm.Usage
 	var metrics map[string]int
+	var backgroundJobID string
 	var err error
 	select {
 	case o := <-done:
-		out, original, content, usage, metrics, err = o.out, o.original, o.content, o.usage, o.metrics, o.err
+		out, original, content, usage, metrics, backgroundJobID, err = o.out, o.original, o.content, o.usage, o.metrics, o.backgroundJobID, o.err
 	case <-ctx.Done():
 		// The Run goroutine is abandoned if it ignores ctx; its eventual send
 		// lands in the buffered channel and is dropped. The abandoned Run may
@@ -919,6 +945,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 
 	res.Usage = usage
 	res.Metrics = maps.Clone(metrics)
+	res.BackgroundJobID = backgroundJobID
 	if err != nil {
 		// Report a timeout only when the ceiling itself expired (the derived
 		// context's deadline fired) and it was not an outer cancellation. A
@@ -953,6 +980,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 	prepared.Content = append([]llm.ContentBlock(nil), content...)
 	prepared.Usage = usage
 	prepared.Metrics = maps.Clone(metrics)
+	prepared.BackgroundJobID = backgroundJobID
 	return prepared, completion
 }
 

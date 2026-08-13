@@ -886,6 +886,7 @@ const (
 	EventReasoningSummary     = "reasoning_summary"
 	EventToolStart            = "tool_start"
 	EventToolResult           = "tool_result"
+	EventBackgroundJobResult  = "background_job_result"
 	EventToolDiff             = "tool_diff"
 	EventNotice               = "notice"
 	EventTurnAttemptStart     = "turn_attempt_start"

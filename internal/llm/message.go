@@ -235,6 +235,9 @@ type ToolResult struct {
 	// Metrics is diagnostics-only tool telemetry and is never copied into a
 	// model-visible ContentBlock.
 	Metrics map[string]int
+	// BackgroundJobID identifies a detached job created by this call. It is
+	// diagnostics-only metadata used to retain the launch execution identity.
+	BackgroundJobID string
 	// ErrorKind is the diagnostics-only structured class of a failed result
 	// (empty = unclassified; the analysis layer text-classifies). Like Metrics
 	// it is never copied into a model-visible ContentBlock.

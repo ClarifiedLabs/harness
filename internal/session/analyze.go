@@ -950,15 +950,9 @@ func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
 			if event.ResultError {
 				out.ToolErrors++
 			}
-			if event.ResultMetrics["command_outcome_available"] != 0 {
-				out.CommandResults++
-				if event.ResultMetrics["command_failed"] != 0 {
-					out.CommandFailures++
-				}
-				if event.ResultMetrics["command_cancelled"] != 0 {
-					out.CommandCancellations++
-				}
-			}
+			addExecutionCommandResult(&out, event.ResultMetrics)
+		case EventBackgroundJobResult:
+			addExecutionCommandResult(&out, event.ResultMetrics)
 		case EventModelRequest:
 			if event.ModelRequest != nil && event.ModelRequest.State == llm.ModelRequestFailed {
 				out.ModelErrors++
@@ -982,6 +976,19 @@ func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
 		out.Completeness = "incomplete"
 	}
 	return out
+}
+
+func addExecutionCommandResult(out *ExecutionAnalysis, metrics map[string]int) {
+	if metrics["command_outcome_available"] == 0 {
+		return
+	}
+	out.CommandResults++
+	if metrics["command_failed"] != 0 {
+		out.CommandFailures++
+	}
+	if metrics["command_cancelled"] != 0 {
+		out.CommandCancellations++
+	}
 }
 
 func (e *ExecutionAnalysis) add(other ExecutionAnalysis) {

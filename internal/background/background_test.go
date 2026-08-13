@@ -70,6 +70,116 @@ func TestManagerStartBackgroundJobCompletesAndDrainsContext(t *testing.T) {
 	}
 }
 
+func TestManagerDrainsCompletedDiagnosticsOnce(t *testing.T) {
+	m := NewManager(Options{})
+	metrics := map[string]int{
+		tools.CommandMetricOutcomeAvailable: 1,
+		tools.CommandMetricFailed:           1,
+		tools.CommandMetricStepsTotal:       3,
+		tools.CommandMetricStepsFailed:      1,
+	}
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{Text: "batch failed", Metrics: metrics}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	identity := DiagnosticIdentity{
+		Agent: "launch-agent", ModelTarget: "target-a", Provider: "provider-a", APIType: "responses", Model: "model-a",
+	}
+	if !m.SetDiagnosticIdentity(started.ID, identity) {
+		t.Fatal("SetDiagnosticIdentity = false")
+	}
+	waitJob(t, m, started.ID)
+
+	// The manager and its snapshots own independent metric maps.
+	metrics[tools.CommandMetricStepsTotal] = 99
+	snapshot, ok := m.Get(started.ID)
+	if !ok || snapshot.Result.Metrics[tools.CommandMetricStepsTotal] != 3 {
+		t.Fatalf("stored metrics = %+v", snapshot.Result.Metrics)
+	}
+	snapshot.Result.Metrics[tools.CommandMetricStepsTotal] = 88
+	fresh, _ := m.Get(started.ID)
+	if fresh.Result.Metrics[tools.CommandMetricStepsTotal] != 3 {
+		t.Fatalf("snapshot mutated manager metrics: %+v", fresh.Result.Metrics)
+	}
+
+	diagnostics := m.DrainCompletedDiagnostics()
+	if len(diagnostics) != 1 {
+		t.Fatalf("diagnostics = %+v, want one", diagnostics)
+	}
+	got := diagnostics[0]
+	if got.ID != started.ID || got.Kind != "shell" || got.Status != StatusCompleted ||
+		got.Metrics[tools.CommandMetricFailed] != 1 || got.Metrics[tools.CommandMetricStepsTotal] != 3 ||
+		got.Identity == nil || *got.Identity != identity {
+		t.Fatalf("diagnostic = %+v", got)
+	}
+	got.Metrics[tools.CommandMetricStepsTotal] = 77
+	if again := m.DrainCompletedDiagnostics(); len(again) != 0 {
+		t.Fatalf("second diagnostics drain = %+v, want empty", again)
+	}
+}
+
+func TestManagerShutdownAndWaitRetainsCancellationDiagnostics(t *testing.T) {
+	m := NewManager(Options{})
+	started := make(chan struct{})
+	job, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+			close(started)
+			<-ctx.Done()
+			return tools.BackgroundJobResult{Metrics: map[string]int{
+				tools.CommandMetricOutcomeAvailable: 1,
+				tools.CommandMetricCancelled:        1,
+				tools.CommandMetricStepsCancelled:   1,
+			}}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-started
+
+	m.ShutdownAndWait(time.Second)
+	snapshot, ok := m.Get(job.ID)
+	if !ok || snapshot.Status != StatusAbandoned || snapshot.Result.Metrics[tools.CommandMetricCancelled] != 1 {
+		t.Fatalf("shutdown snapshot = %+v", snapshot)
+	}
+	diagnostics := m.DrainCompletedDiagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].ID != job.ID || diagnostics[0].Metrics[tools.CommandMetricStepsCancelled] != 1 {
+		t.Fatalf("shutdown diagnostics = %+v", diagnostics)
+	}
+}
+
+func TestManagerAcknowledgesDiagnosticsAfterPersistence(t *testing.T) {
+	m := NewManager(Options{})
+	job, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{Metrics: map[string]int{tools.CommandMetricSucceeded: 1}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	waitJob(t, m, job.ID)
+	for attempt := 0; attempt < 2; attempt++ {
+		pending := m.PeekCompletedDiagnostics()
+		if len(pending) != 1 || pending[0].ID != job.ID {
+			t.Fatalf("pending diagnostics attempt %d = %+v", attempt, pending)
+		}
+	}
+	if !m.AcknowledgeCompletedDiagnostic(job.ID) {
+		t.Fatal("AcknowledgeCompletedDiagnostic = false")
+	}
+	if pending := m.PeekCompletedDiagnostics(); len(pending) != 0 {
+		t.Fatalf("pending diagnostics after acknowledgement = %+v", pending)
+	}
+}
+
 func TestBackgroundJobsToolDescriptionFitsBudget(t *testing.T) {
 	if got := len((&JobsTool{}).Description()); got > 80 {
 		t.Fatalf("background_jobs description = %d bytes, budget 80", got)

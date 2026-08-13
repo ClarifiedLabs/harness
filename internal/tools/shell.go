@@ -103,7 +103,7 @@ const shellSchemaFmt = `{
       "type": "array",
       "minItems": 1,
       "maxItems": 16,
-      "description": "Serial commands; excludes top-level argv/command/stdin and background.",
+      "description": "Serial commands; excludes top-level argv/command/stdin.",
       "items": {
         "type": "object",
         "properties": {
@@ -139,7 +139,7 @@ const shellBackgroundSchemaFmt = `{
       "type": "array",
       "minItems": 1,
       "maxItems": 16,
-      "description": "Serial commands; excludes top-level argv/command/stdin and background.",
+      "description": "Serial commands; excludes top-level argv/command/stdin.",
       "items": {
         "type": "object",
         "properties": {
@@ -272,7 +272,7 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 	if !args.Background && args.TimeoutSeconds == 0 && t.foregroundTimeout > 0 {
 		args.TimeoutSeconds = t.foregroundTimeout
 	}
-	if len(args.Steps) > 0 {
+	if len(args.Steps) > 0 && !args.Background {
 		return shellSteps(ctx, args)
 	}
 	if args.Background {
@@ -308,22 +308,32 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 			ResourceKey: resourceKey,
 			Access:      access,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
-				result, err := shellTopLevel(ctx, args)
+				var result RunResult
+				var err error
+				if len(args.Steps) > 0 {
+					result, err = shellSteps(ctx, args)
+				} else {
+					result, err = shellTopLevel(ctx, args)
+				}
 				return BackgroundJobResult{
 					Text:         result.Text,
 					OriginalText: result.OriginalText,
+					Metrics:      result.Metrics,
 				}, err
 			},
 		})
 		if err != nil {
 			return RunResult{}, err
 		}
-		return RunResult{Text: fmt.Sprintf(
-			"background job %s started (resource: %s, access: %s)",
-			info.ID,
-			resourceKey,
-			access,
-		)}, nil
+		return RunResult{
+			Text: fmt.Sprintf(
+				"background job %s started (resource: %s, access: %s)",
+				info.ID,
+				resourceKey,
+				access,
+			),
+			BackgroundJobID: info.ID,
+		}, nil
 	}
 
 	return shellTopLevel(ctx, args)
@@ -442,8 +452,6 @@ func validateShellArgs(args shellArgs) error {
 		return badArgs("provide steps or a top-level command/argv, not both")
 	case hasSteps && args.Stdin != "":
 		return badArgs("top-level stdin is unavailable with steps; set stdin on a step")
-	case hasSteps && args.Background:
-		return badArgs("steps cannot run in the background")
 	case !args.Background && hasLease:
 		return badArgs("background_lease requires background:true")
 	case len(args.Steps) > shellMaxSteps:
@@ -480,6 +488,12 @@ func validateShellArgs(args shellArgs) error {
 }
 
 func shellDescription(args shellArgs) string {
+	if len(args.Steps) > 0 {
+		if name := strings.TrimSpace(args.Name); name != "" {
+			return name
+		}
+		return fmt.Sprintf("%d shell steps", len(args.Steps))
+	}
 	if len(args.Argv) > 0 {
 		return strings.Join(args.Argv, " ")
 	}
@@ -690,6 +704,7 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 		CommandMetricOutcomeAvailable: 1,
 		CommandMetricStepsTotal:       len(args.Steps),
 	}
+	incompleteWait := false
 	for i, step := range args.Steps {
 		name := strings.TrimSpace(step.Name)
 		if name == "" {
@@ -730,6 +745,9 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 		}
 		full := formatProcessResult(result)
 		transcript.WriteString(full)
+		if !result.WaitComplete {
+			incompleteWait = true
+		}
 		if result.success() {
 			fmt.Fprintf(&receipt, "PASS %s (%s)\n", name, elapsed)
 			if strings.TrimSpace(result.Output) != "" {
@@ -760,7 +778,7 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 				suppressed = true
 			}
 		}
-		if stopOnFailure {
+		if result.Status == processCancelled || stopOnFailure {
 			writeSkippedReceipt(&receipt, len(args.Steps)-i-1)
 			break
 		}
@@ -779,7 +797,7 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 		return RunResult{Text: full, Metrics: metrics}, nil
 	}
 	original := ""
-	if suppressed {
+	if suppressed || incompleteWait {
 		original = full
 	}
 	return RunResult{Text: text, OriginalText: original, Metrics: metrics}, nil
@@ -932,6 +950,9 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string,
 
 func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (processResult, error) {
 	timeout := resolveProcessTimeoutSeconds(timeoutSeconds)
+	if ctx.Err() != nil {
+		return processResult{ExitCode: -1, Status: processCancelled, TimeoutSeconds: timeout, WaitComplete: true}, nil
+	}
 
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*processTimeoutUnit)
 	defer cancel()

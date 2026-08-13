@@ -1218,6 +1218,41 @@ func TestREPLClearResetsAndRotates(t *testing.T) {
 	}
 }
 
+func TestREPLClearRecordsCompletedBackgroundDiagnosticsInOldSession(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	originalPath := app.SessionPath
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{Metrics: map[string]int{
+				tools.CommandMetricOutcomeAvailable: 1,
+				tools.CommandMetricFailed:           1,
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(job.ID)
+		return ok && snapshot.Status == background.StatusCompleted
+	}, "background completion before clear")
+
+	app.clear()
+	raw, err := os.ReadFile(filepath.Join(originalPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read old raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), `"type":"background_job_result"`) ||
+		!strings.Contains(string(raw), `"tool_id":"`+job.ID+`"`) ||
+		!strings.Contains(string(raw), `"command_failed":1`) {
+		t.Fatalf("old session missing background diagnostics:\n%s", raw)
+	}
+}
+
 func TestREPLClearLockFailurePreservesSession(t *testing.T) {
 	var out, errw bytes.Buffer
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
@@ -6503,6 +6538,168 @@ func TestREPLGoalCommandSetsObjective(t *testing.T) {
 	// prompt, so its own queued indicator is expected.)
 	if strings.Contains(errw.String(), "[queued for next prompt: Continue working toward") || strings.Contains(errw.String(), "[steer queued: Continue working toward") {
 		t.Fatalf("goal continuation must not print a submission indicator:\n%s", errw.String())
+	}
+}
+
+func TestRequestContextRecordsBackgroundJobDiagnosticsOnce(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	started, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{
+				Text: "FAIL background checks",
+				Metrics: map[string]int{
+					tools.CommandMetricOutcomeAvailable: 1,
+					tools.CommandMetricFailed:           1,
+					tools.CommandMetricStepsTotal:       2,
+					tools.CommandMetricStepsFailed:      1,
+				},
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(started.ID)
+		return ok && snapshot.Status == background.StatusCompleted
+	}, "background diagnostic completion")
+
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	if contexts := sink.RequestContext(); len(contexts) != 1 || !strings.Contains(contexts[0], "FAIL background checks") {
+		t.Fatalf("background request context = %+v", contexts)
+	}
+	if contexts := sink.RequestContext(); len(contexts) != 0 {
+		t.Fatalf("second background request context = %+v", contexts)
+	}
+	sink.FlushEvents()
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	text := string(raw)
+	if strings.Count(text, `"type":"background_job_result"`) != 1 ||
+		!strings.Contains(text, `"command_steps_total":2`) ||
+		!strings.Contains(text, `"command_steps_failed":1`) {
+		t.Fatalf("background diagnostics not recorded exactly once:\n%s", text)
+	}
+}
+
+func TestFlushEventsRecordsBackgroundDiagnosticsWithLaunchIdentity(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+	app.AgentName = "launch-agent"
+	app.RegistryModel = "target-a"
+	app.Provider = "provider-a"
+	app.Model = "model-a"
+
+	release := make(chan struct{})
+	started, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			<-release
+			return tools.BackgroundJobResult{Metrics: map[string]int{
+				tools.CommandMetricOutcomeAvailable: 1,
+				tools.CommandMetricSucceeded:        1,
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	sink.ToolStart(llm.ToolCall{ID: "launch", Name: "shell"})
+	sink.ToolResult(llm.ToolResult{
+		ForID: "launch", Text: "started", BackgroundJobID: started.ID,
+	})
+	app.AgentName = "switched-agent"
+	app.RegistryModel = "target-b"
+	app.Provider = "provider-b"
+	app.Model = "model-b"
+	close(release)
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(started.ID)
+		return ok && snapshot.Status == background.StatusCompleted
+	}, "background completion")
+
+	// Finalization drains diagnostics even without a request-context delivery.
+	sink.FlushEvents()
+	var diagnostic session.Event
+	data, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		if len(line) == 0 {
+			continue
+		}
+		var event session.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if event.Type == session.EventBackgroundJobResult {
+			diagnostic = event
+		}
+	}
+	if diagnostic.ToolID != started.ID || diagnostic.Agent != "launch-agent" ||
+		diagnostic.ModelTarget != "target-a" || diagnostic.Provider != "provider-a" || diagnostic.Model != "model-a" {
+		t.Fatalf("background diagnostic identity = %+v", diagnostic)
+	}
+	if again := manager.DrainCompletedDiagnostics(); len(again) != 0 {
+		t.Fatalf("diagnostics drained more than once: %+v", again)
+	}
+}
+
+func TestBackgroundDiagnosticsRetryAfterSessionAppendFailure(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{Metrics: map[string]int{
+				tools.CommandMetricOutcomeAvailable: 1,
+				tools.CommandMetricFailed:           1,
+			}}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(job.ID)
+		return ok && snapshot.Status == background.StatusCompleted
+	}, "background completion")
+
+	blocked := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blocked, []byte("file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	app.SessionPath = blocked
+	app.recordCompletedBackgroundDiagnostics()
+	if pending := manager.PeekCompletedDiagnostics(); len(pending) != 1 || pending[0].ID != job.ID {
+		t.Fatalf("diagnostic was acknowledged after failed append: %+v", pending)
+	}
+
+	app.SessionPath = t.TempDir()
+	app.recordCompletedBackgroundDiagnostics()
+	if pending := manager.PeekCompletedDiagnostics(); len(pending) != 0 {
+		t.Fatalf("diagnostic remained pending after retry: %+v", pending)
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read retried raw.ndjson: %v", err)
+	}
+	if strings.Count(string(raw), `"type":"background_job_result"`) != 1 {
+		t.Fatalf("retried diagnostic not recorded exactly once:\n%s", raw)
 	}
 }
 

@@ -151,6 +151,49 @@ func TestRecorderToolResultErrorFields(t *testing.T) {
 	}
 }
 
+func TestRecorderBackgroundJobResultRecordsMetricsOnlyEvent(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{
+		Dir:         dir,
+		Prompt:      2,
+		Agent:       "code",
+		ModelTarget: "openai:model-a",
+		Provider:    "openai",
+		APIType:     "responses",
+		Model:       "model-a",
+	})
+	rec.TurnAttemptStart(3, 1, agent.ContextEstimate{})
+	rec.BackgroundJobResult("bg_1", "shell", "completed", 1500*time.Millisecond, map[string]int{
+		"command_outcome_available": 1,
+		"command_failed":            1,
+		"command_steps_total":       2,
+	})
+	rec.Flush()
+
+	var diagnostics []session.Event
+	for _, event := range readEvents(t, dir) {
+		if event.Type == session.EventBackgroundJobResult {
+			diagnostics = append(diagnostics, event)
+		}
+		if event.Type == session.EventToolResult {
+			t.Fatalf("background diagnostic was recorded as tool_result: %+v", event)
+		}
+	}
+	if len(diagnostics) != 1 {
+		t.Fatalf("background diagnostics = %+v, want one", diagnostics)
+	}
+	event := diagnostics[0]
+	if event.ToolID != "bg_1" || event.Tool != "shell" || event.Summary != "completed" ||
+		event.Prompt != 2 || event.Turn != 3 || event.DurationMS != 1500 || event.Display != "" ||
+		event.ResultMetrics["command_failed"] != 1 || event.ResultMetrics["command_steps_total"] != 2 {
+		t.Fatalf("background diagnostic event = %+v", event)
+	}
+	if event.Agent != "code" || event.ModelTarget != "openai:model-a" || event.Provider != "openai" ||
+		event.APIType != "responses" || event.Model != "model-a" {
+		t.Fatalf("background diagnostic identity = %+v", event)
+	}
+}
+
 func TestRecorderStampsExecutionIdentityOnAttemptsAndTools(t *testing.T) {
 	dir := t.TempDir()
 	rec := New(Config{Dir: dir, Prompt: 1, Agent: "code"})
@@ -200,6 +243,7 @@ func TestRecorderNilSafe(t *testing.T) {
 	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	rec.TextDelta("hello")
 	rec.ToolResult(llm.ToolResult{ForID: "c"})
+	rec.BackgroundJobResult("bg", "shell", "completed", time.Second, map[string]int{"command_succeeded": 1})
 	rec.PromptComplete(agent.PromptUsage{})
 	rec.Flush()
 	if err := rec.Err(); err != nil {

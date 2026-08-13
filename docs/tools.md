@@ -121,14 +121,20 @@ decide regex syntax, ignore behavior, limits, output shape, and exit status.
 - `name`: optional command or step-batch label
 - `output_mode`: `auto` (default), `receipt`, or `full`; with `steps`, `auto`
   and `receipt` return compact receipts while `full` returns the combined step transcript
-- `steps`: up to 16 named `command`/`argv` entries, run serially. Top-level
-  `cwd` and `timeout_seconds` are inherited unless a step overrides them.
+- `steps`: up to 16 named `command`/`argv` entries, run serially in either
+  foreground or background mode. Top-level `cwd` and `timeout_seconds` are
+  inherited unless a step overrides them.
 
-Foreground calls capture combined stdout/stderr and append `[exit code: N]`.
+Shell calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
 the model can react to failing builds, tests, and searches. Structured result
 metrics separately record exit status, timeout, cancellation, and step failures;
-`session errors` consumes those metrics rather than parsing text.
+`session errors` consumes those metrics rather than parsing text. Completed
+background shell jobs persist the same metrics exactly once in a diagnostics-only
+`background_job_result` session event when completion is observed at a request,
+prompt/idle boundary, session rotation, or graceful shutdown. The event retains
+the agent/model identity that launched the job even if the session switched before
+completion.
 
 For an ordinary top-level command, `output_mode:"auto"` preserves successful
 output through 8 KiB. Above that threshold it returns a compact `PASS` receipt
@@ -146,10 +152,18 @@ Successful output is replaced with one `PASS <name> (<duration>)` receipt per
 step. Failures include a bounded output excerpt and skip count. Any suppressed
 successful output or clipped failure output is archived through the normal
 session artifact path, so the model can inspect it without carrying it in every
-later request. `steps` is foreground-only.
+later request. Background steps preserve the same receipts, original transcript,
+per-step overrides, stop/continue behavior, and aggregate diagnostics; unresolved
+step timeouts default to 1200 seconds in background mode instead of 120 seconds.
+`stop_on_failure:false` can continue after an ordinary failure or timeout, but
+cancellation always stops the batch before any later step starts. An incomplete
+process-group reap always retains the full transcript for artifact recovery.
 
-`shell` and `web_fetch` can set `background:true` to return
-a job id immediately. `delegate` can also run as a background child agent.
+`shell` commands or ordered step batches and `web_fetch` can set
+`background:true` to return a job id immediately. `delegate` can also run as a
+background child agent. Graceful process exit and session rotation cancel active
+jobs, wait briefly for context-responsive runners to publish final diagnostics,
+and then continue teardown; forced exit remains immediate.
 Local background work carries a canonical resource lease. `shell`
 defaults to an `exclusive` lease on its canonical cwd; callers may set
 `background_lease:{"resource_key":"...","access":"read_only"}` only when the

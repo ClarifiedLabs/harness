@@ -367,6 +367,39 @@ func TestOneShotWaitsForBackgroundDelegateSynthesizesAndCountsUsage(t *testing.T
 	}
 }
 
+func TestOneShotShutdownRetainsBackgroundCancellationDiagnostics(t *testing.T) {
+	var out, errw bytes.Buffer
+	manager := background.NewManager(background.Options{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+			<-ctx.Done()
+			return tools.BackgroundJobResult{Metrics: map[string]int{
+				tools.CommandMetricOutcomeAvailable: 1,
+				tools.CommandMetricCancelled:        1,
+			}}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	app := newTestApp(t, &out, &errw, llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}))
+	app.Background = manager
+
+	if code := OneShot(app, "finish"); code != ExitOK {
+		t.Fatalf("exit code = %d, errw=%q", code, errw.String())
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), `"type":"background_job_result"`) ||
+		!strings.Contains(string(raw), `"tool_id":"`+job.ID+`"`) ||
+		!strings.Contains(string(raw), `"command_cancelled":1`) {
+		t.Fatalf("missing shutdown diagnostics:\n%s", raw)
+	}
+}
+
 func TestOneShotShowsToolCallProgressOnStderrOnly(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",

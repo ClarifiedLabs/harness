@@ -283,45 +283,25 @@ func collectErrorStream(events []Event, sessionDir, agent, provider, model strin
 			}
 		}
 		switch {
+		case ev.Type == EventBackgroundJobResult:
+			rowIdentity := eventResultIdentity(identity, ev)
+			resultAgent := agent
+			if ev.Agent != "" {
+				resultAgent = ev.Agent
+			}
+			if filter.matchesResult(resultAgent, ev.Tool, rowIdentity.model) {
+				addResultDiagnostics(&stream.summary, ev.ResultMetrics)
+			}
 		case ev.Type == EventToolResult:
 			resultIndex++
-			rowIdentity := identity
-			if ev.ModelTarget != "" {
-				rowIdentity.targetID = ev.ModelTarget
-			}
-			if ev.Provider != "" {
-				rowIdentity.provider = ev.Provider
-			}
-			if ev.APIType != "" {
-				rowIdentity.apiType = ev.APIType
-			}
-			if ev.Model != "" {
-				rowIdentity.model = ev.Model
-			}
+			rowIdentity := eventResultIdentity(identity, ev)
 			if filter.matchesResult(agent, ev.Tool, rowIdentity.model) {
 				stream.summary.ToolResults++
 				stream.summary.ResultsByTool[ev.Tool]++
 				if rowIdentity.model != "" {
 					stream.summary.ResultsByModel[rowIdentity.model]++
 				}
-				for metric, value := range ev.ResultMetrics {
-					switch metric {
-					case "operation_errors", "query_errors", "normalized_bounds":
-						stream.summary.CompositeDiagnostics[metric] += value
-					}
-				}
-				if ev.ResultMetrics["command_outcome_available"] != 0 {
-					stream.summary.CommandResults++
-					if ev.ResultMetrics["command_failed"] != 0 {
-						stream.summary.FailedCommandResults++
-					}
-					if ev.ResultMetrics["command_cancelled"] != 0 {
-						stream.summary.CancelledCommandResults++
-					}
-					if ev.ResultMetrics["command_timed_out"] != 0 {
-						stream.summary.TimedOutCommandResults++
-					}
-				}
+				addResultDiagnostics(&stream.summary, ev.ResultMetrics)
 			}
 			if !ev.ResultError {
 				previous, runLength = runKey{}, 0
@@ -400,6 +380,44 @@ func collectErrorStream(events []Event, sessionDir, agent, provider, model strin
 		}
 	}
 	return stream
+}
+
+func eventResultIdentity(identity eventModelIdentity, ev Event) eventModelIdentity {
+	if ev.ModelTarget != "" {
+		identity.targetID = ev.ModelTarget
+	}
+	if ev.Provider != "" {
+		identity.provider = ev.Provider
+	}
+	if ev.APIType != "" {
+		identity.apiType = ev.APIType
+	}
+	if ev.Model != "" {
+		identity.model = ev.Model
+	}
+	return identity
+}
+
+func addResultDiagnostics(summary *ErrorSummary, metrics map[string]int) {
+	for metric, value := range metrics {
+		switch metric {
+		case "operation_errors", "query_errors", "normalized_bounds":
+			summary.CompositeDiagnostics[metric] += value
+		}
+	}
+	if metrics["command_outcome_available"] == 0 {
+		return
+	}
+	summary.CommandResults++
+	if metrics["command_failed"] != 0 {
+		summary.FailedCommandResults++
+	}
+	if metrics["command_cancelled"] != 0 {
+		summary.CancelledCommandResults++
+	}
+	if metrics["command_timed_out"] != 0 {
+		summary.TimedOutCommandResults++
+	}
 }
 
 func (f ErrorFilter) matchesResult(agent, tool, model string) bool {

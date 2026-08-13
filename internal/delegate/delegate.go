@@ -236,6 +236,7 @@ type Runner struct {
 	opts             Options
 	childToolBuilder func(Runtime, Launch, string, []string) (*tools.Registry, error)
 	budget           *delegateBudget
+	background       tools.BackgroundJobStarter
 }
 
 func NewRunner(snapshot func() Runtime, resolve func(Runtime, string) (Launch, error), opts Options) *Runner {
@@ -331,6 +332,9 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 	var starter tools.BackgroundJobStarter
 	if len(background) > 0 {
 		starter = background[0]
+	}
+	if runner != nil {
+		runner.background = starter
 	}
 	return &Tool{runner: runner, background: starter}
 }
@@ -767,6 +771,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 
 	sink := newChildSink(childDir, childTodos, slices.Contains(toolNames, updateTodosToolName), progress, activity, inlineReasoningEnabled(launch.Reasoning))
+	if background, ok := r.background.(tools.BackgroundJobDiagnosticIdentitySetter); ok {
+		sink.background = background
+	}
 	if r.opts.WorkflowStatus != nil {
 		sink.workflowStatus = func() agent.WorkflowStatus { return r.opts.WorkflowStatus(childID) }
 	}
@@ -1903,6 +1910,7 @@ type childSink struct {
 	todos                *todo.Store
 	todoContext          bool
 	todoTurn             int
+	background           tools.BackgroundJobDiagnosticIdentitySetter
 }
 
 type pendingChildTool struct {
@@ -2169,6 +2177,17 @@ func (s *childSink) ToolStart(call llm.ToolCall) {
 
 func (s *childSink) ToolResult(result llm.ToolResult) {
 	s.flushDisplay()
+	if result.BackgroundJobID != "" && s.background != nil {
+		if identity, ok := s.rec.PendingToolIdentity(result.ForID); ok {
+			s.background.SetDiagnosticIdentity(result.BackgroundJobID, tools.BackgroundDiagnosticIdentity{
+				Agent:       identity.Agent,
+				ModelTarget: identity.ModelTarget,
+				Provider:    identity.Provider,
+				APIType:     identity.APIType,
+				Model:       identity.Model,
+			})
+		}
+	}
 	pending := s.pending[result.ForID]
 	delete(s.pending, result.ForID)
 	call := pending.call

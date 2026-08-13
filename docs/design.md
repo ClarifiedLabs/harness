@@ -2206,7 +2206,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 |---|---|---|
 | `argv` | array of strings | program + literal arguments; mutually exclusive with `command`; must not be a shell string or JSON-encoded array |
 | `command` | string | shell command line; mutually exclusive with `argv`; use only when shell syntax is required |
-| `steps` | array | 1–16 ordered entries, mutually exclusive with top-level `command`/`argv`/`stdin` |
+| `steps` | array | 1–16 ordered entries, mutually exclusive with top-level `command`/`argv`/`stdin`; supported in foreground and background |
 | `steps[].name` | string | receipt label; omitted means `step N` |
 | `steps[].command` / `steps[].argv` | string / array | exactly one per step |
 | `steps[].stdin` | string | step-specific stdin |
@@ -2273,9 +2273,10 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   descendant closes inherited stdout/stderr; any remaining same-group descendants
   are killed after that direct exit. Long-lived commands should use
   `background:true`.
-- With `background:true`, the command uses the same process-group and output
-  formatting rules, but runs under the background job manager instead of blocking
-  the current tool call. Background jobs default to a 1200-second timeout
+- With `background:true`, a top-level command or ordered steps batch uses the same
+  process-group, step-control, output-formatting, original-transcript, and metrics
+  rules, but runs under the background job manager instead of blocking the current
+  tool call. Background jobs default to a 1200-second timeout
   (20 minutes) unless `timeout_seconds` is set explicitly. It also defaults to an
   exclusive lease on the canonical command cwd. Set
   `background_lease.access:"read_only"` only for a command that cannot mutate
@@ -2288,28 +2289,42 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   on completion, use one `background_jobs` `wait` call rather than polling
   `get`/`list`; otherwise completed output is delivered once as request-only
   context. Use `/background` for interactive inspection or cancellation.
-  The background result carries both compact and original text. Automatic
-  completion uses the originating `shell` limits/artifact path; explicit
-  `background_jobs` get/wait results carry the full aggregate as their own
-  `OriginalText`, so choosing an explicit wait never discards recovery.
+  The background result carries compact text, original text, and diagnostics
+  metrics. Automatic completion uses the originating `shell` limits/artifact path;
+  explicit `background_jobs` get/wait results carry the full aggregate as their
+  own `OriginalText`, so choosing an explicit wait never discards recovery. When
+  completion is delivered, its metrics are persisted once in a diagnostics-only
+  `background_job_result` event; this lets session analysis count non-zero exits,
+  timeout/cancellation, and step aggregates without treating the launch receipt as
+  a second ordinary tool result. Diagnostics retain the launch agent/model
+  identity and are drained exactly once at request, prompt/idle, session-rotation,
+  or graceful-shutdown boundaries. Graceful teardown waits up to one second for
+  context-responsive runners to publish cancellation metrics; forced exit does
+  not wait.
 - Environment inherited unmodified.
 - `stdin`, when provided, is written verbatim to the command's standard input; absent
   means `/dev/null` (programs see immediate EOF, never hang on input). Prefer it over
   `echo`/heredocs when feeding content to a command (`git commit -F -`, `python -`,
   `tee file`) — content travels with zero shell escaping.
-- `steps` runs related format/build/lint/test commands serially. Top-level `cwd`
-  and `timeout_seconds` are defaults; each step may override them. Background
-  mode and top-level stdin are rejected for steps. By default the first
-  non-zero, timed-out, cancelled, or unstartable step stops execution and reports
-  the remaining skip count; `stop_on_failure:false` continues.
+- `steps` runs related format/build/lint/test commands serially in foreground or
+  background mode. Top-level `cwd` and `timeout_seconds` are defaults; each step
+  may override them. Top-level stdin is rejected; use `steps[].stdin`. By default
+  the first non-zero, timed-out, cancelled, or unstartable step stops execution and
+  reports the remaining skip count. `stop_on_failure:false` continues after an
+  ordinary failure, timeout, or start error, but cancellation always stops before
+  a later step starts.
 - Each successful step returns only `PASS <name> (<duration>)`. Failure receipts
   include status and at most 4096 bytes of command output. Suppressed success
   output and clipped failure output are combined under named command headers and
   supplied as `ResultTool.OriginalText`, so the ordinary tool-result archiver
-  persists it and appends targeted recovery guidance.
-- A steps call reports the sum of its resolved per-step timeouts through
+  persists it and appends targeted recovery guidance. A timeout/cancellation whose
+  process-group wait does not finish also retains the full transcript even when
+  its visible excerpt was otherwise complete.
+- A foreground steps call reports the sum of its resolved per-step timeouts through
   `SelfTimeouter`, preserving every step's no-maximum timeout contract under the
-  dispatch backstop.
+  dispatch backstop. A background batch runs outside dispatch and applies the
+  background default (1200 seconds) independently to each step without an explicit
+  timeout.
 
 ### 9.8 Shared process execution (`runProcess`)
 

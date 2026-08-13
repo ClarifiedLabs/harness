@@ -86,6 +86,16 @@ type jsonPendingApproval struct {
 }
 
 func (d *jsonDriver) run() int {
+	defer func() {
+		// Forced exit deliberately leaves a possibly stuck prompt goroutine behind;
+		// do not race it through background/session state. Graceful EOF, shutdown,
+		// and ordinary interrupt paths own no prompt when they return.
+		if d.forceExitRequested || forceExitRequested(d.app.ForceExit) {
+			return
+		}
+		d.app.stopBackgroundJobs()
+		d.app.saveOrWarn(d.app.SessionPath)
+	}()
 	if d.app.Created.IsZero() {
 		d.app.Created = d.app.clock()()
 	}

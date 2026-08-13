@@ -387,6 +387,44 @@ func TestRunJSONShutdownMidPromptCancelsAndExitsZero(t *testing.T) {
 	}
 }
 
+func TestRunJSONGracefulExitRetainsBackgroundCancellationDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		input string
+	}{
+		{name: "shutdown", input: "{\"type\":\"shutdown\"}\n"},
+		{name: "EOF"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			app, stream, _, _ := newJSONRunApp(t, llmtest.New("fake"))
+			manager := background.NewManager(background.Options{})
+			app.Background = manager
+			job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+				Kind: "shell",
+				Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+					<-ctx.Done()
+					return tools.BackgroundJobResult{Metrics: map[string]int{
+						tools.CommandMetricOutcomeAvailable: 1,
+						tools.CommandMetricCancelled:        1,
+					}}, ctx.Err()
+				},
+			})
+			if err != nil {
+				t.Fatalf("StartBackgroundJob: %v", err)
+			}
+
+			if code := RunJSON(strings.NewReader(tc.input), app); code != ExitOK {
+				t.Fatalf("exit code = %d", code)
+			}
+			if !strings.Contains(stream.String(), `"type":"background_job_result"`) ||
+				!strings.Contains(stream.String(), `"tool_id":"`+job.ID+`"`) ||
+				!strings.Contains(stream.String(), `"command_cancelled":1`) {
+				t.Fatalf("missing mirrored shutdown diagnostics:\n%s", stream.String())
+			}
+		})
+	}
+}
+
 func TestRunJSONBadInputNeverKillsSession(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("ok answer")},

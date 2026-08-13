@@ -645,10 +645,11 @@ func TestDispatchPreservesResultToolOriginal(t *testing.T) {
 	r.Register(resultFakeTool{
 		fakeTool: newOK("result", "ordinary path should not run"),
 		result: RunResult{
-			Text:         "compact receipt",
-			OriginalText: "complete verbose transcript",
-			Usage:        llm.Usage{InputTokens: 2},
-			Metrics:      map[string]int{"unique_lines": 12},
+			Text:            "compact receipt",
+			OriginalText:    "complete verbose transcript",
+			Usage:           llm.Usage{InputTokens: 2},
+			Metrics:         map[string]int{"unique_lines": 12},
+			BackgroundJobID: "bg_result",
 		},
 	})
 
@@ -664,6 +665,9 @@ func TestDispatchPreservesResultToolOriginal(t *testing.T) {
 	}
 	if res.Metrics["unique_lines"] != 12 {
 		t.Fatalf("metrics = %+v", res.Metrics)
+	}
+	if res.BackgroundJobID != "bg_result" {
+		t.Fatalf("background job ID = %q", res.BackgroundJobID)
 	}
 }
 

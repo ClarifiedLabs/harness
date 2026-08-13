@@ -60,6 +60,15 @@ func DefaultPromptUsageLine(u agent.PromptUsage, promptElapsed time.Duration, co
 	return UsageLine(u, promptElapsed, cost, known, u.Usage.InputTokens, u.Usage.OutputTokens, cost, u.Compactions)
 }
 
+// ExecutionIdentity identifies the agent/model execution that launched work.
+type ExecutionIdentity struct {
+	Agent       string
+	ModelTarget string
+	Provider    string
+	APIType     string
+	Model       string
+}
+
 // Recorder appends parent-fidelity replay events to raw.ndjson. It owns the
 // pending-tool map and turn/prompt duration math so the parent and child
 // sinks cannot drift. A nil *Recorder is valid and records nothing.
@@ -131,15 +140,35 @@ func (r *Recorder) Err() error {
 // mutex so mirrored events keep their append order; the unlock is deferred so
 // a panicking mirror cannot wedge every later recorder call.
 func (r *Recorder) Append(ev session.Event) {
+	_ = r.appendEvent(ev)
+}
+
+func (r *Recorder) appendEvent(ev session.Event) error {
+	return r.appendEventAfterFlush(ev, false)
+}
+
+func (r *Recorder) appendEventAfterFlush(ev session.Event, requireFlush bool) error {
 	if r == nil {
-		return
+		return nil
 	}
 	if ev.Time.IsZero() {
 		ev.Time = r.now()
 	}
-	if err := r.appendLocked(func() error { return r.events.Append(ev) }); err != nil && r.cfg.OnError != nil {
+	err := r.appendLocked(func() error {
+		// Diagnostics are acknowledged only after this returns nil. Flush pending
+		// assistant text first and do not attempt the diagnostic append if that
+		// flush fails, avoiding a successful write followed by a duplicate retry.
+		if requireFlush {
+			if err := r.events.Flush(); err != nil {
+				return err
+			}
+		}
+		return r.events.Append(ev)
+	})
+	if err != nil && r.cfg.OnError != nil {
 		r.cfg.OnError(err)
 	}
+	return err
 }
 
 // Flush writes any buffered assistant-delta chunk. Mirror delivery semantics
@@ -274,6 +303,25 @@ func (r *Recorder) ToolStart(call llm.ToolCall) {
 	})
 }
 
+// PendingToolIdentity returns the execution identity captured when a tool call
+// started. It lets detached completion diagnostics retain launch attribution.
+func (r *Recorder) PendingToolIdentity(id string) (ExecutionIdentity, bool) {
+	if r == nil {
+		return ExecutionIdentity{}, false
+	}
+	pending, ok := r.pending[id]
+	if !ok {
+		return ExecutionIdentity{}, false
+	}
+	return ExecutionIdentity{
+		Agent:       r.cfg.Agent,
+		ModelTarget: pending.model.targetID,
+		Provider:    pending.model.provider,
+		APIType:     pending.model.apiType,
+		Model:       pending.model.model,
+	}, true
+}
+
 // ToolResult records the shared one-line summary, duration, and metrics.
 func (r *Recorder) ToolResult(res llm.ToolResult) {
 	if r == nil {
@@ -317,6 +365,46 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 		APIType:             pending.model.apiType,
 		Model:               pending.model.model,
 	})
+}
+
+// BackgroundJobResult records diagnostics for a completed detached job without
+// presenting it as a second ordinary tool result. The launch receipt remains the
+// tool result paired with the original call; analysis consumes this metrics-only
+// event as the eventual command outcome.
+func (r *Recorder) BackgroundJobResult(id, tool, status string, duration time.Duration, metrics map[string]int) {
+	r.BackgroundJobResultWithIdentity(id, tool, status, duration, metrics, ExecutionIdentity{})
+}
+
+// BackgroundJobResultWithIdentity records a detached outcome against its launch
+// identity. A zero identity falls back to the recorder's current execution.
+func (r *Recorder) BackgroundJobResultWithIdentity(id, tool, status string, duration time.Duration, metrics map[string]int, identity ExecutionIdentity) error {
+	if r == nil || len(metrics) == 0 {
+		return nil
+	}
+	if identity == (ExecutionIdentity{}) {
+		identity = ExecutionIdentity{
+			Agent:       r.cfg.Agent,
+			ModelTarget: r.model.targetID,
+			Provider:    r.model.provider,
+			APIType:     r.model.apiType,
+			Model:       r.model.model,
+		}
+	}
+	return r.appendEventAfterFlush(session.Event{
+		Type:          session.EventBackgroundJobResult,
+		Prompt:        r.cfg.Prompt,
+		Turn:          r.turn,
+		ToolID:        id,
+		Tool:          tool,
+		Summary:       status,
+		DurationMS:    duration.Milliseconds(),
+		ResultMetrics: maps.Clone(metrics),
+		Agent:         identity.Agent,
+		ModelTarget:   identity.ModelTarget,
+		Provider:      identity.Provider,
+		APIType:       identity.APIType,
+		Model:         identity.Model,
+	}, true)
 }
 
 // ToolDiff records a rendered unified diff with the mutated file path so

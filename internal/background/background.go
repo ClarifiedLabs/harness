@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -109,14 +110,16 @@ type Job struct {
 	Error       string
 	// progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
 	// set at job start so the parent wait ticker can read child activity mid-run.
-	progress         any
-	cancel           context.CancelFunc
-	done             chan struct{}
-	finished         bool
-	waitForPrompt    bool
-	contextDelivered bool
-	noticeDelivered  bool
-	usageDelivered   bool
+	progress             any
+	cancel               context.CancelFunc
+	done                 chan struct{}
+	finished             bool
+	waitForPrompt        bool
+	contextDelivered     bool
+	noticeDelivered      bool
+	usageDelivered       bool
+	diagnosticsDelivered bool
+	diagnosticIdentity   *DiagnosticIdentity
 	// contextClaims prevents an ordinary completion from being injected while a
 	// detached wait still owns the selected job's aggregate result.
 	contextClaims int
@@ -140,6 +143,23 @@ type Snapshot struct {
 	Progress       any
 	ContextPending bool
 	NoticePending  bool
+}
+
+// DiagnosticIdentity pins a background result to the execution identity that
+// launched it, even when completion is delivered after an interactive switch.
+type DiagnosticIdentity = tools.BackgroundDiagnosticIdentity
+
+// CompletedDiagnostic is one completed background job's diagnostics-only result.
+// It is drained independently from model-visible completion context so session
+// analysis can account for detached command outcomes without treating the launch
+// receipt as the command's final result.
+type CompletedDiagnostic struct {
+	ID       string
+	Kind     string
+	Status   string
+	Duration time.Duration
+	Metrics  map[string]int
+	Identity *DiagnosticIdentity
 }
 
 // WaitResult describes the state that satisfied a background job wait.
@@ -255,10 +275,12 @@ func (m *Manager) start(
 
 	go func() {
 		result, err := run(ctx, job.ID)
+		result.Metrics = maps.Clone(result.Metrics)
 		finished := m.now()
 		m.mu.Lock()
 		if job.Status == StatusAbandoned {
 			job.Result = result
+			job.Updated = finished
 			if result.Progress != nil {
 				job.progress = result.Progress
 			}
@@ -329,6 +351,23 @@ func (m *Manager) Get(id string) (Snapshot, bool) {
 		return Snapshot{}, false
 	}
 	return snapshotJob(job), true
+}
+
+// SetDiagnosticIdentity associates a detached job with its launch execution.
+// It may run before or after the job finishes, provided diagnostics have not yet
+// been drained from the process-local job table.
+func (m *Manager) SetDiagnosticIdentity(id string, identity DiagnosticIdentity) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[id]
+	if !ok || job.diagnosticsDelivered {
+		return false
+	}
+	job.diagnosticIdentity = &identity
+	return true
 }
 
 func (m *Manager) Cancel(id string) (Snapshot, bool) {
@@ -410,10 +449,41 @@ func (m *Manager) invalidateDetachedWaitsLocked() {
 }
 
 func (m *Manager) Shutdown() {
+	m.shutdown()
+}
+
+// ShutdownAndWait cancels every running job and waits up to timeout for runners
+// to publish their final results. It preserves Shutdown's bounded behavior for
+// context-ignoring jobs while letting callers retain cancellation diagnostics
+// from context-responsive commands before process or session teardown.
+func (m *Manager) ShutdownAndWait(timeout time.Duration) {
+	done := m.shutdown()
+	if len(done) == 0 || timeout <= 0 {
+		return
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	for _, jobDone := range done {
+		select {
+		case <-jobDone:
+		case <-timer.C:
+			return
+		}
+	}
+}
+
+func (m *Manager) shutdown() []<-chan struct{} {
+	if m == nil {
+		return nil
+	}
 	m.mu.Lock()
 	m.invalidateDetachedWaitsLocked()
 	var cancels []context.CancelFunc
+	var done []<-chan struct{}
 	for _, job := range m.jobs {
+		if job.done != nil {
+			done = append(done, job.done)
+		}
 		if job.finished {
 			continue
 		}
@@ -431,6 +501,7 @@ func (m *Manager) Shutdown() {
 	for _, cancel := range cancels {
 		cancel()
 	}
+	return done
 }
 
 func (m *Manager) Clear() {
@@ -792,6 +863,70 @@ func (m *Manager) DrainCompletedContext(archiver toolresult.Archiver) []string {
 	return m.completedContext(true, archiver)
 }
 
+// DrainCompletedDiagnostics returns each completed job's metrics exactly once.
+// Jobs without diagnostics remain eligible in case an abandoned runner publishes
+// a late result after shutdown marked the job finished.
+func (m *Manager) DrainCompletedDiagnostics() []CompletedDiagnostic {
+	return m.completedDiagnostics(true)
+}
+
+// PeekCompletedDiagnostics returns diagnostics still awaiting durable recording
+// without marking them delivered. Call AcknowledgeCompletedDiagnostic only after
+// the corresponding session event append succeeds.
+func (m *Manager) PeekCompletedDiagnostics() []CompletedDiagnostic {
+	return m.completedDiagnostics(false)
+}
+
+func (m *Manager) completedDiagnostics(deliver bool) []CompletedDiagnostic {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []CompletedDiagnostic
+	for _, id := range m.order {
+		job := m.jobs[id]
+		if job == nil || !job.finished || job.diagnosticsDelivered || len(job.Result.Metrics) == 0 {
+			continue
+		}
+		if deliver {
+			job.diagnosticsDelivered = true
+		}
+		duration := job.Updated.Sub(job.Created)
+		if duration < 0 {
+			duration = 0
+		}
+		diagnostic := CompletedDiagnostic{
+			ID:       job.ID,
+			Kind:     job.Kind,
+			Status:   job.Status,
+			Duration: duration,
+			Metrics:  maps.Clone(job.Result.Metrics),
+		}
+		if job.diagnosticIdentity != nil {
+			identity := *job.diagnosticIdentity
+			diagnostic.Identity = &identity
+		}
+		out = append(out, diagnostic)
+	}
+	return out
+}
+
+// AcknowledgeCompletedDiagnostic marks one pending diagnostic durably recorded.
+func (m *Manager) AcknowledgeCompletedDiagnostic(id string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[id]
+	if !ok || !job.finished || len(job.Result.Metrics) == 0 {
+		return false
+	}
+	job.diagnosticsDelivered = true
+	return true
+}
+
 // PeekCompletedContext returns what DrainCompletedContext would deliver
 // without marking it delivered or archiving oversized results, so a size
 // estimate can count pending context that still needs to reach the model.
@@ -908,12 +1043,17 @@ func snapshotJob(job *Job) Snapshot {
 		Status:         job.Status,
 		Created:        job.Created,
 		Updated:        job.Updated,
-		Result:         job.Result,
+		Result:         cloneBackgroundJobResult(job.Result),
 		Error:          job.Error,
 		Progress:       job.progress,
 		ContextPending: !job.contextDelivered && job.finished,
 		NoticePending:  !job.noticeDelivered && job.finished,
 	}
+}
+
+func cloneBackgroundJobResult(result tools.BackgroundJobResult) tools.BackgroundJobResult {
+	result.Metrics = maps.Clone(result.Metrics)
+	return result
 }
 
 func backgroundID(t time.Time) string {

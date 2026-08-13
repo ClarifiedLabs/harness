@@ -36,7 +36,9 @@ func (t fakeChildTool) Run(context.Context, json.RawMessage) (string, error) {
 }
 
 type fakeBackgroundStarter struct {
-	req tools.BackgroundJobRequest
+	req        tools.BackgroundJobRequest
+	identityID string
+	identity   tools.BackgroundDiagnosticIdentity
 }
 
 func TestDelegateToolDescriptionFitsBudget(t *testing.T) {
@@ -74,6 +76,12 @@ func TestDelegateSequentialOnlyForValidForegroundCalls(t *testing.T) {
 func (f *fakeBackgroundStarter) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
 	f.req = req
 	return tools.BackgroundJobInfo{ID: "bg_delegate", Status: "running"}, nil
+}
+
+func (f *fakeBackgroundStarter) SetDiagnosticIdentity(id string, identity tools.BackgroundDiagnosticIdentity) bool {
+	f.identityID = id
+	f.identity = identity
+	return true
 }
 
 type continuationFixture struct {
@@ -1729,6 +1737,23 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	}
 	if sink.progress.Snapshot().Finished {
 		t.Fatal("child sink must not independently terminalize progress")
+	}
+}
+
+func TestChildSinkRegistersBackgroundJobLaunchIdentity(t *testing.T) {
+	starter := &fakeBackgroundStarter{}
+	sink := newChildSink(t.TempDir(), nil, false, NewProgress(), nil)
+	sink.background = starter
+	sink.configureRecorder(time.Now, nil, "child-agent", "child-provider", "child-model")
+	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	sink.ToolStart(llm.ToolCall{ID: "shell-call", Name: "shell"})
+	sink.ToolResult(llm.ToolResult{
+		ForID: "shell-call", Text: "started", BackgroundJobID: "bg_child_shell",
+	})
+
+	if starter.identityID != "bg_child_shell" || starter.identity.Agent != "child-agent" ||
+		starter.identity.Provider != "child-provider" || starter.identity.Model != "child-model" {
+		t.Fatalf("registered child launch identity = %q %+v", starter.identityID, starter.identity)
 	}
 }
 
