@@ -5154,6 +5154,32 @@ func TestRunREPLToolsCommandListsTools(t *testing.T) {
 	}
 }
 
+func TestRunREPLLogsLSPRegistrationOnlyWhenEnabled(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		config  string
+		wantLog bool
+	}{
+		{name: "disabled"},
+		{name: "enabled", config: `{"lsp":{"enable":true,"prewarm":false}}`, wantLog: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := []string{"-model", "claude-opus-4-8"}
+			if tt.config != "" {
+				args = append(args, "-config", writeMainConfig(t, tt.config))
+			}
+			fp := llmtest.New("fake")
+			env, _, errw, _ := fakeProviderEnv(t, args, fp, "/exit\n")
+			if code := run(env); code != ui.ExitOK {
+				t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+			}
+			if got := strings.Contains(errw.String(), "lsp: registered"); got != tt.wantLog {
+				t.Fatalf("registration log present = %v, want %v; errw=%q", got, tt.wantLog, errw.String())
+			}
+		})
+	}
+}
+
 func TestRunREPLLSPToggleChangesModelToolSurfaceAndHint(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1), okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t,

@@ -955,7 +955,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			defer runtime.Shutdown()
 			lspSummary = runtime.ActiveSummary()
 			lspHint = runtime.SystemHint()
-			logger.Info(fmt.Sprintf("lsp: registered %d tools", runtime.summary.Total), logging.Category("lsp"))
+			if runtime.enabled {
+				logger.Info(fmt.Sprintf("lsp: registered %d tools", runtime.summary.Total), logging.Category("lsp"))
+			}
 		}
 	}
 	var serenaSummary mcptools.Summary
