@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -295,21 +294,15 @@ func runInteractiveBenchmark(cmd *exec.Cmd, c benchmarkCase, worktree string) ([
 	if err != nil {
 		return nil, nil, err
 	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, nil, err
-	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
 	}
-	var stderr bytes.Buffer
-	stderrDone := make(chan error, 1)
-	go func() { _, copyErr := io.Copy(&stderr, stderrPipe); stderrDone <- copyErr }()
 	abort := func(stdout *bytes.Buffer, cause error) ([]byte, []byte, error) {
 		_ = stdin.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		<-stderrDone
 		return append([]byte(nil), stdout.Bytes()...), append([]byte(nil), stderr.Bytes()...), cause
 	}
 	encoder := json.NewEncoder(stdin)
@@ -358,12 +351,8 @@ func runInteractiveBenchmark(cmd *exec.Cmd, c benchmarkCase, worktree string) ([
 	}
 	scanErr := scanner.Err()
 	waitErr := cmd.Wait()
-	copyErr := <-stderrDone
 	if scanErr != nil {
 		return stdout.Bytes(), stderr.Bytes(), scanErr
-	}
-	if copyErr != nil {
-		return stdout.Bytes(), stderr.Bytes(), copyErr
 	}
 	if !phaseTwoSent || !shutdownSent {
 		return stdout.Bytes(), stderr.Bytes(), fmt.Errorf("interactive benchmark ended before both prompt boundaries")
