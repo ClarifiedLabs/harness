@@ -396,7 +396,7 @@ func TestRunJSONGracefulExitRetainsBackgroundCancellationDiagnostics(t *testing.
 		{name: "EOF"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			app, stream, _, _ := newJSONRunApp(t, llmtest.New("fake"))
+			app, stream, _, w := newJSONRunApp(t, llmtest.New("fake"))
 			manager := background.NewManager(background.Options{})
 			app.Background = manager
 			job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
@@ -413,8 +413,12 @@ func TestRunJSONGracefulExitRetainsBackgroundCancellationDiagnostics(t *testing.
 				t.Fatalf("StartBackgroundJob: %v", err)
 			}
 
-			if code := RunJSON(strings.NewReader(tc.input), app); code != ExitOK {
+			code := RunJSON(strings.NewReader(tc.input), app)
+			if code != ExitOK {
 				t.Fatalf("exit code = %d", code)
+			}
+			if err := w.Close(runstream.RunEnd{ExitCode: code}); err != nil {
+				t.Fatalf("close run stream: %v", err)
 			}
 			if !strings.Contains(stream.String(), `"type":"background_job_result"`) ||
 				!strings.Contains(stream.String(), `"tool_id":"`+job.ID+`"`) ||
