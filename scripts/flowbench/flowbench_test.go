@@ -146,6 +146,21 @@ printf '%s\n' '{"type":"run_end","exit_code":0}'`
 	}
 }
 
+func TestRunInteractiveBenchmarkWaitsForStderrReader(t *testing.T) {
+	script := `read first
+printf '%s\n' '{"type":"prompt_end","id":"phase-1"}'
+read second
+printf '%s\n' '{"type":"prompt_end","id":"phase-2"}'
+read shutdown
+printf '%s\n' '{"type":"run_end","exit_code":0}'
+exec 1>&-
+sleep 0.05 &`
+	c := benchmarkCase{Prompt: "plan", SecondPrompt: "apply"}
+	if _, _, err := runInteractiveBenchmark(exec.Command("sh", "-c", script), c, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestFlattenJSONStrings(t *testing.T) {
 	got := flattenJSONStrings(json.RawMessage(`{"steps":[{"argv":["go","test","./..."]}],"stop_on_failure":true}`))
 	joined := ""
