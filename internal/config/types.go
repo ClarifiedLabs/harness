@@ -144,6 +144,8 @@ type Config struct {
 	ResponsesStateful             bool    `json:"responses_stateful"`
 	RetentionPolicy               string  `json:"retention_policy"`
 	RetentionFloorTokens          int     `json:"retention_floor_tokens"`
+	RetentionKeepTurns            int     `json:"retention_keep_turns"`
+	RetentionResultHeadBytes      int     `json:"retention_result_head_bytes"`
 	NoSteer                       bool    `json:"no_steer"`
 
 	Agent        string                     `json:"agent"`

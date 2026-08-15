@@ -128,6 +128,17 @@ type FileReadReporter interface {
 	ReadPaths(input json.RawMessage) ([]string, error)
 }
 
+// InputTrimmer is an optional capability for tools whose inputs embed whole
+// file bodies (write, edit). RetentionInputReceipt returns a compact receipt
+// that preserves the fields other capabilities need — MutatedPaths/ReadPaths
+// must stay decodable — while dropping the bulky text. The receipt must remain
+// a complete JSON object and should embed a stable sentinel so repeated passes
+// can detect an already-trimmed input. ok is false when the input has no
+// trimmable payload (the tool keeps the original).
+type InputTrimmer interface {
+	RetentionInputReceipt(input json.RawMessage) (json.RawMessage, bool)
+}
+
 // BackgroundJobRequest is the reusable contract for tools that can hand work to
 // the process-local background job manager. The manager owns job ids, status,
 // cancellation, notices, and request-context delivery; the tool owns its input
@@ -789,6 +800,30 @@ func (r *Registry) ReadPaths(call llm.ToolCall) (paths []string, ok bool) {
 		return nil, false
 	}
 	return uniqueMutationPaths(paths), true
+}
+
+// RetentionInputReceipt reports one call's compact retention receipt when its
+// tool implements InputTrimmer and the input carries a trimmable payload.
+// Unknown tools, non-reporting tools, and already-compact inputs return
+// ok=false so the retention pass leaves the original untouched.
+func (r *Registry) RetentionInputReceipt(call llm.ToolCall) (receipt json.RawMessage, ok bool) {
+	t, found := r.tools[call.Name]
+	if !found {
+		return nil, false
+	}
+	trimmer, ok := t.(InputTrimmer)
+	if !ok {
+		return nil, false
+	}
+	input := call.Input
+	if len(input) == 0 {
+		return nil, false
+	}
+	receipt, ok = trimmer.RetentionInputReceipt(input)
+	if !ok || len(receipt) == 0 {
+		return nil, false
+	}
+	return receipt, true
 }
 
 func uniqueMutationPaths(paths []string) []string {

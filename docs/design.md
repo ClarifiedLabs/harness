@@ -2158,6 +2158,11 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   precedes any write, so a stale or redundant `oldText` fails loudly with the
   ordinary not-found error and leaves every file untouched. Nothing is
   silently double-applied.
+- **Model-visible retention receipt.** Once a later successful `edit` to the same
+  paths exists, the live transcript may replace this call's input with
+  `{"files":[{"path":P,"edits":N,"old_text_bytes":A,"new_text_bytes":B}],"_superseded":
+  "edit content omitted; later successful edit to this path exists; read the file
+  if needed"}`. The model should read the file when it needs the current bytes.
 - With `replaceAll`, every non-overlapping occurrence of `oldText` is replaced and
   each counts toward the reported replacement count; the uniqueness check is skipped
   but zero matches is still a not-found error. The overlap guard is relaxed only
@@ -2203,6 +2208,11 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   failure path (§8.2 malformed streamed args) tells the model to use a smaller
   `write`, then append additional content with `edit`.
 - Existing directory at path, or trailing `/` → error.
+- **Model-visible retention receipt.** Once a later successful `write` to the same
+  path exists, the live transcript may replace this call's input with
+  `{"path":P,"_superseded":"content omitted; later successful write to this path
+  exists; read the file if needed","original_bytes":N}`. The model should read the
+  file when it needs the current bytes; the receipt is not an instruction.
 
 ### 9.7 `shell`
 
@@ -3870,30 +3880,50 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   bounding without continuation reset semantics.
 - The `retention_policy` experiment control can force `age`, `pressure`,
   or `disabled`. Auto and pressure share pressure-only epoch semantics, including
-  the optional absolute floor. Age mode trims eligible read-only results older than
-  `compact_keep_turns` completed turns and images two or more turns old before
-  each request. Disabling the local pass does not disable compaction or
-  provider-overflow recovery. Delegate continuation fingerprints include the
-  selected policy.
+  the optional absolute floor. Age mode trims eligible results older than
+  `retention_keep_turns` completed turns (default 4, decoupled from the
+  compaction suffix) and images two or more turns old before each request.
+  Disabling the local pass does not disable compaction or provider-overflow
+  recovery. Delegate continuation fingerprints include the selected policy.
+- **Eligibility.** A tool result is trimmable when it is read-only (re-derivable
+  on demand) and older than the retention boundary, or when its exact bytes are
+  durably archived and it is older than 2× that boundary. A mutating result with
+  no durable archive is never trimmed. A `write`/`edit` tool input is replaced
+  with a compact path receipt once a newer successful mutation to the same path
+  exists after the boundary; a failed later call never supersedes. Receipts stay
+  complete JSON objects and keep `MutatedPaths`/`ReadPaths` decodable so
+  compaction file indexing keeps working. Every trim still requires a
+  successful archive of the exact original, or the block is left untouched.
 - Both retention policies preserve the §4 transcript invariant and are
-  idempotent. `raw.ndjson` `retention` events record policy/trigger, blocks and
+  idempotent. Idempotency markers (`[older tool output trimmed` in result
+  bodies, `content omitted` in tool inputs) make repeated passes no-ops.
+  `raw.ndjson` `retention` events record policy/trigger, blocks and
   bytes trimmed, estimated context before/after, whether Responses state was
   reset, and whether the next request used stateful continuation or full
   context. `session stats` summarizes those epochs and request shapes.
 - Before replacing an eligible result body, retention atomically archives the
   exact original through the tool-result artifact path. The live transcript
   keeps a typed receipt with tool name, success/error status, shown/original
-  byte counts, a bounded head, and the targeted recovery hint. If no session
-  archiver is available, the receipt retains the generic recovery guidance; if
-  a configured archiver fails, retention leaves the original body untouched.
+  byte counts, a bounded head, and the targeted recovery hint. The head is
+  `retention_result_head_bytes` (default 800 bytes, clamped to the 4096-byte
+  eligibility threshold); the compaction summary preview keeps its own 4096-byte
+  budget. If no session archiver is available, the receipt retains the generic
+  recovery guidance; if a configured archiver fails, retention leaves the
+  original body untouched.
+- The cache-stable prefix is computed against the same boundaries: it stops
+  before the first result a future epoch could trim, the first image it could
+  degrade, and the first superseded tool input it could replace, so a promised
+  prefix is never rewritten later.
 - **Turn boundary:** a completed turn begins at an assistant response and includes
   its immediately following tool-result message when that response requested tools.
   User prompts, steering messages, and synthetic context are inputs to a turn, not
   boundaries that merge all round trips since one prompt.
 - **Mechanism:** keep the system prompt and select a raw whole-turn suffix newest
-  first until it reaches `compact_keep_tokens` (default 20,000) or the
-  `compact_keep_turns` cap (default 8). Always retain at least the newest completed
-  turn. Under low-water pressure, move the oldest retained round behind the boundary,
+  first until it reaches `compact_keep_tokens` or the `compact_keep_turns` cap
+  (default 8). When `compact_keep_tokens` is unset the budget is window-adaptive:
+  `clamp(window/5, 4000, 20000)`, so a small-window model does not keep 20k
+  verbatim while a 1M-window model still caps at 20k. Always retain at least the
+  newest completed turn. Under low-water pressure, move the oldest retained round behind the boundary,
   regenerate the summary over the enlarged removed set, and repeat until the target
   is met or only the newest turn remains. Send
   everything older to the model with the summarization instruction in
@@ -3922,11 +3952,15 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   tool-use message with its immediate result message. Successful supported
   `read`, `write`, and `edit` calls contribute normalized, sorted cumulative
   read/modified paths; modified wins over read. Commands, Git, MCP, malformed
-  inputs, failed calls, and
-  unsupported/custom tools are skipped. The JSON index is the authoritative
-  recognized file-activity inventory in the active checkpoint and summary
-  request. The model records semantic state only for meaningful changes and
-  unfinished mutation intent; it does not duplicate read-only inspected paths.
+  inputs, failed calls, and unsupported/custom tools are skipped. The read list
+  is capped at the 200 most recent first-touches (oldest dropped first) and the
+  checkpoint JSON reports the omitted count as `read_files_omitted`, so a
+  thousand-path exploration does not re-send tens of KB in every checkpoint and
+  every later summary request. Modified paths are never capped. The JSON index
+  is the authoritative recognized file-activity inventory in the active
+  checkpoint and summary request. The model records semantic state only for
+  meaningful changes and unfinished mutation intent; it does not duplicate
+  read-only inspected paths.
 - Before summarization, large old tool results and tool inputs are reduced to
   previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables
   this reduction entirely), and old images are replaced with text placeholders. If older

@@ -555,6 +555,14 @@ type Options struct {
 	// disables the floor. Opt-in: trimming rewrites history and invalidates the
 	// cache prefix from the first trimmed block.
 	RetentionFloorTokens int
+	// RetentionKeepTurns is how many recent turns keep their tool results and
+	// inputs verbatim during live retention. Zero follows CompactKeepTurns;
+	// positive decouples the retention age from the compaction suffix.
+	RetentionKeepTurns int
+	// RetentionResultHeadBytes is how many bytes of a trimmed tool result stay
+	// live (clamped to the 4096-byte retention threshold). Zero uses the
+	// 800-byte default.
+	RetentionResultHeadBytes int
 	// Interactive marks a session whose multi-minute pauses justify the 1h
 	// Anthropic prompt-cache breakpoint on the stable prefix (set for the REPL).
 	// One-shot, delegate, and non-interactive runs leave it false to take the
@@ -618,13 +626,15 @@ type Agent struct {
 	// instead of a count-API/byte estimate that may systematically miss opaque
 	// replay state. Zeroed whenever compaction or retention rewrites the
 	// transcript outside a run's own tracking.
-	measuredInput        int
-	measuredBoundary     int
-	retentionPolicy      RetentionPolicy
-	retentionFloorTokens int
-	retentionEpochArmed  bool
-	proxySessionID       string
-	cacheAffinityID      string
+	measuredInput             int
+	measuredBoundary          int
+	retentionPolicy           RetentionPolicy
+	retentionFloorTokens      int
+	retentionKeepTurnsSetting int
+	retentionResultHeadBytes  int
+	retentionEpochArmed       bool
+	proxySessionID            string
+	cacheAffinityID           string
 }
 
 type compactFallbackNoticeState struct {
@@ -679,6 +689,8 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		responsesStateful:         opts.ResponsesStateful,
 		retentionPolicy:           normalizeRetentionPolicy(opts.RetentionPolicy),
 		retentionFloorTokens:      opts.RetentionFloorTokens,
+		retentionKeepTurnsSetting: opts.RetentionKeepTurns,
+		retentionResultHeadBytes:  opts.RetentionResultHeadBytes,
 		interactive:               opts.Interactive,
 		retentionEpochArmed:       true,
 		proxySessionID:            newProxySessionID(),

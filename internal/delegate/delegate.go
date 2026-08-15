@@ -140,7 +140,9 @@ type Options struct {
 	CompactSummaryMaxTokens   int
 	CompactTimeout            time.Duration
 	CompactToolResultMaxBytes int
-	RetentionPolicy           agent.RetentionPolicy
+	RetentionKeepTurns       int
+	RetentionResultHeadBytes int
+	RetentionPolicy          agent.RetentionPolicy
 	// ShowDiffs lets child agents emit tool_diff events (recorded at parent
 	// fidelity); it mirrors the parent's diff display setting.
 	ShowDiffs        bool
@@ -745,6 +747,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,
 		CompactTimeout:            r.opts.CompactTimeout,
 		CompactToolResultMaxBytes: r.opts.CompactToolResultMaxBytes,
+		RetentionKeepTurns:       r.opts.RetentionKeepTurns,
+		RetentionResultHeadBytes: r.opts.RetentionResultHeadBytes,
 		Now:                       r.opts.Now,
 		ShowDiffs:                 r.opts.ShowDiffs,
 	})

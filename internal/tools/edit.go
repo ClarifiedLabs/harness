@@ -126,8 +126,14 @@ func (edit) PreserveSchemaDescriptions() bool { return true }
 func (edit) ReadOnly(json.RawMessage) bool { return false }
 
 func (edit) MutatedPaths(input json.RawMessage) ([]string, error) {
-	args, err := decodeEditArgs(input)
-	if err != nil {
+	// A retention receipt keeps only files[].path (plus counts); decode leniently
+	// so compaction file indexing keeps working on trimmed inputs.
+	var args struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
 		return nil, err
 	}
 	paths := make([]string, 0, len(args.Files))
@@ -140,6 +146,51 @@ func (edit) MutatedPaths(input json.RawMessage) ([]string, error) {
 func (edit) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	result, err := (edit{}).RunResult(ctx, input)
 	return result.Text, err
+}
+
+// RetentionInputReceipt replaces superseded edit bodies with a path-only
+// receipt. The files[].path shape keeps MutatedPaths decodable so compaction
+// still indexes the mutation; the sentinel marks the input as already trimmed.
+func (edit) RetentionInputReceipt(input json.RawMessage) (json.RawMessage, bool) {
+	args, err := decodeEditArgs(input)
+	if err != nil {
+		return nil, false
+	}
+	files := make([]struct {
+		Path     string `json:"path"`
+		Edits    int    `json:"edits"`
+		OldBytes int    `json:"old_text_bytes"`
+		NewBytes int    `json:"new_text_bytes"`
+	}, 0, len(args.Files))
+	for _, file := range args.Files {
+		old, new := 0, 0
+		for _, block := range file.Edits {
+			old += len(block.OldText)
+			new += len(block.NewText)
+		}
+		files = append(files, struct {
+			Path     string `json:"path"`
+			Edits    int    `json:"edits"`
+			OldBytes int    `json:"old_text_bytes"`
+			NewBytes int    `json:"new_text_bytes"`
+		}{Path: file.Path, Edits: len(file.Edits), OldBytes: old, NewBytes: new})
+	}
+	receipt, err := json.Marshal(struct {
+		Files []struct {
+			Path     string `json:"path"`
+			Edits    int    `json:"edits"`
+			OldBytes int    `json:"old_text_bytes"`
+			NewBytes int    `json:"new_text_bytes"`
+		} `json:"files"`
+		Superseded string `json:"_superseded"`
+	}{
+		Files:      files,
+		Superseded: "edit content omitted; later successful edit to this path exists; read the file if needed",
+	})
+	if err != nil {
+		return nil, false
+	}
+	return receipt, true
 }
 
 func (edit) RunResult(_ context.Context, input json.RawMessage) (RunResult, error) {

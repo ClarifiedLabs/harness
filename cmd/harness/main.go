@@ -869,6 +869,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
 		CompactTimeout:            time.Duration(cfg.CompactTimeoutSeconds) * time.Second,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
+		RetentionKeepTurns:        cfg.RetentionKeepTurns,
+		RetentionResultHeadBytes:  cfg.RetentionResultHeadBytes,
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
 		ShowDiffs:                 cfg.ShowDiffs,
 		Now:                       now,
@@ -1245,6 +1247,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
 		RetentionFloorTokens:      cfg.RetentionFloorTokens,
+		RetentionKeepTurns:        cfg.RetentionKeepTurns,
+		RetentionResultHeadBytes:  cfg.RetentionResultHeadBytes,
 		Interactive:               interactiveSession,
 		Steer:                     !cfg.NoSteer,
 	})

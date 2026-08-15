@@ -83,6 +83,32 @@ func (writeFile) Run(ctx context.Context, input json.RawMessage) (string, error)
 	return fmt.Sprintf("%s %s (%d bytes, %d lines)", verb, args.Path, len(args.Content), countLines(args.Content)), nil
 }
 
+// RetentionInputReceipt replaces a superseded write body with a path-only
+// receipt. The path field keeps MutatedPaths decodable so compaction still
+// indexes the mutation; the sentinel marks the input as already trimmed.
+func (writeFile) RetentionInputReceipt(input json.RawMessage) (json.RawMessage, bool) {
+	var args struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil || args.Path == "" {
+		return nil, false
+	}
+	receipt, err := json.Marshal(struct {
+		Path       string `json:"path"`
+		Superseded string `json:"_superseded"`
+		Bytes      int    `json:"original_bytes"`
+	}{
+		Path:       args.Path,
+		Superseded: "content omitted; later successful write to this path exists; read the file if needed",
+		Bytes:      len(args.Content),
+	})
+	if err != nil {
+		return nil, false
+	}
+	return receipt, true
+}
+
 // countLines reports the number of logical lines in content: the count of
 // newlines, plus one for a non-empty final line without a trailing newline.
 func countLines(content string) int {

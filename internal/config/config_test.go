@@ -793,3 +793,31 @@ func TestRemovedCompatibilityInputsAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestRetentionSettingsPrecedenceAndDefaults(t *testing.T) {
+	// Defaults: 4-turn retention age, 800-byte result head.
+	result := load(t, nil, nil, "")
+	if result.Config.RetentionKeepTurns != 4 || result.Config.RetentionResultHeadBytes != 800 {
+		t.Fatalf("defaults = %d/%d, want 4/800", result.Config.RetentionKeepTurns, result.Config.RetentionResultHeadBytes)
+	}
+
+	// flags > env > config > defaults
+	path := writeConfig(t, `{"retention_keep_turns":6,"retention_result_head_bytes":1200}`)
+	result = load(t, nil, nil, path)
+	if result.Config.RetentionKeepTurns != 6 || result.Config.RetentionResultHeadBytes != 1200 {
+		t.Fatalf("file values = %d/%d, want 6/1200", result.Config.RetentionKeepTurns, result.Config.RetentionResultHeadBytes)
+	}
+	result = load(t, nil, map[string]string{"HARNESS_RETENTION_KEEP_TURNS": "7", "HARNESS_RETENTION_RESULT_HEAD_BYTES": "1400"}, path)
+	if result.Config.RetentionKeepTurns != 7 || result.Config.RetentionResultHeadBytes != 1400 {
+		t.Fatalf("env values = %d/%d, want 7/1400", result.Config.RetentionKeepTurns, result.Config.RetentionResultHeadBytes)
+	}
+	if result.Sources["retention_keep_turns"].Name != "HARNESS_RETENTION_KEEP_TURNS" {
+		t.Fatalf("env source = %+v", result.Sources["retention_keep_turns"])
+	}
+	// Negative values are rejected at the file layer (the settings are
+	// config/env only, like their compact_* siblings).
+	badPath := writeConfig(t, `{"retention_keep_turns":-1}`)
+	if _, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: badPath}); err == nil {
+		t.Fatal("negative retention_keep_turns accepted")
+	}
+}

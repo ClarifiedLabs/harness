@@ -595,6 +595,8 @@ environment variables, JSON paths, types, and defaults. The concise
 | `responses_stateful` | `boolean` | `true`, `false` | `-responses-stateful` | `HARNESS_RESPONSES_STATEFUL` | `responses_stateful` | true | no | Harness responses stateful setting. |
 | `retention_policy` | `string` | `auto`, `age`, `pressure`, `disabled` | `-retention-policy` | `HARNESS_RETENTION_POLICY` | `retention_policy` | "auto" | no | Harness retention policy setting. |
 | `retention_floor_tokens` | `integer` | - | - | - | `retention_floor_tokens` | 0 | no | Harness retention floor tokens setting. |
+| `retention_keep_turns` | `integer` | - | - | `HARNESS_RETENTION_KEEP_TURNS` | `retention_keep_turns` | 4 | no | Harness retention keep turns setting. |
+| `retention_result_head_bytes` | `integer` | - | - | `HARNESS_RETENTION_RESULT_HEAD_BYTES` | `retention_result_head_bytes` | 800 (clamped to the 4096-byte retention threshold) | no | Harness retention result head bytes setting. |
 | `no_steer` | `boolean` | `true`, `false` | `-no-steer` | `HARNESS_NO_STEER` | `no_steer` | false | no | Harness no steer setting. |
 | `agent` | `string` | - | `-agent` | `HARNESS_AGENT` | `agent` | derived: runtime default agent | no | Harness agent setting. |
 | `handoff_agent` | `string` | - | `-handoff-agent` | `HARNESS_HANDOFF_AGENT` | `handoff_agent` | "auto" | no | Harness handoff agent setting. |
@@ -781,18 +783,28 @@ the request and the complete transcript is sent safely.
 Live transcript retention defaults to `auto`, which batches eligible trimming
 into pressure epochs when the larger of the local and provider-derived estimates
 reaches 60% of the context window. `auto` and `pressure` do not rewrite history
-below pressure; select explicit `age` to bound replay by the eight-turn compaction
-keep window. Experiments can override this with `retention_policy`,
+below pressure; select explicit `age` to bound replay by the retention keep
+window. Experiments can override this with `retention_policy`,
 `HARNESS_RETENTION_POLICY`, or `-retention-policy`; accepted values are `auto`,
 `age`, `pressure`, and `disabled`. Disabling live retention does not disable compaction or
 provider-overflow recovery. The config-only `retention_floor_tokens` adds an
 absolute-context fallback to the pressure epoch: when the estimated context
-reaches the floor, the same hysteretic trim of aged read-only tool results runs
+reaches the floor, the same hysteretic trim of aged tool results runs
 even below the 60% window high-water mark — which a very large (e.g. 1M-token)
 window may never reach. It defaults to 0 (disabled) and stays opt-in because
 trimming rewrites history and invalidates the cache prefix from the first
 trimmed block, the same tradeoff pressure retention already makes at the
 high-water mark.
+
+Retention ages results by `retention_keep_turns` completed turns (default 4,
+`HARNESS_RETENTION_KEEP_TURNS`), decoupled from the eight-turn compaction
+suffix. A result is trimmable when it is read-only, or when its exact bytes are
+durably archived and it is twice that age. A superseded `write`/`edit` input is
+replaced with a compact path receipt once a newer successful mutation to the
+same path exists. A trimmed result keeps `retention_result_head_bytes` live
+bytes (default 800, `HARNESS_RETENTION_RESULT_HEAD_BYTES`, clamped to the
+4096-byte eligibility threshold) plus a typed recovery hint pointing at the
+archived original.
 
 The model proxy is a stateless continuation pass-through: it never stores,
 reconstructs, trims, resets, or retries a continuation. It forwards the
@@ -1000,6 +1012,14 @@ later requests. Replay is gated on reasoning being enabled for the request, so
 compaction summaries and prewarm requests stay clean. With replay enabled, the
 dialect tags streamed `reasoning_content` for persistence (as thinking blocks
 with no signature); without it the text remains display-only.
+
+On the official `api.anthropic.com` endpoint an unset `reasoning_replay`
+defaults to `"current_turn"`: only the in-flight tool chain's thinking is
+replayed. Anthropic strips non-final thinking server-side and does not bill old
+turns' thinking again, so this saves upload bytes and keeps harness's context
+estimates accurate rather than changing billed context. Anthropic-compatible
+gateways keep the verbatim default unless they opt in explicitly, and any
+explicit `reasoning_replay` value wins on every endpoint.
 
 Opaque reasoning compatibility is configured separately, per model, with
 `reasoning_replay_domain`. Without that field, a model and its service-tier
@@ -2031,11 +2051,17 @@ when the candidate is discarded. `session stats` summarizes outcomes, duration,
 and applied context reduction.
 
 The recent raw suffix is selected in whole completed turns, newest first, until
-it first reaches `compact_keep_tokens` (default `20000`) or
-`compact_keep_turns` (default `8`) turns. At least the newest completed turn is
-kept. A turn is one assistant response plus its immediate tool-result batch, not
-all model calls made after one user prompt. Low-water pressure can retain fewer
-turns than the preferred suffix.
+it first reaches `compact_keep_tokens` or `compact_keep_turns` (default `8`)
+turns. When `compact_keep_tokens` is unset, its budget is window-adaptive:
+`clamp(context_window/5, 4000, 20000)`, so a 32k-window model keeps a small
+suffix while a 1M-window model still caps at 20k tokens. At least the newest
+completed turn is kept. A turn is one assistant response plus its immediate
+tool-result batch, not all model calls made after one user prompt. Low-water
+pressure can retain fewer turns than the preferred suffix.
+
+Compaction's recognized file-activity index keeps every modified path but caps
+the read list at the 200 most recent first-touches, reporting the omitted count
+as `read_files_omitted` in the checkpoint JSON.
 
 Before summarization, large old tool results and large old tool inputs are
 reduced to previews (`compact_tool_result_max_bytes`, default `4096`), old images

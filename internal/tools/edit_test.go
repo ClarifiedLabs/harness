@@ -664,3 +664,48 @@ func assertFileContent(t *testing.T, path, want string) {
 		t.Errorf("%s content = %q, want %q", path, got, want)
 	}
 }
+
+func TestEditRetentionInputReceipt(t *testing.T) {
+	tool := edit{}
+	input := []byte(`{"files":[{"path":"a.go","edits":[{"oldText":"` + strings.Repeat("x", 400) + `","newText":"y"}]},{"path":"b.go","edits":[{"oldText":"p","newText":"q"}]}]}`)
+	receipt, ok := tool.RetentionInputReceipt(input)
+	if !ok {
+		t.Fatal("RetentionInputReceipt = ok false for a full edit input")
+	}
+	var decoded struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+		Superseded string `json:"_superseded"`
+	}
+	if err := json.Unmarshal(receipt, &decoded); err != nil {
+		t.Fatalf("receipt is not a JSON object: %v (%s)", err, receipt)
+	}
+	if len(decoded.Files) != 2 || decoded.Files[0].Path != "a.go" || decoded.Files[1].Path != "b.go" {
+		t.Fatalf("receipt paths = %+v, want a.go and b.go", decoded.Files)
+	}
+	if decoded.Superseded == "" {
+		t.Fatal("receipt missing the superseded explanation")
+	}
+	if strings.Contains(string(receipt), "oldText\":\"x") {
+		t.Fatalf("receipt leaked edit text: %s", receipt)
+	}
+	paths, err := tool.MutatedPaths(receipt)
+	if err != nil || len(paths) != 2 {
+		t.Fatalf("receipt lost MutatedPaths decodability: %v %v", paths, err)
+	}
+	if llm.ValidateToolInputObject(receipt) != nil {
+		t.Fatalf("receipt is not a complete JSON object: %s", receipt)
+	}
+	if len(receipt) >= len(input) {
+		t.Fatalf("receipt did not shrink: %d -> %d", len(input), len(receipt))
+	}
+}
+
+func TestEditMutatedPathsToleratesReceiptWithoutEdits(t *testing.T) {
+	// A retention receipt keeps only files[].path; MutatedPaths must still work.
+	paths, err := (edit{}).MutatedPaths([]byte(`{"files":[{"path":"a.go","edits":2}],"_superseded":"edit content omitted"}`))
+	if err != nil || len(paths) != 1 || paths[0] != "a.go" {
+		t.Fatalf("MutatedPaths on receipt = %v, %v", paths, err)
+	}
+}

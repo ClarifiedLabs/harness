@@ -23,8 +23,17 @@ const defaultKeepTurns = 8
 
 // defaultKeepTokens is the desired raw recent-suffix size. Whole rounds are
 // accumulated newest-first until this target is reached or defaultKeepTurns is
-// exhausted.
+// exhausted. It is the ceiling for the window-adaptive budget; see keepTokens.
 const defaultKeepTokens = 20_000
+
+// Window-adaptive keep-budget bounds. When compact_keep_tokens is unset the
+// effective budget scales with the context window (window/5) between these
+// floors/ceilings, so a 32k-window model does not try to keep 20k verbatim
+// while a 1M-window model still caps at the same 20k.
+const (
+	adaptiveKeepTokensMin = 4_000
+	adaptiveKeepTokensMax = defaultKeepTokens
+)
 
 // compactThresholdPct is the fraction of the context window at which the
 // post-turn trigger fires: reported input tokens ≥ 78% leaves headroom for the
@@ -940,7 +949,14 @@ func (a *Agent) keepTokens() int {
 	if a.compactKeepTokens > 0 {
 		return a.compactKeepTokens
 	}
-	return defaultKeepTokens
+	// Window-adaptive default: a small window needs a proportionally small
+	// verbatim suffix or compaction churns every few turns; a huge window has no
+	// reason to keep more than the familiar 20k ceiling.
+	window := a.window()
+	if window <= 0 {
+		return defaultKeepTokens
+	}
+	return min(max(window/5, adaptiveKeepTokensMin), adaptiveKeepTokensMax)
 }
 
 func (a *Agent) triggerPercent() int {
@@ -1273,12 +1289,20 @@ func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRe
 	b.WriteString(checkpointProgress)
 	b.WriteString(summary)
 	b.WriteString(checkpointFiles)
+	kept := append([]string{}, readFiles...)
+	omitted := 0
+	if len(kept) > compactionReadFilesCap {
+		omitted = len(kept) - compactionReadFilesCap
+		kept = kept[len(kept)-compactionReadFilesCap:]
+	}
 	fileJSON, _ := json.Marshal(struct {
-		ReadFiles     []string `json:"read_files"`
-		ModifiedFiles []string `json:"modified_files"`
+		ReadFiles        []string `json:"read_files"`
+		ReadFilesOmitted int      `json:"read_files_omitted,omitempty"`
+		ModifiedFiles    []string `json:"modified_files"`
 	}{
-		ReadFiles:     append([]string{}, readFiles...),
-		ModifiedFiles: append([]string{}, modifiedFiles...),
+		ReadFiles:        kept,
+		ReadFilesOmitted: omitted,
+		ModifiedFiles:    append([]string{}, modifiedFiles...),
 	})
 	b.Write(fileJSON)
 	if archiveRef != "" {
@@ -1333,13 +1357,22 @@ func priorCompactionMetadata(messages []llm.Message) *llm.CompactionMetadata {
 	return nil
 }
 
+// compactionReadFilesCap bounds the recognized read-file index carried into a
+// checkpoint and every later summary request. Modified files are always kept
+// in full; reads are capped newest-first (by first-touch order) so a
+// thousand-path exploration does not re-send tens of KB forever (design §12).
+const compactionReadFilesCap = 200
+
 // compactionFileActivity accumulates successful supported file operations from
 // adjacent tool-use/result pairs in the newly compacted history. Tool IDs are
 // intentionally correlated within each pair so providers may safely reuse IDs
-// in later rounds.
+// in later rounds. The read list is capped at compactionReadFilesCap entries
+// (oldest first-touch dropped first) so neither the checkpoint JSON nor a
+// future summary request grows without bound.
 func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.CompactionMetadata) ([]string, []string) {
 	reads := make(map[string]string)
 	modified := make(map[string]string)
+	readOrder := make([]string, 0) // read keys in first-touch order, oldest first
 	addRead := func(path string) {
 		display, key, ok := compactPath(path)
 		if !ok {
@@ -1350,6 +1383,7 @@ func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.Compac
 		}
 		if _, exists := reads[key]; !exists {
 			reads[key] = display
+			readOrder = append(readOrder, key)
 		}
 	}
 	addModified := func(path string) {
@@ -1358,16 +1392,17 @@ func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.Compac
 			return
 		}
 		delete(reads, key)
+		readOrder = removeKey(readOrder, key)
 		if _, exists := modified[key]; !exists {
 			modified[key] = display
 		}
 	}
 	if prior != nil {
-		for _, path := range prior.ReadFiles {
-			addRead(path)
-		}
 		for _, path := range prior.ModifiedFiles {
 			addModified(path)
+		}
+		for _, path := range prior.ReadFiles {
+			addRead(path)
 		}
 	}
 	for i := 0; i+1 < len(messages); i++ {
@@ -1402,7 +1437,25 @@ func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.Compac
 			}
 		}
 	}
+	// Modified files always win and are never subject to the read cap. Reads
+	// keep the most recent first-touches: on a long exploration the oldest
+	// entries are the least likely to still matter.
+	if excess := len(readOrder) - compactionReadFilesCap; excess > 0 {
+		for _, key := range readOrder[:excess] {
+			delete(reads, key)
+		}
+		readOrder = readOrder[excess:]
+	}
 	return sortedPathValues(reads), sortedPathValues(modified)
+}
+
+func removeKey(keys []string, key string) []string {
+	for i, candidate := range keys {
+		if candidate == key {
+			return append(keys[:i], keys[i+1:]...)
+		}
+	}
+	return keys
 }
 
 func compactPath(path string) (display, key string, ok bool) {

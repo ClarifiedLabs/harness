@@ -1,7 +1,10 @@
 package agent
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"harness/internal/llm"
@@ -23,6 +26,25 @@ const (
 	// age-based retention.
 	retentionPressureHighPct = 60
 	retentionPressureLowPct  = 50
+)
+
+const (
+	// defaultRetentionKeepTurns is how many recent turns keep their tool
+	// results verbatim. It is decoupled from compaction's compact_keep_turns
+	// (default 8): a coding session rarely needs an old read/write payload once
+	// a newer turn exists, so retention ages results out sooner.
+	defaultRetentionKeepTurns = 4
+	// defaultRetentionResultThreshold is the size a tool result body must
+	// exceed before the retention pass considers trimming it.
+	defaultRetentionResultThreshold = 4096
+	// defaultRetentionResultHead is how many bytes of a trimmed tool result stay
+	// live. The full body is archived with a recovery hint, so a small head
+	// preserves shape while reclaiming the bulk (design §12).
+	defaultRetentionResultHead = 800
+	// retentionArchivedResultKeepTurns is the extra age a NON-read-only result
+	// must reach before it may be trimmed even though its exact bytes are
+	// durably archived: 2× the retention boundary (design §12).
+	retentionArchivedAgeFactor = 2
 )
 
 func percentFloor(total, pct int) int {
@@ -58,6 +80,10 @@ func atOrBelowPercent(value, total, pct int) bool {
 // retention pass has already shrunk, so repeated passes never re-trim it.
 const retentionTrimMarker = "[older tool output trimmed"
 
+// retentionInputMarker is the parallel idempotency sentinel embedded in a
+// write/edit tool input the retention pass has replaced with a path receipt.
+const retentionInputMarker = "content omitted"
+
 // applyRetention shrinks the live transcript in place before a model request so
 // large stale tool outputs and aged images are not re-sent verbatim every turn
 // (design §12, r9+r20). It is a pure local edit — no model round-trip — and only
@@ -91,9 +117,11 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 		return retentionPass{}
 	}
 	starts := turnStarts(a.transcript)
-	resultBoundary := keepBoundary(starts, a.keepTurns())
+	resultBoundary := keepBoundary(starts, a.retentionKeepTurns())
+	archivedBoundary := keepBoundary(starts, a.retentionKeepTurns()*retentionArchivedAgeFactor)
 	imageBoundary := keepBoundary(starts, retentionImageKeepTurns)
-	if resultBoundary == 0 && imageBoundary == 0 {
+	inputBoundary := keepBoundary(starts, a.retentionKeepTurns())
+	if resultBoundary == 0 && imageBoundary == 0 && inputBoundary == 0 {
 		return retentionPass{} // nothing old enough to shrink
 	}
 
@@ -137,19 +165,31 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 	}
 	event.BytesBefore = retentionTranscriptBytes(a.transcript)
 	readOnly := a.readOnlyResultIDsIn(a.transcript)
+	superseded := a.supersededMutationPaths(a.transcript, inputBoundary)
 	for i := range a.transcript {
 		for j := range a.transcript[i].Content {
 			b := &a.transcript[i].Content[j]
 			blockChanged := false
 			switch b.Kind {
 			case llm.BlockToolResult:
-				// Only read-only results are re-derivable on demand, so only they
-				// are safe to drop the body of.
+				// Read-only results are re-derivable on demand, so they age out at
+				// the ordinary retention boundary. A NON-read-only result keeps its
+				// body until 2× the boundary AND its exact bytes are durably
+				// archived — a durable archive is a stronger recovery path than
+				// re-derivation, and the extra age hedges mutation-adjacent context.
 				if i < resultBoundary && readOnly[b.ResultForID] {
+					blockChanged = a.trimToolResultBlock(b, sink) || blockChanged
+				} else if i < archivedBoundary {
 					blockChanged = a.trimToolResultBlock(b, sink) || blockChanged
 				}
 				if i < imageBoundary {
 					blockChanged = degradeToolResultImages(b, func(llm.ContentBlock) bool { return true }) || blockChanged
+				}
+			case llm.BlockToolUse:
+				// A superseded write/edit input is dead weight: a newer successful
+				// mutation to the same path has already replaced its effect.
+				if i < inputBoundary && superseded[b.ToolUseID] {
+					blockChanged = a.trimSupersededToolInput(b) || blockChanged
 				}
 			case llm.BlockImage:
 				if i < imageBoundary {
@@ -196,20 +236,34 @@ func (a *Agent) cachePolicyForTranscript(transcript []llm.Message, payloadStart 
 // retention pass can rewrite.
 func (a *Agent) stableMessagePrefixIn(messages []llm.Message) int {
 	starts := turnStarts(messages)
-	resultBoundary := keepBoundary(starts, a.keepTurns())
+	resultBoundary := keepBoundary(starts, a.retentionKeepTurns())
+	archivedBoundary := keepBoundary(starts, a.retentionKeepTurns()*retentionArchivedAgeFactor)
 	imageBoundary := keepBoundary(starts, retentionImageKeepTurns)
 	readOnly := a.readOnlyResultIDsIn(messages)
+	superseded := a.supersededMutationPaths(messages, resultBoundary)
 	for i, message := range messages {
 		for _, block := range message.Content {
 			switch block.Kind {
 			case llm.BlockToolResult:
 				if i >= resultBoundary &&
 					readOnly[block.ResultForID] &&
-					len(block.ResultText) > defaultSummaryToolResultSize &&
+					len(block.ResultText) > defaultRetentionResultThreshold &&
+					!retentionTrimmed(block.ResultText) {
+					return i
+				}
+				// Any archived-at-2× boundary result may later be trimmed, so the
+				// prefix must stop before the first one that could still grow old
+				// enough while staying in the transcript.
+				if i >= archivedBoundary &&
+					len(block.ResultText) > defaultRetentionResultThreshold &&
 					!retentionTrimmed(block.ResultText) {
 					return i
 				}
 				if i >= imageBoundary && containsUndegradedImage(block.ResultContent) {
+					return i
+				}
+			case llm.BlockToolUse:
+				if superseded[block.ToolUseID] && !retentionInputTrimmed(block.ToolInput) {
 					return i
 				}
 			case llm.BlockImage:
@@ -284,11 +338,11 @@ func (a *Agent) trimToolResults(msgs []llm.Message, sink EventSink) {
 // the model can fetch the rest. It returns whether it changed the block. Small
 // or already-trimmed/archived results are left untouched.
 func (a *Agent) trimToolResultBlock(b *llm.ContentBlock, sink EventSink) bool {
-	if b.Kind != llm.BlockToolResult || len(b.ResultText) <= defaultSummaryToolResultSize || retentionTrimmed(b.ResultText) {
+	if b.Kind != llm.BlockToolResult || len(b.ResultText) <= defaultRetentionResultThreshold || retentionTrimmed(b.ResultText) {
 		return false
 	}
 	full := b.ResultText
-	head := full[:defaultSummaryToolResultSize]
+	head := full[:min(a.retentionResultHead(), len(full))]
 	hint := genericRetentionHint(len(head), len(full))
 	if archiver, ok := sink.(ToolResultArchiver); ok {
 		archiveInput := llm.ToolResult{
@@ -377,4 +431,131 @@ func (a *Agent) readOnlyResultIDsIn(msgs []llm.Message) map[string]bool {
 		}
 	}
 	return ids
+}
+
+// retentionKeepTurns resolves the retention age boundary. Zero (the config
+// default) uses defaultRetentionKeepTurns (4); a positive value overrides it.
+// compact_keep_turns stays the compaction-suffix control only.
+func (a *Agent) retentionKeepTurns() int {
+	if a.retentionKeepTurnsSetting > 0 {
+		return a.retentionKeepTurnsSetting
+	}
+	return defaultRetentionKeepTurns
+}
+
+// retentionResultHead clamps the configured retention head into
+// [0, defaultRetentionResultThreshold]. Zero means the default head.
+func (a *Agent) retentionResultHead() int {
+	if a.retentionResultHeadBytes <= 0 {
+		return defaultRetentionResultHead
+	}
+	return min(a.retentionResultHeadBytes, defaultRetentionResultThreshold)
+}
+
+// successfulMutationPathsAfter maps a normalized path key to true when a
+// SUCCESSFUL write/edit tool call to that path exists in msgs at or after
+// boundary. Only later success supersedes: a failed write leaves the older
+// input as the best description of on-disk state.
+func (a *Agent) successfulMutationPathsAfter(msgs []llm.Message, boundary int) map[string]bool {
+	success := map[string]bool{}
+	// Index the tool_result errors by call id so a failed write never counts as
+	// superseding, regardless of message ordering.
+	failed := map[string]bool{}
+	for _, m := range msgs {
+		if m.Role != llm.RoleUser {
+			continue
+		}
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockToolResult && b.ResultError {
+				failed[b.ResultForID] = true
+			}
+		}
+	}
+	for i := boundary; i < len(msgs); i++ {
+		assistant := msgs[i]
+		if assistant.Role != llm.RoleAssistant {
+			continue
+		}
+		for _, b := range assistant.Content {
+			if b.Kind != llm.BlockToolUse || failed[b.ToolUseID] {
+				continue
+			}
+			paths, ok := a.tools.MutatedPaths(llm.ToolCall{Name: b.ToolName, Input: b.ToolInput})
+			if !ok {
+				continue
+			}
+			for _, path := range paths {
+				success[mutablePathKey(path)] = true
+			}
+		}
+	}
+	return success
+}
+
+// supersededMutationPaths maps tool_use IDs in msgs whose input is older than
+// boundary AND whose mutated paths all have a later successful mutation. The
+// tool_use must itself be a mutation call whose input is not already a receipt.
+func (a *Agent) supersededMutationPaths(msgs []llm.Message, boundary int) map[string]bool {
+	if boundary <= 0 {
+		return nil
+	}
+	success := a.successfulMutationPathsAfter(msgs, boundary)
+	if len(success) == 0 {
+		return nil
+	}
+	superseded := map[string]bool{}
+	for i := 0; i < boundary && i < len(msgs); i++ {
+		if msgs[i].Role != llm.RoleAssistant {
+			continue
+		}
+		for _, b := range msgs[i].Content {
+			if b.Kind != llm.BlockToolUse || retentionInputTrimmed(b.ToolInput) {
+				continue
+			}
+			paths, ok := a.tools.MutatedPaths(llm.ToolCall{Name: b.ToolName, Input: b.ToolInput})
+			if !ok {
+				continue
+			}
+			allSuperseded := true
+			for _, path := range paths {
+				if !success[mutablePathKey(path)] {
+					allSuperseded = false
+					break
+				}
+			}
+			if allSuperseded {
+				superseded[b.ToolUseID] = true
+			}
+		}
+	}
+	return superseded
+}
+
+func mutablePathKey(path string) string {
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
+// trimSupersededToolInput replaces a superseded write/edit tool input with a
+// compact path receipt produced by the tool's InputTrimmer. The receipt keeps
+// MutatedPaths/ReadPaths decodable so compaction file indexing still works, and
+// keeps the JSON a complete object so the §4 invariant holds.
+func (a *Agent) trimSupersededToolInput(b *llm.ContentBlock) bool {
+	if b.Kind != llm.BlockToolUse || len(b.ToolInput) == 0 || retentionInputTrimmed(b.ToolInput) {
+		return false
+	}
+	receipt, ok := a.tools.RetentionInputReceipt(llm.ToolCall{Name: b.ToolName, Input: b.ToolInput})
+	if !ok || len(receipt) == 0 || len(receipt) >= len(b.ToolInput) {
+		return false
+	}
+	b.ToolInput = receipt
+	return true
+}
+
+// retentionInputTrimmed reports whether a tool_use input has already been
+// replaced with a retention receipt.
+func retentionInputTrimmed(input json.RawMessage) bool {
+	return bytes.Contains(input, []byte(retentionInputMarker))
 }

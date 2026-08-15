@@ -12,6 +12,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/toolresult"
 	"harness/internal/tools"
 )
 
@@ -74,13 +75,14 @@ func TestRetentionTrimsOldReadOnlyResults(t *testing.T) {
 	}
 }
 
-// TestRetentionKeepsMutatingResults verifies a large result from a non-read-only
-// tool is never body-dropped, even when old — it is not re-derivable.
-func TestRetentionKeepsMutatingResults(t *testing.T) {
+// TestRetentionKeepsMutatingResultsWithinRetentionAge verifies a large result
+// from a non-read-only tool is not body-dropped at the ordinary retention age —
+// it is not re-derivable. (The older 2x archived path is covered separately.)
+func TestRetentionKeepsMutatingResultsWithinRetentionAge(t *testing.T) {
 	big := strings.Repeat("x", 9000)
 	var msgs []llm.Message
 	msgs = append(msgs, userText("q0"), asstToolUse("t0", "wr", `{}`), toolResult("t0", big), asstText("a0"))
-	for i := 1; i <= 9; i++ {
+	for i := 1; i < defaultRetentionKeepTurns+2; i++ {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
 	}
 
@@ -261,11 +263,11 @@ func TestStableMessagePrefix(t *testing.T) {
 			want: 3,
 		},
 		{
-			name: "mutating result",
+			name: "mutating result becomes trimmable once archived and aged",
 			messages: []llm.Message{
 				userText("q"), asstToolUse("call", "write", `{}`), toolResult("call", big),
 			},
-			want: 3,
+			want: 2,
 		},
 		{
 			name:     "top level image",
@@ -458,7 +460,7 @@ func TestRetentionArchivesExactReadOnlyResultWithStableRecoveryPath(t *testing.T
 	archived := sink.archived[0]
 	if !archived.Truncated || archived.OriginalText != big ||
 		archived.OriginalBytes != len(big) ||
-		archived.ShownBytes != defaultSummaryToolResultSize {
+		archived.ShownBytes != defaultRetentionResultHead {
 		t.Fatalf("archive receipt did not preserve exact original: %+v", archived)
 	}
 	got := a.Transcript()[2].Content[0].ResultText
@@ -468,7 +470,7 @@ func TestRetentionArchivesExactReadOnlyResultWithStableRecoveryPath(t *testing.T
 	for _, want := range []string{
 		retentionTrimMarker + " receipt]",
 		"status: success",
-		fmt.Sprintf("output: first %d of %d bytes", defaultSummaryToolResultSize, len(big)),
+		fmt.Sprintf("output: first %d of %d bytes", defaultRetentionResultHead, len(big)),
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("trimmed result missing typed field %q: %q", want, got)
@@ -545,11 +547,14 @@ func TestAutoRetentionPreservesResponseStateBelowPressure(t *testing.T) {
 }
 
 func TestAutoPressureEpochWithoutEligibleBlocksPreservesResponseState(t *testing.T) {
+	// The large result is from a mutating tool, so it is not re-derivable and
+	// only the archived 2x-age path could trim it; the filler turns keep it
+	// inside that window, so the pressure epoch has no eligible block.
 	big := strings.Repeat("x", 60_000)
 	msgs := []llm.Message{
 		userText("q0"), asstToolUse("t0", "write", `{}`), toolResult("t0", big), asstText("a0"),
 	}
-	for i := 1; i <= 9; i++ {
+	for i := 1; i <= 6; i++ {
 		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
 	}
 	fp := llmtest.New("responses", llmtest.Step{
@@ -951,5 +956,337 @@ func TestPressureRetentionFloorNothingOldEnough(t *testing.T) {
 	})
 	if pass := a.applyRetentionPolicy(&recordSink{}, 900_000); pass.changed || pass.observed {
 		t.Fatalf("floor pass with nothing old enough = %+v, want no epoch", pass)
+	}
+}
+
+// TestRetentionHeadIsSmallerThanCompactionPreview pins P2: the retention pass
+// keeps an 800-byte head (retention_result_head_bytes), while the compaction
+// summary preview keeps its own 4096-byte budget.
+func TestRetentionHeadIsSmallerThanCompactionPreview(t *testing.T) {
+	big := strings.Repeat("h", 9000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
+	}
+	for i := 1; i <= 9; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(msgs)
+	if changed := a.applyRetention(&recordSink{}); !changed {
+		t.Fatal("retention pass reported unchanged")
+	}
+	got := a.Transcript()[2].Content[0].ResultText
+	// The receipt is: marker header, then a blank line, then the head, then the hint.
+	parts := strings.SplitN(got, "\n\n", 2)
+	if len(parts) < 2 {
+		t.Fatalf("trimmed result missing head separator: %q", got[:min(len(got), 200)])
+	}
+	body := parts[1]
+	if end := strings.Index(body, "\n["+retentionTrimMarker); end >= 0 {
+		body = body[:end]
+	}
+	if want := defaultRetentionResultHead; len(body) < want {
+		t.Fatalf("retention head = %d bytes, want at least %d: %q", len(body), want, got[:min(len(got), 200)])
+	}
+	if defaultSummaryToolResultSize != 4096 {
+		t.Fatalf("compaction preview size changed: %d", defaultSummaryToolResultSize)
+	}
+}
+
+// TestRetentionHeadConfigOverride clamps an oversized head to the threshold.
+func TestRetentionHeadConfigOverride(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		set   int
+		want  int
+		bound int
+	}{
+		{name: "zero uses default", set: 0, want: defaultRetentionResultHead},
+		{name: "override", set: 100, want: 100},
+		{name: "clamped to threshold", set: 99_999, want: defaultRetentionResultThreshold},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{})
+			a.retentionResultHeadBytes = tc.set
+			if got := a.retentionResultHead(); got != tc.want {
+				t.Fatalf("retentionResultHead() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRetentionArchivedNonReadOnlyResultTrimsAtTwiceAge pins P3: a non-read-only
+// result is left intact at the ordinary retention boundary but is trimmed once
+// it is older than 2x that boundary, because its exact bytes are archived.
+func TestRetentionArchivedNonReadOnlyResultTrimsAtTwiceAge(t *testing.T) {
+	big := strings.Repeat("x", 9000)
+	turns := func(extra int) []llm.Message {
+		msgs := []llm.Message{
+			userText("q0"), asstToolUse("t0", "wr", `{}`), toolResult("t0", big), asstText("a0"),
+		}
+		for i := 1; i <= extra; i++ {
+			msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+		}
+		return msgs
+	}
+	sink := &archiveSink{archive: ToolResultArchive{
+		DisplayPath: "artifacts/tool-results/r.txt",
+		ModelPath:   "/session/artifacts/tool-results/r.txt",
+	}}
+
+	// At the ordinary boundary (4 turns later, still within 2x) the mutating
+	// result is preserved.
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(turns(defaultRetentionKeepTurns))
+	a.applyRetention(sink)
+	if got := a.Transcript()[2].Content[0].ResultText; got != big {
+		t.Fatalf("mutating result trimmed before 2x age: %d bytes", len(got))
+	}
+
+	// Past 2x the boundary the archived body is trimmed with a recovery hint.
+	a2 := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a2.SetTranscript(turns(defaultRetentionKeepTurns*retentionArchivedAgeFactor + 1))
+	a2.applyRetention(sink)
+	got := a2.Transcript()[2].Content[0].ResultText
+	if got == big || !strings.Contains(got, toolresult.ArchivedHintMarker) {
+		t.Fatalf("aged archived mutating result not trimmed with hint: %d bytes", len(got))
+	}
+	mustValid(t, a2.Transcript())
+}
+
+// TestRetentionKeepsArchivedNonReadOnlyResultWhenArchiveFails keeps the no
+// archive -> no trim rule on the new 2x-age path.
+func TestRetentionKeepsArchivedNonReadOnlyResultWhenArchiveFails(t *testing.T) {
+	big := strings.Repeat("x", 9000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "wr", `{}`), toolResult("t0", big), asstText("a0"),
+	}
+	for i := 1; i <= defaultRetentionKeepTurns*retentionArchivedAgeFactor+1; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(msgs)
+	if changed := a.applyRetention(&archiveSink{archiveErr: errors.New("disk unavailable")}); changed {
+		t.Fatal("trimmed a result whose archive could not be written")
+	}
+	if got := a.Transcript()[2].Content[0].ResultText; got != big {
+		t.Fatalf("result changed after archive failure: %d bytes", len(got))
+	}
+}
+
+// TestRetentionKeepTurnsDecoupledFromCompaction pins P4: retention ages results
+// out at retention_keep_turns (default 4) while compaction keeps 8, and an
+// explicit setting overrides the default.
+func TestRetentionKeepTurnsDecoupledFromCompaction(t *testing.T) {
+	big := strings.Repeat("x", 9000)
+	msgs := func() []llm.Message {
+		out := []llm.Message{
+			userText("q0"), asstToolUse("t0", "rd", `{}`), toolResult("t0", big), asstText("a0"),
+		}
+		for i := 1; i <= 6; i++ {
+			out = append(out, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+		}
+		return out
+	}
+
+	// Default: 7 completed turns, retention boundary 4 -> the old result trims
+	// even though compaction would keep 8 turns.
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(msgs())
+	if got := a.retentionKeepTurns(); got != 4 {
+		t.Fatalf("default retention keep turns = %d, want 4", got)
+	}
+	if changed := a.applyRetention(&recordSink{}); !changed {
+		t.Fatal("default retention boundary did not trim a 5-turn-old result")
+	}
+
+	// Zero keeps the 4-turn default even when compact_keep_turns is wider.
+	b := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy:  RetentionPolicyAge,
+		CompactKeepTurns: 6,
+	})
+	if got := b.retentionKeepTurns(); got != defaultRetentionKeepTurns {
+		t.Fatalf("zero retention keep turns = %d, want the %d default", got, defaultRetentionKeepTurns)
+	}
+
+	// Explicit wins over the default.
+	c := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{
+		RetentionPolicy:    RetentionPolicyAge,
+		CompactKeepTurns:   8,
+		RetentionKeepTurns: 6,
+	})
+	if got := c.retentionKeepTurns(); got != 6 {
+		t.Fatalf("explicit retention keep turns = %d, want 6", got)
+	}
+}
+
+// fileMutationRegistry registers write/edit tools from the real catalog so the
+// superseded-input pass exercises the actual receipts.
+func fileMutationRegistry(t *testing.T) *tools.Registry {
+	t.Helper()
+	reg := tools.Default()
+	return reg
+}
+
+// TestRetentionTrimsSupersededWriteInputs pins P1: once a newer successful write
+// to the same path exists, the older write's content is replaced by a path
+// receipt, and the receipt still decodes for MutatedPaths.
+func TestRetentionTrimsSupersededWriteInputs(t *testing.T) {
+	content := strings.Repeat("body-", 2000) // ~10KB
+	writeInput := fmt.Sprintf(`{"path":"main.go","content":%q}`, content)
+	// Turn 0 writes; turns 1-3 are filler; turn 4 writes again (the superseding
+	// success inside the kept suffix); turn 5 is filler. With the 4-turn
+	// retention boundary the first write is old while the second is recent.
+	msgs := []llm.Message{
+		userText("q0"),
+		asstToolUse("w0", "write", writeInput),
+		toolResult("w0", "overwrote main.go (10000 bytes)"),
+		asstText("a0"),
+	}
+	for i := 1; i <= 3; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	msgs = append(msgs,
+		userText("q4"),
+		asstToolUse("w1", "write", writeInput),
+		toolResult("w1", "overwrote main.go (10000 bytes)"),
+		asstText("a4"),
+		userText("q5"), asstText("a5"),
+	)
+	a := newAgent(llmtest.New("fake"), fileMutationRegistry(t), Options{
+		RetentionPolicy:    RetentionPolicyAge,
+		RetentionKeepTurns: 4,
+	})
+	a.SetTranscript(msgs)
+	before := a.estimateContext(nil).Total
+	boundary := keepBoundary(turnStarts(msgs), a.retentionKeepTurns())
+	if boundary <= 5 {
+		t.Fatalf("test setup: superseding write (index 5) not after boundary %d", boundary)
+	}
+
+	if changed := a.applyRetention(&recordSink{}); !changed {
+		t.Fatal("retention did not trim a superseded write input")
+	}
+	mustValid(t, a.Transcript())
+
+	first := a.Transcript()[1].Content[0]
+	if !strings.Contains(string(first.ToolInput), retentionInputMarker) {
+		t.Fatalf("superseded write input not replaced: %.120s", first.ToolInput)
+	}
+	if len(first.ToolInput) >= len(writeInput) {
+		t.Fatalf("receipt did not shrink the input: %d -> %d", len(writeInput), len(first.ToolInput))
+	}
+	if paths, ok := a.tools.MutatedPaths(llm.ToolCall{Name: "write", Input: first.ToolInput}); !ok || len(paths) != 1 || paths[0] != "main.go" {
+		t.Fatalf("receipt lost MutatedPaths decodability: %+v ok=%t", paths, ok)
+	}
+	// The newest write to the path stays verbatim.
+	if got := string(a.Transcript()[11].Content[0].ToolInput); got != writeInput {
+		t.Fatalf("newest write input was trimmed: %.80s", got)
+	}
+	_ = boundary
+	if after := a.estimateContext(nil).Total; after >= before {
+		t.Fatalf("context estimate did not fall: %d -> %d", before, after)
+	}
+
+	// Idempotency: a second pass leaves the receipt byte-identical.
+	if changed := a.applyRetention(&recordSink{}); changed {
+		t.Fatal("second retention pass re-trimmed a receipt")
+	}
+}
+
+// TestRetentionKeepsWriteInputWhenNoNewerSuccess verifies the negative case: a
+// lone write (or one whose later sibling failed) keeps its full input.
+func TestRetentionKeepsWriteInputWhenNoNewerSuccess(t *testing.T) {
+	content := strings.Repeat("body-", 2000)
+	writeInput := fmt.Sprintf(`{"path":"main.go","content":%q}`, content)
+	base := func(lastErr bool) []llm.Message {
+		result := toolResult("w0", "overwrote main.go")
+		failed := llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+			Kind: llm.BlockToolResult, ResultForID: "w1", ResultText: "open /x: not found", ResultError: true,
+		}}}
+		msgs := []llm.Message{
+			userText("q0"), asstToolUse("w0", "write", writeInput), result, asstText("a0"),
+			userText("q1"), asstToolUse("w1", "write", writeInput), failed, asstText("a1"),
+		}
+		_ = lastErr
+		for i := 2; i <= 6; i++ {
+			msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+		}
+		return msgs
+	}
+	a := newAgent(llmtest.New("fake"), fileMutationRegistry(t), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(base(true))
+	if changed := a.applyRetention(&recordSink{}); changed {
+		t.Fatal("trimmed a write input whose only newer sibling failed")
+	}
+}
+
+// TestRetentionTrimsSupersededEditInputs covers the edit receipt shape, a
+// multi-file edit, and that the paths stay decodable.
+func TestRetentionTrimsSupersededEditInputs(t *testing.T) {
+	oldText := strings.Repeat("old-", 2000)
+	editInput := fmt.Sprintf(`{"files":[{"path":"a.go","edits":[{"oldText":%q,"newText":"x"}]},{"path":"b.go","edits":[{"oldText":%q,"newText":"y"}]}]}`, oldText, oldText)
+	newer := fmt.Sprintf(`{"files":[{"path":"a.go","edits":[{"oldText":"x","newText":"z"}]},{"path":"b.go","edits":[{"oldText":"y","newText":"w"}]}]}`)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("e0", "edit", editInput), toolResult("e0", "edited a.go, b.go"), asstText("a0"),
+	}
+	for i := 1; i <= 3; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	msgs = append(msgs,
+		userText("q4"), asstToolUse("e1", "edit", newer), toolResult("e1", "edited a.go, b.go"), asstText("a4"),
+		userText("q5"), asstText("a5"),
+	)
+	a := newAgent(llmtest.New("fake"), fileMutationRegistry(t), Options{
+		RetentionPolicy:    RetentionPolicyAge,
+		RetentionKeepTurns: 4,
+	})
+	a.SetTranscript(msgs)
+	if boundary := keepBoundary(turnStarts(msgs), a.retentionKeepTurns()); boundary <= 5 {
+		t.Fatalf("test setup: superseding edit (index 5) not after boundary %d", boundary)
+	}
+	if changed := a.applyRetention(&recordSink{}); !changed {
+		t.Fatal("retention did not trim a superseded edit input")
+	}
+	mustValid(t, a.Transcript())
+	got := a.Transcript()[1].Content[0].ToolInput
+	if !strings.Contains(string(got), retentionInputMarker) {
+		t.Fatalf("edit receipt missing marker: %.160s", got)
+	}
+	if strings.Contains(string(got), oldText) {
+		t.Fatalf("edit receipt still carries text: %.160s", got)
+	}
+	// The superseding edit stays verbatim.
+	if got := string(a.Transcript()[11].Content[0].ToolInput); got != newer {
+		t.Fatalf("superseding edit input was trimmed: %.80s", got)
+	}
+	paths, ok := a.tools.MutatedPaths(llm.ToolCall{Name: "edit", Input: []byte(newer)})
+	if !ok || len(paths) != 2 {
+		t.Fatalf("superseding edit lost MutatedPaths decodability: %+v ok=%t", paths, ok)
+	}
+	// The receipt keeps the same paths decodable too.
+	receiptPaths, ok := a.tools.MutatedPaths(llm.ToolCall{Name: "edit", Input: a.Transcript()[1].Content[0].ToolInput})
+	if !ok || len(receiptPaths) != 2 {
+		t.Fatalf("edit receipt lost MutatedPaths decodability: %+v ok=%t", receiptPaths, ok)
+	}
+}
+
+// TestStablePrefixStopsBeforeFutureTrimmableToolUse pins the P1 cache-prefix
+// interaction: a message carrying a superseded write input is not promised to
+// the stable prefix, because a later epoch rewrites it.
+func TestStablePrefixStopsBeforeFutureTrimmableToolUse(t *testing.T) {
+	content := strings.Repeat("body-", 2000)
+	writeInput := fmt.Sprintf(`{"path":"main.go","content":%q}`, content)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("w0", "write", writeInput), toolResult("w0", "ok"), asstText("a0"),
+		userText("q1"), asstText("a1"),
+		userText("q2"), asstText("a2"),
+		userText("q3"), asstText("a3"),
+		userText("q4"), asstToolUse("w1", "write", writeInput), toolResult("w1", "ok"), asstText("a4"),
+		userText("q5"), asstText("a5"),
+	}
+	a := newAgent(llmtest.New("fake"), fileMutationRegistry(t), Options{RetentionKeepTurns: 4})
+	if got := a.stableMessagePrefixIn(msgs); got != 1 {
+		t.Fatalf("stable prefix = %d, want 1 (stop before the superseded write)", got)
 	}
 }

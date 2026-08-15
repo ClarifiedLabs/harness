@@ -1,10 +1,13 @@
 package tools
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"harness/internal/llm"
 )
 
 func runWriteFile(t *testing.T, args map[string]any) (string, error) {
@@ -104,5 +107,51 @@ func TestWriteFileMutatedPaths(t *testing.T) {
 	}
 	if len(paths) != 1 || paths[0] != "a.txt" {
 		t.Fatalf("MutatedPaths = %v, want [a.txt]", paths)
+	}
+}
+
+func TestWriteRetentionInputReceipt(t *testing.T) {
+	tool := writeFile{}
+	input := []byte(`{"path":"main.go","content":"` + strings.Repeat(`package main\n`, 60) + `"}`)
+	receipt, ok := tool.RetentionInputReceipt(input)
+	if !ok {
+		t.Fatal("RetentionInputReceipt = ok false for a full write input")
+	}
+	var decoded struct {
+		Path       string `json:"path"`
+		Superseded string `json:"_superseded"`
+	}
+	if err := json.Unmarshal(receipt, &decoded); err != nil {
+		t.Fatalf("receipt is not a JSON object: %v (%s)", err, receipt)
+	}
+	if decoded.Path != "main.go" {
+		t.Fatalf("receipt path = %q, want main.go", decoded.Path)
+	}
+	if decoded.Superseded == "" {
+		t.Fatal("receipt missing the superseded explanation")
+	}
+	if paths, err := tool.MutatedPaths(receipt); err != nil || len(paths) != 1 || paths[0] != "main.go" {
+		t.Fatalf("receipt lost MutatedPaths decodability: %v %v", paths, err)
+	}
+	if len(receipt) >= len(input) {
+		t.Fatalf("receipt did not shrink: %d -> %d", len(input), len(receipt))
+	}
+	if llm.ValidateToolInputObject(receipt) != nil {
+		t.Fatalf("receipt is not a complete JSON object: %s", receipt)
+	}
+}
+
+func TestWriteRetentionInputReceiptRejectsInvalid(t *testing.T) {
+	tool := writeFile{}
+	for _, tc := range []struct{ name, input string }{
+		{"missing path", `{"content":"x"}`},
+		{"not json", `path`},
+		{"empty", ``},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok := tool.RetentionInputReceipt([]byte(tc.input)); ok {
+				t.Fatal("RetentionInputReceipt = ok true, want false")
+			}
+		})
 	}
 }

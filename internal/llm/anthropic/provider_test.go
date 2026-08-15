@@ -931,3 +931,58 @@ func TestNormalizeAnthropicUsageInputIncludesCache(t *testing.T) {
 		t.Fatalf("clamped InputTokens = %d, want 0", clamped.InputTokens)
 	}
 }
+
+// TestReasoningReplayDefaultsCurrentTurnOnOfficialEndpoint pins P7: an unset
+// reasoning_replay becomes current_turn only when the base URL is the real
+// api.anthropic.com endpoint; compatible gateways keep full replay unless the
+// provider config opts in, and any explicit setting wins.
+func TestReasoningReplayDefaultsCurrentTurnOnOfficialEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		baseURL  string
+		config   llm.ReasoningReplay
+		want     llm.ReasoningReplay
+		wantWire bool // true = the built request drops historical thinking
+	}{
+		{name: "unset official endpoint defaults to current_turn", baseURL: "", want: llm.ReasoningReplayCurrentTurn, wantWire: true},
+		{name: "explicit official endpoint url defaults to current_turn", baseURL: "https://api.anthropic.com/v1", want: llm.ReasoningReplayCurrentTurn, wantWire: true},
+		{name: "gateway keeps full replay", baseURL: "https://gateway.example.com/v1", config: "", want: "", wantWire: false},
+		{name: "explicit full wins on official endpoint", baseURL: "https://api.anthropic.com/v1", config: llm.ReasoningReplayFull, want: llm.ReasoningReplayFull},
+		{name: "explicit current_turn wins on gateway", baseURL: "https://gateway.example.com/v1", config: llm.ReasoningReplayCurrentTurn, want: llm.ReasoningReplayCurrentTurn, wantWire: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(Config{BaseURL: tc.baseURL, ReasoningReplay: tc.config, APIKey: "k"})
+			if p.reasoningReplay != tc.want {
+				t.Fatalf("provider reasoningReplay = %q, want %q", p.reasoningReplay, tc.want)
+			}
+			w := buildRequestWithReasoningReplay(thinkingChainRequest(), 1_000_000, 0, p.reasoningReplay)
+			// Historical message 1 keeps its thinking block only under full replay;
+			// current_turn drops it (the in-flight chain always keeps its own).
+			historicalThinking := false
+			if types := wireContentTypes(w.Messages[1]); len(types) > 0 && types[0] == "thinking" {
+				historicalThinking = true
+			}
+			if historicalThinking != !tc.wantWire {
+				t.Fatalf("historical thinking kept = %t, want %t", historicalThinking, !tc.wantWire)
+			}
+		})
+	}
+}
+
+func TestIsOfficialAnthropicEndpoint(t *testing.T) {
+	for _, tc := range []struct {
+		base string
+		want bool
+	}{
+		{"https://api.anthropic.com/v1", true},
+		{"https://api.anthropic.com", true},
+		{"http://localhost:8080/v1", false},
+		{"https://gateway.example.com/v1", false},
+		{"https://api.anthropic.com.evil.com/v1", false},
+		{"not a url", false},
+	} {
+		if got := isOfficialAnthropicEndpoint(tc.base); got != tc.want {
+			t.Errorf("isOfficialAnthropicEndpoint(%q) = %t, want %t", tc.base, got, tc.want)
+		}
+	}
+}

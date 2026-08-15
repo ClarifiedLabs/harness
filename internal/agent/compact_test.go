@@ -237,8 +237,8 @@ func TestLowWaterBoundaryMoveRegeneratesSummaryAndArchive(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		transcript = append(transcript, userText(turnLabel(i)+" question"), asstText(turnLabel(i)+" "+strings.Repeat("x", 3_500)))
 	}
-	fp := llmtest.New("fake", summaryStep("first", 10, 1), summaryStep("second", 20, 2))
-	a := newAgent(fp, &tools.Registry{}, Options{Model: "local", ContextWindow: 10_000})
+	fp := llmtest.New("fake", summaryStep("first", 10, 1), summaryStep("second", 20, 2), summaryStep("third", 100, 23), summaryStep("fourth", 200, 50))
+	a := newAgent(fp, &tools.Registry{}, Options{Model: "local", ContextWindow: 10_000, CompactKeepTokens: 2_000})
 	a.SetTranscript(transcript)
 	var archived CompactionArchive
 	a.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
@@ -249,14 +249,20 @@ func TestLowWaterBoundaryMoveRegeneratesSummaryAndArchive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Compact: %v", err)
 	}
-	if len(fp.Requests) != 2 || usage.InputTokens != 30 || usage.OutputTokens != 3 {
-		t.Fatalf("summary retries = %d usage=%+v, want 2 and cumulative usage", len(fp.Requests), usage)
+	if len(fp.Requests) != 4 || usage.InputTokens != 330 || usage.OutputTokens != 76 {
+		t.Fatalf("summary retries = %d usage=%+v, want 4 and cumulative usage", len(fp.Requests), usage)
 	}
-	if got := countCompletedTurns(archived.Messages); got != 3 {
-		t.Fatalf("archived rounds = %d, want final moved boundary with 3", got)
+	if got := countCompletedTurns(archived.Messages); got != 7 {
+		t.Fatalf("archived rounds = %d, want final moved boundary with 7", got)
 	}
-	if !strings.Contains(dump(fp.Requests[1].Messages), "C ") {
-		t.Fatalf("regenerated summary input omitted moved round C: %s", dump(fp.Requests[1].Messages))
+	// The boundary move must regenerate the summary: the final reduce request
+	// folds the chunk covering the newly moved rounds instead of reusing the
+	// summary produced for the earlier boundary.
+	if !strings.Contains(dump(fp.Requests[3].Messages), "Chunk 3 summary") {
+		t.Fatalf("final reduce omitted the regenerated chunk summaries: %s", dump(fp.Requests[3].Messages))
+	}
+	if !strings.Contains(a.Transcript()[0].Content[0].Text, "fourth") {
+		t.Fatalf("checkpoint kept the stale pre-move summary: %s", a.Transcript()[0].Content[0].Text)
 	}
 }
 
@@ -705,7 +711,7 @@ func TestMaybeCompactLongSinglePromptUsesTurnBoundariesAndLowWaterMark(t *testin
 		summaryStep("FOUR EARLY TURNS COMPLETE", 60, 12),
 		summaryStep("NEXT FOUR TURNS COMPLETE", 70, 14),
 	)
-	a := newAgent(fp, &tools.Registry{}, Options{Model: "local", ContextWindow: window, CompactKeepTurns: 8})
+	a := newAgent(fp, &tools.Registry{}, Options{Model: "local", ContextWindow: window, CompactKeepTurns: 8, CompactKeepTokens: 20_000})
 	a.SetSystem("sys")
 	a.SetTranscript(transcript)
 	if got := len(completedTurnSpans(a.Transcript())); got != 12 {
@@ -2100,5 +2106,186 @@ func TestEstimateTokensWeightsOpaqueFieldsSeparately(t *testing.T) {
 	wantReq := (len(string(llm.RoleAssistant))+len(string(llm.BlockThinking))+len(thinking))/bytesPerToken + len(signature)/opaqueBytesPerToken
 	if req.Messages != wantReq {
 		t.Fatalf("estimateRequest messages = %d, want %d", req.Messages, wantReq)
+	}
+}
+
+// TestCompactionReadFilesCapBoundsCheckpointIndex pins P5: the recognized
+// read-file index is capped, modified files are never capped, and the checkpoint
+// JSON reports how many reads were omitted.
+func TestCompactionReadFilesCapBoundsCheckpointIndex(t *testing.T) {
+	reg := tools.Default()
+	var msgs []llm.Message
+	// 300 read turns plus 5 modified paths, all successful.
+	for i := 0; i < compactionReadFilesCap+100; i++ {
+		id := fmt.Sprintf("r%d", i)
+		readInput := fmt.Sprintf(`{"path":"read_%03d.go"}`, i)
+		msgs = append(msgs,
+			asstToolUse(id, "read", readInput),
+			toolResult(id, fmt.Sprintf("read %d", i)),
+		)
+	}
+	for i := 0; i < 5; i++ {
+		id := fmt.Sprintf("w%d", i)
+		writeInput := fmt.Sprintf(`{"path":"mod_%d.go","content":"x"}`, i)
+		msgs = append(msgs,
+			asstToolUse(id, "write", writeInput),
+			toolResult(id, fmt.Sprintf("wrote %d", i)),
+		)
+	}
+	a := newAgent(llmtest.New("fake", summaryStep("S", 10, 1)), reg, Options{Model: "claude-opus-4-8"})
+	reads, modified := a.compactionFileActivity(msgs, nil)
+	if len(reads) != compactionReadFilesCap {
+		t.Fatalf("capped read files = %d, want %d", len(reads), compactionReadFilesCap)
+	}
+	// The oldest first-touches are dropped.
+	if containsPath(reads, "read_000.go") {
+		t.Fatalf("oldest read kept: %v", reads[:3])
+	}
+	if !containsPath(reads, fmt.Sprintf("read_%03d.go", compactionReadFilesCap+99)) {
+		t.Fatalf("newest read dropped")
+	}
+	if len(modified) != 5 {
+		t.Fatalf("modified files capped: %v", modified)
+	}
+
+	// The checkpoint truncates an over-long list itself and reports the count.
+	oversized := append([]string{}, reads...)
+	oversized = append(oversized, "extra1.go", "extra2.go")
+	checkpoint := a.checkpointMessage("S", msgs, "", "model", "", "", oversized, modified)
+	text := checkpoint.Content[0].Text
+	if !strings.Contains(text, `"read_files_omitted":2`) {
+		t.Fatalf("checkpoint missing read_files_omitted: %.200s", text[len(text)-400:])
+	}
+	if strings.Contains(text, "read_000.go") {
+		t.Fatalf("checkpoint JSON includes a dropped read path")
+	}
+}
+
+func containsPath(paths []string, want string) bool {
+	for _, p := range paths {
+		if p == want {
+			return true
+		}
+	}
+	return false
+}
+
+// TestCompactionPriorMetadataCarryForwardIsCapped verifies a prior checkpoint's
+// read list is capped too, and modified paths always win over reads.
+func TestCompactionPriorMetadataCarryForwardIsCapped(t *testing.T) {
+	reg := tools.Default()
+	prior := &llm.CompactionMetadata{}
+	for i := 0; i < compactionReadFilesCap+50; i++ {
+		prior.ReadFiles = append(prior.ReadFiles, fmt.Sprintf("old_%03d.go", i))
+	}
+	prior.ModifiedFiles = []string{"kept.go"}
+	a := newAgent(llmtest.New("fake"), reg, Options{Model: "claude-opus-4-8"})
+	reads, modified := a.compactionFileActivity(nil, prior)
+	if len(reads) != compactionReadFilesCap {
+		t.Fatalf("prior carry-forward reads = %d, want %d", len(reads), compactionReadFilesCap)
+	}
+	if containsPath(reads, "old_000.go") {
+		t.Fatalf("oldest prior read kept")
+	}
+	if !containsPath(modified, "kept.go") {
+		t.Fatalf("prior modified path dropped: %v", modified)
+	}
+}
+
+// TestKeepTokensWindowAdaptive pins P6: an unset compact_keep_tokens scales with
+// the window between 4k and 20k; an explicit value wins.
+func TestKeepTokensWindowAdaptive(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		window, setWant int
+		set             int
+	}{
+		{name: "32k window uses window/5", window: 32_000, setWant: 6_400},
+		{name: "20k window stays at 4k", window: 20_000, setWant: adaptiveKeepTokensMin},
+		{name: "200k window uses 40k clamped to 20k", window: 200_000, setWant: adaptiveKeepTokensMax},
+		{name: "1M window caps at 20k", window: 1_000_000, setWant: adaptiveKeepTokensMax},
+		{name: "100k window caps at 20k", window: 100_000, setWant: adaptiveKeepTokensMax},
+		{name: "explicit wins", window: 1_000_000, set: 7_000, setWant: 7_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newAgent(llmtest.New("fake"), &tools.Registry{}, Options{Model: "local", ContextWindow: tc.window, CompactKeepTokens: tc.set})
+			if got := a.keepTokens(); got != tc.setWant {
+				t.Fatalf("keepTokens() = %d, want %d", got, tc.setWant)
+			}
+		})
+	}
+}
+
+// TestCompactionFixtureContextReduction is the fixture-level exit check: a
+// synthetic transcript with repeated 20KB writes, full-mode shell results, and
+// 300 read paths must show a measurably lower estimateContext after retention.
+func TestCompactionFixtureContextReduction(t *testing.T) {
+	reg := tools.Default()
+	bigBody := strings.Repeat("x", 20_000)
+	var msgs []llm.Message
+	// Several superseded 20KB writes to one path.
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("w%d", i)
+		input := fmt.Sprintf(`{"path":"main.go","content":"%s"}`, bigBody)
+		msgs = append(msgs, asstToolUse(id, "write", input), toolResult(id, "overwrote main.go"))
+	}
+	// A few full-mode shell results (non-read-only, large).
+	for i := 0; i < 3; i++ {
+		id := fmt.Sprintf("s%d", i)
+		msgs = append(msgs, asstToolUse(id, "shell", `{"argv":["ls"]}`), toolResult(id, bigBody+bigBody))
+	}
+	// 300 read paths.
+	for i := 0; i < 300; i++ {
+		id := fmt.Sprintf("r%d", i)
+		msgs = append(msgs, asstToolUse(id, "read", fmt.Sprintf(`{"path":"f_%03d.go"}`, i)), toolResult(id, "ok"))
+	}
+	// Filler turns to push everything above past the retention boundaries.
+	for i := 0; i < 6; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("filler %d", i)), asstText("ok"))
+	}
+	// A recent successful write inside the kept suffix: it supersedes the three
+	// old 20KB writes at the head of the transcript.
+	msgs = append(msgs,
+		asstToolUse("w_new", "write", `{"path":"main.go","content":"package main\n"}`),
+		toolResult("w_new", "overwrote main.go"),
+	)
+
+	a := newAgent(llmtest.New("fake"), reg, Options{RetentionPolicy: RetentionPolicyAge, Model: "local"})
+	a.SetTranscript(msgs)
+	mustValid(t, a.Transcript())
+	before := a.estimateContextForTranscript(nil, a.Transcript()).Total
+	bytesBefore := retentionTranscriptBytes(a.Transcript())
+
+	sink := &archiveSink{archive: ToolResultArchive{
+		DisplayPath: "artifacts/tool-results/r.txt",
+		ModelPath:   "/session/artifacts/tool-results/r.txt",
+	}}
+	if changed := a.applyRetention(sink); !changed {
+		t.Fatal("retention pass made no changes on the fixture transcript")
+	}
+	mustValid(t, a.Transcript())
+	after := a.estimateContextForTranscript(nil, a.Transcript()).Total
+	bytesAfter := retentionTranscriptBytes(a.Transcript())
+	if after >= before {
+		t.Fatalf("context estimate did not fall: %d -> %d", before, after)
+	}
+	if removed := bytesBefore - bytesAfter; removed < 50_000 {
+		t.Fatalf("retention reclaimed only %d bytes, want at least 50000", removed)
+	}
+	// Every write input to main.go but the newest must be a receipt.
+	receipts, verbatim := 0, 0
+	for _, m := range a.Transcript() {
+		for _, b := range m.Content {
+			if b.Kind == llm.BlockToolUse && b.ToolName == "write" {
+				if strings.Contains(string(b.ToolInput), retentionInputMarker) {
+					receipts++
+				} else {
+					verbatim++
+				}
+			}
+		}
+	}
+	if receipts != 3 || verbatim != 1 {
+		t.Fatalf("write inputs: %d receipts, %d verbatim; want 3 receipts and 1 verbatim", receipts, verbatim)
 	}
 }

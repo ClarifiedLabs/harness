@@ -84,6 +84,8 @@ type fileConfig struct {
 	ResponsesStateful             optional[bool]                       `json:"responses_stateful"`
 	RetentionPolicy               optional[string]                     `json:"retention_policy"`
 	RetentionFloorTokens          optional[int]                        `json:"retention_floor_tokens"`
+	RetentionKeepTurns            optional[int]                        `json:"retention_keep_turns"`
+	RetentionResultHeadBytes      optional[int]                        `json:"retention_result_head_bytes"`
 	NoSteer                       optional[bool]                       `json:"no_steer"`
 	Verbose                       optional[bool]                       `json:"verbose"`
 	ToolStream                    optional[bool]                       `json:"tool_stream"`

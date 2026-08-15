@@ -10,6 +10,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -67,6 +68,15 @@ type Provider struct {
 // New constructs a Provider from cfg, applying defaults.
 func New(cfg Config) *Provider {
 	base, client, sleep := llm.HTTPDefaults(cfg.BaseURL, defaultBaseURL, cfg.HTTPClient, cfg.Sleep)
+	reasoningReplay := cfg.ReasoningReplay
+	if reasoningReplay == "" && isOfficialAnthropicEndpoint(base) {
+		// The official endpoint strips non-final thinking server-side and does
+		// bill it once on the turn that produced it, so dropping historical
+		// replay is transport/upload savings plus estimate accuracy, not a
+		// billed-context change. Compatible gateways keep full replay unless the
+		// provider config opts in explicitly.
+		reasoningReplay = llm.ReasoningReplayCurrentTurn
+	}
 	return &Provider{
 		apiKey:                  cfg.APIKey,
 		authHeaders:             cfg.AuthHeaders,
@@ -74,10 +84,26 @@ func New(cfg Config) *Provider {
 		contextWindow:           cfg.ContextWindow,
 		outputLimit:             cfg.OutputLimit,
 		usageInputIncludesCache: cfg.UsageInputIncludesCache,
-		reasoningReplay:         cfg.ReasoningReplay,
+		reasoningReplay:         reasoningReplay,
 		client:                  client,
 		sleep:                   sleep,
 	}
+}
+
+// isOfficialAnthropicEndpoint reports whether base targets the real
+// api.anthropic.com Messages API rather than an Anthropic-compatible gateway.
+func isOfficialAnthropicEndpoint(base string) bool {
+	parsed, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	host := parsed.Hostname()
+	if host != "api.anthropic.com" {
+		return false
+	}
+	// Accept any scheme/port on the official host; gateways on other hosts —
+	// including a localhost proxy that forwards to it — are excluded.
+	return strings.HasPrefix(host, "api.anthropic.com")
 }
 
 func (p *Provider) Name() string { return "anthropic" }
