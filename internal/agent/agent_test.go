@@ -3290,6 +3290,97 @@ func TestMidStreamRetryBudgetExhaustedDropsPartialText(t *testing.T) {
 	}
 }
 
+func TestProviderErrorRunsTerminalStopHook(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "stop-payload.json")
+	command := fmt.Sprintf("cat >> %q; printf '{}'", payloadPath)
+	runner := testHookRunner(t, fmt.Sprintf(`{"Stop":[{"hooks":[{"type":"command","command":%q}]}]}`, command))
+	providerErr := &llm.APIError{StatusCode: 429, Message: "slow down", Retryable: true}
+	fp := llmtest.New("fake", llmtest.Step{Err: providerErr})
+	a := newAgent(fp, tools.Default(), Options{Hooks: runner})
+
+	err := a.RunPrompt(context.Background(), "hi", &recordSink{})
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("RunPrompt err = %v, want provider error", err)
+	}
+	payloadBytes, readErr := os.ReadFile(payloadPath)
+	if readErr != nil {
+		t.Fatalf("read Stop payload: %v", readErr)
+	}
+	payloadLines := strings.Split(strings.TrimSpace(string(payloadBytes)), "\n")
+	if len(payloadLines) != 1 {
+		t.Fatalf("Stop hook calls = %d, want exactly 1", len(payloadLines))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadLines[0]), &payload); err != nil {
+		t.Fatalf("decode Stop payload: %v", err)
+	}
+	if payload["hook_event_name"] != string(hooks.Stop) {
+		t.Fatalf("hook_event_name = %v, want %q", payload["hook_event_name"], hooks.Stop)
+	}
+	if canBlock, ok := payload["can_block"].(bool); !ok || canBlock {
+		t.Fatalf("can_block = %v, want false", payload["can_block"])
+	}
+}
+
+func TestCanceledPromptRunsTerminalStopHook(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "stop-payload.json")
+	command := fmt.Sprintf("cat >> %q; printf '{}'", payloadPath)
+	runner := testHookRunner(t, fmt.Sprintf(`{"Stop":[{"hooks":[{"type":"command","command":%q}]}]}`, command))
+	ctx, cancel := context.WithCancel(context.Background())
+	fp := llmtest.New("fake", llmtest.Step{Block: func(context.Context) { cancel() }})
+	a := newAgent(fp, tools.Default(), Options{Hooks: runner})
+
+	err := a.RunPrompt(ctx, "hi", &recordSink{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("RunPrompt err = %v, want context canceled", err)
+	}
+	payloadBytes, readErr := os.ReadFile(payloadPath)
+	if readErr != nil {
+		t.Fatalf("read Stop payload: %v", readErr)
+	}
+	payloadLines := strings.Split(strings.TrimSpace(string(payloadBytes)), "\n")
+	if len(payloadLines) != 1 {
+		t.Fatalf("Stop hook calls = %d, want exactly 1", len(payloadLines))
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadLines[0]), &payload); err != nil {
+		t.Fatalf("decode Stop payload: %v", err)
+	}
+	if canBlock, ok := payload["can_block"].(bool); !ok || canBlock {
+		t.Fatalf("can_block = %v, want false", payload["can_block"])
+	}
+}
+
+func TestHardBudgetMakesNormalStopHookNonBlockable(t *testing.T) {
+	payloadPath := filepath.Join(t.TempDir(), "stop-payload.json")
+	command := fmt.Sprintf("cat > %q; printf '{\"decision\":\"block\",\"reason\":\"continue\"}'", payloadPath)
+	runner := testHookRunner(t, fmt.Sprintf(`{"Stop":[{"hooks":[{"type":"command","command":%q}]}]}`, command))
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("done")},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 10},
+	})
+	a := newAgent(fp, tools.Default(), Options{Hooks: runner, MaxPromptTokens: 1})
+
+	if err := a.RunPrompt(context.Background(), "hi", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
+	}
+	payloadBytes, err := os.ReadFile(payloadPath)
+	if err != nil {
+		t.Fatalf("read Stop payload: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		t.Fatalf("decode Stop payload: %v", err)
+	}
+	if canBlock, ok := payload["can_block"].(bool); !ok || canBlock {
+		t.Fatalf("can_block = %v, want false", payload["can_block"])
+	}
+}
+
 func TestRateLimitedStreamNotRetried(t *testing.T) {
 	// A connect-exhausted rate-limit error (HTTP 429/529, status code set) must not
 	// be re-run by the agent: the provider's connect loop already spent its full

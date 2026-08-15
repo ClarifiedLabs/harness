@@ -2122,7 +2122,17 @@ receive the one-shot `focus` field.
 
 Each command runs in the harness cwd with a JSON event payload on stdin. Every
 payload carries common fields such as `session_id`, `transcript_path`, `cwd`,
-`hook_event_name`, `model`, and `permission_mode`, plus per-event fields.
+`hook_event_name`, `model`, and `permission_mode`, plus per-event fields. `Stop`
+fires once before control returns from every admitted prompt, including canceled
+prompts. At a normal model stop its `can_block` field is `true` only when the
+turn, token, and cost budgets permit another request; a blocking result then
+requests one more model turn. Provider failures, cancellation, exhausted hard
+budgets, and other terminal paths that cannot continue emit `Stop` with
+`can_block:false`, and blocking output is ignored. A canceled prompt runs this
+terminal notification in a detached context bounded to ten seconds. This lets
+integrations observe abnormal prompt exits as well as normal model completion;
+`can_block` distinguishes a completion guard that may continue from a terminal
+notification that cannot.
 
 `matcher` is a Go regexp over the tool name for tool hooks, `manual|auto` for
 compaction hooks, and `startup|resume|clear|fork|clone` for `SessionStart`. Omitted, empty,

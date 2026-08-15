@@ -1724,6 +1724,26 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		workflowStatus = sampleWorkflowStatus(sink)
 		sink.PromptComplete(promptUsage())
 	}()
+	// Stop notifies session coordinators on every prompt exit. The normal
+	// model-stop path below can request another turn; every other exit still needs
+	// one non-blockable notification before the caller regains control.
+	stopHookRan := false
+	defer func() {
+		if a.hooks == nil || stopHookRan || !a.hooks.HasEvent(hooks.Stop) {
+			return
+		}
+		// The prompt's context (or a provider's derived request context) may be
+		// canceled on this path. Always detach and bound the non-blockable terminal
+		// notification so cancellation cannot suppress it or make it unbounded.
+		hookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		a.runStopHook(hookCtx, sink, hooks.Payload{
+			"prompt_id":        promptID,
+			"turn_id":          turns,
+			"stop_hook_active": false,
+			"can_block":        false,
+		})
+	}()
 
 	for unlimited || turns < a.maxTurns || forcePromptWorkSynthesis {
 		if !unlimited && !guard.turnBudgetClosureSteered && shouldEnterTurnBudgetClosure(a.maxTurns, turns) {
@@ -1985,20 +2005,25 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 				sink.Notice(notice)
 			}
 			if a.hooks != nil && !stopHookActive && a.hooks.HasEvent(hooks.Stop) {
-				hookRes := a.hooks.Run(ctx, hooks.Stop, "", hooks.Payload{
+				canBlock := (unlimited || turns < a.maxTurns) &&
+					(a.maxPromptTokens <= 0 || totalTokens(total) < a.maxPromptTokens) &&
+					(a.maxPromptCostUSD <= 0 || !total.CostKnown || total.CostUSD < a.maxPromptCostUSD)
+				hookRes := a.runStopHook(ctx, sink, hooks.Payload{
 					"prompt_id":              promptID,
 					"turn_id":                turns,
 					"stop_hook_active":       stopHookActive,
 					"last_assistant_message": res.text,
+					"can_block":              canBlock,
 				})
-				reportHookDiagnostics(sink, hookRes.Diagnostics)
-				for _, notice := range hookRes.Notices {
-					sink.Notice(notice)
-				}
+				// A cancellation before Runner dispatched any handler gets one
+				// detached terminal attempt from the defer. Once a handler started,
+				// its diagnostic proves the event was dispatched and prevents a
+				// duplicate side effect.
+				stopHookRan = ctx.Err() == nil || len(hookRes.Diagnostics) > 0
 				if len(hookRes.AdditionalContext) > 0 {
 					extraContext = append(extraContext, hookRes.AdditionalContext...)
 				}
-				if hookRes.Block {
+				if hookRes.Block && canBlock {
 					reason := hookRes.Reason()
 					if reason == "" {
 						reason = "Stop hook requested continuation"
@@ -2264,6 +2289,15 @@ func reportTurnProgress(sink EventSink, progress TurnProgress) {
 	if progressSink, ok := sink.(TurnProgressSink); ok {
 		progressSink.TurnProgress(progress)
 	}
+}
+
+func (a *Agent) runStopHook(ctx context.Context, sink EventSink, payload hooks.Payload) hooks.Result {
+	result := a.hooks.Run(ctx, hooks.Stop, "", payload)
+	reportHookDiagnostics(sink, result.Diagnostics)
+	for _, notice := range result.Notices {
+		sink.Notice(notice)
+	}
+	return result
 }
 
 func reportHookDiagnostics(sink EventSink, diagnostics []hooks.Diagnostic) {

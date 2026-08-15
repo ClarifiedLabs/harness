@@ -1759,9 +1759,15 @@ prompt.
   monotonic, and discarded billed usage is included once in the turn/prompt total
   and separately reported as wasted. Previous-response rejection resets the stored
   Responses state and resends the full context.
-- **Stop hook:** a configured `Stop` hook fires when the model would end the prompt;
-  it may block the break and force one more turn. `stop_hook_active` guards it so it
-  fires at most once per prompt (`agent.go`).
+- **Stop hook:** a configured `Stop` hook fires once before an admitted prompt
+  returns, including canceled prompts. At a normal model stop it carries
+  `can_block:true` only when turn, token, and cost budgets permit another request,
+  and may then block the break to force that turn. Provider failures,
+  cancellation, exhausted hard budgets, and other terminal paths that cannot
+  continue emit the same hook with `can_block:false` and ignore blocking output.
+  Canceled prompts run the terminal notification in a detached context bounded
+  to ten seconds. `stop_hook_active` guards the normal continuation path, while
+  the terminal fallback covers exits that never reached it (`agent.go`).
 - **In-prompt steering (default on; `-no-steer` off).** Input the user submits
   with Enter while a prompt is running is injected as a `RoleUser` message
   before the *next* model request (i.e. between tool rounds — the next time
