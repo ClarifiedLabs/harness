@@ -417,7 +417,8 @@ Failed or canceled children instead record host/unavailable provenance. The
 bounded report is persisted in child `meta.json` independently of lifecycle
 termination, and every continuation produces a fresh report. Delegate receipts
 also state how many root descendant slots remain (for example `3 of 16
-descendant slots remaining`) whenever a delegate budget applies.
+descendant slots remaining`). Non-positive budget settings select the default
+4-active/16-total limits rather than disabling the budget.
 
 `delegate_output=lines` adds a curated prompt-scoped view of foreground,
 background, concurrent, and nested child activity to parent stderr. Direct

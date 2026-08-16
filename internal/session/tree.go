@@ -840,13 +840,18 @@ func contextCheckpoint(entry Entry) (llm.Message, error) {
 		return llm.Message{}, fmt.Errorf("session: compaction %q has no checkpoint", entry.ID)
 	}
 	checkpoint := cloneMessagesForTree([]llm.Message{*entry.Checkpoint})[0]
+	readFilesOmitted := 0
+	if checkpoint.Compaction != nil {
+		readFilesOmitted = checkpoint.Compaction.ReadFilesOmitted
+	}
 	checkpoint.Compaction = &llm.CompactionMetadata{
-		Summary:        entry.Summary,
-		SummarySource:  entry.SummarySource,
-		FallbackReason: entry.FallbackReason,
-		Focus:          entry.CustomFocus,
-		ReadFiles:      append([]string(nil), entry.ReadFiles...),
-		ModifiedFiles:  append([]string(nil), entry.ModifiedFiles...),
+		Summary:          entry.Summary,
+		SummarySource:    entry.SummarySource,
+		FallbackReason:   entry.FallbackReason,
+		Focus:            entry.CustomFocus,
+		ReadFiles:        append([]string(nil), entry.ReadFiles...),
+		ReadFilesOmitted: readFilesOmitted,
+		ModifiedFiles:    append([]string(nil), entry.ModifiedFiles...),
 	}
 	return checkpoint, nil
 }

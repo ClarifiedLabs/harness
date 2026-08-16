@@ -248,7 +248,7 @@ func validateDeclaredCompletion(report declaredCompletionReport, contract string
 			if coverage != "complete" && coverage != "partial" {
 				return session.ChildCompletionValidationInvalid
 			}
-			if report.Outcome == session.ChildCompletionOutcomeComplete && coverage == "complete" && len(report.unreviewedOrDefault()) != 0 {
+			if report.Outcome == session.ChildCompletionOutcomeComplete && (coverage != "complete" || len(report.unreviewedOrDefault()) != 0) {
 				return session.ChildCompletionValidationInvalid
 			}
 		}
@@ -262,6 +262,9 @@ func validateDeclaredCompletion(report declaredCompletionReport, contract string
 		}
 		if partialFields && foreign() {
 			return session.ChildCompletionValidationInvalid
+		}
+		if report.Evidence != nil && len(*report.Evidence) > maxCompletionEvidenceItems {
+			return session.ChildCompletionValidationOversized
 		}
 		for _, evidence := range report.evidenceOrDefault() {
 			if !boundedString(evidence.Path, maxCompletionStringBytes, false) || !boundedString(evidence.Symbol, maxCompletionStringBytes, true) {

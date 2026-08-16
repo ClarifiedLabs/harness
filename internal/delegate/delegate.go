@@ -286,9 +286,9 @@ func (b *delegateBudget) acquire(logicalID string, continuation bool) (func(), e
 	return func() { once.Do(func() { b.mu.Lock(); b.active--; b.mu.Unlock() }) }, nil
 }
 
-// remaining reports the descendant slots still available under the budget.
-// ok is false for an unlimited (nil) budget, in which case no receipt clause
-// applies.
+// remaining reports the root descendant slots still available. Runners always
+// have a budget: non-positive settings resolve to the 4-active/16-total defaults.
+// The nil guard only keeps a zero-value or test Runner safe.
 func (b *delegateBudget) remaining() (remaining, total int, ok bool) {
 	if b == nil {
 		return 0, 0, false
@@ -836,15 +836,16 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	child.SetCompactionArchiver(func(_ context.Context, archive agent.CompactionArchive) (string, error) {
 		ref, err := session.SaveCompaction(childDir, session.Compaction{
-			Time:           r.now(),
-			Summary:        archive.Summary,
-			SummarySource:  archive.SummarySource,
-			FallbackReason: archive.FallbackReason,
-			Usage:          archive.Usage,
-			Messages:       archive.Messages,
-			Focus:          archive.Focus,
-			ReadFiles:      archive.ReadFiles,
-			ModifiedFiles:  archive.ModifiedFiles,
+			Time:             r.now(),
+			Summary:          archive.Summary,
+			SummarySource:    archive.SummarySource,
+			FallbackReason:   archive.FallbackReason,
+			Usage:            archive.Usage,
+			Messages:         archive.Messages,
+			Focus:            archive.Focus,
+			ReadFiles:        archive.ReadFiles,
+			ReadFilesOmitted: archive.ReadFilesOmitted,
+			ModifiedFiles:    archive.ModifiedFiles,
 		})
 		if err == nil {
 			childTodos.RequireRequestContext()

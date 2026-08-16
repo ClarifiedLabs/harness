@@ -97,15 +97,16 @@ const (
 // CompactionArchive is handed to the optional archive callback before old
 // messages are removed from the active transcript.
 type CompactionArchive struct {
-	Messages       []llm.Message
-	Summary        string
-	SummarySource  string
-	FallbackReason string
-	Usage          llm.Usage
-	TokensBefore   int
-	Focus          string
-	ReadFiles      []string
-	ModifiedFiles  []string
+	Messages         []llm.Message
+	Summary          string
+	SummarySource    string
+	FallbackReason   string
+	Usage            llm.Usage
+	TokensBefore     int
+	Focus            string
+	ReadFiles        []string
+	ReadFilesOmitted int
+	ModifiedFiles    []string
 }
 
 // CompactionArchiver preserves raw compacted messages and returns a reference
@@ -270,6 +271,7 @@ func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result 
 		candidate.archive.FallbackReason,
 		candidate.archive.Focus,
 		candidate.archive.ReadFiles,
+		candidate.archive.ReadFilesOmitted,
 		candidate.archive.ModifiedFiles,
 	)
 	a.transcript = compacted
@@ -491,14 +493,15 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	var usage llm.Usage
 	var older, kept []llm.Message
 	var readFiles, modifiedFiles []string
+	var readFilesOmitted int
 	var compacted []llm.Message
 	for {
 		older = a.transcript[:boundary]
 		kept = a.transcript[boundary:]
 		prior := priorCompactionMetadata(older)
-		readFiles, modifiedFiles = a.compactionFileActivity(older, prior)
+		readFiles, modifiedFiles, readFilesOmitted = a.compactionFileActivity(older, prior)
 		if !fallbackUsed {
-			generated, attemptUsage, err := a.summarizeCompaction(summaryCtx, older, prior, readFiles, modifiedFiles, focus)
+			generated, attemptUsage, err := a.summarizeCompaction(summaryCtx, older, prior, readFiles, readFilesOmitted, modifiedFiles, focus)
 			usage = add(usage, attemptUsage)
 			if err != nil {
 				if ctx.Err() != nil {
@@ -520,7 +523,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 				summary = generated
 			}
 		}
-		compacted = append([]llm.Message{a.checkpointMessage(summary, older, "", summarySource, fallbackReason, focus, readFiles, modifiedFiles)}, cloneMessages(kept)...)
+		compacted = append([]llm.Message{a.checkpointMessage(summary, older, "", summarySource, fallbackReason, focus, readFiles, readFilesOmitted, modifiedFiles)}, cloneMessages(kept)...)
 		if collapseAll || a.estimateContextForTranscript(nil, compacted).Total <= a.window()*a.targetPercent()/100 {
 			break
 		}
@@ -549,15 +552,16 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	archiveRef := ""
 	if a.archiveCompaction != nil {
 		ref, err := a.archiveCompaction(ctx, CompactionArchive{
-			Messages:       cloneMessages(older),
-			Summary:        summary,
-			SummarySource:  summarySource,
-			FallbackReason: fallbackReason,
-			Usage:          usage,
-			TokensBefore:   before,
-			Focus:          focus,
-			ReadFiles:      append([]string(nil), readFiles...),
-			ModifiedFiles:  append([]string(nil), modifiedFiles...),
+			Messages:         cloneMessages(older),
+			Summary:          summary,
+			SummarySource:    summarySource,
+			FallbackReason:   fallbackReason,
+			Usage:            usage,
+			TokensBefore:     before,
+			Focus:            focus,
+			ReadFiles:        append([]string(nil), readFiles...),
+			ReadFilesOmitted: readFilesOmitted,
+			ModifiedFiles:    append([]string(nil), modifiedFiles...),
 		})
 		if err != nil {
 			sink.Notice(fmt.Sprintf("[compact archive failed: %v; keeping full transcript]", err))
@@ -570,7 +574,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	// Adding an archive reference changes only checkpoint text, so the transcript
 	// shape validated above cannot become invalid after the side-effectful archive
 	// callback succeeds.
-	compacted[0] = a.checkpointMessage(summary, older, archiveRef, summarySource, fallbackReason, focus, readFiles, modifiedFiles)
+	compacted[0] = a.checkpointMessage(summary, older, archiveRef, summarySource, fallbackReason, focus, readFiles, readFilesOmitted, modifiedFiles)
 
 	a.transcript = compacted
 	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
@@ -757,7 +761,7 @@ func (a *Agent) summarize(ctx context.Context, system string, older []llm.Messag
 // branch/handoff summarization. A structured prior checkpoint is archived and
 // preserved for active-instruction extraction, but is not re-summarized as
 // ordinary conversation.
-func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, prior *llm.CompactionMetadata, readFiles, modifiedFiles []string, focus string) (string, llm.Usage, error) {
+func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, prior *llm.CompactionMetadata, readFiles []string, readFilesOmitted int, modifiedFiles []string, focus string) (string, llm.Usage, error) {
 	newlyAged := older
 	if prior != nil {
 		newlyAged = make([]llm.Message, 0, len(older)-1)
@@ -787,7 +791,7 @@ func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, pr
 			finalMessages = append(finalMessages, message)
 		}
 	}
-	metadata, err := compactionSummaryMetadataMessage(a.now(), prior, readFiles, modifiedFiles)
+	metadata, err := compactionSummaryMetadataMessage(a.now(), prior, readFiles, readFilesOmitted, modifiedFiles)
 	if err != nil {
 		return "", total, err
 	}
@@ -811,15 +815,17 @@ func compactionSystem(system, focus string) string {
 	return system + "\n\nFor this compaction only, give special attention to: " + focus + "\nStill satisfy every required output section."
 }
 
-func compactionSummaryMetadataMessage(now time.Time, prior *llm.CompactionMetadata, readFiles, modifiedFiles []string) (llm.Message, error) {
+func compactionSummaryMetadataMessage(now time.Time, prior *llm.CompactionMetadata, readFiles []string, readFilesOmitted int, modifiedFiles []string) (llm.Message, error) {
 	type summaryMetadata struct {
-		PreviousSummary string   `json:"previous_summary,omitempty"`
-		ReadFiles       []string `json:"read_files"`
-		ModifiedFiles   []string `json:"modified_files"`
+		PreviousSummary  string   `json:"previous_summary,omitempty"`
+		ReadFiles        []string `json:"read_files"`
+		ReadFilesOmitted int      `json:"read_files_omitted,omitempty"`
+		ModifiedFiles    []string `json:"modified_files"`
 	}
 	data := summaryMetadata{
-		ReadFiles:     append([]string{}, readFiles...),
-		ModifiedFiles: append([]string{}, modifiedFiles...),
+		ReadFiles:        append([]string{}, readFiles...),
+		ReadFilesOmitted: readFilesOmitted,
+		ModifiedFiles:    append([]string{}, modifiedFiles...),
 	}
 	if prior != nil {
 		data.PreviousSummary = prior.Summary
@@ -1266,7 +1272,7 @@ func hasNonResult(m llm.Message) bool {
 	return len(m.Content) == 0
 }
 
-func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRef, summarySource, fallbackReason, focus string, readFiles, modifiedFiles []string) llm.Message {
+func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRef, summarySource, fallbackReason, focus string, readFiles []string, readFilesOmitted int, modifiedFiles []string) llm.Message {
 	var b strings.Builder
 	b.WriteString(checkpointHeader)
 	b.WriteString(checkpointPreamble)
@@ -1289,19 +1295,13 @@ func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRe
 	b.WriteString(checkpointProgress)
 	b.WriteString(summary)
 	b.WriteString(checkpointFiles)
-	kept := append([]string{}, readFiles...)
-	omitted := 0
-	if len(kept) > compactionReadFilesCap {
-		omitted = len(kept) - compactionReadFilesCap
-		kept = kept[len(kept)-compactionReadFilesCap:]
-	}
 	fileJSON, _ := json.Marshal(struct {
 		ReadFiles        []string `json:"read_files"`
 		ReadFilesOmitted int      `json:"read_files_omitted,omitempty"`
 		ModifiedFiles    []string `json:"modified_files"`
 	}{
-		ReadFiles:        kept,
-		ReadFilesOmitted: omitted,
+		ReadFiles:        append([]string{}, readFiles...),
+		ReadFilesOmitted: readFilesOmitted,
 		ModifiedFiles:    append([]string{}, modifiedFiles...),
 	})
 	b.Write(fileJSON)
@@ -1312,12 +1312,13 @@ func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRe
 	message := a.textMessage(llm.RoleUser, b.String())
 	message.Origin = llm.MessageOriginCompactionCheckpoint
 	message.Compaction = &llm.CompactionMetadata{
-		Summary:        summary,
-		SummarySource:  summarySource,
-		FallbackReason: fallbackReason,
-		Focus:          focus,
-		ReadFiles:      append([]string(nil), readFiles...),
-		ModifiedFiles:  append([]string(nil), modifiedFiles...),
+		Summary:          summary,
+		SummarySource:    summarySource,
+		FallbackReason:   fallbackReason,
+		Focus:            focus,
+		ReadFiles:        append([]string(nil), readFiles...),
+		ReadFilesOmitted: readFilesOmitted,
+		ModifiedFiles:    append([]string(nil), modifiedFiles...),
 	}
 	return message
 }
@@ -1369,7 +1370,7 @@ const compactionReadFilesCap = 200
 // in later rounds. The read list is capped at compactionReadFilesCap entries
 // (oldest first-touch dropped first) so neither the checkpoint JSON nor a
 // future summary request grows without bound.
-func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.CompactionMetadata) ([]string, []string) {
+func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.CompactionMetadata) ([]string, []string, int) {
 	reads := make(map[string]string)
 	modified := make(map[string]string)
 	readOrder := make([]string, 0) // read keys in first-touch order, oldest first
@@ -1397,7 +1398,9 @@ func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.Compac
 			modified[key] = display
 		}
 	}
+	omitted := 0
 	if prior != nil {
+		omitted = prior.ReadFilesOmitted
 		for _, path := range prior.ModifiedFiles {
 			addModified(path)
 		}
@@ -1445,8 +1448,9 @@ func (a *Agent) compactionFileActivity(messages []llm.Message, prior *llm.Compac
 			delete(reads, key)
 		}
 		readOrder = readOrder[excess:]
+		omitted += excess
 	}
-	return sortedPathValues(reads), sortedPathValues(modified)
+	return sortedPathValues(reads), sortedPathValues(modified), omitted
 }
 
 func removeKey(keys []string, key string) []string {

@@ -311,7 +311,10 @@ func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
 		asstToolUse("u1", "shell", `{"args":["touch","ignored.go"]}`), toolResult("u1", "ok"),
 	}
 	prior := &llm.CompactionMetadata{ReadFiles: []string{"prior.go"}, ModifiedFiles: []string{"already.go"}}
-	reads, modified := a.compactionFileActivity(messages, prior)
+	reads, modified, omitted := a.compactionFileActivity(messages, prior)
+	if omitted != 0 {
+		t.Fatalf("read files omitted = %d, want 0", omitted)
+	}
 	if got, want := strings.Join(reads, ","), "prior.go,z.go"; got != want {
 		t.Fatalf("read files = %q, want %q", got, want)
 	}
@@ -512,7 +515,7 @@ func TestRepeatedCompactionMapReduceUsesPriorSummaryOnlyInFinalUpdate(t *testing
 	for i := 0; i < 3; i++ {
 		older = append(older, userText("q"), asstText(strings.Repeat(string(rune('a'+i)), 6_000)))
 	}
-	got, _, err := a.summarizeCompaction(context.Background(), older, checkpoint.Compaction, []string{"read.go"}, nil, "focus here")
+	got, _, err := a.summarizeCompaction(context.Background(), older, checkpoint.Compaction, []string{"read.go"}, 0, nil, "focus here")
 	if err != nil {
 		t.Fatalf("summarizeCompaction: %v", err)
 	}
@@ -2133,7 +2136,7 @@ func TestCompactionReadFilesCapBoundsCheckpointIndex(t *testing.T) {
 		)
 	}
 	a := newAgent(llmtest.New("fake", summaryStep("S", 10, 1)), reg, Options{Model: "claude-opus-4-8"})
-	reads, modified := a.compactionFileActivity(msgs, nil)
+	reads, modified, omitted := a.compactionFileActivity(msgs, nil)
 	if len(reads) != compactionReadFilesCap {
 		t.Fatalf("capped read files = %d, want %d", len(reads), compactionReadFilesCap)
 	}
@@ -2147,13 +2150,14 @@ func TestCompactionReadFilesCapBoundsCheckpointIndex(t *testing.T) {
 	if len(modified) != 5 {
 		t.Fatalf("modified files capped: %v", modified)
 	}
+	if omitted != 100 {
+		t.Fatalf("read files omitted = %d, want 100", omitted)
+	}
 
-	// The checkpoint truncates an over-long list itself and reports the count.
-	oversized := append([]string{}, reads...)
-	oversized = append(oversized, "extra1.go", "extra2.go")
-	checkpoint := a.checkpointMessage("S", msgs, "", "model", "", "", oversized, modified)
+	// The activity collector passes the omission count through to the checkpoint.
+	checkpoint := a.checkpointMessage("S", msgs, "", "model", "", "", reads, omitted, modified)
 	text := checkpoint.Content[0].Text
-	if !strings.Contains(text, `"read_files_omitted":2`) {
+	if !strings.Contains(text, `"read_files_omitted":100`) {
 		t.Fatalf("checkpoint missing read_files_omitted: %.200s", text[len(text)-400:])
 	}
 	if strings.Contains(text, "read_000.go") {
@@ -2174,13 +2178,13 @@ func containsPath(paths []string, want string) bool {
 // read list is capped too, and modified paths always win over reads.
 func TestCompactionPriorMetadataCarryForwardIsCapped(t *testing.T) {
 	reg := tools.Default()
-	prior := &llm.CompactionMetadata{}
+	prior := &llm.CompactionMetadata{ReadFilesOmitted: 7}
 	for i := 0; i < compactionReadFilesCap+50; i++ {
 		prior.ReadFiles = append(prior.ReadFiles, fmt.Sprintf("old_%03d.go", i))
 	}
 	prior.ModifiedFiles = []string{"kept.go"}
 	a := newAgent(llmtest.New("fake"), reg, Options{Model: "claude-opus-4-8"})
-	reads, modified := a.compactionFileActivity(nil, prior)
+	reads, modified, omitted := a.compactionFileActivity(nil, prior)
 	if len(reads) != compactionReadFilesCap {
 		t.Fatalf("prior carry-forward reads = %d, want %d", len(reads), compactionReadFilesCap)
 	}
@@ -2189,6 +2193,9 @@ func TestCompactionPriorMetadataCarryForwardIsCapped(t *testing.T) {
 	}
 	if !containsPath(modified, "kept.go") {
 		t.Fatalf("prior modified path dropped: %v", modified)
+	}
+	if omitted != 57 {
+		t.Fatalf("carried omission count = %d, want 57", omitted)
 	}
 }
 

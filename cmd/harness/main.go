@@ -1499,15 +1499,16 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	ag.SetCompactionArchiver(func(ctx context.Context, archive agent.CompactionArchive) (string, error) {
 		ref, err := session.SaveCompaction(app.SessionPath, session.Compaction{
-			Time:           now(),
-			Summary:        archive.Summary,
-			SummarySource:  archive.SummarySource,
-			FallbackReason: archive.FallbackReason,
-			Usage:          archive.Usage,
-			Messages:       archive.Messages,
-			Focus:          archive.Focus,
-			ReadFiles:      archive.ReadFiles,
-			ModifiedFiles:  archive.ModifiedFiles,
+			Time:             now(),
+			Summary:          archive.Summary,
+			SummarySource:    archive.SummarySource,
+			FallbackReason:   archive.FallbackReason,
+			Usage:            archive.Usage,
+			Messages:         archive.Messages,
+			Focus:            archive.Focus,
+			ReadFiles:        archive.ReadFiles,
+			ReadFilesOmitted: archive.ReadFilesOmitted,
+			ModifiedFiles:    archive.ModifiedFiles,
 		})
 		if err != nil {
 			return "", err

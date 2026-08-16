@@ -2842,6 +2842,49 @@ func TestResponsesProbeResetsDeadAnchorBeforeRequest(t *testing.T) {
 	}
 }
 
+func TestResponsesProbeDisablesStateAfterRepeatedDeadAnchors(t *testing.T) {
+	fp := llmtest.New("responses",
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_1"},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_2"},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_3"},
+	)
+	a := newAgent(&probeProvider{FakeProvider: fp, canContinue: func(string) bool { return false }}, tools.Default(), Options{ResponsesStateful: true})
+	a.SetTranscript([]llm.Message{userText("old"), asstText("answer")})
+	digest, err := llm.FingerprintMessages(a.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp_anchor", AnchorMessages: 2, AnchorDigest: digest})
+
+	for prompt := 1; prompt <= 3; prompt++ {
+		sink := &recordSink{}
+		if err := a.RunPrompt(context.Background(), fmt.Sprintf("prompt %d", prompt), sink); err != nil {
+			t.Fatalf("RunPrompt %d: %v", prompt, err)
+		}
+		disabled := false
+		for _, notice := range sink.notices {
+			if strings.Contains(notice, "continuation repeatedly unavailable") {
+				disabled = true
+			}
+		}
+		if disabled != (prompt == 3) {
+			t.Fatalf("prompt %d disabled=%v, notices=%v", prompt, disabled, sink.notices)
+		}
+	}
+	if len(fp.Requests) != 3 {
+		t.Fatalf("provider requests = %d, want one per prompt", len(fp.Requests))
+	}
+	if fp.Requests[0].StoreResponse != true || fp.Requests[1].StoreResponse != true {
+		t.Fatalf("stateful mode disabled before third probe failure: %+v", fp.Requests)
+	}
+	if fp.Requests[2].StoreResponse || fp.Requests[2].PreviousResponseID != "" {
+		t.Fatalf("third request = store %v prev %q, want stateless", fp.Requests[2].StoreResponse, fp.Requests[2].PreviousResponseID)
+	}
+	if state := a.ResponseState(); state != nil {
+		t.Fatalf("response state = %+v, want cleared after disable", state)
+	}
+}
+
 func TestResponsesProbeAbsentProviderKeepsStatefulBehavior(t *testing.T) {
 	// A provider without the probe (plain HTTP) must keep its anchor so HTTP
 	// behavior is unchanged.

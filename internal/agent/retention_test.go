@@ -1271,6 +1271,20 @@ func TestRetentionTrimsSupersededEditInputs(t *testing.T) {
 	}
 }
 
+func TestRetentionInputTrimmedUsesStructuralMarker(t *testing.T) {
+	ordinary := json.RawMessage(`{"path":"main.go","content":"content omitted; later successful write exists"}`)
+	if retentionInputTrimmed(ordinary) {
+		t.Fatal("ordinary file content was mistaken for a retention receipt")
+	}
+	receipt := json.RawMessage(`{"path":"main.go","_superseded":"content omitted; later successful write exists"}`)
+	if !retentionInputTrimmed(receipt) {
+		t.Fatal("structural retention receipt was not recognized")
+	}
+	if retentionInputTrimmed(json.RawMessage(`{"_superseded":`)) {
+		t.Fatal("malformed input was mistaken for a retention receipt")
+	}
+}
+
 // TestStablePrefixStopsBeforeFutureTrimmableToolUse pins the P1 cache-prefix
 // interaction: a message carrying a superseded write input is not promised to
 // the stable prefix, because a later epoch rewrites it.

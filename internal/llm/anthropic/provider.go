@@ -97,13 +97,9 @@ func isOfficialAnthropicEndpoint(base string) bool {
 	if err != nil {
 		return false
 	}
-	host := parsed.Hostname()
-	if host != "api.anthropic.com" {
-		return false
-	}
-	// Accept any scheme/port on the official host; gateways on other hosts —
+	// Accept any scheme/port on the exact official host; gateways on other hosts —
 	// including a localhost proxy that forwards to it — are excluded.
-	return strings.HasPrefix(host, "api.anthropic.com")
+	return parsed.Hostname() == "api.anthropic.com"
 }
 
 func (p *Provider) Name() string { return "anthropic" }

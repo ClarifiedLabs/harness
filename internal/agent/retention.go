@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -80,9 +79,9 @@ func atOrBelowPercent(value, total, pct int) bool {
 // retention pass has already shrunk, so repeated passes never re-trim it.
 const retentionTrimMarker = "[older tool output trimmed"
 
-// retentionInputMarker is the parallel idempotency sentinel embedded in a
-// write/edit tool input the retention pass has replaced with a path receipt.
-const retentionInputMarker = "content omitted"
+// retentionInputMarker is the reserved JSON field embedded in a write/edit tool
+// input the retention pass has replaced with a path receipt.
+const retentionInputMarker = "_superseded"
 
 // applyRetention shrinks the live transcript in place before a model request so
 // large stale tool outputs and aged images are not re-sent verbatim every turn
@@ -561,7 +560,11 @@ func (a *Agent) trimSupersededToolInput(b *llm.ContentBlock) bool {
 }
 
 // retentionInputTrimmed reports whether a tool_use input has already been
-// replaced with a retention receipt.
+// replaced with a retention receipt. Decode the reserved field rather than
+// searching raw bytes: ordinary file content may contain the receipt prose.
 func retentionInputTrimmed(input json.RawMessage) bool {
-	return bytes.Contains(input, []byte(retentionInputMarker))
+	var receipt struct {
+		Superseded string `json:"_superseded"`
+	}
+	return json.Unmarshal(input, &receipt) == nil && receipt.Superseded != ""
 }

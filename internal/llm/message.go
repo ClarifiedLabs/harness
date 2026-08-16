@@ -51,12 +51,13 @@ const (
 // rendered checkpoint text, and preserves deterministic compacted-history file
 // activity alongside the summary prose and its provenance.
 type CompactionMetadata struct {
-	Summary        string   `json:"summary"`
-	SummarySource  string   `json:"summary_source,omitempty"`
-	FallbackReason string   `json:"fallback_reason,omitempty"`
-	Focus          string   `json:"focus,omitempty"`
-	ReadFiles      []string `json:"read_files,omitempty"`
-	ModifiedFiles  []string `json:"modified_files,omitempty"`
+	Summary          string   `json:"summary"`
+	SummarySource    string   `json:"summary_source,omitempty"`
+	FallbackReason   string   `json:"fallback_reason,omitempty"`
+	Focus            string   `json:"focus,omitempty"`
+	ReadFiles        []string `json:"read_files,omitempty"`
+	ReadFilesOmitted int      `json:"read_files_omitted,omitempty"`
+	ModifiedFiles    []string `json:"modified_files,omitempty"`
 }
 
 // Message is one turn-fragment in a transcript: a role plus an ordered list of

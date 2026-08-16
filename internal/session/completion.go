@@ -108,7 +108,9 @@ func validateChildCompletionReport(report ChildCompletionReport, expectedContrac
 			!(report.Coverage == "" && report.ValidationStatus == ChildCompletionValidationPartialFields) {
 			return ChildCompletionValidationInvalid
 		}
-		if report.Outcome == ChildCompletionOutcomeComplete && report.Coverage == "complete" && len(report.UnreviewedScope) != 0 {
+		if report.Outcome == ChildCompletionOutcomeComplete &&
+			!(report.ValidationStatus == ChildCompletionValidationPartialFields && report.Coverage == "") &&
+			(report.Coverage != "complete" || len(report.UnreviewedScope) != 0) {
 			return ChildCompletionValidationInvalid
 		}
 		if !validCompletionStrings(report.UnreviewedScope, childCompletionMaxUnreviewedItems, childCompletionMaxStringBytes, false) {

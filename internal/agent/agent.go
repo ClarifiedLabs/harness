@@ -616,8 +616,9 @@ type Agent struct {
 	// §8.1). It is non-nil only while RunAdmittedPromptWithContext executes.
 	failGuard         *failureGuard
 	responsesStateful bool
-	// continuationFailures counts consecutive previous-response rejections.
-	// Three in a row disables stateful mode for the rest of the run.
+	// continuationFailures counts consecutive unavailable continuation attempts,
+	// whether found by a local probe or rejected by the provider. Three in a row
+	// disables stateful mode for the rest of the run.
 	continuationFailures int
 	interactive          bool            // 1h Anthropic cache breakpoint; see Options.Interactive
 	steer                chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
@@ -928,7 +929,20 @@ func (a *Agent) ensureResponseContinuation(sink EventSink) bool {
 	if sink != nil {
 		sink.Notice("[responses state reset: continuation unavailable; sending full context]")
 	}
+	a.noteContinuationFailure(sink)
 	return true
+}
+
+func (a *Agent) noteContinuationFailure(sink EventSink) {
+	a.continuationFailures++
+	if a.continuationFailures < 3 {
+		return
+	}
+	a.continuationFailures = 0
+	a.SetResponsesStateful(false)
+	if sink != nil {
+		sink.Notice("[responses state disabled: continuation repeatedly unavailable; running stateless]")
+	}
 }
 
 // SetSleep replaces the mid-stream retry backoff function. Tests inject a no-op
@@ -1972,13 +1986,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
-			if a.continuationFailures++; a.continuationFailures >= 3 {
-				// SetResponsesStateful(false) already clears the anchor; do not
-				// reset again.
-				a.continuationFailures = 0
-				a.SetResponsesStateful(false)
-				sink.Notice("[responses state disabled: continuation repeatedly unavailable; running stateless]")
-			}
+			a.noteContinuationFailure(sink)
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 

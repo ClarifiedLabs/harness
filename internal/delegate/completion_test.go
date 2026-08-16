@@ -27,6 +27,11 @@ func TestParseCompletionReportContractsAndFallbacks(t *testing.T) {
 		tooManyFiles[i] = "x"
 	}
 	oversizedList := `{"outcome":"partial","unresolved_requirements":1,"changed_files":["` + strings.Join(tooManyFiles, `","`) + `"],"verification":[{"check":"test","status":"passed"}]}`
+	tooMuchEvidence := make([]string, maxCompletionEvidenceItems+1)
+	for i := range tooMuchEvidence {
+		tooMuchEvidence[i] = `{"path":"x"}`
+	}
+	oversizedEvidence := `{"outcome":"partial","unresolved_requirements":1,"evidence":[` + strings.Join(tooMuchEvidence, ",") + `],"unresolved_questions":[]}`
 
 	tests := []struct {
 		name       string
@@ -52,6 +57,7 @@ func TestParseCompletionReportContractsAndFallbacks(t *testing.T) {
 		{name: "review fields missing degrades to partial", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1}`), contract: session.ChildCompletionContractReview, outcome: session.ChildCompletionOutcomePartial, validation: session.ChildCompletionValidationPartialFields, prose: ""},
 		{name: "review partial contract fields still invalid", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1,"coverage":"partial"}`), contract: session.ChildCompletionContractReview, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationInvalid},
 		{name: "bounded list", text: completionBlock(oversizedList), contract: session.ChildCompletionContractImplementation, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationOversized},
+		{name: "bounded evidence", text: completionBlock(oversizedEvidence), contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationOversized},
 		{name: "oversized block", text: completionBlock(strings.Repeat("x", maxCompletionBlockBytes+1)), contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationOversized},
 		{name: "duplicate", text: validGeneral + "\n" + validGeneral, contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationDuplicate, prose: validGeneral + "\n" + validGeneral},
 		{name: "not final", text: validGeneral + "\ntrailing prose", contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationMalformed, prose: validGeneral + "\ntrailing prose"},
@@ -156,6 +162,7 @@ func TestParseCompletionReportStillInvalidatesWrongContent(t *testing.T) {
 		{name: "blocked with empty blockers", body: `{"outcome":"blocked","unresolved_requirements":1,"blockers":[]}`, contract: session.ChildCompletionContractGeneral},
 		{name: "unresolved missing", body: `{"outcome":"complete","evidence":[]}`, contract: session.ChildCompletionContractGeneral},
 		{name: "partial contract fields on review", body: `{"outcome":"partial","unresolved_requirements":1,"coverage":"partial"}`, contract: session.ChildCompletionContractReview},
+		{name: "complete review with partial coverage", body: `{"outcome":"complete","unresolved_requirements":0,"coverage":"partial","unreviewed_scope":["src/"]}`, contract: session.ChildCompletionContractReview},
 		{name: "foreign field on review", body: `{"outcome":"partial","unresolved_requirements":1,"coverage":"partial","unreviewed_scope":[],"evidence":[]}`, contract: session.ChildCompletionContractReview},
 		{name: "verification only on implementation", body: `{"outcome":"partial","unresolved_requirements":1,"verification":[]}`, contract: session.ChildCompletionContractImplementation},
 	} {
