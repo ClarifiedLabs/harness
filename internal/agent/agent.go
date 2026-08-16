@@ -1972,6 +1972,13 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
+			if a.continuationFailures++; a.continuationFailures >= 3 {
+				// SetResponsesStateful(false) already clears the anchor; do not
+				// reset again.
+				a.continuationFailures = 0
+				a.SetResponsesStateful(false)
+				sink.Notice("[responses state disabled: continuation repeatedly unavailable; running stateless]")
+			}
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 
@@ -2024,6 +2031,11 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		completeTurn()
 		a.transcript = append(a.transcript, a.assistantMessage(res))
 		a.updateResponseState(res)
+		if modelReq.usedPrevious {
+			// Only a turn that actually continued the anchor clears the
+			// consecutive-failure count; a stateless recovery turn must not.
+			a.continuationFailures = 0
+		}
 		if res.stopReason != llm.StopToolUse {
 			if err := a.validateTranscript("after assistant turn"); err != nil {
 				return err

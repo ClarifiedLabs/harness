@@ -2862,6 +2862,62 @@ func TestResponsesProbeAbsentProviderKeepsStatefulBehavior(t *testing.T) {
 	}
 }
 
+func TestResponsesStateDisabledAfterRepeatedContinuationFailures(t *testing.T) {
+	// Each prompt's first request is rejected, so the count accumulates across
+	// prompts: the reactive stateless retry inside a prompt succeeds without
+	// continuing the anchor and must not clear it.
+	rejected := &llm.APIError{StatusCode: 400, Code: "previous_response_not_found", Message: "missing previous_response_id"}
+	fp := llmtest.New("responses",
+		llmtest.Step{Err: rejected},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_ok_1"},
+		llmtest.Step{Err: rejected},
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_ok_2"},
+		llmtest.Step{Err: rejected},
+		// The third failure disables stateful mode; its retry is stateless.
+		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_ok_3"},
+	)
+	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
+	a.SetTranscript([]llm.Message{userText("old"), asstText("answer")})
+	digest, err := llm.FingerprintMessages(a.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp_anchor", AnchorMessages: 2, AnchorDigest: digest})
+
+	for prompt := 1; prompt <= 3; prompt++ {
+		sink := &recordSink{}
+		if err := a.RunPrompt(context.Background(), fmt.Sprintf("prompt %d", prompt), sink); err != nil {
+			t.Fatalf("RunPrompt %d: %v", prompt, err)
+		}
+		disabled := false
+		for _, n := range sink.notices {
+			if strings.Contains(n, "continuation repeatedly unavailable") {
+				disabled = true
+			}
+		}
+		if prompt < 3 && disabled {
+			t.Fatalf("prompt %d disabled stateful mode early: %v", prompt, sink.notices)
+		}
+		if prompt == 3 && !disabled {
+			t.Fatalf("prompt 3 missing disable notice: %v", sink.notices)
+		}
+	}
+	// Six scripted steps for three rejected+retried prompts: every provider
+	// call maps to a scripted step, so no extra probe round-trips happened.
+	if len(fp.Requests) != 6 {
+		t.Fatalf("provider requests = %d, want 6", len(fp.Requests))
+	}
+	// From the disable point on, requests are stateless.
+	for i, req := range fp.Requests[5:] {
+		if req.StoreResponse || req.PreviousResponseID != "" {
+			t.Fatalf("request[%d] = store %v prev %q, want stateless after disable", i+5, req.StoreResponse, req.PreviousResponseID)
+		}
+	}
+	if state := a.ResponseState(); state != nil {
+		t.Fatalf("response state = %+v, want cleared after disable", state)
+	}
+}
+
 func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *testing.T) {
 	fp := llmtest.New("responses",
 		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 12}}}, Err: &llm.APIError{StatusCode: 400, Code: "previous_response_not_found", Message: "missing previous_response_id"}},
