@@ -82,10 +82,13 @@ func TestCompletionContractSystemPromptIncludesCommonAndSpecificSchema(t *testin
 	tests := []struct {
 		contract string
 		specific []string
+		// exampleKeys must all appear inside the fenced example block, so a
+		// generic core-only example cannot satisfy the assertion.
+		exampleKeys []string
 	}{
-		{contract: session.ChildCompletionContractImplementation, specific: []string{"changed_files", "verification", "not_run"}},
-		{contract: session.ChildCompletionContractReview, specific: []string{"coverage", "unreviewed_scope"}},
-		{contract: session.ChildCompletionContractGeneral, specific: []string{"evidence", "unresolved_questions"}},
+		{contract: session.ChildCompletionContractImplementation, specific: []string{"changed_files", "verification", "not_run"}, exampleKeys: []string{"outcome", "unresolved_requirements", "blockers", "changed_files", "verification"}},
+		{contract: session.ChildCompletionContractReview, specific: []string{"coverage", "unreviewed_scope"}, exampleKeys: []string{"outcome", "unresolved_requirements", "blockers", "coverage", "unreviewed_scope"}},
+		{contract: session.ChildCompletionContractGeneral, specific: []string{"evidence", "unresolved_questions"}, exampleKeys: []string{"outcome", "unresolved_requirements", "blockers", "evidence", "unresolved_questions"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.contract, func(t *testing.T) {
@@ -93,6 +96,27 @@ func TestCompletionContractSystemPromptIncludesCommonAndSpecificSchema(t *testin
 			for _, want := range append([]string{"harness-completion", "outcome", "unresolved_requirements", "blockers", "complete", "zero unresolved"}, tc.specific...) {
 				if !strings.Contains(prompt, want) {
 					t.Errorf("prompt missing %q: %s", want, prompt)
+				}
+			}
+			start := strings.Index(prompt, completionFence)
+			if start < 0 {
+				t.Fatalf("prompt has no fenced example: %s", prompt)
+			}
+			block := prompt[start:]
+			if end := strings.Index(block[len(completionFence):], "```"); end >= 0 {
+				block = block[:len(completionFence)+end]
+			}
+			lines := strings.SplitN(block, "\n", 2)
+			if len(lines) != 2 {
+				t.Fatalf("fenced example has no body: %s", block)
+			}
+			var decoded map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(strings.TrimSpace(lines[1])), &decoded); err != nil {
+				t.Fatalf("fenced example is not valid JSON: %v\n%s", err, block)
+			}
+			for _, key := range tc.exampleKeys {
+				if _, ok := decoded[key]; !ok {
+					t.Errorf("example JSON missing %q: %s", key, block)
 				}
 			}
 		})

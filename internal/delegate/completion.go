@@ -246,7 +246,19 @@ func boundedString(value string, maxBytes int, allowEmpty bool) bool {
 }
 
 func completionContractSystemPrompt(system, contract string) string {
-	common := "Your final response must end with exactly one block in this form:\n```harness-completion\n{\"outcome\":\"partial\",\"unresolved_requirements\":1,\"blockers\":[\"...\"]}\n```\nDo not emit that tagged block before the final response. Outcome must be complete, partial, blocked, or failed; unresolved_requirements is a required non-negative integer. Blockers is optional except that blocked requires at least one short blocker. A complete outcome requires zero unresolved requirements. Host fields contract, source, and validation_status must not be included."
+	// The fenced example shows every field the contract requires. Children
+	// copy the example shape, so a generic core-only example produced reports
+	// missing the contract fields and they were discarded as invalid.
+	var example string
+	switch contract {
+	case session.ChildCompletionContractReview:
+		example = `{"outcome":"partial","unresolved_requirements":1,"blockers":[],"coverage":"partial","unreviewed_scope":["..."]}`
+	case session.ChildCompletionContractImplementation:
+		example = `{"outcome":"partial","unresolved_requirements":1,"blockers":[],"changed_files":["..."],"verification":[{"check":"...","status":"passed","detail":"..."}]}`
+	default:
+		example = `{"outcome":"partial","unresolved_requirements":1,"blockers":[],"evidence":[{"path":"...","symbol":"..."}],"unresolved_questions":["..."]}`
+	}
+	common := "Your final response must end with exactly one block in this form:\n```harness-completion\n" + example + "\n```\nDo not emit that tagged block before the final response. Outcome must be complete, partial, blocked, or failed; unresolved_requirements is a required non-negative integer. Blockers is optional except that blocked requires at least one short blocker. A complete outcome requires zero unresolved requirements. Host fields contract, source, and validation_status must not be included."
 	var instruction string
 	switch contract {
 	case session.ChildCompletionContractReview:
