@@ -19,7 +19,7 @@ import (
 )
 
 // AnalysisVersion is the stable schema version emitted by WriteAnalysisJSON.
-const AnalysisVersion = 5
+const AnalysisVersion = 6
 
 const (
 	maxAnalysisTextSessions     = 100
@@ -69,24 +69,17 @@ type WorkflowAnalysis struct {
 	remainingRequirementValues  []int
 }
 
-// CompletionAnalysis aggregates host-validated child completion reports without
-// exposing child prose, blockers, changed paths, or evidence bodies.
+// CompletionAnalysis aggregates host-validated child outcome footers without
+// exposing child Markdown or blocker bodies.
 type CompletionAnalysis struct {
-	Applicable                        bool            `json:"applicable"`
-	Reports                           int             `json:"reports"`
-	Unavailable                       int             `json:"unavailable"`
-	Outcomes                          map[string]int  `json:"outcomes"`
-	Validation                        map[string]int  `json:"validation"`
-	Contracts                         map[string]int  `json:"contracts"`
-	UnresolvedRequirementsTotal       int             `json:"unresolved_requirements_total"`
-	UnresolvedRequirements            IntDistribution `json:"unresolved_requirements"`
-	ImplementationChangedFilesReports int             `json:"implementation_changed_files_reports"`
-	ImplementationVerificationReports int             `json:"implementation_verification_reports"`
-	ReviewCoverage                    map[string]int  `json:"review_coverage"`
-	GeneralEvidenceReports            int             `json:"general_evidence_reports"`
-	ParentReworkAvailable             bool            `json:"parent_rework_available"`
-	ParentReworkObserved              int             `json:"parent_rework_observed"`
-	unresolvedRequirementValues       []int
+	Applicable            bool           `json:"applicable"`
+	Reports               int            `json:"reports"`
+	Unavailable           int            `json:"unavailable"`
+	Outcomes              map[string]int `json:"outcomes"`
+	Validation            map[string]int `json:"validation"`
+	Contracts             map[string]int `json:"contracts"`
+	ParentReworkAvailable bool           `json:"parent_rework_available"`
+	ParentReworkObserved  int            `json:"parent_rework_observed"`
 }
 
 // ProgressAnalysis summarizes turn_progress records. Pending batching steers
@@ -371,7 +364,7 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 				Cohort:     cohort,
 				Execution:  ExecutionAnalysis{Terminations: make(map[string]int)},
 				Workflow:   WorkflowAnalysis{Outcomes: make(map[string]int)},
-				Completion: CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int), ReviewCoverage: make(map[string]int)},
+				Completion: CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int)},
 			}}
 			cohorts[cohort.Key] = acc
 		}
@@ -379,7 +372,7 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		hierarchy := UsageAnalysis{}
 		hierarchyExecution := ExecutionAnalysis{Terminations: make(map[string]int)}
 		hierarchyWorkflow := WorkflowAnalysis{Outcomes: make(map[string]int)}
-		hierarchyCompletion := CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int), ReviewCoverage: make(map[string]int)}
+		hierarchyCompletion := CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int)}
 		var hierarchyStorage StorageAnalysis
 		allRawComplete := opts.Before.IsZero()
 		rootItem := -1
@@ -1187,11 +1180,10 @@ func deriveTelemetry(events []Event, child *ChildMeta) TelemetryAnalysis {
 
 func deriveCompletion(child *ChildMeta, applicable bool) CompletionAnalysis {
 	out := CompletionAnalysis{
-		Applicable:     applicable,
-		Outcomes:       make(map[string]int),
-		Validation:     make(map[string]int),
-		Contracts:      make(map[string]int),
-		ReviewCoverage: make(map[string]int),
+		Applicable: applicable,
+		Outcomes:   make(map[string]int),
+		Validation: make(map[string]int),
+		Contracts:  make(map[string]int),
 	}
 	if !applicable {
 		return out
@@ -1216,7 +1208,6 @@ func deriveCompletion(child *ChildMeta, applicable bool) CompletionAnalysis {
 	}
 	switch report.ValidationStatus {
 	case ChildCompletionValidationValid,
-		ChildCompletionValidationPartialFields,
 		ChildCompletionValidationMissing,
 		ChildCompletionValidationMalformed,
 		ChildCompletionValidationInvalid,
@@ -1230,39 +1221,23 @@ func deriveCompletion(child *ChildMeta, applicable bool) CompletionAnalysis {
 		persisted && !validCompletionLifecycle(child, report.ValidationStatus) {
 		report.ValidationStatus = ChildCompletionValidationInvalid
 	}
-	if report.ValidationStatus == ChildCompletionValidationValid || report.ValidationStatus == ChildCompletionValidationPartialFields {
-		if status := validateChildCompletionReport(report, contract); status != ChildCompletionValidationValid && status != ChildCompletionValidationPartialFields {
+	if report.ValidationStatus == ChildCompletionValidationValid {
+		if status := validateChildCompletionReport(report, contract); status != ChildCompletionValidationValid {
 			report.ValidationStatus = status
 		}
 	}
-	if report.ValidationStatus != ChildCompletionValidationValid && report.ValidationStatus != ChildCompletionValidationPartialFields {
+	if report.ValidationStatus != ChildCompletionValidationValid {
 		report.Outcome = ChildCompletionOutcomeUnknown
 	}
 	out.Outcomes[report.Outcome]++
 	out.Validation[report.ValidationStatus]++
 	out.Contracts[contract]++
-	if report.ValidationStatus != ChildCompletionValidationValid && report.ValidationStatus != ChildCompletionValidationPartialFields {
+	if report.ValidationStatus != ChildCompletionValidationValid {
 		out.Unavailable++
 		return out
 	}
 
 	out.Reports++
-	out.UnresolvedRequirementsTotal += report.UnresolvedRequirements
-	out.unresolvedRequirementValues = append(out.unresolvedRequirementValues, report.UnresolvedRequirements)
-	out.UnresolvedRequirements = intDistribution(out.unresolvedRequirementValues)
-	switch report.Contract {
-	case ChildCompletionContractImplementation:
-		out.ImplementationChangedFilesReports++
-		out.ImplementationVerificationReports++
-	case ChildCompletionContractReview:
-		coverage := report.Coverage
-		if coverage != "complete" && coverage != "partial" {
-			coverage = "unknown"
-		}
-		out.ReviewCoverage[coverage]++
-	case ChildCompletionContractGeneral:
-		out.GeneralEvidenceReports++
-	}
 	return out
 }
 
@@ -1272,7 +1247,6 @@ func validCompletionLifecycle(child *ChildMeta, validation string) bool {
 	}
 	switch validation {
 	case ChildCompletionValidationValid,
-		ChildCompletionValidationPartialFields,
 		ChildCompletionValidationMissing,
 		ChildCompletionValidationMalformed,
 		ChildCompletionValidationInvalid,
@@ -1297,7 +1271,7 @@ func validCompletionLifecycle(child *ChildMeta, validation string) bool {
 
 func validCompletionProvenance(source, validation string) bool {
 	switch validation {
-	case ChildCompletionValidationValid, ChildCompletionValidationPartialFields:
+	case ChildCompletionValidationValid:
 		return source == ChildCompletionSourceDeclared
 	case ChildCompletionValidationMissing,
 		ChildCompletionValidationMalformed,
@@ -1467,9 +1441,6 @@ func (c *CompletionAnalysis) add(other CompletionAnalysis) {
 	if c.Contracts == nil {
 		c.Contracts = make(map[string]int)
 	}
-	if c.ReviewCoverage == nil {
-		c.ReviewCoverage = make(map[string]int)
-	}
 	c.Applicable = c.Applicable || other.Applicable
 	c.Reports += other.Reports
 	c.Unavailable += other.Unavailable
@@ -1482,15 +1453,6 @@ func (c *CompletionAnalysis) add(other CompletionAnalysis) {
 	for key, value := range other.Contracts {
 		c.Contracts[key] += value
 	}
-	c.UnresolvedRequirementsTotal += other.UnresolvedRequirementsTotal
-	c.unresolvedRequirementValues = append(c.unresolvedRequirementValues, other.unresolvedRequirementValues...)
-	c.UnresolvedRequirements = intDistribution(c.unresolvedRequirementValues)
-	c.ImplementationChangedFilesReports += other.ImplementationChangedFilesReports
-	c.ImplementationVerificationReports += other.ImplementationVerificationReports
-	for key, value := range other.ReviewCoverage {
-		c.ReviewCoverage[key] += value
-	}
-	c.GeneralEvidenceReports += other.GeneralEvidenceReports
 	c.ParentReworkAvailable = c.ParentReworkAvailable || other.ParentReworkAvailable
 	c.ParentReworkObserved += other.ParentReworkObserved
 }
@@ -1645,8 +1607,7 @@ func writeTelemetryText(w io.Writer, indent string, t TelemetryAnalysis) {
 		fmt.Fprintf(w, "%sworkflow outcomes: unavailable\n", indent)
 	}
 	if t.Completion.Applicable {
-		fmt.Fprintf(w, "%sdelegate completion reports/unavailable: %d / %d; outcomes: %s; validation: %s; unresolved total/median/p90: %d / %d / %d (%d samples)\n", indent, t.Completion.Reports, t.Completion.Unavailable, formatCountMap(true, t.Completion.Outcomes), formatCountMap(true, t.Completion.Validation), t.Completion.UnresolvedRequirementsTotal, t.Completion.UnresolvedRequirements.Median, t.Completion.UnresolvedRequirements.P90, t.Completion.UnresolvedRequirements.Samples)
-		fmt.Fprintf(w, "%sdelegate contracts: %s; review coverage: %s; implementation changed-files/verification: %d / %d; general evidence: %d\n", indent, formatCountMap(true, t.Completion.Contracts), formatCountMap(true, t.Completion.ReviewCoverage), t.Completion.ImplementationChangedFilesReports, t.Completion.ImplementationVerificationReports, t.Completion.GeneralEvidenceReports)
+		fmt.Fprintf(w, "%sdelegate completion reports/unavailable: %d / %d; outcomes: %s; validation: %s; contracts: %s\n", indent, t.Completion.Reports, t.Completion.Unavailable, formatCountMap(true, t.Completion.Outcomes), formatCountMap(true, t.Completion.Validation), formatCountMap(true, t.Completion.Contracts))
 		fmt.Fprintf(w, "%sparent rework observed: %s\n", indent, availableCount(t.Completion.ParentReworkAvailable, t.Completion.ParentReworkObserved))
 	} else {
 		fmt.Fprintf(w, "%sdelegate completion: not applicable\n", indent)

@@ -1965,13 +1965,14 @@ keep payload and effective scopes separate; public maxima clamp negatives while
 invariant counters preserve compatible-scope arithmetic errors. Execution
 completion means a terminal `prompt_usage` record exists; termination reasons
 describe loop control, not task correctness. Delegate semantic completion is a
-separate bounded report with `complete`, `partial`, `blocked`, `failed`, or the
-host compatibility fallback `unknown`. Analyzer output exposes only aggregate
-outcome/validation/contract counters, unresolved-count distributions, and
-mode-contract coverage—never blocker text, paths, check names/details, report
-prose, or unresolved questions. Legacy, invalid, failed, and canceled children
-remain explicit coverage failures rather than being inferred as complete;
-parent rework is currently unavailable.
+separate bounded record. New optional footers declare only `complete` or
+`blocked`; a missing or unusable footer produces the host compatibility outcome
+`unknown`. Analyzer schema v6 exposes only aggregate outcome, validation, and
+contract-provenance counters—never blocker text or report prose. Completion
+metadata is schema-local: use the Harness 0.5.11 binary to analyze sessions
+created before 0.5.12. Missing, invalid, host-failed, and canceled children remain
+explicit coverage failures rather than being inferred as complete; parent rework
+is currently unavailable.
 
 `session errors` lists the classified failures behind that section: every
 failed tool result and failed model request in one session (root plus delegate

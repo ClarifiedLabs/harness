@@ -609,7 +609,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		launch.System = implementationSystemPrompt(launch.System)
 	}
 	contract := completionContract(req.Mode, launch.Agent)
-	launch.System = completionContractSystemPrompt(launch.System, contract)
+	launch.System = completionSystemPrompt(launch.System)
 	progress.SetAgent(launch.Agent)
 
 	toolNames := launch.Tools.Names()
@@ -1614,7 +1614,7 @@ func withoutChildBudget(system string) string {
 
 func implementationSystemPrompt(system string) string {
 	return fmt.Sprintf(
-		"%s\n\n[implementation mode]\nThis is scoped mutating implementation work. Make the requested changes, verify them, and return an exact handoff with changed paths, checks run, and any remaining work. Commit only when commit ownership was explicitly delegated.\n\nIn the final harness-completion JSON block, include changed_files as an explicit array and verification as a non-empty array of {\"check\":\"...\",\"status\":\"passed|failed|not_run\",\"detail\":\"...\"}. A not_run result requires a detail explaining why verification could not run; a complete outcome cannot include failed verification.",
+		"%s\n\n[implementation mode]\nThis is scoped mutating implementation work. Make the requested changes, verify them, and return an exact Markdown handoff with changed paths, checks run, and any remaining work. Commit only when commit ownership was explicitly delegated.",
 		strings.TrimSpace(system),
 	)
 }

@@ -2,32 +2,25 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
-func persistedCompletion(report ChildCompletionReport) ChildCompletionReport {
-	report.unresolvedRequirementsPresent = true
-	return report
-}
-
-func TestValidateChildCompletionReportContracts(t *testing.T) {
-	validImplementation := persistedCompletion(ChildCompletionReport{
-		Outcome: ChildCompletionOutcomeComplete, Contract: ChildCompletionContractImplementation,
-		ChangedFiles: []string{}, Verification: []ChildCompletionVerification{{Check: "go test ./...", Status: "passed"}},
-	})
+func TestValidateChildCompletionReport(t *testing.T) {
 	tests := []struct {
 		name     string
 		report   ChildCompletionReport
 		contract string
 		want     string
 	}{
-		{name: "implementation", report: validImplementation, contract: ChildCompletionContractImplementation, want: ChildCompletionValidationValid},
-		{name: "wrong contract", report: validImplementation, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
-		{name: "missing unresolved count", report: ChildCompletionReport{Outcome: ChildCompletionOutcomePartial, Contract: ChildCompletionContractGeneral, Evidence: []ChildCompletionEvidence{}, UnresolvedQuestions: []string{}}, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
-		{name: "unresolved cap", report: persistedCompletion(ChildCompletionReport{Outcome: ChildCompletionOutcomePartial, UnresolvedRequirements: ChildCompletionMaxUnresolvedRequirements + 1, Contract: ChildCompletionContractGeneral, Evidence: []ChildCompletionEvidence{}, UnresolvedQuestions: []string{}}), contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
-		{name: "cross contract field", report: persistedCompletion(ChildCompletionReport{Outcome: ChildCompletionOutcomePartial, UnresolvedRequirements: 1, Contract: ChildCompletionContractGeneral, ChangedFiles: []string{}, Evidence: []ChildCompletionEvidence{}, UnresolvedQuestions: []string{}}), contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
-		{name: "complete review with partial coverage", report: persistedCompletion(ChildCompletionReport{Outcome: ChildCompletionOutcomeComplete, Contract: ChildCompletionContractReview, Coverage: "partial", UnreviewedScope: []string{"src/"}}), contract: ChildCompletionContractReview, want: ChildCompletionValidationInvalid},
-		{name: "oversized blocker", report: persistedCompletion(ChildCompletionReport{Outcome: ChildCompletionOutcomePartial, Contract: ChildCompletionContractGeneral, Blockers: []string{string(make([]byte, childCompletionMaxStringBytes+1))}, Evidence: []ChildCompletionEvidence{}, UnresolvedQuestions: []string{}}), contract: ChildCompletionContractGeneral, want: ChildCompletionValidationOversized},
+		{name: "complete", report: ChildCompletionReport{Outcome: ChildCompletionOutcomeComplete, Contract: ChildCompletionContractGeneral}, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationValid},
+		{name: "retired partial", report: ChildCompletionReport{Outcome: "partial", Contract: ChildCompletionContractImplementation}, contract: ChildCompletionContractImplementation, want: ChildCompletionValidationInvalid},
+		{name: "retired failed", report: ChildCompletionReport{Outcome: "failed", Contract: ChildCompletionContractGeneral}, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
+		{name: "blocked", report: ChildCompletionReport{Outcome: ChildCompletionOutcomeBlocked, Blockers: []string{"missing credentials"}, Contract: ChildCompletionContractReview}, contract: ChildCompletionContractReview, want: ChildCompletionValidationValid},
+		{name: "bad outcome", report: ChildCompletionReport{Outcome: "done", Contract: ChildCompletionContractGeneral}, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
+		{name: "wrong contract", report: ChildCompletionReport{Outcome: ChildCompletionOutcomeComplete, Contract: ChildCompletionContractReview}, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
+		{name: "blocked without blocker", report: ChildCompletionReport{Outcome: ChildCompletionOutcomeBlocked, Contract: ChildCompletionContractGeneral}, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationInvalid},
+		{name: "oversized blocker", report: ChildCompletionReport{Outcome: ChildCompletionOutcomeBlocked, Blockers: []string{strings.Repeat("x", childCompletionMaxStringBytes+1)}, Contract: ChildCompletionContractGeneral}, contract: ChildCompletionContractGeneral, want: ChildCompletionValidationOversized},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,23 +31,35 @@ func TestValidateChildCompletionReportContracts(t *testing.T) {
 	}
 }
 
-func TestChildCompletionJSONPreservesExplicitEmptyContractArrays(t *testing.T) {
-	original := ChildCompletionReport{
-		Outcome: ChildCompletionOutcomeComplete, Contract: ChildCompletionContractImplementation,
-		ChangedFiles: []string{}, Verification: []ChildCompletionVerification{{Check: "test", Status: "passed"}},
+func TestChildCompletionJSONContainsOnlyMinimalFields(t *testing.T) {
+	report := ChildCompletionReport{
+		Outcome: ChildCompletionOutcomeBlocked, Blockers: []string{"missing credentials"},
+		Contract: ChildCompletionContractImplementation, Source: ChildCompletionSourceDeclared,
+		ValidationStatus: ChildCompletionValidationValid,
 	}
-	encoded, err := json.Marshal(original)
+	encoded, err := json.Marshal(report)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var decoded ChildCompletionReport
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.ChangedFiles == nil || decoded.Verification == nil {
-		t.Fatalf("explicit arrays lost across JSON round trip: %s", encoded)
+	want := []string{"outcome", "blockers", "contract", "source", "validation_status"}
+	if len(fields) != len(want) {
+		t.Fatalf("persisted fields = %v; JSON=%s", fields, encoded)
 	}
-	if got := validateChildCompletionReport(decoded, ChildCompletionContractImplementation); got != ChildCompletionValidationValid {
-		t.Fatalf("round-trip validation = %q; JSON=%s", got, encoded)
+	for _, key := range want {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("persisted JSON missing %q: %s", key, encoded)
+		}
+	}
+}
+
+func TestChildCompletionJSONRejectsRetiredRichSchema(t *testing.T) {
+	retired := `{"outcome":"partial","unresolved_requirements":2,"blockers":[],"changed_files":["x.go"],"verification":[{"check":"go test ./...","status":"passed"}],"contract":"implementation","source":"child_declared","validation_status":"valid"}`
+	var report ChildCompletionReport
+	if err := json.Unmarshal([]byte(retired), &report); err == nil {
+		t.Fatalf("retired completion schema decoded as current metadata: %+v", report)
 	}
 }

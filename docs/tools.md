@@ -401,22 +401,34 @@ turn budgets, physical turns used, and a structured termination reason:
 `error`. A termination reason describes why Harness stopped the loop; it does
 not claim that the delegated task is semantically complete.
 
-A successful child final response must end with one `harness-completion` fenced
-JSON report. Harness validates it under the implementation, review, or general
-contract, strips a valid block from the prose, and prefixes foreground and
-background results with the semantic outcome plus source/validation status.
-Implementation reports include explicit `changed_files` and verification;
-review reports include coverage and unreviewed scope; general reports include
-evidence and unresolved questions. A report whose generic core (outcome,
-unresolved count, blockers) is valid but whose contract fields are omitted is
-not discarded: it becomes `partial_fields`, the declared outcome and unresolved
-count are preserved, and missing arrays/strings are filled with empty defaults.
-Missing, malformed, duplicate, invalid, or oversized reports do not discard
-useful prose: they produce `unknown` with a compatibility validation status.
-Failed or canceled children instead record host/unavailable provenance. The
-bounded report is persisted in child `meta.json` independently of lifecycle
-termination, and every continuation produces a fresh report. Delegate receipts
-also state how many root descendant slots remain (for example `3 of 16
+The child's primary completion artifact is its final Markdown report. If it
+knows the task outcome, it may append one terminal `harness-completion` fenced
+JSON footer in one of these forms:
+
+````text
+```harness-completion
+{"outcome":"complete"}
+```
+````
+
+````text
+```harness-completion
+{"outcome":"blocked","blockers":["what prevents completion"]}
+```
+````
+
+Harness strips a valid footer before returning the Markdown report to the
+parent. Substantive details—findings, changed files, verification, evidence,
+unreviewed scope, and remaining work—belong in Markdown, not status metadata.
+New child metadata persists only outcome, optional bounded blockers,
+source/contract provenance, and validation status. Missing, malformed,
+duplicate, invalid, or oversized footers do not discard useful prose. A missing
+footer produces an `unreported` receipt; other unusable footers remain explicit
+unknown outcomes. Failed or canceled children record host/unavailable
+provenance, and completion is never inferred from lifecycle termination.
+Completion metadata is schema-local: use the Harness 0.5.11 binary to analyze
+sessions created before 0.5.12. Every continuation produces a fresh report.
+Delegate receipts also state how many root descendant slots remain (for example `3 of 16
 descendant slots remaining`). Non-positive budget settings select the default
 4-active/16-total limits rather than disabling the budget.
 

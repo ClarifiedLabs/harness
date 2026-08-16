@@ -2561,30 +2561,24 @@ reuses its logical descendant slot; all terminal paths release active capacity.
   an exact handoff with changed paths, checks run, and any remaining work.
   Child metadata, result receipts, and session stats preserve the mode.
 - Every child is instructed to stop once its delegated requirements and focused
-  verification are complete and to end its final response with exactly one
-  `harness-completion` fenced JSON object. The host selects an `implementation`
-  contract for implementation mode, `review` for the resolved review agent, and
-  `general` otherwise. The strict decoder accepts only bounded contract fields:
-  semantic outcome, unresolved count, blockers, and the mode-specific
-  changed-file/verification, review-coverage/unreviewed-scope, or
-  evidence/unresolved-question arrays. `complete` requires zero unresolved
-  requirements; implementation and review contracts enforce their additional
-  verification and coverage invariants. A generic-core-only block whose
-  contract fields are omitted is not discarded: it degrades to a
-  `partial_fields` declared report with empty defaults for the missing
-  arrays/strings while preserving the declared outcome and unresolved count;
-  only genuinely wrong content (bad outcome enum, `complete` with unresolved,
-  `blocked` without blockers, foreign or partial contract fields, unknown
-  JSON fields, structural malformation) stays `invalid`.
+  verification are complete and to write a useful final Markdown handoff. If it
+  knows the semantic outcome, it may append exactly one terminal
+  `harness-completion` fenced JSON footer containing only `outcome` (`complete`
+  or `blocked`) and, for a blocked outcome, a bounded `blockers` string array.
+  Substantive findings, changed files, verification, evidence, unreviewed scope,
+  and remaining work stay in Markdown rather than being duplicated into status
+  metadata. The host still records `implementation`, `review`, or `general` as
+  provenance; it no longer changes the footer schema.
 - Completion parsing examines only the final assistant response after a
-  successful child run. A valid block is removed from parent-facing prose;
-  missing, malformed, duplicate, invalid, or oversized blocks preserve useful
-  prose and become host-generated `unknown` compatibility outcomes instead of
-  failing the run. Failures and cancellation receive host/unavailable
-  provenance without parsing model output. Receipts show outcome and
-  source/validation, while terminal `ChildMeta.Completion` stores the bounded
-  report beside—not in place of—lifecycle status, workflow status, and
-  `TerminationReason`. Each continuation writes an independent report for its
+  successful child run. A valid footer is removed from parent-facing prose;
+  missing, malformed, duplicate, invalid, or oversized footers preserve useful
+  prose and become `unknown` compatibility outcomes instead of failing the run.
+  Failures and cancellation receive host/unavailable provenance without parsing
+  model output. Receipts show a compact outcome or `unreported`, while terminal
+  `ChildMeta.Completion` stores only outcome, optional blockers, contract/source
+  provenance, and validation status beside—not in place of—lifecycle status,
+  workflow status, and `TerminationReason`. Each continuation writes an
+  independent report for its
   fresh child ID. Receipts also report the root descendant budget, e.g.
   `3 of 16 descendant slots remaining`. Non-positive settings select the default
   4-active/16-total limits; descendant budgets are not unlimited.
@@ -3718,7 +3712,7 @@ type UsageTotals struct {
   and absent streams are not inferred. A cutoff includes events at or before the
   requested instant and disables untimestamped child-metadata fallback. Aggregate
   execution completeness has a stable severity order (`incomplete` over
-  `unavailable` over `unknown` over `complete`). Analyzer schema v3 groups every
+  `unavailable` over `unknown` over `complete`). Analyzer schema v6 groups every
   physical root plus descendants as one experimental hierarchy. Items retain
   their own provider/model/agent/build/runtime identity, derive immutable
   per-attempt identity availability/stability, and carry root ownership; cohort
@@ -3734,11 +3728,12 @@ type UsageTotals struct {
   hierarchies; it is never added to child usage. Hierarchy and cohort summaries
   carry sample counts with nearest-rank median/p90 token values and known-complete
   cost. Child completion aggregation counts only outcomes, validation states,
-  contract coverage, unresolved-count distributions, and mode-specific field
-  coverage. It never emits blocker text, changed/evidence paths, verification
-  names or details, unreviewed scope, unresolved questions, or child report
-  prose. Legacy children without reports remain useful but contribute an
-  explicit `unknown`/missing coverage failure; parent rework remains unavailable
+  and contract provenance. It never emits blocker text or child report prose,
+  and schema v6 has no contract-specific completion-field analytics. Completion
+  metadata is schema-local: current analysis rejects retired rich completion
+  records, and sessions created before 0.5.12 should be analyzed with the Harness
+  0.5.11 binary. Children without reports remain useful but contribute an explicit
+  `unknown`/missing coverage failure. Parent rework remains unavailable
   unless a future host-owned signal can observe it. Semantic completion remains
   independent of lifecycle termination.
 

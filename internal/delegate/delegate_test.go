@@ -346,7 +346,7 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunMetered: %v", err)
 	}
-	if !strings.Contains(result.Text, "final report") || !strings.Contains(result.Text, "[delegate: 1 turn") || !strings.Contains(result.Text, "compatibility_fallback/missing") {
+	if !strings.Contains(result.Text, "final report") || !strings.Contains(result.Text, "[delegate completion: unreported]") || !strings.Contains(result.Text, "[delegate: 1 turn") {
 		t.Fatalf("delegate output = %q", result.Text)
 	}
 	if result.Usage.InputTokens != 11 || result.Usage.OutputTokens != 5 {
@@ -368,7 +368,7 @@ func TestDelegateRunsChildAgentAndReturnsFinalReport(t *testing.T) {
 	if req.Model != "claude-opus-4-8" {
 		t.Fatalf("request model = %q", req.Model)
 	}
-	wantSystem := completionContractSystemPrompt(childBudgetSystemPrompt(childSystemPrompt("parent system"), 3), session.ChildCompletionContractGeneral)
+	wantSystem := completionSystemPrompt(childBudgetSystemPrompt(childSystemPrompt("parent system"), 3))
 	if req.System != wantSystem {
 		t.Fatalf("child system = %q, want %q", req.System, wantSystem)
 	}
@@ -420,10 +420,9 @@ func TestDelegateImplementationModeAddsStaticPromptAndPersistsMode(t *testing.T)
 		"[implementation mode]",
 		"scoped mutating implementation work",
 		"Make the requested changes, verify them",
-		"return an exact handoff",
+		"exact Markdown handoff",
 		"harness-completion",
-		"changed_files",
-		"verification",
+		"may optionally end",
 	} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("implementation system missing %q: %q", want, system)
@@ -452,12 +451,12 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 			ResponseID: "resp-tools",
 		},
 		llmtest.Step{
-			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source handoff\n\n" + completionBlock(`{"outcome":"partial","unresolved_requirements":1,"changed_files":[],"verification":[{"check":"source check","status":"passed"}]}`)}},
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source handoff\n\n" + completionBlock(`{"outcome":"blocked","blockers":["continuation required"]}`)}},
 			Stop:       llm.StopEndTurn,
 			ResponseID: "resp-source",
 		},
 		llmtest.Step{
-			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued completion\n\n" + completionBlock(`{"outcome":"complete","unresolved_requirements":0,"changed_files":["continued.go"],"verification":[{"check":"go test","status":"passed"}]}`)}},
+			Events:     []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued completion\n\n" + completionBlock(`{"outcome":"complete"}`)}},
 			Stop:       llm.StopEndTurn,
 			ResponseID: "resp-continued",
 		},
@@ -481,7 +480,7 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	if err != nil {
 		t.Fatalf("continuation Run: %v", err)
 	}
-	if continued.ChildID == source.ChildID || continued.ContinuedFrom != "source" || continued.EffectiveMaxTurns != budget || continued.Mode != ModeImplementation || source.Completion.Outcome != session.ChildCompletionOutcomePartial || continued.Completion.Outcome != session.ChildCompletionOutcomeComplete {
+	if continued.ChildID == source.ChildID || continued.ContinuedFrom != "source" || continued.EffectiveMaxTurns != budget || continued.Mode != ModeImplementation || source.Completion.Outcome != session.ChildCompletionOutcomeBlocked || continued.Completion.Outcome != session.ChildCompletionOutcomeComplete {
 		t.Fatalf("continuation result = source %+v continued %+v", source, continued)
 	}
 	if !strings.Contains(continued.Report, "continued from source") {
@@ -542,7 +541,7 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	if sourceMeta.Status != session.ChildStatusCompleted || sourceMeta.ContinuedFrom != "" {
 		t.Fatalf("source metadata changed unexpectedly: %+v", sourceMeta)
 	}
-	if continuedMeta.ContinuedFrom != "source" || continuedMeta.Mode != ModeImplementation || continuedMeta.RuntimeFingerprint == "" || continuedMeta.RuntimeFingerprint != sourceMeta.RuntimeFingerprint || sourceMeta.Completion == nil || sourceMeta.Completion.Outcome != session.ChildCompletionOutcomePartial || continuedMeta.Completion == nil || continuedMeta.Completion.Outcome != session.ChildCompletionOutcomeComplete {
+	if continuedMeta.ContinuedFrom != "source" || continuedMeta.Mode != ModeImplementation || continuedMeta.RuntimeFingerprint == "" || continuedMeta.RuntimeFingerprint != sourceMeta.RuntimeFingerprint || sourceMeta.Completion == nil || sourceMeta.Completion.Outcome != session.ChildCompletionOutcomeBlocked || continuedMeta.Completion == nil || continuedMeta.Completion.Outcome != session.ChildCompletionOutcomeComplete {
 		t.Fatalf("continued metadata = %+v, source %+v", continuedMeta, sourceMeta)
 	}
 	if continuedMeta.ContinuationMode != continuationModeRetained ||
@@ -1196,11 +1195,11 @@ func TestDelegateImplementationModeDefaultsExclusive(t *testing.T) {
 func TestDelegateBackgroundContinuationInheritsContractBeforeStart(t *testing.T) {
 	fixture := newContinuationFixture(t, 100_000, false,
 		llmtest.Step{
-			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done\n\n" + completionBlock(`{"outcome":"partial","unresolved_requirements":1,"changed_files":[],"verification":[{"check":"source","status":"passed"}]}`)}},
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done\n\n" + completionBlock(`{"outcome":"blocked","blockers":["continuation required"]}`)}},
 			Stop:   llm.StopEndTurn,
 		},
 		llmtest.Step{
-			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued done\n\n" + completionBlock(`{"outcome":"complete","unresolved_requirements":0,"changed_files":[],"verification":[{"check":"continued","status":"passed"}]}`)}},
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "continued done\n\n" + completionBlock(`{"outcome":"complete"}`)}},
 			Stop:   llm.StopEndTurn,
 		},
 	)
@@ -1360,7 +1359,7 @@ func TestDelegatePersistsTurnLimitTermination(t *testing.T) {
 			Stop: llm.StopToolUse,
 		},
 		llmtest.Step{
-			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "budget exhausted\n\n" + completionBlock(`{"outcome":"partial","unresolved_requirements":1,"evidence":[],"unresolved_questions":["remaining work"]}`)}},
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "budget exhausted\n\n" + completionBlock(`{"outcome":"blocked","blockers":["turn budget exhausted"]}`)}},
 			Stop:   llm.StopEndTurn,
 		},
 	)
@@ -1376,7 +1375,7 @@ func TestDelegatePersistsTurnLimitTermination(t *testing.T) {
 		t.Fatalf("Run: %v", err)
 	}
 	if result.EffectiveMaxTurns != 1 || result.Turns != 2 || result.TerminationReason != agent.TerminationTurnLimit ||
-		result.ClosureTrigger != agent.ClosureTriggerTurnBudget || result.ClosureTurn != 1 || !result.TurnBudgetExhausted || result.Completion.Outcome != session.ChildCompletionOutcomePartial {
+		result.ClosureTrigger != agent.ClosureTriggerTurnBudget || result.ClosureTurn != 1 || !result.TurnBudgetExhausted || result.Completion.Outcome != session.ChildCompletionOutcomeBlocked {
 		t.Fatalf("run result = %+v, want budget 1, two physical turns, turn_limit closure", result)
 	}
 	if !strings.Contains(result.Report, "turn budget 1, termination turn_limit") {
@@ -1387,7 +1386,7 @@ func TestDelegatePersistsTurnLimitTermination(t *testing.T) {
 	}
 	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", "limited"))
 	if meta.EffectiveMaxTurns != 1 || meta.TurnsUsed != 2 || meta.TerminationReason != string(agent.TerminationTurnLimit) ||
-		meta.ClosureTrigger != string(agent.ClosureTriggerTurnBudget) || meta.ClosureTurn != 1 || !meta.TurnBudgetExhausted || meta.Completion == nil || meta.Completion.Outcome != session.ChildCompletionOutcomePartial {
+		meta.ClosureTrigger != string(agent.ClosureTriggerTurnBudget) || meta.ClosureTurn != 1 || !meta.TurnBudgetExhausted || meta.Completion == nil || meta.Completion.Outcome != session.ChildCompletionOutcomeBlocked {
 		t.Fatalf("metadata = %+v, want budget 1, two physical turns, turn_limit closure", meta)
 	}
 	events := readDelegateChildEvents(t, filepath.Join(sessionPath, "children", "limited"))
@@ -2191,7 +2190,7 @@ func TestDelegatePassesRequestedAgentToResolver(t *testing.T) {
 		t.Fatalf("resolver agent = %q, want style_review", gotName)
 	}
 	req := fp.Requests[0]
-	wantSystem := completionContractSystemPrompt(childBudgetSystemPrompt(childSystemPrompt("style system"), DefaultMaxTurns), session.ChildCompletionContractGeneral)
+	wantSystem := completionSystemPrompt(childBudgetSystemPrompt(childSystemPrompt("style system"), DefaultMaxTurns))
 	if req.Model != "style-model" || req.System != wantSystem {
 		t.Fatalf("request model/system = %q/%q", req.Model, req.System)
 	}

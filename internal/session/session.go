@@ -136,47 +136,20 @@ type UsageTotals struct {
 	Compactions int     `json:"compactions,omitempty"`
 }
 
-// ChildCompletionVerification records one bounded child-declared verification
-// result. Detail is required when Status is not_run.
-type ChildCompletionVerification struct {
-	Check  string `json:"check"`
-	Status string `json:"status"`
-	Detail string `json:"detail,omitempty"`
-}
-
-// ChildCompletionEvidence identifies one bounded source location supporting an
-// exploration, planning, or general child report.
-type ChildCompletionEvidence struct {
-	Path   string `json:"path"`
-	Symbol string `json:"symbol,omitempty"`
-}
-
-// ChildCompletionReport is the host-validated semantic completion contract for
-// one child run. Source and ValidationStatus are assigned by Harness, never
-// trusted from child output. Unknown preserves useful legacy prose without
-// inferring completion from prose or loop termination.
+// ChildCompletionReport stores the optional child-declared outcome plus
+// host-owned provenance. Substantive handoff details remain in the child's
+// Markdown report rather than being duplicated into structured metadata.
 type ChildCompletionReport struct {
-	Outcome                string                        `json:"outcome"`
-	UnresolvedRequirements int                           `json:"unresolved_requirements"`
-	Blockers               []string                      `json:"blockers,omitempty"`
-	ChangedFiles           []string                      `json:"changed_files"`
-	Verification           []ChildCompletionVerification `json:"verification"`
-	Coverage               string                        `json:"coverage,omitempty"`
-	UnreviewedScope        []string                      `json:"unreviewed_scope"`
-	Evidence               []ChildCompletionEvidence     `json:"evidence"`
-	UnresolvedQuestions    []string                      `json:"unresolved_questions"`
-	Contract               string                        `json:"contract"`
-	Source                 string                        `json:"source"`
-	ValidationStatus       string                        `json:"validation_status"`
-
-	unresolvedRequirementsPresent bool
+	Outcome          string   `json:"outcome"`
+	Blockers         []string `json:"blockers,omitempty"`
+	Contract         string   `json:"contract"`
+	Source           string   `json:"source"`
+	ValidationStatus string   `json:"validation_status"`
 }
 
 const (
 	ChildCompletionOutcomeComplete = "complete"
-	ChildCompletionOutcomePartial  = "partial"
 	ChildCompletionOutcomeBlocked  = "blocked"
-	ChildCompletionOutcomeFailed   = "failed"
 	ChildCompletionOutcomeUnknown  = "unknown"
 
 	ChildCompletionContractImplementation = "implementation"
@@ -187,18 +160,13 @@ const (
 	ChildCompletionSourceCompatibility = "compatibility_fallback"
 	ChildCompletionSourceHost          = "host"
 
-	ChildCompletionValidationValid = "valid"
-	// PartialFields marks a declared report whose generic core is valid but
-	// whose contract-specific fields were omitted. The report is usable: the
-	// host fills the missing arrays/strings with empty defaults and preserves
-	// the declared outcome and unresolved count.
-	ChildCompletionValidationPartialFields = "partial_fields"
-	ChildCompletionValidationMissing       = "missing"
-	ChildCompletionValidationMalformed     = "malformed"
-	ChildCompletionValidationInvalid       = "invalid"
-	ChildCompletionValidationOversized     = "oversized"
-	ChildCompletionValidationDuplicate     = "duplicate"
-	ChildCompletionValidationUnavailable   = "unavailable"
+	ChildCompletionValidationValid       = "valid"
+	ChildCompletionValidationMissing     = "missing"
+	ChildCompletionValidationMalformed   = "malformed"
+	ChildCompletionValidationInvalid     = "invalid"
+	ChildCompletionValidationOversized   = "oversized"
+	ChildCompletionValidationDuplicate   = "duplicate"
+	ChildCompletionValidationUnavailable = "unavailable"
 )
 
 // ChildMeta is the forensic index for a child-agent run stored under a parent
