@@ -556,7 +556,7 @@ type Options struct {
 	// cache prefix from the first trimmed block.
 	RetentionFloorTokens int
 	// RetentionKeepTurns is how many recent turns keep their tool results and
-	// inputs verbatim during live retention. Zero follows CompactKeepTurns;
+	// inputs verbatim during live retention. Zero uses the 4-turn default;
 	// positive decouples the retention age from the compaction suffix.
 	RetentionKeepTurns int
 	// RetentionResultHeadBytes is how many bytes of a trimmed tool result stay

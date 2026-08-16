@@ -165,6 +165,10 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 	}
 	event.BytesBefore = retentionTranscriptBytes(a.transcript)
 	readOnly := a.readOnlyResultIDsIn(a.transcript)
+	// The 2x-age trim below drops bytes the model cannot re-derive, so it is
+	// only offered when the sink can durably archive the exact original; an
+	// archive failure at trim time still refuses the trim (design §12).
+	_, canArchive := sink.(ToolResultArchiver)
 	superseded := a.supersededMutationPaths(a.transcript, inputBoundary)
 	for i := range a.transcript {
 		for j := range a.transcript[i].Content {
@@ -174,12 +178,14 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 			case llm.BlockToolResult:
 				// Read-only results are re-derivable on demand, so they age out at
 				// the ordinary retention boundary. A NON-read-only result keeps its
-				// body until 2× the boundary AND its exact bytes are durably
-				// archived — a durable archive is a stronger recovery path than
-				// re-derivation, and the extra age hedges mutation-adjacent context.
+				// body until 2× the boundary AND only when its exact bytes can be
+				// durably archived — a durable archive is a stronger recovery path
+				// than re-derivation, and the extra age hedges mutation-adjacent
+				// context. (i < archivedBoundary implies i < resultBoundary, so the
+				// second branch only ever sees non-read-only results.)
 				if i < resultBoundary && readOnly[b.ResultForID] {
 					blockChanged = a.trimToolResultBlock(b, sink) || blockChanged
-				} else if i < archivedBoundary {
+				} else if i < archivedBoundary && canArchive {
 					blockChanged = a.trimToolResultBlock(b, sink) || blockChanged
 				}
 				if i < imageBoundary {

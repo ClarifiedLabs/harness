@@ -1290,3 +1290,25 @@ func TestStablePrefixStopsBeforeFutureTrimmableToolUse(t *testing.T) {
 		t.Fatalf("stable prefix = %d, want 1 (stop before the superseded write)", got)
 	}
 }
+
+// TestRetentionKeepsNonReadOnlyResultWithoutArchiver is the regression test for
+// the 2x-age path: when the sink cannot durably archive the exact bytes, a
+// mutating (non-re-derivable) result keeps its body no matter its age — the
+// generic "re-run the tool" hint cannot recover it.
+func TestRetentionKeepsNonReadOnlyResultWithoutArchiver(t *testing.T) {
+	big := strings.Repeat("x", 9000)
+	msgs := []llm.Message{
+		userText("q0"), asstToolUse("t0", "wr", `{}`), toolResult("t0", big), asstText("a0"),
+	}
+	for i := 1; i <= defaultRetentionKeepTurns*retentionArchivedAgeFactor+1; i++ {
+		msgs = append(msgs, userText(fmt.Sprintf("q%d", i)), asstText(fmt.Sprintf("a%d", i)))
+	}
+	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
+	a.SetTranscript(msgs)
+	if changed := a.applyRetention(&recordSink{}); changed {
+		t.Fatal("trimmed a mutating result with no archiver to preserve its bytes")
+	}
+	if got := a.Transcript()[2].Content[0].ResultText; got != big {
+		t.Fatalf("mutating result body changed without an archive: %d bytes", len(got))
+	}
+}
