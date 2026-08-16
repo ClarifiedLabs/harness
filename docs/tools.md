@@ -240,7 +240,11 @@ Harness assigns no lifecycle or completion authority to the list.
 
 The root TODO list is saved in `state.json`, restored by `-resume`, and cleared
 by `/clear`. Resume and transcript rewrites inject the unresolved list once as
-request-only recovery context. Child agents receive private TODO stores.
+request-only recovery context. Otherwise, an unresolved list with no successful
+update is reminded after 12 conversational model rounds; ignored reminders back
+off after another 24, 48, and 96 rounds, capped at 96 thereafter. A successful
+update or delivered recovery reminder resets the cadence, and transport retries
+do not advance it. Child agents receive private TODO stores.
 
 The `plan` agent receives `record_plan` instead of `update_todos`. It writes a
 self-contained Markdown artifact to `<session>/plans/NNNN-<slug>.plan.md` with

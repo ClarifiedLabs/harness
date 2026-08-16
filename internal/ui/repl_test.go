@@ -6459,6 +6459,31 @@ func newTestAppWithGoal(t *testing.T, out, errw testWriter, fp *llmtest.FakeProv
 	return app
 }
 
+func TestTodoContextReturnsAfterTwelveModelRounds(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	registry := tools.Default()
+	registry.Register(todo.NewTool(app.Todos))
+	app.Agent.SetTools(registry)
+	app.Todos.Replace([]todo.Item{{Step: "Implement", Status: todo.StatusInProgress}})
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+
+	for turn := 1; turn < 12; turn++ {
+		if got := sink.RequestContext(); len(got) != 0 {
+			t.Fatalf("turn %d context = %+v, want empty", turn, got)
+		}
+		sink.TurnAttemptStart(turn, 1, agent.ContextEstimate{})
+		sink.TurnAttemptStart(turn, 2, agent.ContextEstimate{})
+	}
+	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
+		t.Fatalf("turn 12 context = %+v, want stale TODO reminder", got)
+	}
+	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
+	if got := sink.RequestContext(); len(got) != 0 {
+		t.Fatalf("post-reminder context = %+v, want empty", got)
+	}
+}
+
 func TestTodoContextDeliveryIsOneShotAfterTranscriptRewrite(t *testing.T) {
 	var out, errw bytes.Buffer
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))

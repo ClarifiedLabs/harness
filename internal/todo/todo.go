@@ -15,20 +15,30 @@ const (
 	StatusCompleted  = "completed"
 )
 
+const (
+	staleReminderInitialRounds = 12
+	staleReminderMaxRounds     = 96
+)
+
 type Item struct {
 	Step   string `json:"step"`
 	Status string `json:"status"`
 }
 
-// Store keeps only the latest list and whether a transcript rewrite requires
-// one recovery reminder. It assigns no lifecycle meaning to item statuses.
+// Store keeps the latest list, one transcript-recovery reminder, and the
+// bounded cadence for reminding the model about unresolved stale work. It
+// assigns no lifecycle meaning to item statuses.
 type Store struct {
 	mu                     sync.Mutex
 	items                  []Item
 	requestContextRequired bool
+	roundsSinceReminder    int
+	staleReminderInterval  int
 }
 
-func NewStore() *Store { return &Store{} }
+func NewStore() *Store {
+	return &Store{staleReminderInterval: staleReminderInitialRounds}
+}
 
 func (s *Store) Snapshot() []Item {
 	s.mu.Lock()
@@ -41,6 +51,7 @@ func (s *Store) Replace(items []Item) {
 	defer s.mu.Unlock()
 	s.items = append([]Item(nil), items...)
 	s.requestContextRequired = false
+	s.resetStaleReminderSchedule()
 }
 
 func (s *Store) Restore(items []Item) {
@@ -48,6 +59,7 @@ func (s *Store) Restore(items []Item) {
 	defer s.mu.Unlock()
 	s.items = append([]Item(nil), items...)
 	s.requestContextRequired = unresolved(s.items)
+	s.resetStaleReminderSchedule()
 }
 
 func (s *Store) RequireRequestContext() {
@@ -59,18 +71,56 @@ func (s *Store) RequireRequestContext() {
 func (s *Store) PendingRequestContext() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if !s.requestContextRequired {
+	if !unresolved(s.items) {
 		return ""
 	}
-	return RequestContext(s.items)
+	if s.requestContextRequired {
+		return RequestContext(s.items)
+	}
+	s.ensureStaleReminderInterval()
+	if s.roundsSinceReminder+1 >= s.staleReminderInterval {
+		return RequestContext(s.items)
+	}
+	return ""
 }
 
-// CommitRequestContext acknowledges a reminder only after a model request has
-// reached the send boundary. Repeated calls are harmless.
-func (s *Store) CommitRequestContext() {
+// CommitModelRound acknowledges any attached reminder after a model request
+// reaches the send boundary. A new conversational round advances stale-list
+// tracking; transport and compatibility retries do not.
+func (s *Store) CommitModelRound(newRound bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.requestContextRequired = false
+	if !unresolved(s.items) {
+		s.requestContextRequired = false
+		s.resetStaleReminderSchedule()
+		return
+	}
+	if s.requestContextRequired {
+		s.requestContextRequired = false
+		s.resetStaleReminderSchedule()
+		return
+	}
+	if !newRound {
+		return
+	}
+	s.ensureStaleReminderInterval()
+	s.roundsSinceReminder++
+	if s.roundsSinceReminder < s.staleReminderInterval {
+		return
+	}
+	s.roundsSinceReminder = 0
+	s.staleReminderInterval = min(s.staleReminderInterval*2, staleReminderMaxRounds)
+}
+
+func (s *Store) resetStaleReminderSchedule() {
+	s.roundsSinceReminder = 0
+	s.staleReminderInterval = staleReminderInitialRounds
+}
+
+func (s *Store) ensureStaleReminderInterval() {
+	if s.staleReminderInterval <= 0 {
+		s.staleReminderInterval = staleReminderInitialRounds
+	}
 }
 
 type Tool struct{ store *Store }

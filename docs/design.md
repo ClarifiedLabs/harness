@@ -2503,7 +2503,12 @@ this subsection records the common runner those argv tools point at.
   cleared by `/clear`. A transcript rewrite or resume schedules one unresolved
   list reminder as ephemeral `RequestContext`; it is acknowledged only when a
   model request reaches the send boundary. A normal `update_todos` call clears
-  the reminder because the tool call itself is already in the transcript.
+  the recovery reminder because the tool call itself is already in the transcript.
+- Unresolved work without another successful update receives stale-list
+  reminders after 12, then 24, 48, and 96 conversational model rounds; the
+  interval remains capped at 96. A successful update or delivered recovery
+  reminder resets the schedule. Transport and provider-compatibility retries
+  reuse the attached context and do not advance the round count.
 - Every built-in agent except `plan` exposes `update_todos`. Each delegate gets
   a private store. Custom agent whitelists may omit it.
 

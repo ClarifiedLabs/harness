@@ -2141,8 +2141,8 @@ func (s *childSink) ReasoningSummary(text string) {
 }
 
 func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
-	if s.todos != nil && s.todoContext && turn != s.todoTurn {
-		s.todos.CommitRequestContext()
+	if s.todos != nil && s.todoContext {
+		s.todos.CommitModelRound(turn != s.todoTurn)
 		s.todoTurn = turn
 	}
 	s.flushDisplay()

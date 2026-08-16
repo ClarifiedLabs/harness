@@ -19,6 +19,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
+	"harness/internal/todo"
 	"harness/internal/tools"
 )
 
@@ -1680,6 +1681,44 @@ func TestDelegateTerminalizesPostMetadataSetupFailure(t *testing.T) {
 	}
 	if strings.Contains(events[1].Text, setupErr.Error()) {
 		t.Fatalf("setup error leaked into terminal event: %+v", events[1])
+	}
+}
+
+func TestChildSinkTodoContextUsesBoundedCadenceAndRetrySafeRounds(t *testing.T) {
+	store := todo.NewStore()
+	store.Replace([]todo.Item{{Step: "Implement", Status: todo.StatusInProgress}})
+	sink := newChildSink("", store, true, NewProgress(), nil)
+
+	for turn := 1; turn < 12; turn++ {
+		if got := sink.RequestContext(); len(got) != 0 {
+			t.Fatalf("turn %d context = %+v, want empty", turn, got)
+		}
+		sink.TurnAttemptStart(turn, 1, agent.ContextEstimate{})
+		sink.TurnAttemptStart(turn, 2, agent.ContextEstimate{})
+	}
+	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
+		t.Fatalf("turn 12 context = %+v, want stale TODO reminder", got)
+	}
+	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
+
+	for turn := 13; turn < 36; turn++ {
+		if got := sink.RequestContext(); len(got) != 0 {
+			t.Fatalf("turn %d context = %+v, want empty", turn, got)
+		}
+		sink.TurnAttemptStart(turn, 1, agent.ContextEstimate{})
+	}
+	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
+		t.Fatalf("turn 36 context = %+v, want backed-off TODO reminder", got)
+	}
+	sink.TurnAttemptStart(36, 1, agent.ContextEstimate{})
+
+	sink.TranscriptRewritten()
+	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
+		t.Fatalf("rewrite context = %+v, want immediate recovery reminder", got)
+	}
+	sink.TurnAttemptStart(36, 2, agent.ContextEstimate{})
+	if got := sink.RequestContext(); len(got) != 0 {
+		t.Fatalf("post-recovery context = %+v, want reset cadence", got)
 	}
 }
 

@@ -5685,8 +5685,8 @@ func (s *accumulatingSink) CompactionComplete() {
 }
 
 func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
-	if s.app != nil && s.app.Todos != nil && turn != s.todoTurn {
-		s.app.Todos.CommitRequestContext()
+	if s.app != nil && s.app.Todos != nil && s.app.agentHasTool("update_todos") {
+		s.app.Todos.CommitModelRound(turn != s.todoTurn)
 		s.todoTurn = turn
 	}
 	s.attemptText.Reset()

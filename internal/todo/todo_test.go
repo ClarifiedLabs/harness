@@ -71,6 +71,23 @@ func TestUpdateTodosRejectsInvalidListWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestRejectedUpdateDoesNotResetStaleReminderCadence(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{{Step: "Existing", Status: StatusInProgress}})
+	for range staleReminderInitialRounds - 1 {
+		if got := commitModelRound(store); got != "" {
+			t.Fatalf("early context = %q", got)
+		}
+	}
+
+	if _, err := runUpdate(t, NewTool(store), []Item{{Step: "Invalid", Status: "blocked"}}); err == nil {
+		t.Fatal("invalid update succeeded")
+	}
+	if got := commitModelRound(store); !strings.Contains(got, "[~] Existing") {
+		t.Fatalf("rejected update postponed stale reminder: %q", got)
+	}
+}
+
 func TestUpdateTodosStatusErrorsAreActionable(t *testing.T) {
 	store := NewStore()
 	_, err := runUpdate(t, NewTool(store), []Item{{Step: "Inspect", Status: "blocked"}})
@@ -110,7 +127,7 @@ func TestStoreRecoveryContextIsOneShotAndOnlyForUnresolvedItems(t *testing.T) {
 	if got := store.PendingRequestContext(); !strings.Contains(got, "[~] Implement") {
 		t.Fatalf("PendingRequestContext = %q", got)
 	}
-	store.CommitRequestContext()
+	store.CommitModelRound(true)
 	if got := store.PendingRequestContext(); got != "" {
 		t.Fatalf("committed context = %q, want empty", got)
 	}
@@ -121,6 +138,62 @@ func TestStoreRecoveryContextIsOneShotAndOnlyForUnresolvedItems(t *testing.T) {
 	store.Restore([]Item{{Step: "Done", Status: StatusCompleted}})
 	if got := store.PendingRequestContext(); got != "" {
 		t.Fatalf("completed context = %q, want empty", got)
+	}
+}
+
+func commitModelRound(store *Store) string {
+	ctx := store.PendingRequestContext()
+	store.CommitModelRound(true)
+	return ctx
+}
+
+func TestStoreRemindsAboutStaleTodosWithBoundedBackoff(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{{Step: "Implement", Status: StatusInProgress}})
+
+	for _, interval := range []int{12, 24, 48, 96, 96} {
+		for round := 1; round < interval; round++ {
+			if got := commitModelRound(store); got != "" {
+				t.Fatalf("interval %d round %d context = %q, want empty", interval, round, got)
+			}
+		}
+		if got := commitModelRound(store); !strings.Contains(got, "[~] Implement") {
+			t.Fatalf("interval %d reminder = %q", interval, got)
+		}
+	}
+}
+
+func TestStoreUpdateAndRecoveryResetStaleReminderSchedule(t *testing.T) {
+	store := NewStore()
+	store.Replace([]Item{{Step: "Implement", Status: StatusInProgress}})
+	for range staleReminderInitialRounds - 1 {
+		if got := commitModelRound(store); got != "" {
+			t.Fatalf("early context before update = %q", got)
+		}
+	}
+
+	store.Replace([]Item{{Step: "Verify", Status: StatusInProgress}})
+	for round := 1; round < staleReminderInitialRounds; round++ {
+		if got := commitModelRound(store); got != "" {
+			t.Fatalf("round %d after update context = %q, want empty", round, got)
+		}
+	}
+	if got := commitModelRound(store); !strings.Contains(got, "[~] Verify") {
+		t.Fatalf("reminder after update reset = %q", got)
+	}
+
+	store.RequireRequestContext()
+	if got := store.PendingRequestContext(); !strings.Contains(got, "[~] Verify") {
+		t.Fatalf("recovery context = %q", got)
+	}
+	store.CommitModelRound(false)
+	for round := 1; round < staleReminderInitialRounds; round++ {
+		if got := commitModelRound(store); got != "" {
+			t.Fatalf("round %d after recovery context = %q, want empty", round, got)
+		}
+	}
+	if got := commitModelRound(store); !strings.Contains(got, "[~] Verify") {
+		t.Fatalf("reminder after recovery reset = %q", got)
 	}
 }
 

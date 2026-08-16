@@ -1741,7 +1741,10 @@ Non-plan built-in agents use `update_todos` for an advisory checklist. Each call
 replaces the complete `{step,status}` list, and the statuses never complete,
 block, or otherwise control the agent loop. The unresolved list is restored on
 resume and injected once after compaction or another transcript rewrite so the
-model can reconcile it with current progress.
+model can reconcile it with current progress. Without another successful
+update, Harness also reminds the model after 12 conversational rounds, then
+backs off to intervals of 24, 48, and at most 96 rounds. Updates and delivered
+recovery reminders reset the cadence; request retries do not advance it.
 
 ## Sessions
 
