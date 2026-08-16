@@ -181,7 +181,9 @@ while an exclusive job conflicts with every active lease for the same resource
 and reports the existing job id. Jobs on different resources remain concurrent.
 The lease is an exact-key match on the canonical path: it does not protect the
 whole workspace, so two jobs on sibling or nested directories do not conflict.
-`web_fetch` does not lease the local workspace.
+`web_fetch` does not lease the local workspace. `web_fetch` returns text
+only; non-textual responses fail with an error that points at downloading the
+archive or binary with `shell` (for example `curl`) for inspection.
 Completed background job summaries are delivered once as request-only context to
 the parent agent. Background delegates are join-required: after one useful parent
 turn, harness waits for them and makes the parent synthesize their reports
@@ -260,8 +262,9 @@ missing or ambiguous blocks together. Ambiguous errors include up to five
 occurrence line numbers; close not-found candidates include the first divergent
 line. Fuzzy matching uses a normalized comparison view but maps the selected
 span back to the original bytes, so unrelated whitespace and typographic
-punctuation are preserved. A single top-level `path` is accepted only as an
-unambiguous compatibility shorthand for exactly one pathless `files` entry.
+punctuation are preserved. A top-level `path` is the default base for every
+`files` entry that omits its own `path`; entries naming the same path are
+tolerated, and an entry naming a different path is rejected as ambiguous.
 By default, harness prints a unified before/after diff for each built-in file
 mutation tool call. Set `show_diffs`, `HARNESS_SHOW_DIFFS`, or `-show-diffs` to
 false to disable diff output. Diffs are generated from per-call file snapshots,

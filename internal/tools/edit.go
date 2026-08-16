@@ -20,7 +20,7 @@ import (
 const editSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Single-entry compatibility shorthand."},
+    "path": {"type": "string", "description": "Single-entry compatibility shorthand; entries without path inherit it."},
     "files": {
       "type": "array",
       "minItems": 1,
@@ -227,10 +227,18 @@ func decodeEditArgs(input json.RawMessage) (editArgs, error) {
 		return editArgs{}, badArgs("files is required and must contain at least one file")
 	}
 	if strings.TrimSpace(raw.Path) != "" {
-		if len(raw.Files) != 1 || strings.TrimSpace(raw.Files[0].Path) != "" {
-			return editArgs{}, badArgs("top-level path is accepted only with exactly one files entry that omits path; use {files:[{path,edits}]} for multiple files")
+		// Top-level path is the default base for every entry that omits its
+		// own path. An entry that names a different path is ambiguous and
+		// still rejected; naming the same path is tolerated.
+		for i := range raw.Files {
+			if strings.TrimSpace(raw.Files[i].Path) == "" {
+				raw.Files[i].Path = raw.Path
+				continue
+			}
+			if filepath.Clean(raw.Files[i].Path) != filepath.Clean(raw.Path) {
+				return editArgs{}, badArgs("files[%d].path %q differs from top-level path %q; use {files:[{path,edits}]} when files diverge", i, raw.Files[i].Path, raw.Path)
+			}
 		}
-		raw.Files[0].Path = raw.Path
 	}
 
 	files := make([]editFile, 0, len(raw.Files))

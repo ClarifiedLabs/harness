@@ -2187,9 +2187,9 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   whitespace, smart quotes, Unicode dashes, and special spaces. The normalized
   match carries an offset map back to the original content; only that raw span
   is replaced, so normalization cannot rewrite unrelated bytes.
-- A top-level `path` is normalized only when there is exactly one pathless
-  `files` entry. Nested plus top-level paths and multiple pathless entries are
-  rejected as ambiguous.
+- A top-level `path` is the default base for every `files` entry that omits
+  its own `path`; entries naming the same path are tolerated, and an entry
+  naming a different path is rejected as ambiguous.
 - Success reports `edited <file-count> file(s), <replacement-count> replacement(s)`
   followed by one line per file.
 

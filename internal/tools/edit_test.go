@@ -609,14 +609,28 @@ func TestEditFuzzyMatchPreservesUntouchedBytes(t *testing.T) {
 	}
 }
 
-func TestDecodeEditArgsAcceptsOnlyUnambiguousTopLevelPath(t *testing.T) {
-	args, err := decodeEditArgs(json.RawMessage(`{"path":"a.txt","files":[{"edits":[{"oldText":"a","newText":"b"}]}]}`))
-	if err != nil || len(args.Files) != 1 || args.Files[0].Path != "a.txt" {
-		t.Fatalf("decoded = %+v, %v", args, err)
+func TestDecodeEditArgsAppliesTopLevelPathAsDefaultBase(t *testing.T) {
+	// Two pathless entries inherit the top-level path and apply in order.
+	args, err := decodeEditArgs(json.RawMessage(`{"path":"a.txt","files":[{"edits":[{"oldText":"a","newText":"b"}]},{"edits":[{"oldText":"b","newText":"c"}]}]}`))
+	if err != nil {
+		t.Fatalf("inherited path across entries rejected: %v", err)
 	}
+	for i, file := range args.Files {
+		if file.Path != "a.txt" {
+			t.Fatalf("files[%d].path = %q, want a.txt", i, file.Path)
+		}
+	}
+
+	// An entry that repeats the same path is tolerated.
+	args, err = decodeEditArgs(json.RawMessage(`{"path":"a.txt","files":[{"path":"a.txt","edits":[{"oldText":"a","newText":"b"}]}]}`))
+	if err != nil || len(args.Files) != 1 || args.Files[0].Path != "a.txt" {
+		t.Fatalf("identical path rejected: %+v, %v", args, err)
+	}
+
+	// A diverging entry path remains ambiguous and rejected.
 	for _, input := range []string{
 		`{"path":"a.txt","files":[{"path":"b.txt","edits":[{"oldText":"a","newText":"b"}]}]}`,
-		`{"path":"a.txt","files":[{"edits":[{"oldText":"a","newText":"b"}]},{"edits":[{"oldText":"c","newText":"d"}]}]}`,
+		`{"path":"a.txt","files":[{"edits":[{"oldText":"a","newText":"b"}]},{"path":"b.txt","edits":[{"oldText":"c","newText":"d"}]}]}`,
 	} {
 		if _, err := decodeEditArgs(json.RawMessage(input)); err == nil {
 			t.Fatalf("ambiguous input accepted: %s", input)
