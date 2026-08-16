@@ -286,6 +286,18 @@ func (b *delegateBudget) acquire(logicalID string, continuation bool) (func(), e
 	return func() { once.Do(func() { b.mu.Lock(); b.active--; b.mu.Unlock() }) }, nil
 }
 
+// remaining reports the descendant slots still available under the budget.
+// ok is false for an unlimited (nil) budget, in which case no receipt clause
+// applies.
+func (b *delegateBudget) remaining() (remaining, total int, ok bool) {
+	if b == nil {
+		return 0, 0, false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.maxTotal - b.total, b.maxTotal, true
+}
+
 func (r *Runner) Rebind(snapshot func() Runtime) *Runner {
 	if r == nil {
 		return nil
@@ -988,6 +1000,9 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		if usage.WorkflowStatus.ExpectedWait {
 			report += " (expected wait)"
 		}
+	}
+	if remaining, total, ok := r.budget.remaining(); ok {
+		report += fmt.Sprintf(", %d of %d descendant slots remaining", remaining, total)
 	}
 	if childDir != "" {
 		report += fmt.Sprintf(", transcript %s", childDir)

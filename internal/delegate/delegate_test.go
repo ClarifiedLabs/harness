@@ -561,11 +561,43 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	}
 }
 
+func TestDelegateReceiptSurfacesRemainingDescendantBudget(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{Stop: llm.StopEndTurn})
+	fixture.runner.budget = newDelegateBudget(Options{MaxActiveDescendants: 2, MaxTotalDescendants: 2})
+
+	result, err := fixture.runner.Run(context.Background(), RunRequest{Task: "first", ChildID: "child-1"}, nil)
+	if err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if !strings.Contains(result.Report, "1 of 2 descendant slots remaining") {
+		t.Fatalf("first receipt missing remaining budget: %s", result.Report)
+	}
+
+	result, err = fixture.runner.Run(context.Background(), RunRequest{Task: "second", ChildID: "child-2"}, nil)
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if !strings.Contains(result.Report, "0 of 2 descendant slots remaining") {
+		t.Fatalf("second receipt missing exhausted budget: %s", result.Report)
+	}
+
+	// The exhausted budget path is unchanged: a third new child still errors.
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "third", ChildID: "child-3"}, nil); err == nil || !strings.Contains(err.Error(), "total descendant limit") {
+		t.Fatalf("exhausted budget error = %v", err)
+	}
+}
+
 func TestDelegateBudgetEnforcesRootLimits(t *testing.T) {
 	budget := newDelegateBudget(Options{MaxActiveDescendants: 1, MaxTotalDescendants: 2})
+	if remaining, total, ok := budget.remaining(); !ok || remaining != 2 || total != 2 {
+		t.Fatalf("remaining before any child = %d/%d ok=%v, want 2/2", remaining, total, ok)
+	}
 	release, err := budget.acquire("child-1", false)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if remaining, total, ok := budget.remaining(); !ok || remaining != 1 || total != 2 {
+		t.Fatalf("remaining after one child = %d/%d ok=%v, want 1/2", remaining, total, ok)
 	}
 	if _, err := budget.acquire("child-2", false); err == nil || !strings.Contains(err.Error(), "active descendant") {
 		t.Fatalf("active limit error = %v", err)
@@ -575,6 +607,9 @@ func TestDelegateBudgetEnforcesRootLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if remaining, _, ok := budget.remaining(); !ok || remaining != 0 {
+		t.Fatalf("remaining after two children = %d ok=%v, want 0", remaining, ok)
+	}
 	release()
 	if _, err := budget.acquire("child-3", false); err == nil || !strings.Contains(err.Error(), "total descendant") {
 		t.Fatalf("total limit error = %v", err)
@@ -582,6 +617,9 @@ func TestDelegateBudgetEnforcesRootLimits(t *testing.T) {
 	continued, err := budget.acquire("child-1", true)
 	if err != nil {
 		t.Fatalf("continuation should reuse total budget: %v", err)
+	}
+	if remaining, _, ok := budget.remaining(); !ok || remaining != 0 {
+		t.Fatalf("continuation must not consume total budget: remaining %d ok=%v", remaining, ok)
 	}
 	continued()
 }

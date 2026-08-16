@@ -2585,7 +2585,9 @@ reuses its logical descendant slot; all terminal paths release active capacity.
   source/validation, while terminal `ChildMeta.Completion` stores the bounded
   report beside—not in place of—lifecycle status, workflow status, and
   `TerminationReason`. Each continuation writes an independent report for its
-  fresh child ID.
+  fresh child ID. Receipts also report the root descendant budget, e.g.
+  `3 of 16 descendant slots remaining`, when a budget applies; an unlimited
+  budget omits the clause.
 - `continue_child_id` names an already-terminal child of the same immediate
   parent. Continuation never appends to or overwrites that source directory:
   the Runner creates a fresh child ID and seeds it with the source transcript,
