@@ -80,7 +80,7 @@ func Connect(ctx context.Context, opts ConnectOptions, body []byte, yield func(S
 				yield(StreamEvent{}, ctxErr)
 				return nil, ctxErr
 			}
-			apiErr := &APIError{Message: err.Error(), Retryable: true}
+			apiErr := &APIError{Message: err.Error(), Retryable: true, Stage: APIErrorStageUpstreamConnect}
 			if !connectBackoff(ctx, opts.Sleep, attempt, 0, attemptDuration, apiErr, yield) {
 				return nil, apiErr
 			}
@@ -167,7 +167,10 @@ func modelRequestFailureEvent(apiErr *APIError, attempt int, attemptDuration tim
 		event.Retryable = apiErr.Retryable
 		event.RetryAfterMS = apiErr.RetryAfter.Milliseconds()
 		event.Stage = APIErrorStageUpstreamHTTP
-		if apiErr.StatusCode == 0 {
+		if apiErr.Stage != "" {
+			event.Stage = apiErr.Stage
+		}
+		if apiErr.StatusCode == 0 && apiErr.Stage == "" {
 			event.Stage = APIErrorStageUpstreamStream
 		}
 		if apiErr.Diagnostic != nil {
@@ -190,9 +193,13 @@ func modelRequestCancelledEvent(attempt int) StreamEvent {
 
 // connectBackoffDelay picks the backoff before the next connect attempt. The
 // rate-limit class (429/529) takes the higher cap60s ceiling because it recovers
-// over minutes; transport errors and transient 500/502/503 keep the cap30s
+// over minutes; transport errors take the minConnectDelay floor so a down
+// proxy is not retried back-to-back; transient 500/502/503 keep the cap30s
 // schedule. Retry-After remains a floor either way.
 func connectBackoffDelay(attempt int, retryAfter time.Duration, apiErr *APIError) time.Duration {
+	if apiErr != nil && apiErr.Stage == APIErrorStageUpstreamConnect {
+		return retry.NextConnect(attempt, retryAfter)
+	}
 	if apiErr != nil && retry.RateLimitedStatus(apiErr.StatusCode) {
 		return retry.NextRateLimited(attempt, retryAfter)
 	}

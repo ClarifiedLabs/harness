@@ -16,7 +16,12 @@ import (
 
 const (
 	baseDelay = 500 * time.Millisecond
-	cap30s    = 30 * time.Second
+	// minConnectDelay floors transport-level retries. Full jitter over the
+	// 500ms base can draw ~0ms on the first attempts, so a down proxy burns
+	// three attempts back-to-back within a second. Transport failures have no
+	// server-supplied Retry-After, so the floor is the only pacing.
+	minConnectDelay = 750 * time.Millisecond
+	cap30s           = 30 * time.Second
 	// cap60s is the higher jitter ceiling for the rate-limit class (429/529),
 	// which recovers over minutes rather than the seconds typical of a transient
 	// 500/502/503, so a longer backoff between attempts wastes fewer requests.
@@ -38,6 +43,18 @@ func Next(attempt int, retryAfter time.Duration) time.Duration {
 // window matching how rate limits recover.
 func NextRateLimited(attempt int, retryAfter time.Duration) time.Duration {
 	return next(attempt, retryAfter, cap60s)
+}
+
+// NextConnect is Next with a floor for transport-level failures (connection
+// refused/reset, DNS, TLS). The result is never below minConnectDelay, so
+// connect retries never fire back-to-back; a server-supplied retryAfter larger
+// than the floor still wins. The attempt budget itself is unchanged.
+func NextConnect(attempt int, retryAfter time.Duration) time.Duration {
+	if d := next(attempt, retryAfter, cap30s); d < minConnectDelay {
+		return minConnectDelay
+	} else {
+		return d
+	}
 }
 
 func next(attempt int, retryAfter, maxCeiling time.Duration) time.Duration {

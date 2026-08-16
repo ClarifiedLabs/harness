@@ -24,6 +24,7 @@ const (
 	APIErrorStageProxyResolve    APIErrorStage = "proxy_resolve"
 	APIErrorStageProxyPrepare    APIErrorStage = "proxy_prepare"
 	APIErrorStageProviderRuntime APIErrorStage = "provider_runtime"
+	APIErrorStageUpstreamConnect APIErrorStage = "upstream_connect"
 	APIErrorStageUpstreamHTTP    APIErrorStage = "upstream_http"
 	APIErrorStageUpstreamStream  APIErrorStage = "upstream_stream"
 
@@ -98,7 +99,11 @@ type APIError struct {
 	ResponsePayload DiagnosticPayload // bounded, redacted upstream response fragment
 	Retryable       bool
 	RetryAfter      time.Duration
-	Diagnostic      *APIErrorDiagnostic
+	// Stage marks where the request failed. It is set by the connect loop for
+	// transport failures (APIErrorStageUpstreamConnect); HTTP/stream failures
+	// are classified at event-emission time instead.
+	Stage      APIErrorStage
+	Diagnostic *APIErrorDiagnostic
 }
 
 // DiagnosticPayload is valid, compact JSON stored as a comparable string so

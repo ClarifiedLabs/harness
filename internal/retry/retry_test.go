@@ -53,6 +53,27 @@ func TestNextRateLimitedHigherCeiling(t *testing.T) {
 	}
 }
 
+func TestNextConnectFloorsTransportRetries(t *testing.T) {
+	// Transport retries must never fire back-to-back: full jitter over the
+	// 500ms base can draw ~0ms on the early attempts.
+	for attempt := 0; attempt < 12; attempt++ {
+		if d := NextConnect(attempt, 0); d < minConnectDelay {
+			t.Fatalf("NextConnect(%d, 0) = %v, want >= %v", attempt, d, minConnectDelay)
+		}
+		if d := NextConnect(attempt, 0); d > cap30s {
+			t.Fatalf("NextConnect(%d, 0) = %v, want <= 30s cap", attempt, d)
+		}
+	}
+	// A larger server-supplied Retry-After still wins over the floor.
+	if d := NextConnect(0, 2*time.Second); d < 2*time.Second {
+		t.Fatalf("NextConnect(0, 2s) = %v, want >= 2s (Retry-After floor)", d)
+	}
+	// A Retry-After below the connect floor is raised to it.
+	if d := NextConnect(0, 10*time.Millisecond); d != minConnectDelay {
+		t.Fatalf("NextConnect(0, 10ms) = %v, want %v", d, minConnectDelay)
+	}
+}
+
 func TestParseRetryAfter(t *testing.T) {
 	if d := ParseRetryAfter("3"); d != 3*time.Second {
 		t.Errorf("seconds form = %v, want 3s", d)

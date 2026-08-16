@@ -3,11 +3,62 @@ package llm
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestConnectTransportErrorsBackoffWithFloor(t *testing.T) {
+	// Dial a port with no listener so every Client.Do fails at transport level
+	// without depending on a specific error string.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var delays []time.Duration
+	var stages []APIErrorStage
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := Connect(context.Background(), ConnectOptions{
+		Client: client,
+		URL:    "http://" + addr + "/v1/responses",
+		Header: func(*http.Request) {},
+		ParseError: func(resp *http.Response) *APIError {
+			apiErr, _, _ := ParseErrorResponse(resp)
+			return apiErr
+		},
+		Sleep: func(d time.Duration) { delays = append(delays, d) },
+	}, nil, func(event StreamEvent, err error) bool {
+		if event.Kind == EventModelRequest && event.ModelRequest != nil && event.ModelRequest.State == ModelRequestUpstreamAttemptFailed {
+			stages = append(stages, event.ModelRequest.Stage)
+		}
+		_ = err
+		return true
+	})
+
+	if resp != nil || err == nil {
+		t.Fatalf("Connect = resp %v err %v, want terminal transport error", resp, err)
+	}
+	if got := len(delays); got != connectMaxAttempts-1 {
+		t.Fatalf("retry sleeps = %d, want %d (attempt budget respected)", got, connectMaxAttempts-1)
+	}
+	for i, d := range delays {
+		if d < 750*time.Millisecond {
+			t.Fatalf("retry delay[%d] = %v, want >= 750ms (no back-to-back transport retries)", i, d)
+		}
+	}
+	for _, stage := range stages {
+		if stage != APIErrorStageUpstreamConnect {
+			t.Fatalf("model request stage = %q, want upstream_connect", stage)
+		}
+	}
+}
 
 func TestConnectBackoffWakesOnContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
