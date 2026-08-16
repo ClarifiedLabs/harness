@@ -1741,12 +1741,12 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 		},
 		"scope": map[string]any{
 			"type":        "string",
-			"description": "Background workspace; default: cwd. Separate concurrent write scopes.",
+			"description": "Background workspace; default: cwd. Separate concurrent write scopes. Requires background:true.",
 		},
 		"access": map[string]any{
 			"type":        "string",
 			"enum":        []string{tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive},
-			"description": "Background lease; defaults by agent. Override only when stricter.",
+			"description": "Background lease; defaults by agent. Override only when stricter. Requires background:true.",
 		},
 	}
 	body := map[string]any{

@@ -58,6 +58,12 @@ func TestDelegatePreservesConciseSchemaDescriptions(t *testing.T) {
 	if !strings.Contains(parameters, `"description":"Only independent work; joined automatically."`) {
 		t.Fatalf("model-facing schema lost parameter description: %s", parameters)
 	}
+	if !strings.Contains(parameters, `"description":"Background workspace; default: cwd. Separate concurrent write scopes. Requires background:true."`) {
+		t.Fatalf("scope description must state the background:true requirement: %s", parameters)
+	}
+	if !strings.Contains(parameters, `"description":"Background lease; defaults by agent. Override only when stricter. Requires background:true."`) {
+		t.Fatalf("access description must state the background:true requirement: %s", parameters)
+	}
 }
 
 func TestDelegateSequentialOnlyForValidForegroundCalls(t *testing.T) {
