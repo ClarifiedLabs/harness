@@ -363,7 +363,7 @@ func TestWebFetchNonHTTPSchemeRejected(t *testing.T) {
 
 func TestWebFetchBinaryContentTypeRejected(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Header().Set("Content-Type", "application/x-gzip")
 		writeString(w, "\x00\x01\x02binary")
 	}))
 	defer srv.Close()
@@ -372,8 +372,12 @@ func TestWebFetchBinaryContentTypeRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("binary content type should be rejected")
 	}
-	if !strings.Contains(err.Error(), "octet-stream") {
-		t.Errorf("error should mention the content type: %v", err)
+	msg := err.Error()
+	if !strings.Contains(msg, "x-gzip") {
+		t.Errorf("error should mention the media type: %v", msg)
+	}
+	if !strings.Contains(msg, "curl") {
+		t.Errorf("error should point at the shell fallback: %v", msg)
 	}
 }
 

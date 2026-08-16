@@ -179,7 +179,7 @@ func doWebFetch(ctx context.Context, rawURL string, maxBytes int, timeoutSeconds
 	contentType := resp.Header.Get("Content-Type")
 	mediaType := httpx.MediaType(contentType)
 	if !isTextual(mediaType) {
-		return "", fmt.Errorf("unsupported content type %q (binary content is not fetched as text)", contentType)
+		return "", fmt.Errorf("unsupported content type %q (binary content is not fetched as text); download archives or binaries with shell (e.g. curl) and inspect them with shell tools", contentType)
 	}
 
 	// Read one extra byte so the cap can be reported without trusting
