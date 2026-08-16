@@ -187,12 +187,17 @@ const (
 	ChildCompletionSourceHost          = "host"
 
 	ChildCompletionValidationValid       = "valid"
-	ChildCompletionValidationMissing     = "missing"
-	ChildCompletionValidationMalformed   = "malformed"
-	ChildCompletionValidationInvalid     = "invalid"
-	ChildCompletionValidationOversized   = "oversized"
-	ChildCompletionValidationDuplicate   = "duplicate"
-	ChildCompletionValidationUnavailable = "unavailable"
+	// PartialFields marks a declared report whose generic core is valid but
+	// whose contract-specific fields were omitted. The report is usable: the
+	// host fills the missing arrays/strings with empty defaults and preserves
+	// the declared outcome and unresolved count.
+	ChildCompletionValidationPartialFields = "partial_fields"
+	ChildCompletionValidationMissing       = "missing"
+	ChildCompletionValidationMalformed     = "malformed"
+	ChildCompletionValidationInvalid       = "invalid"
+	ChildCompletionValidationOversized     = "oversized"
+	ChildCompletionValidationDuplicate     = "duplicate"
+	ChildCompletionValidationUnavailable   = "unavailable"
 )
 
 // ChildMeta is the forensic index for a child-agent run stored under a parent

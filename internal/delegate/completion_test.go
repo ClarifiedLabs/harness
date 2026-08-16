@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -47,8 +48,9 @@ func TestParseCompletionReportContractsAndFallbacks(t *testing.T) {
 		{name: "unresolved over cap", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1000001,"evidence":[],"unresolved_questions":[]}`), contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationInvalid},
 		{name: "general rejects implementation fields", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1,"changed_files":[],"evidence":[],"unresolved_questions":[]}`), contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationInvalid},
 		{name: "implementation rejects general fields", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1,"changed_files":[],"verification":[{"check":"test","status":"passed"}],"evidence":[]}`), contract: session.ChildCompletionContractImplementation, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationInvalid},
-		{name: "implementation fields missing", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1}`), contract: session.ChildCompletionContractImplementation, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationInvalid},
-		{name: "review unreviewed missing", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1,"coverage":"partial"}`), contract: session.ChildCompletionContractReview, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationInvalid},
+		{name: "implementation fields missing degrades to partial", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1}`), contract: session.ChildCompletionContractImplementation, outcome: session.ChildCompletionOutcomePartial, validation: session.ChildCompletionValidationPartialFields, prose: ""},
+		{name: "review fields missing degrades to partial", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1}`), contract: session.ChildCompletionContractReview, outcome: session.ChildCompletionOutcomePartial, validation: session.ChildCompletionValidationPartialFields, prose: ""},
+		{name: "review partial contract fields still invalid", text: completionBlock(`{"outcome":"partial","unresolved_requirements":1,"coverage":"partial"}`), contract: session.ChildCompletionContractReview, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationInvalid},
 		{name: "bounded list", text: completionBlock(oversizedList), contract: session.ChildCompletionContractImplementation, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationOversized},
 		{name: "oversized block", text: completionBlock(strings.Repeat("x", maxCompletionBlockBytes+1)), contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationOversized},
 		{name: "duplicate", text: validGeneral + "\n" + validGeneral, contract: session.ChildCompletionContractGeneral, outcome: session.ChildCompletionOutcomeUnknown, validation: session.ChildCompletionValidationDuplicate, prose: validGeneral + "\n" + validGeneral},
@@ -64,15 +66,106 @@ func TestParseCompletionReportContractsAndFallbacks(t *testing.T) {
 			if report.ValidationStatus == session.ChildCompletionValidationValid && report.Source != session.ChildCompletionSourceDeclared {
 				t.Fatalf("valid source = %q", report.Source)
 			}
-			if report.ValidationStatus != session.ChildCompletionValidationValid && report.Source != session.ChildCompletionSourceCompatibility {
+			if report.ValidationStatus != session.ChildCompletionValidationValid && report.ValidationStatus != session.ChildCompletionValidationPartialFields && report.Source != session.ChildCompletionSourceCompatibility {
 				t.Fatalf("fallback source = %q", report.Source)
 			}
+			usable := report.ValidationStatus == session.ChildCompletionValidationValid || report.ValidationStatus == session.ChildCompletionValidationPartialFields
 			wantProse := tc.prose
-			if wantProse == "" && tc.validation != session.ChildCompletionValidationValid {
+			if wantProse == "" && !usable {
 				wantProse = tc.text
 			}
 			if prose != wantProse {
 				t.Fatalf("prose = %q, want %q", prose, wantProse)
+			}
+		})
+	}
+}
+
+func TestParseCompletionReportPartialFieldsFillsDefaults(t *testing.T) {
+	// The observed failure mode: children emit the generic core only. Each
+	// contract must preserve the declared outcome and unresolved count, fill
+	// empty defaults for its contract fields, and stay a usable report.
+	generic := `{"outcome":"partial","unresolved_requirements":2,"blockers":[]}`
+	for _, tc := range []struct {
+		contract string
+		check    func(CompletionReport) error
+	}{{
+		contract: session.ChildCompletionContractGeneral,
+		check: func(r CompletionReport) error {
+			if r.Evidence == nil || len(r.Evidence) != 0 {
+				return fmt.Errorf("evidence = %#v, want empty non-nil default", r.Evidence)
+			}
+			if r.UnresolvedQuestions == nil || len(r.UnresolvedQuestions) != 0 {
+				return fmt.Errorf("unresolved_questions = %#v, want empty non-nil default", r.UnresolvedQuestions)
+			}
+			return nil
+		},
+	}, {
+		contract: session.ChildCompletionContractReview,
+		check: func(r CompletionReport) error {
+			if r.Coverage != "" {
+				return fmt.Errorf("coverage = %q, want empty default", r.Coverage)
+			}
+			if r.UnreviewedScope == nil || len(r.UnreviewedScope) != 0 {
+				return fmt.Errorf("unreviewed_scope = %#v, want empty non-nil default", r.UnreviewedScope)
+			}
+			return nil
+		},
+	}, {
+		contract: session.ChildCompletionContractImplementation,
+		check: func(r CompletionReport) error {
+			if r.ChangedFiles == nil || len(r.ChangedFiles) != 0 {
+				return fmt.Errorf("changed_files = %#v, want empty non-nil default", r.ChangedFiles)
+			}
+			if r.Verification == nil || len(r.Verification) != 0 {
+				return fmt.Errorf("verification = %#v, want empty non-nil default", r.Verification)
+			}
+			return nil
+		},
+	}} {
+		t.Run(tc.contract, func(t *testing.T) {
+			report, prose := parseCompletionReport("summary.\n"+completionBlock(generic), tc.contract)
+			if report.ValidationStatus != session.ChildCompletionValidationPartialFields {
+				t.Fatalf("validation = %q, want partial_fields", report.ValidationStatus)
+			}
+			if report.Outcome != session.ChildCompletionOutcomePartial || report.UnresolvedRequirements != 2 {
+				t.Fatalf("declared core not preserved: %+v", report)
+			}
+			if report.Source != session.ChildCompletionSourceDeclared {
+				t.Fatalf("source = %q, want child_declared", report.Source)
+			}
+			if err := tc.check(report); err != nil {
+				t.Fatal(err)
+			}
+			if prose != "summary." {
+				t.Fatalf("prose = %q", prose)
+			}
+		})
+	}
+}
+
+func TestParseCompletionReportStillInvalidatesWrongContent(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		body     string
+		contract string
+	}{
+		{name: "bad outcome enum", body: `{"outcome":"done","unresolved_requirements":0}`, contract: session.ChildCompletionContractGeneral},
+		{name: "complete with unresolved", body: `{"outcome":"complete","unresolved_requirements":1}`, contract: session.ChildCompletionContractGeneral},
+		{name: "blocked without blockers", body: `{"outcome":"blocked","unresolved_requirements":1}`, contract: session.ChildCompletionContractGeneral},
+		{name: "blocked with empty blockers", body: `{"outcome":"blocked","unresolved_requirements":1,"blockers":[]}`, contract: session.ChildCompletionContractGeneral},
+		{name: "unresolved missing", body: `{"outcome":"complete","evidence":[]}`, contract: session.ChildCompletionContractGeneral},
+		{name: "partial contract fields on review", body: `{"outcome":"partial","unresolved_requirements":1,"coverage":"partial"}`, contract: session.ChildCompletionContractReview},
+		{name: "foreign field on review", body: `{"outcome":"partial","unresolved_requirements":1,"coverage":"partial","unreviewed_scope":[],"evidence":[]}`, contract: session.ChildCompletionContractReview},
+		{name: "verification only on implementation", body: `{"outcome":"partial","unresolved_requirements":1,"verification":[]}`, contract: session.ChildCompletionContractImplementation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report, _ := parseCompletionReport(completionBlock(tc.body), tc.contract)
+			if report.ValidationStatus != session.ChildCompletionValidationInvalid {
+				t.Fatalf("validation = %q, want invalid", report.ValidationStatus)
+			}
+			if report.Outcome != session.ChildCompletionOutcomeUnknown || report.Source != session.ChildCompletionSourceCompatibility {
+				t.Fatalf("invalid report not discarded: %+v", report)
 			}
 		})
 	}

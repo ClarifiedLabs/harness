@@ -407,12 +407,15 @@ contract, strips a valid block from the prose, and prefixes foreground and
 background results with the semantic outcome plus source/validation status.
 Implementation reports include explicit `changed_files` and verification;
 review reports include coverage and unreviewed scope; general reports include
-evidence and unresolved questions. Missing, malformed, duplicate, invalid, or
-oversized reports do not discard useful prose: they produce `unknown` with a
-compatibility validation status. Failed or canceled children instead record
-host/unavailable provenance. The bounded report is persisted in child
-`meta.json` independently of lifecycle termination, and every continuation
-produces a fresh report.
+evidence and unresolved questions. A report whose generic core (outcome,
+unresolved count, blockers) is valid but whose contract fields are omitted is
+not discarded: it becomes `partial_fields`, the declared outcome and unresolved
+count are preserved, and missing arrays/strings are filled with empty defaults.
+Missing, malformed, duplicate, invalid, or oversized reports do not discard
+useful prose: they produce `unknown` with a compatibility validation status.
+Failed or canceled children instead record host/unavailable provenance. The
+bounded report is persisted in child `meta.json` independently of lifecycle
+termination, and every continuation produces a fresh report.
 
 `delegate_output=lines` adds a curated prompt-scoped view of foreground,
 background, concurrent, and nested child activity to parent stderr. Direct

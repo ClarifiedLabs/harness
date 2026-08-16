@@ -2569,7 +2569,13 @@ reuses its logical descendant slot; all terminal paths release active capacity.
   changed-file/verification, review-coverage/unreviewed-scope, or
   evidence/unresolved-question arrays. `complete` requires zero unresolved
   requirements; implementation and review contracts enforce their additional
-  verification and coverage invariants.
+  verification and coverage invariants. A generic-core-only block whose
+  contract fields are omitted is not discarded: it degrades to a
+  `partial_fields` declared report with empty defaults for the missing
+  arrays/strings while preserving the declared outcome and unresolved count;
+  only genuinely wrong content (bad outcome enum, `complete` with unresolved,
+  `blocked` without blockers, foreign or partial contract fields, unknown
+  JSON fields, structural malformation) stays `invalid`.
 - Completion parsing examines only the final assistant response after a
   successful child run. A valid block is removed from parent-facing prose;
   missing, malformed, duplicate, invalid, or oversized blocks preserve useful

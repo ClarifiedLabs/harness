@@ -400,6 +400,23 @@ func TestDeriveCompletionNormalizesUntrustedMetadataKeys(t *testing.T) {
 	}
 }
 
+func TestDeriveCompletionCountsPartialFieldsAsUsable(t *testing.T) {
+	meta := ChildMeta{
+		Status: ChildStatusCompleted, Mode: ChildCompletionContractGeneral,
+		Completion: &ChildCompletionReport{
+			Outcome: ChildCompletionOutcomePartial, UnresolvedRequirements: 3,
+			Evidence: []ChildCompletionEvidence{}, UnresolvedQuestions: []string{},
+			Contract: ChildCompletionContractGeneral, Source: ChildCompletionSourceDeclared,
+			ValidationStatus: ChildCompletionValidationPartialFields,
+		},
+	}
+	meta.Completion.unresolvedRequirementsPresent = true
+	got := deriveCompletion(&meta, true)
+	if got.Reports != 1 || got.Unavailable != 0 || got.Outcomes[ChildCompletionOutcomePartial] != 1 || got.Validation[ChildCompletionValidationPartialFields] != 1 || got.UnresolvedRequirementsTotal != 3 || got.GeneralEvidenceReports != 1 {
+		t.Fatalf("partial_fields report not counted as usable: %+v", got)
+	}
+}
+
 func TestAnalyzeDelegateCompletionCoverageAndPrivacy(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "root")
 	mustAppendAnalysisEvent(t, root, Event{Type: EventToolResult})

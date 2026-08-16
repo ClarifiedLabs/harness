@@ -1216,6 +1216,7 @@ func deriveCompletion(child *ChildMeta, applicable bool) CompletionAnalysis {
 	}
 	switch report.ValidationStatus {
 	case ChildCompletionValidationValid,
+		ChildCompletionValidationPartialFields,
 		ChildCompletionValidationMissing,
 		ChildCompletionValidationMalformed,
 		ChildCompletionValidationInvalid,
@@ -1229,18 +1230,18 @@ func deriveCompletion(child *ChildMeta, applicable bool) CompletionAnalysis {
 		persisted && !validCompletionLifecycle(child, report.ValidationStatus) {
 		report.ValidationStatus = ChildCompletionValidationInvalid
 	}
-	if report.ValidationStatus == ChildCompletionValidationValid {
-		if status := validateChildCompletionReport(report, contract); status != ChildCompletionValidationValid {
+	if report.ValidationStatus == ChildCompletionValidationValid || report.ValidationStatus == ChildCompletionValidationPartialFields {
+		if status := validateChildCompletionReport(report, contract); status != ChildCompletionValidationValid && status != ChildCompletionValidationPartialFields {
 			report.ValidationStatus = status
 		}
 	}
-	if report.ValidationStatus != ChildCompletionValidationValid {
+	if report.ValidationStatus != ChildCompletionValidationValid && report.ValidationStatus != ChildCompletionValidationPartialFields {
 		report.Outcome = ChildCompletionOutcomeUnknown
 	}
 	out.Outcomes[report.Outcome]++
 	out.Validation[report.ValidationStatus]++
 	out.Contracts[contract]++
-	if report.ValidationStatus != ChildCompletionValidationValid {
+	if report.ValidationStatus != ChildCompletionValidationValid && report.ValidationStatus != ChildCompletionValidationPartialFields {
 		out.Unavailable++
 		return out
 	}
@@ -1271,6 +1272,7 @@ func validCompletionLifecycle(child *ChildMeta, validation string) bool {
 	}
 	switch validation {
 	case ChildCompletionValidationValid,
+		ChildCompletionValidationPartialFields,
 		ChildCompletionValidationMissing,
 		ChildCompletionValidationMalformed,
 		ChildCompletionValidationInvalid,
@@ -1295,7 +1297,7 @@ func validCompletionLifecycle(child *ChildMeta, validation string) bool {
 
 func validCompletionProvenance(source, validation string) bool {
 	switch validation {
-	case ChildCompletionValidationValid:
+	case ChildCompletionValidationValid, ChildCompletionValidationPartialFields:
 		return source == ChildCompletionSourceDeclared
 	case ChildCompletionValidationMissing,
 		ChildCompletionValidationMalformed,

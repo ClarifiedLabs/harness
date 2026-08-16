@@ -105,10 +105,12 @@ func parseCompletionReport(text, contract string) (CompletionReport, string) {
 	if err := requireJSONEOF(decoder); err != nil {
 		return unknownCompletion(contract, session.ChildCompletionSourceCompatibility, session.ChildCompletionValidationMalformed), text
 	}
-	if status := validateDeclaredCompletion(declared, contract); status != "" {
+	status := validateDeclaredCompletion(declared, contract)
+	if status == session.ChildCompletionValidationInvalid || status == session.ChildCompletionValidationOversized {
 		return unknownCompletion(contract, session.ChildCompletionSourceCompatibility, status), text
 	}
 
+	partial := status == session.ChildCompletionValidationPartialFields
 	report := CompletionReport{
 		Outcome:                declared.Outcome,
 		UnresolvedRequirements: *declared.UnresolvedRequirements,
@@ -116,6 +118,30 @@ func parseCompletionReport(text, contract string) (CompletionReport, string) {
 		Contract:               contract,
 		Source:                 session.ChildCompletionSourceDeclared,
 		ValidationStatus:       session.ChildCompletionValidationValid,
+	}
+	if partial {
+		// Preserve the declared outcome and unresolved count; fill the omitted
+		// contract fields with empty defaults so downstream consumers see a
+		// complete-shaped report.
+		report.ValidationStatus = session.ChildCompletionValidationPartialFields
+		if declared.ChangedFiles == nil && contract == session.ChildCompletionContractImplementation {
+			report.ChangedFiles = []string{}
+		}
+		if declared.Verification == nil && contract == session.ChildCompletionContractImplementation {
+			report.Verification = []completionVerification{}
+		}
+		if declared.Coverage == nil && contract == session.ChildCompletionContractReview {
+			report.Coverage = ""
+		}
+		if declared.UnreviewedScope == nil && contract == session.ChildCompletionContractReview {
+			report.UnreviewedScope = []string{}
+		}
+		if declared.Evidence == nil && contract == session.ChildCompletionContractGeneral {
+			report.Evidence = []completionEvidence{}
+		}
+		if declared.UnresolvedQuestions == nil && contract == session.ChildCompletionContractGeneral {
+			report.UnresolvedQuestions = []string{}
+		}
 	}
 	if declared.ChangedFiles != nil {
 		report.ChangedFiles = *declared.ChangedFiles
@@ -168,16 +194,31 @@ func validateDeclaredCompletion(report declaredCompletionReport, contract string
 		return session.ChildCompletionValidationOversized
 	}
 
+	// partialFields reports whether the declared block omitted the fields this
+	// contract requires. A generic core-only block is still a usable report —
+	// the host fills empty defaults — so it degrades to partial_fields rather
+	// than being discarded as invalid.
+	var partialFields bool
+	foreign := func() bool {
+		return report.ChangedFiles != nil || report.Verification != nil || report.Coverage != nil ||
+			report.UnreviewedScope != nil || report.Evidence != nil || report.UnresolvedQuestions != nil
+	}
 	switch contract {
 	case session.ChildCompletionContractImplementation:
-		if report.ChangedFiles == nil || report.Verification == nil || len(*report.Verification) == 0 ||
-			report.Coverage != nil || report.UnreviewedScope != nil || report.Evidence != nil || report.UnresolvedQuestions != nil {
+		partialFields = report.ChangedFiles == nil || report.Verification == nil || len(*report.Verification) == 0
+		if !partialFields && (report.Coverage != nil || report.UnreviewedScope != nil || report.Evidence != nil || report.UnresolvedQuestions != nil) {
 			return session.ChildCompletionValidationInvalid
 		}
-		if !boundedStrings(*report.ChangedFiles, maxCompletionListItems, maxCompletionStringBytes, false) || len(*report.Verification) > maxCompletionVerification {
+		if partialFields && foreign() {
+			// Some contract fields are present but a required one is missing;
+			// only a fully generic core counts as a degradable partial report.
+			return session.ChildCompletionValidationInvalid
+		}
+		if report.ChangedFiles != nil && !boundedStrings(*report.ChangedFiles, maxCompletionListItems, maxCompletionStringBytes, false) ||
+			report.Verification != nil && len(*report.Verification) > maxCompletionVerification {
 			return session.ChildCompletionValidationOversized
 		}
-		for _, verification := range *report.Verification {
+		for _, verification := range report.verificationOrDefault() {
 			if !boundedString(verification.Check, maxCompletionStringBytes, false) || !boundedString(verification.Detail, maxCompletionDetailBytes, true) {
 				return session.ChildCompletionValidationOversized
 			}
@@ -196,37 +237,80 @@ func validateDeclaredCompletion(report declaredCompletionReport, contract string
 			}
 		}
 	case session.ChildCompletionContractReview:
-		if report.Coverage == nil || report.UnreviewedScope == nil || report.ChangedFiles != nil || report.Verification != nil || report.Evidence != nil || report.UnresolvedQuestions != nil {
+		partialFields = report.Coverage == nil || report.UnreviewedScope == nil
+		if !partialFields && (report.ChangedFiles != nil || report.Verification != nil || report.Evidence != nil || report.UnresolvedQuestions != nil) {
 			return session.ChildCompletionValidationInvalid
 		}
-		if *report.Coverage != "complete" && *report.Coverage != "partial" {
+		if partialFields && foreign() {
 			return session.ChildCompletionValidationInvalid
 		}
-		if report.Outcome == session.ChildCompletionOutcomeComplete && (*report.Coverage != "complete" || len(*report.UnreviewedScope) != 0) {
-			return session.ChildCompletionValidationInvalid
+		for _, coverage := range report.coverageOrDefault() {
+			if coverage != "complete" && coverage != "partial" {
+				return session.ChildCompletionValidationInvalid
+			}
+			if report.Outcome == session.ChildCompletionOutcomeComplete && coverage == "complete" && len(report.unreviewedOrDefault()) != 0 {
+				return session.ChildCompletionValidationInvalid
+			}
 		}
-		if !boundedStrings(*report.UnreviewedScope, maxCompletionUnreviewedItems, maxCompletionStringBytes, false) {
+		if report.UnreviewedScope != nil && !boundedStrings(*report.UnreviewedScope, maxCompletionUnreviewedItems, maxCompletionStringBytes, false) {
 			return session.ChildCompletionValidationOversized
 		}
 	case session.ChildCompletionContractGeneral:
-		if report.Evidence == nil || report.UnresolvedQuestions == nil || report.ChangedFiles != nil || report.Verification != nil || report.Coverage != nil || report.UnreviewedScope != nil {
+		partialFields = report.Evidence == nil || report.UnresolvedQuestions == nil
+		if !partialFields && (report.ChangedFiles != nil || report.Verification != nil || report.Coverage != nil || report.UnreviewedScope != nil) {
 			return session.ChildCompletionValidationInvalid
 		}
-		if len(*report.Evidence) > maxCompletionEvidenceItems || len(*report.UnresolvedQuestions) > maxCompletionQuestionItems {
-			return session.ChildCompletionValidationOversized
+		if partialFields && foreign() {
+			return session.ChildCompletionValidationInvalid
 		}
-		for _, evidence := range *report.Evidence {
+		for _, evidence := range report.evidenceOrDefault() {
 			if !boundedString(evidence.Path, maxCompletionStringBytes, false) || !boundedString(evidence.Symbol, maxCompletionStringBytes, true) {
 				return session.ChildCompletionValidationOversized
 			}
 		}
-		if !boundedStrings(*report.UnresolvedQuestions, maxCompletionQuestionItems, maxCompletionStringBytes, false) {
+		if report.UnresolvedQuestions != nil && len(*report.UnresolvedQuestions) > maxCompletionQuestionItems {
+			return session.ChildCompletionValidationOversized
+		}
+		if report.UnresolvedQuestions != nil && !boundedStrings(*report.UnresolvedQuestions, maxCompletionQuestionItems, maxCompletionStringBytes, false) {
 			return session.ChildCompletionValidationOversized
 		}
 	default:
 		return session.ChildCompletionValidationInvalid
 	}
+	if partialFields {
+		return session.ChildCompletionValidationPartialFields
+	}
 	return ""
+}
+
+// verificationOrDefault exposes verification as a possibly-empty slice so the
+// shared validation loop handles both present and defaulted reports.
+func (r declaredCompletionReport) verificationOrDefault() []completionVerification {
+	if r.Verification == nil {
+		return nil
+	}
+	return *r.Verification
+}
+
+func (r declaredCompletionReport) coverageOrDefault() []string {
+	if r.Coverage == nil {
+		return nil
+	}
+	return []string{*r.Coverage}
+}
+
+func (r declaredCompletionReport) unreviewedOrDefault() []string {
+	if r.UnreviewedScope == nil {
+		return nil
+	}
+	return *r.UnreviewedScope
+}
+
+func (r declaredCompletionReport) evidenceOrDefault() []completionEvidence {
+	if r.Evidence == nil {
+		return nil
+	}
+	return *r.Evidence
 }
 
 func boundedStrings(values []string, maxItems, maxBytes int, allowEmpty bool) bool {

@@ -67,8 +67,13 @@ func validateChildCompletionReport(report ChildCompletionReport, expectedContrac
 
 	switch expectedContract {
 	case ChildCompletionContractImplementation:
-		if report.ChangedFiles == nil || report.Verification == nil || len(report.Verification) == 0 ||
-			report.Coverage != "" || report.UnreviewedScope != nil || report.Evidence != nil || report.UnresolvedQuestions != nil {
+		if report.Coverage != "" || report.UnreviewedScope != nil || report.Evidence != nil || report.UnresolvedQuestions != nil {
+			return ChildCompletionValidationInvalid
+		}
+		if report.ChangedFiles == nil || report.Verification == nil {
+			return ChildCompletionValidationInvalid
+		}
+		if len(report.Verification) == 0 && report.ValidationStatus != ChildCompletionValidationPartialFields {
 			return ChildCompletionValidationInvalid
 		}
 		if !validCompletionStrings(report.ChangedFiles, childCompletionMaxListItems, childCompletionMaxStringBytes, false) || len(report.Verification) > childCompletionMaxVerification {
@@ -97,10 +102,13 @@ func validateChildCompletionReport(report ChildCompletionReport, expectedContrac
 			report.Evidence != nil || report.UnresolvedQuestions != nil {
 			return ChildCompletionValidationInvalid
 		}
-		if report.Coverage != "complete" && report.Coverage != "partial" {
+		// A partial_fields review may carry an empty coverage default; a
+		// declared coverage value must still be complete or partial.
+		if report.Coverage != "complete" && report.Coverage != "partial" &&
+			!(report.Coverage == "" && report.ValidationStatus == ChildCompletionValidationPartialFields) {
 			return ChildCompletionValidationInvalid
 		}
-		if report.Outcome == ChildCompletionOutcomeComplete && (report.Coverage != "complete" || len(report.UnreviewedScope) != 0) {
+		if report.Outcome == ChildCompletionOutcomeComplete && report.Coverage == "complete" && len(report.UnreviewedScope) != 0 {
 			return ChildCompletionValidationInvalid
 		}
 		if !validCompletionStrings(report.UnreviewedScope, childCompletionMaxUnreviewedItems, childCompletionMaxStringBytes, false) {
