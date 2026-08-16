@@ -129,11 +129,11 @@ func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 		case StatusInProgress:
 			active++
 		default:
-			return "", fmt.Errorf("todos[%d]: invalid status %q", i, args.Todos[i].Status)
+			return "", fmt.Errorf("todos[%d]: invalid status %q (use pending, in_progress, or completed)", i, args.Todos[i].Status)
 		}
 	}
 	if active > 1 {
-		return "", fmt.Errorf("at most one todo may be in_progress")
+		return "", fmt.Errorf("at most one todo may be in_progress; set the previous one completed or pending first")
 	}
 	t.store.Replace(args.Todos)
 	return Render(args.Todos), nil

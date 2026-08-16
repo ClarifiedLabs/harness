@@ -71,6 +71,21 @@ func TestUpdateTodosRejectsInvalidListWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestUpdateTodosStatusErrorsAreActionable(t *testing.T) {
+	store := NewStore()
+	_, err := runUpdate(t, NewTool(store), []Item{{Step: "Inspect", Status: "blocked"}})
+	if err == nil || !strings.Contains(err.Error(), "(use pending, in_progress, or completed)") {
+		t.Fatalf("invalid status error should name the accepted values: %v", err)
+	}
+	_, err = runUpdate(t, NewTool(store), []Item{
+		{Step: "One", Status: StatusInProgress},
+		{Step: "Two", Status: StatusInProgress},
+	})
+	if err == nil || !strings.Contains(err.Error(), "set the previous one completed or pending first") {
+		t.Fatalf("multiple in_progress error should explain the fix: %v", err)
+	}
+}
+
 func TestUpdateTodosDescriptionFitsBudget(t *testing.T) {
 	if got := len((&Tool{store: NewStore()}).Description()); got > 80 {
 		t.Fatalf("update_todos description = %d bytes, budget 80", got)
