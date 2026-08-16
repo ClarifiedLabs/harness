@@ -3216,13 +3216,72 @@ func TestRunSessionStatsErrors(t *testing.T) {
 			getenv: func(string) string { return "" },
 			now:    time.Now,
 		})
-		if code != ui.ExitRuntime {
-			t.Fatalf("exit = %d, want %d", code, ui.ExitRuntime)
+		if code != ui.ExitUsage {
+			t.Fatalf("exit = %d, want %d", code, ui.ExitUsage)
 		}
-		if !strings.HasPrefix(errw.String(), "harness: session stats: collect root session: ") {
+		if !strings.Contains(errw.String(), "unknown session") || !strings.Contains(errw.String(), "expected a session directory or timestamp ID") {
 			t.Fatalf("stderr = %q", errw.String())
 		}
 	})
+}
+
+func TestRunSessionStatsResolvesBareSessionIDFromForeignCWD(t *testing.T) {
+	state := t.TempDir()
+	created := time.Date(2026, 8, 13, 11, 59, 22, 0, time.UTC)
+	id := created.Format("20060102T150405Z")
+	dir := session.DefaultPath(state, created)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := (session.Session{Provider: "openai", Model: "test-model", Created: created, Updated: created}).Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.AppendEvent(dir, session.Event{Type: session.EventUser, Prompt: 1, Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run from an unrelated working directory with only the bare ID.
+	_ = t.TempDir()
+	var out, errw bytes.Buffer
+	code := run(environment{
+		args: []string{"session", "stats", id},
+		stdout: &out, stderr: &errw,
+		getenv: func(k string) string {
+			if k == "XDG_STATE_HOME" {
+				return state
+			}
+			return ""
+		},
+		now: time.Now,
+	})
+	if code != ui.ExitOK {
+		t.Fatalf("exit = %d; stderr = %q", code, errw.String())
+	}
+	if !strings.Contains(out.String(), "Session\n") {
+		t.Fatalf("stats output missing session heading: %q", out.String())
+	}
+
+	// A nonexistent bare ID reports the actionable error instead of a
+	// relative-path open failure.
+	out.Reset()
+	errw.Reset()
+	code = run(environment{
+		args: []string{"session", "errors", "20260101T000000Z"},
+		stdout: &out, stderr: &errw,
+		getenv: func(k string) string {
+			if k == "XDG_STATE_HOME" {
+				return state
+			}
+			return ""
+		},
+		now: time.Now,
+	})
+	if code != ui.ExitUsage {
+		t.Fatalf("exit = %d, want usage", code)
+	}
+	if !strings.Contains(errw.String(), "unknown session \"20260101T000000Z\"") {
+		t.Fatalf("stderr = %q", errw.String())
+	}
 }
 
 func TestRunSessionErrors(t *testing.T) {

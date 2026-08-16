@@ -39,7 +39,12 @@ func runSessionAnalyze(env environment, invocation cli.Invocation) int {
 		err    error
 	)
 	if len(invocation.Args) == 1 {
-		report, err = session.AnalyzeCorpus(invocation.Args[0], opts)
+		dir, resolveErr := session.ResolveSessionDir(stateDir(env.getenv), invocation.Args[0])
+		if resolveErr != nil {
+			fmt.Fprintf(env.stderr, "session analyze: %v\n", resolveErr)
+			return ui.ExitUsage
+		}
+		report, err = session.AnalyzeCorpus(dir, opts)
 	} else {
 		window, parseErr := time.ParseDuration(since)
 		if parseErr != nil || window < 0 {

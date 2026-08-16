@@ -1007,3 +1007,55 @@ func TestStatsReasoningReplayLineHiddenWithoutThinking(t *testing.T) {
 		t.Fatalf("reasoning replay line present without thinking payloads:\n%s", got)
 	}
 }
+
+func TestResolveSessionDir(t *testing.T) {
+	state := t.TempDir()
+	created := time.Date(2026, 8, 13, 11, 59, 22, 0, time.UTC)
+	id := created.Format("20060102T150405Z")
+	real := DefaultPath(state, created)
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "state.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A bare timestamp ID resolves from any working directory.
+	got, err := ResolveSessionDir(state, id)
+	if err != nil {
+		t.Fatalf("bare id: %v", err)
+	}
+	if got != real {
+		t.Fatalf("bare id resolved %q, want %q", got, real)
+	}
+
+	// A real directory path keeps working, absolute or relative.
+	if got, err = ResolveSessionDir(state, real); err != nil || got != real {
+		t.Fatalf("absolute path = %q, %v", got, err)
+	}
+	rel := filepath.Base(real)
+	if got, err = ResolveSessionDir(state, rel); err != nil || got != real {
+		t.Fatalf("relative timestamp name = %q, %v, want %q", got, err, real)
+	}
+
+	// A nonexistent ID produces the actionable error.
+	if _, err = ResolveSessionDir(state, "20260101T000000Z"); err == nil || !strings.Contains(err.Error(), `unknown session "20260101T000000Z" (expected a session directory or timestamp ID)`) {
+		t.Fatalf("missing id error = %v", err)
+	}
+	if _, err = ResolveSessionDir(state, "not-a-session"); err == nil || !strings.Contains(err.Error(), "expected a session directory or timestamp ID") {
+		t.Fatalf("garbage arg error = %v", err)
+	}
+
+	// A disambiguated DefaultPathForID directory is reachable from its bare
+	// timestamp prefix.
+	suffixed := DefaultPathForID(state, created, "abcd1234")
+	if err := os.MkdirAll(suffixed, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(suffixed, "state.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = ResolveSessionDir(state, id); err != nil || got != suffixed {
+		t.Fatalf("suffixed id resolved %q, %v, want %q", got, err, suffixed)
+	}
+}

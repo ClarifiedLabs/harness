@@ -1822,6 +1822,13 @@ harness session analyze [--since D|--all] [--before RFC3339] [--format text|json
 harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--before RFC3339] [--format text|json] [dir]
 ```
 
+`session timings`, `session stats`, `session errors`, and `session analyze`
+accept a bare session ID such as `20260813T115922Z` in place of the session
+directory; it resolves under the default sessions root, so the commands work
+from any working directory. An existing directory path keeps working unchanged,
+and an unknown ID fails with `unknown session <id> (expected a session
+directory or timestamp ID)`.
+
 `session ls` lists recorded root sessions newest first. By default it includes
 only sessions whose persisted startup working directory matches the current
 working directory. `-a`/`--all` removes that working-directory filter, but still

@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -186,7 +187,7 @@ const (
 	ChildCompletionSourceCompatibility = "compatibility_fallback"
 	ChildCompletionSourceHost          = "host"
 
-	ChildCompletionValidationValid       = "valid"
+	ChildCompletionValidationValid = "valid"
 	// PartialFields marks a declared report whose generic core is valid but
 	// whose contract-specific fields were omitted. The report is usable: the
 	// host fills the missing arrays/strings with empty defaults and preserves
@@ -2163,6 +2164,46 @@ func transcriptsEqualMessages(a, b []llm.Message) bool {
 func DefaultPath(stateDir string, at time.Time) string {
 	name := at.UTC().Format("20060102T150405Z")
 	return filepath.Join(DefaultRoot(stateDir), name)
+}
+
+// resolveSessionIDRE matches the bare timestamp directory names DefaultPath
+// creates, optionally suffixed with the short id DefaultPathForID appends.
+var resolveSessionIDRE = regexp.MustCompile(`^\d{8}T\d{6}Z(?:-[^/\\]+)?$`)
+
+// ResolveSessionDir maps a `harness session <subcommand>` directory argument to
+// an existing session directory. An absolute or relative path that is a real
+// directory is returned as-is; a bare timestamp session id is looked up under
+// the default sessions root so the commands work from any working directory.
+// Anything else fails with an actionable error.
+func ResolveSessionDir(stateDir, arg string) (string, error) {
+	arg = strings.TrimSpace(arg)
+	if arg == "" {
+		return "", fmt.Errorf("unknown session %q (expected a session directory or timestamp ID)", arg)
+	}
+	if info, err := os.Stat(arg); err == nil && info.IsDir() {
+		if _, statErr := os.Stat(filepath.Join(arg, "state.json")); statErr == nil {
+			return arg, nil
+		}
+	}
+	if resolveSessionIDRE.MatchString(arg) {
+		root := DefaultRoot(stateDir)
+		if entries, err := os.ReadDir(root); err == nil {
+			// Timestamp names are unique; prefer the newest on an unexpected
+			// collision without special-casing.
+			var candidates []string
+			for _, entry := range entries {
+				name := entry.Name()
+				if entry.IsDir() && (name == arg || strings.HasPrefix(name, arg+"-")) {
+					candidates = append(candidates, filepath.Join(root, name))
+				}
+			}
+			if len(candidates) > 0 {
+				sort.Strings(candidates)
+				return candidates[len(candidates)-1], nil
+			}
+		}
+	}
+	return "", fmt.Errorf("unknown session %q (expected a session directory or timestamp ID)", arg)
 }
 
 // DefaultPathForID disambiguates a newly extracted session created in the same

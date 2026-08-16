@@ -52,7 +52,11 @@ func runSessionErrors(env environment, invocation cli.Invocation) int {
 	}
 
 	if len(invocation.Args) == 1 {
-		dir := invocation.Args[0]
+		dir, err := session.ResolveSessionDir(stateDir(env.getenv), invocation.Args[0])
+		if err != nil {
+			fmt.Fprintf(env.stderr, "session errors: %v\n", err)
+			return ui.ExitUsage
+		}
 		analysis, err := session.AnalyzeErrors(dir, filter, before)
 		if err != nil {
 			fmt.Fprintf(env.stderr, "session errors: %v\n", err)

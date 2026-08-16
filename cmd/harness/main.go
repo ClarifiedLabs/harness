@@ -2255,7 +2255,12 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 }
 
 func runSessionTimings(env environment, invocation cli.Invocation) int {
-	if err := session.Timings(invocation.Args[0], env.stdout); err != nil {
+	dir, err := session.ResolveSessionDir(stateDir(env.getenv), invocation.Args[0])
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness: session timings: %v\n", err)
+		return ui.ExitUsage
+	}
+	if err := session.Timings(dir, env.stdout); err != nil {
 		fmt.Fprintf(env.stderr, "harness: session timings: %v\n", err)
 		return ui.ExitRuntime
 	}
@@ -2268,11 +2273,15 @@ func runSessionStats(env environment, invocation cli.Invocation) int {
 		fmt.Fprintln(env.stderr, "usage: harness session stats [--format text|json] <session-dir>")
 		return ui.ExitUsage
 	}
-	var err error
+	dir, err := session.ResolveSessionDir(stateDir(env.getenv), invocation.Args[0])
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness: session stats: %v\n", err)
+		return ui.ExitUsage
+	}
 	if format == "json" {
-		err = session.StatsJSON(invocation.Args[0], env.stdout)
+		err = session.StatsJSON(dir, env.stdout)
 	} else {
-		err = session.Stats(invocation.Args[0], env.stdout)
+		err = session.Stats(dir, env.stdout)
 	}
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: session stats: %v\n", err)
