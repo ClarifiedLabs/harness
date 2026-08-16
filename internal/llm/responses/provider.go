@@ -24,6 +24,10 @@ const (
 	responsesPath  = "/responses"
 )
 
+// The provider's transport-local continuation knowledge is exposed to the
+// agent through the optional llm.ResponseContinuationProbe interface.
+var _ llm.ResponseContinuationProbe = (*Provider)(nil)
+
 type Config struct {
 	APIKey              string
 	AuthHeaders         map[string]string

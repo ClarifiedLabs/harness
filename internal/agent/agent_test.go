@@ -2778,6 +2778,90 @@ func TestResponsesStatefulSendsDeltaAfterResponseID(t *testing.T) {
 	}
 }
 
+// probeProvider wraps a scripted provider with a controllable continuation
+// probe so tests can exercise the pre-request response-continuation check.
+type probeProvider struct {
+	*llmtest.FakeProvider
+	canContinue func(string) bool
+}
+
+func (p *probeProvider) CanContinueResponse(responseID string) bool {
+	return p.canContinue(responseID)
+}
+
+func TestResponsesProbeResetsDeadAnchorBeforeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		canContinue func(string) bool
+		wantPrev    string
+		wantNotices int
+	}{{
+		name:        "probe unavailable",
+		canContinue: func(string) bool { return false },
+		wantPrev:    "",
+		wantNotices: 1,
+	}, {
+		name:        "probe available",
+		canContinue: func(string) bool { return true },
+		wantPrev:    "resp_anchor",
+		wantNotices: 0,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_next"})
+			a := newAgent(&probeProvider{FakeProvider: fp, canContinue: tc.canContinue}, tools.Default(), Options{ResponsesStateful: true})
+			a.SetTranscript([]llm.Message{userText("old"), asstText("answer")})
+			digest, err := llm.FingerprintMessages(a.Transcript())
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp_anchor", AnchorMessages: 2, AnchorDigest: digest})
+			sink := &recordSink{}
+
+			if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+				t.Fatalf("RunPrompt: %v", err)
+			}
+			if len(fp.Requests) != 1 {
+				t.Fatalf("provider requests = %d, want exactly one (no discovery round-trip)", len(fp.Requests))
+			}
+			if got := fp.Requests[0].PreviousResponseID; got != tc.wantPrev {
+				t.Fatalf("request previous_response_id = %q, want %q", got, tc.wantPrev)
+			}
+			if tc.wantPrev == "" && len(fp.Requests[0].Messages) != 3 {
+				t.Fatalf("stateless request messages = %d, want full context (3)", len(fp.Requests[0].Messages))
+			}
+			resetNotices := 0
+			for _, n := range sink.notices {
+				if strings.Contains(n, "continuation unavailable") {
+					resetNotices++
+				}
+			}
+			if resetNotices != tc.wantNotices {
+				t.Fatalf("reset notices = %d, want %d: %v", resetNotices, tc.wantNotices, sink.notices)
+			}
+		})
+	}
+}
+
+func TestResponsesProbeAbsentProviderKeepsStatefulBehavior(t *testing.T) {
+	// A provider without the probe (plain HTTP) must keep its anchor so HTTP
+	// behavior is unchanged.
+	fp := llmtest.New("responses", llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_next"})
+	a := newAgent(fp, tools.Default(), Options{ResponsesStateful: true})
+	a.SetTranscript([]llm.Message{userText("old"), asstText("answer")})
+	digest, err := llm.FingerprintMessages(a.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.SetResponseState(&llm.ResponseState{PreviousResponseID: "resp_anchor", AnchorMessages: 2, AnchorDigest: digest})
+
+	if err := a.RunPrompt(context.Background(), "next", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 1 || fp.Requests[0].PreviousResponseID != "resp_anchor" {
+		t.Fatalf("requests = %+v, want one request keeping the anchor", fp.Requests)
+	}
+}
+
 func TestResponsesStatefulRetriesFullContextWhenPreviousResponseRejected(t *testing.T) {
 	fp := llmtest.New("responses",
 		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 12}}}, Err: &llm.APIError{StatusCode: 400, Code: "previous_response_not_found", Message: "missing previous_response_id"}},

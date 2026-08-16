@@ -27,6 +27,15 @@ type InputTokenCounter interface {
 	CountInputTokens(ctx context.Context, req Request) (InputTokenCount, error)
 }
 
+// ResponseContinuationProbe is an optional Provider side interface reporting
+// whether a previous response id can still be continued on the next request.
+// Providers without transport-local continuation constraints (plain HTTP) do
+// not implement it; the agent only probes when it is present so HTTP behavior
+// is unchanged.
+type ResponseContinuationProbe interface {
+	CanContinueResponse(responseID string) bool
+}
+
 // ErrInputTokenCountUnsupported marks providers without preflight counting.
 var ErrInputTokenCountUnsupported = errors.New("input token count unsupported")
 

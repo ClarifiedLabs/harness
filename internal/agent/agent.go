@@ -614,12 +614,15 @@ type Agent struct {
 	showDiffs                 bool
 	// failGuard is the per-prompt repeated-identical-failure guard (design
 	// §8.1). It is non-nil only while RunAdmittedPromptWithContext executes.
-	failGuard          *failureGuard
-	responsesStateful  bool
-	interactive        bool            // 1h Anthropic cache breakpoint; see Options.Interactive
-	steer              chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
-	responseState      llm.ResponseState
-	responseStateEpoch uint64
+	failGuard         *failureGuard
+	responsesStateful bool
+	// continuationFailures counts consecutive previous-response rejections.
+	// Three in a row disables stateful mode for the rest of the run.
+	continuationFailures int
+	interactive          bool            // 1h Anthropic cache breakpoint; see Options.Interactive
+	steer                chan SteerInput // buffered in-prompt steer input; nil when Options.Steer is false
+	responseState        llm.ResponseState
+	responseStateEpoch   uint64
 	// measuredInput/measuredBoundary persist the last turn's actual billed
 	// input (uncached + cache read/write) and the transcript length it
 	// measured, so the next reported context estimate can anchor to actuals
@@ -900,6 +903,32 @@ func (a *Agent) SetResponseState(state *llm.ResponseState) {
 func (a *Agent) resetResponseState() {
 	a.responseState = llm.ResponseState{}
 	a.responseStateEpoch++
+}
+
+// probeResponseContinuation reports whether the provider can still continue
+// the anchored previous response. Providers without transport-local
+// continuation constraints do not implement the probe and always continue.
+func (a *Agent) probeResponseContinuation() bool {
+	probe, ok := a.provider.(llm.ResponseContinuationProbe)
+	if !ok {
+		return true
+	}
+	return probe.CanContinueResponse(a.responseState.PreviousResponseID)
+}
+
+// ensureResponseContinuation checks the provider can continue the anchored
+// response before the request round-trips. When it cannot, the anchor is reset
+// locally so the request carries full context instead of burning a provider
+// round-trip discovering the failure. It reports whether state was reset.
+func (a *Agent) ensureResponseContinuation(sink EventSink) bool {
+	if a.responseState.PreviousResponseID == "" || a.probeResponseContinuation() {
+		return false
+	}
+	a.resetResponseState()
+	if sink != nil {
+		sink.Notice("[responses state reset: continuation unavailable; sending full context]")
+	}
+	return true
 }
 
 // SetSleep replaces the mid-stream retry backoff function. Tests inject a no-op
@@ -1847,6 +1876,13 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
 			return err
 		}
+		// Probe transport-local continuation before the request round-trips: a
+		// dead anchor would otherwise be discovered by a failed request that
+		// re-sent the truncated payload and then retried with full context.
+		if a.ensureResponseContinuation(sink) {
+			requestContext = a.requestContext(baseRequestContext, sink)
+			modelReq = a.modelRequest(requestContext)
+		}
 		modelReq = a.countModelRequestInput(ctx, modelReq)
 		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 		if a.autoCompactionEnabled() && a.overThreshold(modelReq.estimate.Total) {
@@ -1988,7 +2024,6 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		completeTurn()
 		a.transcript = append(a.transcript, a.assistantMessage(res))
 		a.updateResponseState(res)
-
 		if res.stopReason != llm.StopToolUse {
 			if err := a.validateTranscript("after assistant turn"); err != nil {
 				return err
