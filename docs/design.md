@@ -1929,7 +1929,13 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   the complete `SKILL.md` once, wraps it as typed request-only active-skill
   context, and keeps that exact context on every request for the prompt,
   including after compaction. A read failure aborts the prompt before a model
-  call, eliminating the former activation round trip. Discovery scans existing
+  call, eliminating the former activation round trip. Explicit blocks are
+  seeded into the same pinned set the read path uses, so a model re-read of an
+  explicitly activated `SKILL.md` dedupes into that single pinned context — the
+  read's receipt reports `status: already active` — while changed content still
+  reactivates and replaces it. Bodies are digest-compared after trimming at
+  most one trailing newline, so the raw-file and line-numbered-decoded forms
+  match. Discovery scans existing
   `.agents/skills` roots from the Git project root through `cwd`, outer to inner,
   then the user root; project scope beats user scope and the nearest project root
   wins equal-scope name collisions.

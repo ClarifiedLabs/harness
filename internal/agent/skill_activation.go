@@ -33,13 +33,15 @@ func (set *activeSkillSet) contexts() []string {
 	return context
 }
 
-func (set *activeSkillSet) activate(path, body string) (status, digest string) {
+func (set *activeSkillSet) activate(path, body, context string) (status, digest string) {
 	if set.byPath == nil {
 		set.byPath = make(map[string]activeSkill)
 	}
-	sum := sha256.Sum256([]byte(body))
-	name := filepath.Base(filepath.Dir(path))
-	context := skills.ActiveContext(name, path, body)
+	sum := skillBodyDigest(body)
+	if context == "" {
+		name := filepath.Base(filepath.Dir(path))
+		context = skills.ActiveContext(name, path, body)
+	}
 	current, exists := set.byPath[path]
 	switch {
 	case !exists:
@@ -53,6 +55,33 @@ func (set *activeSkillSet) activate(path, body string) (status, digest string) {
 	}
 	set.byPath[path] = activeSkill{digest: sum, context: context}
 	return status, fmt.Sprintf("%x", sum[:8])
+}
+
+// skillBodyDigest digests a skill body after trimming at most one trailing
+// newline. The read path's decoded body and the raw file differ only by that
+// newline (line numbering drops it and reconstruction does not re-add it), so
+// normalized digests make both forms compare equal.
+func skillBodyDigest(body string) [sha256.Size]byte {
+	return sha256.Sum256([]byte(strings.TrimSuffix(body, "\n")))
+}
+
+// seedActiveSkills moves recognized active-skill blocks from extraContext into
+// the pinned set so a model re-read of the same SKILL.md dedupes to one copy.
+// Each parsed item keeps its original text as the pinned context, so the
+// model-visible rendering matches the explicit-activation form exactly.
+// Blocks without a source path cannot be keyed against a re-read, so they and
+// unrecognized items are returned unchanged.
+func seedActiveSkills(active *activeSkillSet, extraContext []string) []string {
+	kept := make([]string, 0, len(extraContext))
+	for _, item := range extraContext {
+		_, location, body, ok := skills.ParseActiveContext(item)
+		if !ok || location == "" {
+			kept = append(kept, item)
+			continue
+		}
+		active.activate(location, body, item)
+	}
+	return kept
 }
 
 // activateSkillReadResults recognizes a successful, complete read of one
@@ -73,7 +102,7 @@ func (a *Agent) activateSkillReadResults(calls []llm.ToolCall, results []llm.Con
 		if !ok {
 			continue
 		}
-		status, digest := active.activate(path, body)
+		status, digest := active.activate(path, body, "")
 		if activationSink, ok := sink.(SkillActivationEventSink); ok {
 			activationSink.SkillActivated(SkillActivationEvent{Source: "read", Status: strings.ReplaceAll(status, " ", "_")})
 		}

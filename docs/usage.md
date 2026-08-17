@@ -1451,7 +1451,9 @@ return to the prompt without contacting the model; `!!` sends a literal leading
 word-bounded plain skill name, `skill://name`, or `…/SKILL.md` mentions the
 named skill anywhere in the text; Harness reads that skill's complete
 `SKILL.md` before the first model request and supplies it as request-only
-context. A failed read aborts the prompt before model work. `$$` escapes a
+context. A failed read aborts the prompt before model work; a later model
+re-read of the same `SKILL.md` dedupes into that one pinned copy instead of
+duplicating it. `$$` escapes a
 literal `$`.
 
 In terminals that support bracketed paste, pasted text fills the prompt for

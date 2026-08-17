@@ -167,6 +167,83 @@ func TestExplicitSkillContextReportsActivationWithoutToolRound(t *testing.T) {
 	}
 }
 
+func TestExplicitSkillContextDeduplicatedWithModelRead(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SKILL.md")
+	body := "---\nname: focused-review\ndescription: Review carefully\n---\n\nDEDUP BODY LINE\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input := fmt.Sprintf(`{"path":%q}`, path)
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "skill-read", "read", input)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Catalog(), Options{})
+	sink := &archiveSink{archive: ToolResultArchive{ModelPath: "/session/full.txt"}}
+	explicit := skills.ActiveContext("focused-review", path, body)
+
+	if err := a.RunPromptContentWithContext(context.Background(), "use $focused-review", nil, []string{explicit}, 1, sink); err != nil {
+		t.Fatal(err)
+	}
+	mustValid(t, a.Transcript())
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(fp.Requests))
+	}
+	// Every request of the prompt carries exactly one copy of the body.
+	for i, request := range fp.Requests {
+		contextText := strings.Join(request.RequestContext, "\n")
+		if count := strings.Count(contextText, "DEDUP BODY LINE"); count != 1 {
+			t.Fatalf("request %d active skill body count = %d, want 1:\n%s", i, count, contextText)
+		}
+	}
+	if result := toolResultText(fp.Requests[1].Messages, "skill-read"); !strings.Contains(result, "status: already active") {
+		t.Fatalf("read result is not an already-active receipt: %q", result)
+	}
+	want := []SkillActivationEvent{
+		{Source: "explicit", Status: "activated"},
+		{Source: "read", Status: "already_active"},
+	}
+	if len(sink.activations) != len(want) {
+		t.Fatalf("activation events = %+v", sink.activations)
+	}
+	for i, event := range want {
+		if sink.activations[i] != event {
+			t.Fatalf("activation events = %+v", sink.activations)
+		}
+	}
+}
+
+func TestSkillDigestNormalization(t *testing.T) {
+	path := "/skills/digest/SKILL.md"
+	var set activeSkillSet
+	if status, _ := set.activate(path, "BODY\n", ""); status != "activated" {
+		t.Fatalf("first status = %q", status)
+	}
+	if status, _ := set.activate(path, "BODY", ""); status != "already active" {
+		t.Fatalf("newline-only difference reactivated: %q", status)
+	}
+	if status, _ := set.activate(path, "CHANGED", ""); status != "reactivated after source change" {
+		t.Fatalf("changed body did not reactivate: %q", status)
+	}
+}
+
+func TestSeedActiveSkillsKeepsUnrecognizedContext(t *testing.T) {
+	block := skills.ActiveContext("commit", "/skills/commit/SKILL.md", "PINNED BODY")
+	arbitrary := "hook-provided guidance"
+	noSource := skills.ActiveContext("commit", "", "UNKEYED BODY")
+	var set activeSkillSet
+
+	kept := seedActiveSkills(&set, []string{arbitrary, block, noSource})
+	if len(kept) != 2 || kept[0] != arbitrary || kept[1] != noSource {
+		t.Fatalf("kept context = %q", kept)
+	}
+	contexts := set.contexts()
+	if len(contexts) != 1 || contexts[0] != block {
+		t.Fatalf("pinned contexts = %q", contexts)
+	}
+}
+
 func TestCompleteSkillReadAcceptsNormalizedSkillPaths(t *testing.T) {
 	a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{})
 	for _, tc := range []struct {

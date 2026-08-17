@@ -1700,7 +1700,13 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		return fmt.Errorf("invalid or stale prompt admission")
 	}
 	a.compactFallbackNotice = compactFallbackNoticeState{}
+	var activeSkills activeSkillSet
+	// Report on the original slice so every explicit block still emits telemetry,
+	// then move recognized blocks into the pinned set: a later model re-read of
+	// the same SKILL.md then dedupes to the single pinned copy instead of
+	// duplicating the body in RequestContext.
 	reportExplicitSkillContexts(extraContext, sink)
+	extraContext = seedActiveSkills(&activeSkills, extraContext)
 	promptIndex := admission.promptIndex
 	initialPromptPending := true
 
@@ -1721,7 +1727,6 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 	var wastedTotal llm.Usage            // tokens spent on retried-and-discarded turn attempts (r51+r52)
 	appendBoundary := a.measuredBoundary // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
-	var activeSkills activeSkillSet
 	forcePromptWorkSynthesis := false
 	var terminationReason TerminationReason
 	var closureTrigger ClosureTrigger

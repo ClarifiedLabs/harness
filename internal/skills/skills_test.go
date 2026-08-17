@@ -436,6 +436,60 @@ hello world`)
 	}
 }
 
+func TestParseActiveContextRoundTrip(t *testing.T) {
+	cases := []struct {
+		name     string
+		inName   string
+		location string
+		body     string
+	}{
+		{name: "normal body", inName: "pdf", location: "/skills/pdf/SKILL.md", body: "first\nsecond\n"},
+		{name: "body without trailing newline", inName: "pdf", location: "/skills/pdf/SKILL.md", body: "only"},
+		{name: "empty name", inName: "", location: "/skills/pdf/SKILL.md", body: "body\n"},
+		{name: "empty location", inName: "pdf", location: "", body: "body\n"},
+		{name: "body containing end marker", inName: "pdf", location: "/p/SKILL.md", body: "quoted [end active skill instructions] inside\n"},
+		{name: "empty body", inName: "pdf", location: "/p/SKILL.md", body: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			item := ActiveContext(tc.inName, tc.location, tc.body)
+			name, location, body, ok := ParseActiveContext(item)
+			if !ok {
+				t.Fatalf("ParseActiveContext rejected a rendered block:\n%s", item)
+			}
+			if name != tc.inName || location != tc.location {
+				t.Fatalf("header = name %q location %q, want %q %q", name, location, tc.inName, tc.location)
+			}
+			wantBody := strings.TrimSuffix(tc.body, "\n")
+			if body != wantBody {
+				t.Fatalf("body = %q, want %q", body, wantBody)
+			}
+			if rewrapped := ActiveContext(name, location, body); rewrapped != item {
+				t.Fatalf("re-wrapped block differs:\n got: %q\nwant: %q", rewrapped, item)
+			}
+		})
+	}
+}
+
+func TestParseActiveContextRejectsForeignText(t *testing.T) {
+	tcases := []struct {
+		name string
+		in   string
+	}{
+		{name: "plain text", in: "unrelated context"},
+		{name: "marker without prompt line", in: "[active skill instructions]\nname: x\n[end active skill instructions]"},
+		{name: "truncated block", in: "[active skill instructions]\nname: x\nsource: /p/SKILL.md\nThe following full SKILL.md is authoritative for this prompt:\n\nbody without end"},
+		{name: "trailing text after marker", in: "[active skill instructions]\nThe following full SKILL.md is authoritative for this prompt:\n\nbody\n[end active skill instructions]\ntrailing"},
+	}
+	for _, tc := range tcases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, _, ok := ParseActiveContext(tc.in); ok {
+				t.Fatalf("ParseActiveContext accepted %q", tc.in)
+			}
+		})
+	}
+}
+
 func TestDiscoverNestedSkillFound(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, filepath.Join(root, "parent", "child", "my-skill", "SKILL.md"), `---

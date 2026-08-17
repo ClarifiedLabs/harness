@@ -23,6 +23,14 @@ const skillFile = "SKILL.md"
 // request-only context.
 const ActiveContextMarker = "[active skill instructions]"
 
+// activeContextPromptLine introduces the authoritative body inside an
+// ActiveContext block.
+const activeContextPromptLine = "The following full SKILL.md is authoritative for this prompt:"
+
+// activeContextEndMarker terminates an ActiveContext block. Because it may
+// also appear inside a body, parsers must anchor on the last occurrence.
+const activeContextEndMarker = "[end active skill instructions]"
+
 // maxScanDepth bounds recursive scanning of a skill directory to prevent
 // runaway traversal in large or cyclic directory trees.
 const maxScanDepth = 4
@@ -96,13 +104,62 @@ func ActiveContext(name, location, body string) string {
 	if location != "" {
 		fmt.Fprintf(&b, "source: %s\n", location)
 	}
-	b.WriteString("The following full SKILL.md is authoritative for this prompt:\n\n")
+	fmt.Fprintf(&b, "%s\n\n", activeContextPromptLine)
 	b.WriteString(body)
 	if !strings.HasSuffix(body, "\n") {
 		b.WriteByte('\n')
 	}
-	b.WriteString("[end active skill instructions]")
+	b.WriteString(activeContextEndMarker)
 	return b.String()
+}
+
+// ParseActiveContext extracts name, location, and body from a block rendered
+// by ActiveContext. ok is false for any other text. The end marker is matched
+// at its last occurrence and must be the final non-space content, so a body
+// that itself contains the marker round-trips. Because ActiveContext always
+// separates the body from the end marker with exactly one newline, the body is
+// returned in canonical form with at most one trailing newline removed; the
+// rendered block is unchanged by re-wrapping it. It never errors.
+func ParseActiveContext(item string) (name, location, body string, ok bool) {
+	text := strings.TrimSpace(item)
+	if !strings.HasPrefix(text, ActiveContextMarker) {
+		return "", "", "", false
+	}
+	rest := text[len(ActiveContextMarker):]
+	if !strings.HasPrefix(rest, "\n") {
+		return "", "", "", false
+	}
+	rest = rest[1:]
+	for {
+		line, tail, found := strings.Cut(rest, "\n")
+		if !found {
+			return "", "", "", false
+		}
+		switch {
+		case strings.HasPrefix(line, "name: "):
+			name = strings.TrimPrefix(line, "name: ")
+			rest = tail
+		case strings.HasPrefix(line, "source: "):
+			location = strings.TrimPrefix(line, "source: ")
+			rest = tail
+		default:
+			// Anything else must be the authoritative prompt line, followed by
+			// the blank line that separates it from the body.
+			if line != activeContextPromptLine || !strings.HasPrefix(tail, "\n") {
+				return "", "", "", false
+			}
+			bodyText := tail[1:]
+			end := strings.LastIndex(bodyText, activeContextEndMarker)
+			if end < 0 || strings.TrimSpace(bodyText[end+len(activeContextEndMarker):]) != "" {
+				return "", "", "", false
+			}
+			// ActiveContext guarantees exactly one newline before the end marker;
+			// strip only that one so the original body round-trips whether or not
+			// it ended in a newline.
+			body = strings.TrimSuffix(bodyText[:end], "\n")
+			return name, location, body, true
+		}
+	}
 }
 
 // discovered bundles a parsed skill with its scope for collision resolution.
