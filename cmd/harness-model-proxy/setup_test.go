@@ -100,6 +100,46 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	}
 }
 
+func TestSetupSelectionPagesAlignHighlightedRows(t *testing.T) {
+	stripANSI := strings.NewReplacer("\x1b[1m", "", "\x1b[0m", "").Replace
+	assertAligned := func(t *testing.T, output string, firstRow, secondRow int, firstText, secondText string) {
+		t.Helper()
+		lines := strings.Split(strings.TrimSuffix(stripANSI(output), "\n"), "\n")
+		if len(lines) <= secondRow {
+			t.Fatalf("selection output has %d lines, want row %d:\n%s", len(lines), secondRow, output)
+		}
+		firstColumn := strings.Index(lines[firstRow], firstText)
+		secondColumn := strings.Index(lines[secondRow], secondText)
+		if firstColumn < 0 || secondColumn < 0 {
+			t.Fatalf("selection rows missing text %q or %q:\n%s", firstText, secondText, output)
+		}
+		if firstColumn != secondColumn {
+			t.Fatalf("highlighted row text starts in column %d, want %d:\n%s", secondColumn, firstColumn, output)
+		}
+	}
+
+	t.Run("providers", func(t *testing.T) {
+		providers := []setupProviderPick{
+			{Provider: modelcatalog.Provider{ID: "plain", Name: "Plain"}},
+			{Provider: modelcatalog.Provider{ID: "selected-provider", Name: "Selected"}, Configured: true},
+		}
+		var out bytes.Buffer
+		printSetupProviderSelectionPage(&out, providers, 0, 20, "")
+		assertAligned(t, out.String(), 1, 2, "0 models", "0 models")
+		assertAligned(t, out.String(), 1, 2, "Plain", "Selected")
+	})
+
+	t.Run("models", func(t *testing.T) {
+		models := []setupModelPick{
+			{Model: modelcatalog.Model{ID: "plain", Name: "Plain"}},
+			{Model: modelcatalog.Model{ID: "selected-model", Name: "Selected"}, Enabled: true},
+		}
+		var out bytes.Buffer
+		printSetupModelSelectionPage(&out, "provider", models, []int{0, 1}, 0, 20, "")
+		assertAligned(t, out.String(), 2, 3, "Plain", "Selected")
+	})
+}
+
 // TestRunSetupWritesManagedConfigWithoutPrices verifies that setup marks the
 // written provider config managed and omits per-model prices, even when
 // models.dev has prices for the selected model. The proxy resolves those prices

@@ -872,6 +872,14 @@ func (p setupProviderPick) PickerID() string      { return p.ID }
 func (p setupProviderPick) PickerName() string    { return p.Name }
 func (p setupProviderPick) PickerModelCount() int { return len(p.Models) }
 
+func formatSetupPickerID(id string, width int, highlighted bool) string {
+	padded := fmt.Sprintf("%-*s", width, id)
+	if !highlighted {
+		return padded
+	}
+	return "\x1b[1m" + id + "\x1b[0m" + strings.TrimPrefix(padded, id)
+}
+
 func printSetupProviderSelectionPage(w io.Writer, providers []setupProviderPick, page, pageSize int, filter string) {
 	start, end := ui.PickerPageBounds(page, pageSize, len(providers))
 	title := fmt.Sprintf("Providers %d-%d of %d", start+1, end, len(providers))
@@ -882,14 +890,13 @@ func printSetupProviderSelectionPage(w io.Writer, providers []setupProviderPick,
 	for i := start; i < end; i++ {
 		provider := providers[i]
 		marker := " "
-		id := provider.PickerID()
+		id := formatSetupPickerID(provider.PickerID(), 28, provider.Configured)
 		name := provider.PickerName()
 		if provider.Configured {
 			marker = "*"
-			id = "\x1b[1m" + id + "\x1b[0m"
 			name = "\x1b[1m" + name + "\x1b[0m"
 		}
-		fmt.Fprintf(w, "%s%4d. %-28s %5d models  %s\n", marker, i+1, id, provider.PickerModelCount(), name)
+		fmt.Fprintf(w, "%s%4d. %s %5d models  %s\n", marker, i+1, id, provider.PickerModelCount(), name)
 	}
 }
 
@@ -1014,14 +1021,13 @@ func printSetupModelSelectionPage(w io.Writer, providerID string, items []setupM
 			release = "-"
 		}
 		marker := " "
-		id := ui.ClipPickerText(item.PickerID(), 34)
+		id := formatSetupPickerID(ui.ClipPickerText(item.PickerID(), 34), 43, item.Enabled)
 		name := item.PickerName()
 		if item.Enabled {
 			marker = "*"
-			id = "\x1b[1m" + id + "\x1b[0m"
 			name = "\x1b[1m" + name + "\x1b[0m"
 		}
-		fmt.Fprintf(w, "%s%4d. %-43s %-12s %10s  %s\n", marker, pos+1, id, price, release, name)
+		fmt.Fprintf(w, "%s%4d. %s %-12s %10s  %s\n", marker, pos+1, id, price, release, name)
 	}
 }
 
