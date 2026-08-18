@@ -612,14 +612,21 @@ func TestJobsToolRejectsWaitOnlyArgsOnNonWaitActions(t *testing.T) {
 
 func TestManagerWaitAlreadyCompletedDeliversContextAndPreservesNoticeAndUsage(t *testing.T) {
 	m := NewManager(Options{})
+	usage := llm.Usage{
+		InputTokens: 11, CacheReadTokens: 5, OutputTokens: 7, ReasoningTokens: 3,
+		CacheWriteTokens: 2, CacheWrite1hTokens: 1, CostUSD: 0.25, CostKnown: true,
+	}
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
 		Kind:          "delegate",
 		Description:   "inspect",
 		WaitForPrompt: true,
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
 			return tools.BackgroundJobResult{
-				Text:  "finished report",
-				Usage: llm.Usage{InputTokens: 11, OutputTokens: 7, CostKnown: true},
+				Text:           "finished report",
+				TranscriptPath: "/tmp/child",
+				Usage:          usage,
+				Compactions:    3,
+				Metrics:        map[string]int{"child": 1},
 			}, nil
 		},
 	})
@@ -641,15 +648,89 @@ func TestManagerWaitAlreadyCompletedDeliversContextAndPreservesNoticeAndUsage(t 
 	if got := m.DrainCompletedContext(nil); len(got) != 0 {
 		t.Fatalf("completion context delivered twice: %v", got)
 	}
-	if got := m.DrainNotices(); len(got) != 1 {
-		t.Fatalf("completion notices = %v, want one", got)
+	notices := m.DrainNoticeSnapshots()
+	if len(notices) != 1 {
+		t.Fatalf("completion notices = %+v, want one", notices)
 	}
-	usage := m.DrainPromptWorkUsage()
-	if usage.InputTokens != 11 || usage.OutputTokens != 7 {
-		t.Fatalf("usage = %+v", usage)
+	notice := notices[0]
+	if notice.ID != started.ID || notice.Status != StatusCompleted || notice.Result.Usage != usage ||
+		notice.Result.Compactions != 3 || notice.Result.TranscriptPath != "/tmp/child" || notice.NoticePending {
+		t.Fatalf("notice snapshot = %+v", notice)
+	}
+	notice.Result.Metrics["child"] = 99
+	stored, _ := m.Get(started.ID)
+	if stored.Result.Metrics["child"] != 1 {
+		t.Fatalf("notice snapshot mutated manager result: %+v", stored.Result.Metrics)
+	}
+	if got := m.DrainNoticeSnapshots(); len(got) != 0 {
+		t.Fatalf("second notice drain = %+v, want empty", got)
+	}
+	diagnostics := m.DrainCompletedDiagnostics()
+	if len(diagnostics) != 1 || diagnostics[0].ID != started.ID || diagnostics[0].Metrics["child"] != 1 {
+		t.Fatalf("diagnostics after notice drain = %+v, want independent result", diagnostics)
+	}
+	if got := m.DrainCompletedDiagnostics(); len(got) != 0 {
+		t.Fatalf("second diagnostics drain = %+v, want empty", got)
+	}
+	drainedUsage := m.DrainPromptWorkUsage()
+	if drainedUsage != usage {
+		t.Fatalf("usage = %+v, want %+v", drainedUsage, usage)
 	}
 	if got := m.DrainPromptWorkUsage(); got != (llm.Usage{}) {
 		t.Fatalf("second usage drain = %+v, want zero", got)
+	}
+}
+
+func TestManagerNoticeSnapshotsRetainFailedAndCanceledPartialResults(t *testing.T) {
+	m := NewManager(Options{})
+	failed, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "delegate",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{
+				Usage:       llm.Usage{InputTokens: 5, OutputTokens: 2},
+				Compactions: 1,
+			}, errors.New("provider unavailable")
+		},
+	})
+	if err != nil {
+		t.Fatalf("start failed job: %v", err)
+	}
+	awaitJobDone(t, m, failed.ID)
+
+	startedRun := make(chan struct{})
+	canceled, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "delegate",
+		Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-ctx.Done()
+			return tools.BackgroundJobResult{
+				TranscriptPath: "/tmp/canceled-child",
+				Usage:          llm.Usage{InputTokens: 9, ReasoningTokens: 4},
+				Compactions:    2,
+			}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("start canceled job: %v", err)
+	}
+	<-startedRun
+	if _, ok := m.Cancel(canceled.ID); !ok {
+		t.Fatal("cancel job = false")
+	}
+	awaitJobDone(t, m, canceled.ID)
+
+	notices := m.DrainNoticeSnapshots()
+	if len(notices) != 2 || notices[0].ID != failed.ID || notices[1].ID != canceled.ID {
+		t.Fatalf("notice order = %+v", notices)
+	}
+	if notices[0].Status != StatusFailed || notices[0].Error != "provider unavailable" ||
+		notices[0].Result.Usage.InputTokens != 5 || notices[0].Result.Compactions != 1 {
+		t.Fatalf("failed notice = %+v", notices[0])
+	}
+	if notices[1].Status != StatusCanceled || notices[1].Result.Usage.InputTokens != 9 ||
+		notices[1].Result.Usage.ReasoningTokens != 4 || notices[1].Result.Compactions != 2 ||
+		notices[1].Result.TranscriptPath != "/tmp/canceled-child" {
+		t.Fatalf("canceled notice = %+v", notices[1])
 	}
 }
 

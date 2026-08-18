@@ -4954,6 +4954,138 @@ func TestUsageReportSingleModelIncludesCompactions(t *testing.T) {
 	}
 }
 
+func TestFormatBackgroundCompletionNotice(t *testing.T) {
+	tests := []struct {
+		name string
+		job  background.Snapshot
+		want string
+	}{
+		{
+			name: "completed delegate with all usage",
+			job: background.Snapshot{
+				ID: "bg_delegate", Kind: "delegate", Status: background.StatusCompleted,
+				Result: tools.BackgroundJobResult{
+					TranscriptPath: "/tmp/child",
+					Usage: llm.Usage{
+						InputTokens: 100, CacheReadTokens: 30, OutputTokens: 10, ReasoningTokens: 4,
+						CacheWriteTokens: 20, CacheWrite1hTokens: 8, CostUSD: 0.5, CostKnown: true,
+					},
+					Compactions: 2,
+				},
+			},
+			want: "[background: bg_delegate completed; child session: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write / 8 cache write (1h) · 2 compactions · $0.5000; transcript /tmp/child]",
+		},
+		{
+			name: "zero unpriced delegate",
+			job: background.Snapshot{
+				ID: "bg_zero", Kind: "delegate", Status: background.StatusCompleted,
+			},
+			want: "[background: bg_zero completed; child session: 0 input / 0 cached input / 0 output / 0 reasoning · 0 compactions]",
+		},
+		{
+			name: "failed delegate with partial usage",
+			job: background.Snapshot{
+				ID: "bg_failed", Kind: "delegate", Status: background.StatusFailed, Error: "provider unavailable",
+				Result: tools.BackgroundJobResult{Usage: llm.Usage{InputTokens: 7, OutputTokens: 2}, Compactions: 1},
+			},
+			want: "[background: bg_failed failed: provider unavailable; child session: 7 input / 0 cached input / 2 output / 0 reasoning · 1 compaction]",
+		},
+		{
+			name: "canceled delegate with billable partial usage",
+			job: background.Snapshot{
+				ID: "bg_canceled", Kind: "delegate", Status: background.StatusCanceled,
+				Result: tools.BackgroundJobResult{Usage: llm.Usage{InputTokens: 9, ReasoningTokens: 4, CostUSD: 0.125, CostKnown: true}},
+			},
+			want: "[background: bg_canceled canceled; child session: 9 input / 0 cached input / 0 output / 4 reasoning · 0 compactions · $0.1250]",
+		},
+		{
+			name: "abandoned delegate",
+			job:  background.Snapshot{ID: "bg_abandoned", Kind: "delegate", Status: background.StatusAbandoned},
+			want: "[background: bg_abandoned abandoned; child session: 0 input / 0 cached input / 0 output / 0 reasoning · 0 compactions]",
+		},
+		{
+			name: "shell completion unchanged",
+			job: background.Snapshot{
+				ID: "bg_shell", Kind: "shell", Status: background.StatusCompleted,
+				Result: tools.BackgroundJobResult{TranscriptPath: "/tmp/command"},
+			},
+			want: "[background: bg_shell completed; transcript /tmp/command]",
+		},
+		{
+			name: "web fetch failure unchanged",
+			job:  background.Snapshot{ID: "bg_web", Kind: "web_fetch", Status: background.StatusFailed, Error: "HTTP 500"},
+			want: "[background: bg_web failed: HTTP 500]",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := formatBackgroundCompletionNotice(tc.job); got != tc.want {
+				t.Fatalf("notice = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestREPLBackgroundDelegateNoticeIncludesChildStatsOnceAndPersists(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+	usage := llm.Usage{InputTokens: 11, CacheReadTokens: 5, OutputTokens: 7, CostUSD: 0.25, CostKnown: true}
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "delegate",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{
+				TranscriptPath: "/tmp/child-session",
+				Usage:          usage,
+				Compactions:    2,
+			}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(job.ID)
+		return ok && snapshot.Status == background.StatusCompleted
+	}, "background delegate completion")
+	app.SetUsage(session.UsageTotals{Usage: llm.Usage{InputTokens: 100, OutputTokens: 20}, Compactions: 1})
+
+	if code := Run(strings.NewReader("/exit\n"), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	notice := fmt.Sprintf("[background: %s completed; child session: 11 input / 5 cached input / 7 output / 0 reasoning · 2 compactions · $0.2500; transcript /tmp/child-session]", job.ID)
+	if got := strings.Count(errw.String(), notice); got != 1 {
+		t.Fatalf("notice count = %d, want 1; stderr:\n%s", got, errw.String())
+	}
+	for _, want := range []string{
+		"[session summary: 100 input / 0 cached input / 20 output / 0 reasoning · 1 compaction]",
+		"resume with: harness -resume " + app.SessionPath,
+	} {
+		if !strings.Contains(errw.String(), want) {
+			t.Fatalf("stderr missing %q:\n%s", want, errw.String())
+		}
+	}
+
+	data, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	var persisted int
+	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		var event session.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if event.Type == session.EventNotice && event.Text == notice {
+			persisted++
+		}
+	}
+	if persisted != 1 {
+		t.Fatalf("persisted enriched notices = %d, want 1; raw:\n%s", persisted, data)
+	}
+}
+
 func uiUserMsg(s string) llm.Message {
 	return llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: s}}}
 }

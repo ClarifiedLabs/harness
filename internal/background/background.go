@@ -967,17 +967,23 @@ func (m *Manager) completedContext(deliver bool, archiver toolresult.Archiver) [
 	return out
 }
 
-func (m *Manager) DrainNotices() []string {
+// DrainNoticeSnapshots returns finished jobs needing a human notice exactly once.
+// Results stay structured so the UI can format them without losing model usage or
+// child-session metadata. Returned snapshots do not share mutable maps with jobs.
+func (m *Manager) DrainNoticeSnapshots() []Snapshot {
+	if m == nil {
+		return nil
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []string
+	var out []Snapshot
 	for _, id := range m.order {
 		job := m.jobs[id]
 		if job == nil || job.noticeDelivered || !job.finished {
 			continue
 		}
 		job.noticeDelivered = true
-		out = append(out, noticeFor(job))
+		out = append(out, snapshotJob(job))
 	}
 	return out
 }
@@ -1016,20 +1022,6 @@ func detachedWaitContextFor(outcome detachedWaitOutcome, prepare ResultPreparer,
 	}
 	prepared, _ = toolresult.PrepareTruncated(prepared, archiver)
 	return fmt.Sprintf("[detached background wait %s]\n%s", outcome.id, strings.TrimSpace(prepared.Text))
-}
-
-func noticeFor(job *Job) string {
-	switch job.Status {
-	case StatusCompleted:
-		if job.Result.TranscriptPath != "" {
-			return fmt.Sprintf("[background: %s completed; transcript %s]", job.ID, job.Result.TranscriptPath)
-		}
-		return fmt.Sprintf("[background: %s completed]", job.ID)
-	case StatusCanceled, StatusAbandoned:
-		return fmt.Sprintf("[background: %s %s]", job.ID, job.Status)
-	default:
-		return fmt.Sprintf("[background: %s failed: %s]", job.ID, job.Error)
-	}
 }
 
 func snapshotJob(job *Job) Snapshot {

@@ -2749,7 +2749,9 @@ reuses its logical descendant slot; all terminal paths release active capacity.
 Tools that opt into the reusable background job contract hand the manager a job
 kind, description, optional canonical resource/access lease, and cancellable
 runner. The manager owns ids, status, list/get/wait/cancel, lease enforcement,
-one-shot notices, and request-only context delivery.
+exactly-once structured terminal-notice selection, and request-only context
+delivery. The UI formats each selected snapshot, renders it through the normal
+notice path, and records/mirrors that exact text.
 `shell`, `web_fetch`, and `delegate` support this path via `background:true`; background
 delegate jobs still use the same launch validation, child transcript, private coordination stores,
 and token-accounting behavior as synchronous delegate.
@@ -2815,9 +2817,19 @@ and token-accounting behavior as synchronous delegate.
   implements `ResultTool` so explicit get/wait output preserves the same
   archive opportunity instead of consuming completion context and losing the
   suppressed original.
-- Background delegate results carry child model usage through the manager exactly
-  once; the agent folds it into the parent prompt and session totals before completion,
-  including failed child runs that returned partial usage.
+- `BackgroundJobResult` carries child model usage plus a separate successful
+  compaction count for model-backed job display and session diagnostics. Background
+  delegate results carry token/cost usage through the manager exactly once; the
+  agent folds it into the parent prompt and session totals before completion,
+  including failed or canceled child runs that returned partial usage. Child
+  compactions remain child-session metadata and do not increment the parent's
+  compaction count.
+- Terminal notice delivery, completion context, diagnostics, and nested usage drains
+  are independent exactly-once channels. The manager returns cloned structured
+  snapshots in launch order; the UI applies exit-summary formatting only to
+  delegates, with a `child session` label, then persists and mirrors the resulting
+  text. Interactive JSON receives the same text as a normal `notice` event. One-shot
+  mode does not poll these notices and retains its final aggregate session summary.
 - Background jobs run in the same cwd/tool policy as ordinary tools. Resource
   leases coordinate opted-in local background work; they do not sandbox paths or
   serialize foreground filesystem edits.

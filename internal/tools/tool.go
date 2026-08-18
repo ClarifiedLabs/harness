@@ -163,6 +163,8 @@ type BackgroundJobRequest struct {
 // BackgroundJobResult is the model-facing outcome of a completed background
 // tool job. TranscriptPath is for jobs, such as delegate agents, that persist a
 // separate transcript. Usage carries nested model spend back to the parent prompt.
+// Compactions lets model-backed jobs expose their own successful compaction count
+// for display and session diagnostics; it is not folded into parent accounting.
 // Metrics carries the same diagnostics-only aggregate telemetry as RunResult;
 // the background manager retains it for completion diagnostics without adding it
 // to model-visible context. Progress, when non-nil, is an opaque closure
@@ -174,6 +176,7 @@ type BackgroundJobResult struct {
 	OriginalText   string
 	TranscriptPath string
 	Usage          llm.Usage
+	Compactions    int
 	Metrics        map[string]int
 	Progress       any
 }

@@ -91,6 +91,25 @@ func (f *fakeBackgroundStarter) SetDiagnosticIdentity(id string, identity tools.
 	return true
 }
 
+func TestToBackgroundJobResultPreservesChildSessionMetadata(t *testing.T) {
+	progress := func() agent.DelegateProgressSnapshot { return agent.DelegateProgressSnapshot{Finished: true} }
+	usage := llm.Usage{
+		InputTokens: 11, CacheReadTokens: 7, OutputTokens: 5, ReasoningTokens: 3,
+		CacheWriteTokens: 2, CacheWrite1hTokens: 1, CostUSD: 0.25, CostKnown: true,
+	}
+	got := toBackgroundJobResult(RunResult{
+		Report:         "child report",
+		Usage:          usage,
+		Compactions:    4,
+		TranscriptPath: "/tmp/child",
+		Progress:       progress,
+	})
+	if got.Text != "child report" || got.Usage != usage || got.Compactions != 4 ||
+		got.TranscriptPath != "/tmp/child" || got.Progress == nil {
+		t.Fatalf("background result = %+v", got)
+	}
+}
+
 type continuationFixture struct {
 	runner      *Runner
 	provider    *llmtest.FakeProvider
@@ -853,8 +872,8 @@ func TestDelegateContinuationCompactsRetainedContextAboveLimit(t *testing.T) {
 		!strings.Contains(result.Report, "continued from source via compact checkpoint") {
 		t.Fatalf("compact continuation result = %+v", result)
 	}
-	if result.Usage.InputTokens != 200 || result.Usage.OutputTokens != 20 {
-		t.Fatalf("compact continuation usage = %+v, want summary plus continued request", result.Usage)
+	if result.Usage.InputTokens != 200 || result.Usage.OutputTokens != 20 || result.Compactions != 1 {
+		t.Fatalf("compact continuation usage = %+v, compactions = %d; want summary plus continued request and one compaction", result.Usage, result.Compactions)
 	}
 	if len(fixture.provider.Requests) != 3 {
 		t.Fatalf("model requests = %d, want source, checkpoint, continuation", len(fixture.provider.Requests))
@@ -956,8 +975,8 @@ func TestDelegateContinuationRejectsCompactCheckpointAboveLimit(t *testing.T) {
 	if len(fixture.provider.Requests) != 2 {
 		t.Fatalf("context-rejected continuation made %d model requests, want source plus checkpoint", len(fixture.provider.Requests))
 	}
-	if result.Usage.InputTokens != 20 || result.Usage.OutputTokens != 2 {
-		t.Fatalf("context-rejected continuation usage = %+v, want checkpoint usage", result.Usage)
+	if result.Usage.InputTokens != 20 || result.Usage.OutputTokens != 2 || result.Compactions != 1 {
+		t.Fatalf("context-rejected continuation usage = %+v, compactions = %d; want checkpoint usage and one compaction", result.Usage, result.Compactions)
 	}
 	meta := readDelegateChildMeta(t, session.ChildSessionDir(fixture.sessionPath, "target"))
 	if meta.Status != session.ChildStatusFailed ||

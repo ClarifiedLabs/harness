@@ -198,9 +198,11 @@ type RunRequest struct {
 
 // RunResult is the complete outcome of one child-agent run.
 type RunResult struct {
-	Report              string
-	Completion          CompletionReport
-	Usage               llm.Usage
+	Report     string
+	Completion CompletionReport
+	Usage      llm.Usage
+	// Compactions is the child session's successful compaction count.
+	Compactions         int
 	Turns               int
 	EffectiveMaxTurns   int
 	TerminationReason   agent.TerminationReason
@@ -445,12 +447,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 				childReq.Background = false
 				childReq.ChildID = childID
 				result, err := t.runner.Run(ctx, childReq, progress)
-				return tools.BackgroundJobResult{
-					Text:           result.Report,
-					TranscriptPath: result.TranscriptPath,
-					Usage:          result.Usage,
-					Progress:       result.Progress,
-				}, annotateRunError(ctx, err)
+				return toBackgroundJobResult(result), annotateRunError(ctx, err)
 			},
 		})
 		if err != nil {
@@ -484,6 +481,16 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		return tools.MeteredResult{Text: result.Report, Usage: result.Usage, Progress: result.Progress}, annotated
 	}
 	return tools.MeteredResult{Text: result.Report, Usage: result.Usage, Progress: result.Progress}, nil
+}
+
+func toBackgroundJobResult(result RunResult) tools.BackgroundJobResult {
+	return tools.BackgroundJobResult{
+		Text:           result.Report,
+		TranscriptPath: result.TranscriptPath,
+		Usage:          result.Usage,
+		Compactions:    result.Compactions,
+		Progress:       result.Progress,
+	}
 }
 
 // StartProgress implements tools.ProgressStarter. It creates the live progress
@@ -871,6 +878,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		persistenceErr := errors.Join(sink.appendError(), stateErr)
 		terminalErr = errors.Join(runErr, persistenceErr)
 		result.Usage = terminalUsage.Usage
+		result.Compactions = terminalUsage.Compactions
 		result.Turns = terminalUsage.Turns
 		result.TerminationReason = terminalUsage.TerminationReason
 		result.ClosureTrigger = terminalUsage.ClosureTrigger
@@ -951,6 +959,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	result = RunResult{
 		Completion:          terminalCompletion,
 		Usage:               usage.Usage,
+		Compactions:         usage.Compactions,
 		Turns:               usage.Turns,
 		EffectiveMaxTurns:   maxTurns,
 		TerminationReason:   usage.TerminationReason,

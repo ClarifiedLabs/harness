@@ -752,9 +752,14 @@ func TestRunJSONInitialBoundaryRefreshesMCPAndPersistsNotice(t *testing.T) {
 	app.AgentName = "auto"
 	manager := background.NewManager(background.Options{})
 	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind: "shell",
+		Kind: "delegate",
 		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
-			return tools.BackgroundJobResult{Text: "background result"}, nil
+			return tools.BackgroundJobResult{
+				Text:           "background result",
+				TranscriptPath: "/tmp/json-child",
+				Usage:          llm.Usage{InputTokens: 13, CacheReadTokens: 4, OutputTokens: 6, CostUSD: 0.2, CostKnown: true},
+				Compactions:    1,
+			}, nil
 		},
 	})
 	if err != nil {
@@ -764,6 +769,7 @@ func TestRunJSONInitialBoundaryRefreshesMCPAndPersistsNotice(t *testing.T) {
 		t.Fatalf("wait for background job: %v", err)
 	}
 	app.Background = manager
+	backgroundNotice := fmt.Sprintf("[background: %s completed; child session: 13 input / 4 cached input / 6 output / 0 reasoning · 1 compaction · $0.2000; transcript /tmp/json-child]", job.ID)
 	refreshed := &tools.Registry{}
 	refreshed.Register(mcpRefreshTool{name: "mcp__test__initial"})
 	calls := 0
@@ -792,26 +798,30 @@ func TestRunJSONInitialBoundaryRefreshesMCPAndPersistsNotice(t *testing.T) {
 		t.Fatalf("initially refreshed tool was not advertised: %+v", fp.Requests[0].Tools)
 	}
 	lines := decodeRunStreamLines(t, stream.String())
-	var noticeIndex, promptIndex = -1, -1
+	var noticeIndex, backgroundNoticeIndex, promptIndex = -1, -1, -1
 	for i, line := range lines {
 		switch line["type"] {
 		case "notice":
 			if line["text"] == notice {
 				noticeIndex = i
 			}
+			if line["text"] == backgroundNotice {
+				backgroundNoticeIndex = i
+			}
 		case "prompt_start":
 			promptIndex = i
 		}
 	}
-	if noticeIndex < 0 || promptIndex < 0 || noticeIndex > promptIndex {
-		t.Fatalf("initial MCP notice must precede prompt_start; types=%v", streamTypes(lines))
+	if noticeIndex < 0 || backgroundNoticeIndex < 0 || promptIndex < 0 ||
+		noticeIndex > promptIndex || backgroundNoticeIndex > promptIndex {
+		t.Fatalf("initial notices must precede prompt_start; types=%v", streamTypes(lines))
 	}
 	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
 	if err != nil {
 		t.Fatalf("read raw.ndjson: %v", err)
 	}
-	if !strings.Contains(string(raw), notice) || !strings.Contains(string(raw), "[background:") {
-		t.Fatalf("raw.ndjson omitted streamed boundary notices:\n%s", raw)
+	if !strings.Contains(string(raw), notice) || !strings.Contains(string(raw), backgroundNotice) {
+		t.Fatalf("raw.ndjson omitted enriched streamed boundary notices:\n%s", raw)
 	}
 }
 

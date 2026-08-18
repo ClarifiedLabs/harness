@@ -185,11 +185,16 @@ whole workspace, so two jobs on sibling or nested directories do not conflict.
 only; non-textual responses fail with an error that points at downloading the
 archive or binary with `shell` (for example `curl`) for inspection.
 Completed background job summaries are delivered once as request-only context to
-the parent agent. Background delegates are join-required: after one useful parent
-turn, harness waits for them and makes the parent synthesize their reports
-before ending the prompt. Their model usage is included exactly once in parent
-prompt/session totals. Ordinary background commands remain detached. Jobs live only
-in the current harness process and are abandoned when that process exits.
+the parent agent. Interactive completion notices for background delegates also show
+the child session's token buckets, cost when the existing session-summary formatter
+shows it, and successful compaction count.
+Those token/cost totals are display-only and are already included exactly once in
+the parent prompt/session totals. Interactive JSON mirrors the same enriched text
+as a normal `notice` event; one-shot mode keeps only its existing final aggregate
+summary. Background delegates are join-required: after one useful parent turn,
+harness waits for them and makes the parent synthesize their reports before ending
+the prompt. Ordinary background commands remain detached. Jobs live only in the
+current harness process and are abandoned when that process exits.
 Completion is normally delivered automatically. When later work has a strict
 dependency, `background_jobs {"action":"wait"}` waits on manager notifications
 instead of polling `get` or `list`; add `id` to target one job, use `ids` with
@@ -398,6 +403,8 @@ per-child ceilings, not a hierarchy-wide shared budget.
 Child agents get private TODO and plan stores. Their transcripts are saved under
 `children/<child-id>/` alongside the parent session. Foreground and background
 child token/cost usage is included exactly once in parent prompt/session usage.
+Interactive background-delegate terminal notices label the same already-accounted
+usage, cost, and child compaction total as `child session` statistics.
 Child metadata records background resource/access leases, requested and effective
 turn budgets, physical turns used, and a structured termination reason:
 `model_completed`, `turn_limit`,

@@ -355,6 +355,9 @@ func TestOneShotWaitsForBackgroundDelegateSynthesizesAndCountsUsage(t *testing.T
 	if app.usage.InputTokens != 100 || app.usage.OutputTokens != 36 {
 		t.Fatalf("session usage = %+v, want provider 30/6 + background delegate 70/30", app.usage)
 	}
+	if strings.Contains(errw.String(), "[background:") {
+		t.Fatalf("one-shot emitted a standalone background completion notice: %q", errw.String())
+	}
 }
 
 func TestOneShotShutdownRetainsBackgroundCancellationDiagnostics(t *testing.T) {

@@ -4998,7 +4998,8 @@ func (app *App) pollBackgroundNotices() {
 		return
 	}
 	app.recordCompletedBackgroundDiagnostics()
-	for _, notice := range app.Background.DrainNotices() {
+	for _, job := range app.Background.DrainNoticeSnapshots() {
+		notice := formatBackgroundCompletionNotice(job)
 		if app.Renderer != nil {
 			app.Renderer.Notice(notice)
 		} else {
@@ -5006,6 +5007,31 @@ func (app *App) pollBackgroundNotices() {
 		}
 		app.recordEvent(session.Event{Type: session.EventNotice, Text: notice, Time: app.clock()()})
 	}
+}
+
+func formatBackgroundCompletionNotice(job background.Snapshot) string {
+	var b strings.Builder
+	switch job.Status {
+	case background.StatusCompleted:
+		fmt.Fprintf(&b, "[background: %s completed", job.ID)
+	case background.StatusCanceled, background.StatusAbandoned:
+		fmt.Fprintf(&b, "[background: %s %s", job.ID, job.Status)
+	default:
+		fmt.Fprintf(&b, "[background: %s failed: %s", job.ID, job.Error)
+	}
+	if job.Kind == "delegate" {
+		totals := session.UsageTotals{
+			Usage:       job.Result.Usage,
+			CostUSD:     job.Result.Usage.CostUSD,
+			Compactions: job.Result.Compactions,
+		}
+		writeUsageTotals(&b, "; child session: ", totals, " · "+compactionPhrase(totals.Compactions))
+	}
+	if job.Status == background.StatusCompleted && job.Result.TranscriptPath != "" {
+		fmt.Fprintf(&b, "; transcript %s", job.Result.TranscriptPath)
+	}
+	b.WriteByte(']')
+	return b.String()
 }
 
 func (app *App) printTodoStatus(includeEmpty bool) bool {
