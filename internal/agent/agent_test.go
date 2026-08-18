@@ -271,10 +271,9 @@ func (s *diffRecordSink) ToolDiff(_ llm.ToolCall, path, text string) {
 
 type archiveSink struct {
 	recordSink
-	archive     ToolResultArchive
-	archiveErr  error
-	archived    []llm.ToolResult
-	activations []SkillActivationEvent
+	archive    ToolResultArchive
+	archiveErr error
+	archived   []llm.ToolResult
 }
 
 type countingProvider struct {
@@ -294,10 +293,6 @@ func (p *countingProvider) CountInputTokens(context.Context, llm.Request) (llm.I
 func (s *archiveSink) ArchiveToolResult(r llm.ToolResult) (ToolResultArchive, error) {
 	s.archived = append(s.archived, r)
 	return s.archive, s.archiveErr
-}
-
-func (s *archiveSink) SkillActivated(event SkillActivationEvent) {
-	s.activations = append(s.activations, event)
 }
 
 // recordTool is a fake tool whose Run is scriptable; it records inputs in
@@ -5129,10 +5124,10 @@ type steerDeliverySink struct {
 	delivered []string
 }
 
-func (s *steerDeliverySink) SteerDelivered(text string) {
+func (s *steerDeliverySink) SteerDelivered(input SteerInput) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.delivered = append(s.delivered, text)
+	s.delivered = append(s.delivered, input.Text)
 }
 
 func (s *steerDeliverySink) deliveredTexts() []string {
@@ -5524,5 +5519,50 @@ func TestMeasuredAnchorClearsAfterCompaction(t *testing.T) {
 	want := a.EstimateContext().Total
 	if got != want {
 		t.Fatalf("/context estimate after compaction = %d, want the estimator's %d", got, want)
+	}
+}
+
+func TestSkillReadResultPassesThroughWithoutRequestContextPinning(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "SKILL.md")
+	const body = "PASS THROUGH SKILL BODY"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input := fmt.Sprintf(`{"path":%q}`, path)
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "skill-read", "read", input)},
+			Stop:   llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Catalog(), Options{})
+
+	if err := a.RunPrompt(context.Background(), "use the skill", &recordSink{}); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	mustValid(t, a.Transcript())
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d, want 2", len(fp.Requests))
+	}
+	for i, request := range fp.Requests {
+		if contextText := strings.Join(request.RequestContext, "\n"); strings.Contains(contextText, body) {
+			t.Fatalf("request %d pinned SKILL.md body in request context: %q", i+1, contextText)
+		}
+	}
+	var result string
+	for _, message := range fp.Requests[1].Messages {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockToolResult && block.ResultForID == "skill-read" {
+				result = block.ResultText
+			}
+		}
+	}
+	if want := "1\t" + body; result != want {
+		t.Fatalf("SKILL.md result = %q, want unchanged line-numbered content %q", result, want)
+	}
+	if strings.Contains(result, "receipt") {
+		t.Fatalf("SKILL.md result was replaced with a receipt: %q", result)
 	}
 }

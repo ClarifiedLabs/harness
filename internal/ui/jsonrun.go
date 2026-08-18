@@ -427,10 +427,11 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		}
 	}
 	var (
-		text          string
-		images        []inputimage.Loaded
-		contentImages []llm.ContentBlock
-		promptContext []string
+		text            string
+		images          []inputimage.Loaded
+		contentImages   []llm.ContentBlock
+		promptContext   []string
+		skillInjections int
 	)
 	switch {
 	case req.cause != "":
@@ -444,6 +445,7 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		text = req.steer.Text
 		contentImages = req.steer.Images
 		promptContext = req.steer.RequestContext
+		skillInjections = skillInjectionsFromMetadata(req.steer.DeliveryMetadata)
 	default:
 		preflight := newForceExitPreflight(app.ForceExit)
 		prepared, err := app.preparePrompt(req.text, promptOptions{
@@ -463,6 +465,7 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 		text = prepared.prompt
 		images = prepared.images
 		promptContext = prepared.promptContext
+		skillInjections = prepared.skillInjections
 		loaded, ok := d.loadProtocolImages(req.id, req.images)
 		if !ok {
 			d.startNextQueued()
@@ -487,6 +490,7 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 	} else {
 		admission = app.Agent.AdmitPromptContent(text, contentImages)
 		promptID = app.beginPrompt(text, images)
+		app.recordSkillInjections(promptID, 1, skillInjections)
 	}
 
 	// The in-band interrupt message needs cancel regardless of whether the

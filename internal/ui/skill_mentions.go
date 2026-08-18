@@ -6,14 +6,15 @@ import (
 	"sort"
 	"strings"
 
+	"harness/internal/session"
 	"harness/internal/skills"
 )
 
 type skillMentionResolution struct {
-	Prompt  string
-	Context []string
-	Unknown string
-	Err     error
+	Prompt   string
+	Injected int
+	Unknown  string
+	Err      error
 }
 
 func normalizeSkillPath(p string) string {
@@ -130,8 +131,11 @@ func resolveSkillMentions(prompt string, available map[string]skills.Skill) skil
 		}
 	}
 	if len(selected) > 0 {
-		context, err := explicitSkillContext(selected)
-		return skillMentionResolution{Prompt: resolvedPrompt, Context: context, Err: err}
+		prefix, err := explicitSkillPrefix(selected)
+		if err != nil {
+			return skillMentionResolution{Prompt: resolvedPrompt, Err: err}
+		}
+		return skillMentionResolution{Prompt: prefix + resolvedPrompt, Injected: len(selected)}
 	}
 	if name, ok := standaloneUnknownSkillMention(prompt); ok {
 		return skillMentionResolution{Prompt: resolvedPrompt, Unknown: name}
@@ -210,27 +214,63 @@ func unescapeDollarEscapes(prompt string) string {
 	return b.String()
 }
 
-func explicitSkillContext(selected []skills.Skill) ([]string, error) {
-	context := make([]string, 0, len(selected))
+func explicitSkillPrefix(selected []skills.Skill) (string, error) {
+	blocks := make([]string, 0, len(selected))
 	for _, skill := range selected {
 		body, err := skill.Read()
 		if err != nil {
-			return nil, fmt.Errorf("read skill %q at %s: %w", skill.Name, skill.Location, err)
+			return "", fmt.Errorf("read skill %q at %s: %w", skill.Name, skill.Location, err)
 		}
-		context = append(context, skills.ActiveContext(skill.Name, skill.Location, body))
+		blocks = append(blocks, skills.InjectionBlock(skill.Name, skill.Location, body))
 	}
-	return context, nil
+	return strings.Join(blocks, "\n\n") + "\n\n", nil
 }
 
-func (app *App) resolveSkillMentionContext(prompt string) (string, []string, bool) {
+func (app *App) resolveSkillMentionContext(prompt string) (string, int, bool) {
 	res := resolveSkillMentions(prompt, app.Skills)
 	if res.Unknown != "" {
 		fmt.Fprintf(app.Errw, "unknown skill %q; type /skills\n", res.Unknown)
-		return res.Prompt, nil, false
+		return res.Prompt, 0, false
 	}
 	if res.Err != nil {
 		fmt.Fprintf(app.Errw, "skill activation failed: %v\n", res.Err)
-		return res.Prompt, nil, false
+		return res.Prompt, 0, false
 	}
-	return res.Prompt, res.Context, true
+	return res.Prompt, res.Injected, true
+}
+
+type skillInjectionDelivery struct {
+	count int
+}
+
+func skillInjectionMetadata(count int) []any {
+	if count == 0 {
+		return nil
+	}
+	return []any{skillInjectionDelivery{count: count}}
+}
+
+func skillInjectionsFromMetadata(metadata []any) int {
+	var count int
+	for _, item := range metadata {
+		if delivery, ok := item.(skillInjectionDelivery); ok {
+			count += delivery.count
+		}
+	}
+	return count
+}
+
+func (app *App) recordSkillInjections(prompt, turn, count int) {
+	for range count {
+		if app.otelSink != nil {
+			app.otelSink.RecordSkill("explicit", "injected")
+		}
+		app.recordEvent(session.Event{
+			Type:    session.EventSkillActivation,
+			Prompt:  prompt,
+			Turn:    turn,
+			Purpose: "explicit",
+			Summary: "injected",
+		})
+	}
 }

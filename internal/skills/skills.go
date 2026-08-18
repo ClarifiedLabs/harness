@@ -1,8 +1,7 @@
 // Package skills discovers and parses Agent Skills from SKILL.md files, builds
-// a catalog for prompt disclosure, and supplies behavioral instructions so the
-// model can activate skills via explicit request context or its existing
-// file-read tool (progressive disclosure: catalog → SKILL.md body → bundled
-// resources on demand).
+// a catalog for prompt disclosure, and renders explicitly mentioned skills for
+// persisted prompt injection (progressive disclosure: catalog → SKILL.md body →
+// bundled resources on demand).
 package skills
 
 import (
@@ -18,18 +17,6 @@ import (
 
 // skillFile is the canonical filename inside each skill subdirectory.
 const skillFile = "SKILL.md"
-
-// ActiveContextMarker is the stable prefix for a fully activated skill body in
-// request-only context.
-const ActiveContextMarker = "[active skill instructions]"
-
-// activeContextPromptLine introduces the authoritative body inside an
-// ActiveContext block.
-const activeContextPromptLine = "The following full SKILL.md is authoritative for this prompt:"
-
-// activeContextEndMarker terminates an ActiveContext block. Because it may
-// also appear inside a body, parsers must anchor on the last occurrence.
-const activeContextEndMarker = "[end active skill instructions]"
 
 // maxScanDepth bounds recursive scanning of a skill directory to prevent
 // runaway traversal in large or cyclic directory trees.
@@ -81,8 +68,7 @@ type Skill struct {
 }
 
 // Read returns the full text of the SKILL.md file at Location. Called by the
-// model (via read) or by the harness to feed the body into context at
-// activation time.
+// model (via read) or by the harness to inject an explicitly mentioned skill.
 func (s Skill) Read() (string, error) {
 	data, err := os.ReadFile(s.Location)
 	if err != nil {
@@ -91,75 +77,12 @@ func (s Skill) Read() (string, error) {
 	return string(data), nil
 }
 
-// ActiveContext wraps a fully loaded SKILL.md as request-only authoritative
-// context. Keeping the wrapper here gives explicit $mentions and tool-driven
-// activation the same stable contract without adding another model-visible
-// tool.
-func ActiveContext(name, location, body string) string {
-	var b strings.Builder
-	b.WriteString(ActiveContextMarker + "\n")
-	if name = oneLine(name); name != "" {
-		fmt.Fprintf(&b, "name: %s\n", name)
-	}
-	if location != "" {
-		fmt.Fprintf(&b, "source: %s\n", location)
-	}
-	fmt.Fprintf(&b, "%s\n\n", activeContextPromptLine)
-	b.WriteString(body)
-	if !strings.HasSuffix(body, "\n") {
-		b.WriteByte('\n')
-	}
-	b.WriteString(activeContextEndMarker)
-	return b.String()
-}
-
-// ParseActiveContext extracts name, location, and body from a block rendered
-// by ActiveContext. ok is false for any other text. The end marker is matched
-// at its last occurrence and must be the final non-space content, so a body
-// that itself contains the marker round-trips. Because ActiveContext always
-// separates the body from the end marker with exactly one newline, the body is
-// returned in canonical form with at most one trailing newline removed; the
-// rendered block is unchanged by re-wrapping it. It never errors.
-func ParseActiveContext(item string) (name, location, body string, ok bool) {
-	text := strings.TrimSpace(item)
-	if !strings.HasPrefix(text, ActiveContextMarker) {
-		return "", "", "", false
-	}
-	rest := text[len(ActiveContextMarker):]
-	if !strings.HasPrefix(rest, "\n") {
-		return "", "", "", false
-	}
-	rest = rest[1:]
-	for {
-		line, tail, found := strings.Cut(rest, "\n")
-		if !found {
-			return "", "", "", false
-		}
-		switch {
-		case strings.HasPrefix(line, "name: "):
-			name = strings.TrimPrefix(line, "name: ")
-			rest = tail
-		case strings.HasPrefix(line, "source: "):
-			location = strings.TrimPrefix(line, "source: ")
-			rest = tail
-		default:
-			// Anything else must be the authoritative prompt line, followed by
-			// the blank line that separates it from the body.
-			if line != activeContextPromptLine || !strings.HasPrefix(tail, "\n") {
-				return "", "", "", false
-			}
-			bodyText := tail[1:]
-			end := strings.LastIndex(bodyText, activeContextEndMarker)
-			if end < 0 || strings.TrimSpace(bodyText[end+len(activeContextEndMarker):]) != "" {
-				return "", "", "", false
-			}
-			// ActiveContext guarantees exactly one newline before the end marker;
-			// strip only that one so the original body round-trips whether or not
-			// it ended in a newline.
-			body = strings.TrimSuffix(bodyText[:end], "\n")
-			return name, location, body, true
-		}
-	}
+// InjectionBlock wraps a fully loaded SKILL.md in the Codex skill envelope used
+// for persisted user-prompt injection. Trailing line endings are normalized so
+// exactly one newline separates the body from the closing tag.
+func InjectionBlock(name, location, body string) string {
+	body = strings.TrimRight(body, "\r\n")
+	return fmt.Sprintf("<skill>\n<name>%s</name>\n<path>%s</path>\n\n%s\n</skill>", name, location, body)
 }
 
 // discovered bundles a parsed skill with its scope for collision resolution.
@@ -570,7 +493,7 @@ func BuildCatalogBudgeted(skills map[string]Skill, budget int) (string, CatalogR
 	}
 	b.WriteString("### How to use skills\n")
 	b.WriteString("- Discovery: list above is authoritative (`file:` lives on host).\n")
-	b.WriteString("- Trigger: if user names a skill (`$Name`) OR task clearly matches description, you must use it for that turn. Multiple mentions \u2192 use all. Don't carry across turns.\n")
+	b.WriteString("- Trigger: if user names a skill (`$Name`) OR task clearly matches description, you must use it for that turn. Multiple mentions \u2192 use all. Don't carry across turns. If a later turn needs the skill again, re-read its `SKILL.md`.\n")
 	b.WriteString("- Missing: if named skill absent or unreadable, say so briefly and fallback.\n")
 	b.WriteString("- Progressive disclosure:\n")
 	b.WriteString("  1) After deciding, read its `SKILL.md` completely before acting (via `read`). If truncated/paginated, continue until EOF.\n")

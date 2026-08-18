@@ -2341,16 +2341,6 @@ func (s *childSink) TranscriptRewritten() {
 	}
 }
 
-func (s *childSink) SkillActivated(event agent.SkillActivationEvent) {
-	s.rec.Append(session.Event{
-		Type:    session.EventSkillActivation,
-		Prompt:  1,
-		Turn:    max(s.turn, 1),
-		Purpose: event.Source,
-		Summary: event.Status,
-	})
-}
-
 func (s *childSink) RequestContext() []string {
 	if s.todos != nil && s.todoContext {
 		if ctx := s.todos.PendingRequestContext(); ctx != "" {

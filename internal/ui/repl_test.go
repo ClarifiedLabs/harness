@@ -1107,6 +1107,8 @@ func TestOTelForwardingAndLifecycleReachConcreteSink(t *testing.T) {
 		Usage:  llm.Usage{InputTokens: 10, OutputTokens: 3},
 	})
 	app := newTestApp(t, &out, &errw, fp)
+	skill := testSkill(t, "telemetry", "Test telemetry", "PRIVATE SKILL BODY")
+	app.Skills = map[string]skills.Skill{"telemetry": skill}
 	exp, err := otel.NewExporter(
 		otel.Config{Enabled: true, Endpoint: "http://collector.invalid", Timeout: time.Second},
 		buildinfo.Metadata{Version: "test"}, "", "", "", "", nil,
@@ -1116,7 +1118,7 @@ func TestOTelForwardingAndLifecycleReachConcreteSink(t *testing.T) {
 	}
 	app.SetOTel(otel.NewSink(exp, nil, app.Provider, app.Model, app.AgentName, false))
 
-	if code := OneShot(app, "private prompt"); code != ExitOK {
+	if code := OneShot(app, "private prompt using $telemetry"); code != ExitOK {
 		t.Fatalf("OneShot exit = %d, stderr = %s", code, errw.String())
 	}
 	app.RecordOTelSession()
@@ -1127,13 +1129,16 @@ func TestOTelForwardingAndLifecycleReachConcreteSink(t *testing.T) {
 	text := string(payload)
 	for _, metric := range []string{
 		"harness.prompt.total", "harness.tokens.input", "harness.session.tokens",
-		"harness.context.messages", "harness.context.bytes",
+		"harness.context.messages", "harness.context.bytes", "harness.skill.activations",
 	} {
 		if !strings.Contains(text, metric) {
 			t.Fatalf("OTEL payload missing %q: %s", metric, text)
 		}
 	}
-	if strings.Contains(text, "private prompt") || strings.Contains(text, "answer") {
+	if !strings.Contains(text, `"key":"source","value":{"stringValue":"explicit"}`) {
+		t.Fatalf("OTEL skill activation missing explicit source: %s", text)
+	}
+	if strings.Contains(text, "private prompt") || strings.Contains(text, "PRIVATE SKILL BODY") || strings.Contains(text, "answer") {
 		t.Fatalf("OTEL payload leaked transcript content: %s", text)
 	}
 	if !strings.Contains(text, filepath.Base(app.SessionPath)) || !strings.Contains(text, app.Model) {
@@ -1583,30 +1588,50 @@ func TestREPLPastedBangStaysLiteral(t *testing.T) {
 	}
 }
 
-func TestREPLTypedSkillMentionAddsRequestContext(t *testing.T) {
+func TestREPLTypedSkillMentionInjectsPersistedPrompt(t *testing.T) {
 	var out, errw bytes.Buffer
-	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn},
+		llmtest.Step{Stop: llm.StopEndTurn},
+	)
 	app := newTestApp(t, &out, &errw, fp)
 	commit := testSkill(t, "commit", "Create a git commit", "REPL SKILL BODY")
 	app.Skills = map[string]skills.Skill{
 		"commit": commit,
 	}
 
-	if code := Run(strings.NewReader("please use $commit\n/exit\n"), app, nil); code != 0 {
+	if code := Run(strings.NewReader("please use $commit\nfollow up\n/exit\n"), app, nil); code != 0 {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
-	if fp.RequestCount() != 1 {
-		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
+	if fp.RequestCount() != 2 {
+		t.Fatalf("provider requests = %d, want 2", fp.RequestCount())
 	}
 	req := fp.Requests[0]
-	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
-		t.Fatalf("user prompt should be preserved, got %q", got)
+	assertSkillInjectedPrompt(t, req.Messages[0].Content[0].Text, commit, "REPL SKILL BODY", "please use $commit")
+	if len(req.RequestContext) != 0 {
+		t.Fatalf("skill injection should not use request context: %v", req.RequestContext)
 	}
-	got := strings.Join(req.RequestContext, "\n\n")
-	if !strings.Contains(got, "[active skill instructions]") ||
-		!strings.Contains(got, "source: "+commit.Location) ||
-		!strings.Contains(got, "REPL SKILL BODY") {
-		t.Fatalf("request context missing skill instructions:\n%s", got)
+	transcript := app.Agent.Transcript()
+	if err := llm.ValidateTranscript(transcript); err != nil {
+		t.Fatalf("persisted skill transcript is invalid: %v", err)
+	}
+	var userTexts []string
+	for _, message := range transcript {
+		if message.Role == llm.RoleUser && len(message.Content) == 1 && message.Content[0].Kind == llm.BlockText {
+			userTexts = append(userTexts, message.Content[0].Text)
+		}
+	}
+	if len(userTexts) != 2 || userTexts[1] != "follow up" {
+		t.Fatalf("follow-up user messages = %q, want one uninjected follow-up", userTexts)
+	}
+	var activations int
+	for _, event := range readRawEvents(t, app.SessionPath) {
+		if event.Type == session.EventSkillActivation && event.Purpose == "explicit" && event.Summary == "injected" {
+			activations++
+		}
+	}
+	if activations != 1 {
+		t.Fatalf("explicit/injected activation events = %d, want 1", activations)
 	}
 }
 
@@ -1626,12 +1651,9 @@ func TestREPLPromptEditorTabCompletesSkillMention(t *testing.T) {
 		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	req := fp.Requests[0]
-	if got := req.Messages[0].Content[0].Text; got != "please $commit now" {
-		t.Fatalf("tab-completed prompt = %q, want %q", got, "please $commit now")
-	}
-	if got := strings.Join(req.RequestContext, "\n\n"); !strings.Contains(got, "[active skill instructions]") ||
-		!strings.Contains(got, "TAB SKILL BODY") {
-		t.Fatalf("tab-completed prompt should add skill context:\n%s", got)
+	assertSkillInjectedPrompt(t, req.Messages[0].Content[0].Text, commit, "TAB SKILL BODY", "please $commit now")
+	if len(req.RequestContext) != 0 {
+		t.Fatalf("tab-completed skill should not use request context: %v", req.RequestContext)
 	}
 }
 
@@ -1652,15 +1674,12 @@ func TestREPLTypedEscapedSkillMentionStillScansLaterMentions(t *testing.T) {
 		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
 	}
 	req := fp.Requests[0]
-	if got := req.Messages[0].Content[0].Text; got != "$commit and use $review" {
-		t.Fatalf("user prompt should unescape only the escaped dollar, got %q", got)
+	assertSkillInjectedPrompt(t, req.Messages[0].Content[0].Text, review, "REVIEW SKILL BODY", "$commit and use $review")
+	if strings.Contains(req.Messages[0].Content[0].Text, "<name>commit</name>") {
+		t.Fatalf("escaped skill mention should not inject commit:\n%s", req.Messages[0].Content[0].Text)
 	}
-	got := strings.Join(req.RequestContext, "\n\n")
-	if strings.Contains(got, "name: commit") {
-		t.Fatalf("escaped skill mention should not add commit context:\n%s", got)
-	}
-	if !strings.Contains(got, "source: "+review.Location) || !strings.Contains(got, "REVIEW SKILL BODY") {
-		t.Fatalf("later skill mention should add review context:\n%s", got)
+	if len(req.RequestContext) != 0 {
+		t.Fatalf("later skill mention should not use request context: %v", req.RequestContext)
 	}
 }
 
@@ -1684,8 +1703,8 @@ func TestREPLPastedSkillMentionStaysLiteral(t *testing.T) {
 	if got := req.Messages[0].Content[0].Text; got != pasted {
 		t.Fatalf("pasted prompt = %q, want %q", got, pasted)
 	}
-	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[active skill instructions]") {
-		t.Fatalf("pasted prompt should not add skill context:\n%s", got)
+	if strings.Contains(req.Messages[0].Content[0].Text, "<skill>") {
+		t.Fatalf("pasted prompt should not inject a skill:\n%s", req.Messages[0].Content[0].Text)
 	}
 }
 
@@ -5507,7 +5526,7 @@ func TestREPLDuringPromptSteerInjectsBeforeNextModelRound(t *testing.T) {
 	}
 }
 
-func TestREPLDuringPromptSteerCarriesSkillContext(t *testing.T) {
+func TestREPLDuringPromptSteerInjectsPersistedSkillPrompt(t *testing.T) {
 	var out, errw lockedBuffer
 	releaseTurn := make(chan struct{})
 	toolRan := make(chan struct{})
@@ -5573,14 +5592,32 @@ func TestREPLDuringPromptSteerCarriesSkillContext(t *testing.T) {
 		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
 	}
 
-	var sawSkillContext bool
-	for _, item := range fp.Requests[1].RequestContext {
-		if strings.Contains(item, "STEER SKILL BODY") {
-			sawSkillContext = true
+	var steeredText string
+	for _, message := range fp.Requests[1].Messages {
+		if message.Role != llm.RoleUser {
+			continue
+		}
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockText && strings.Contains(block.Text, "STEER SKILL BODY") {
+				steeredText = block.Text
+			}
 		}
 	}
-	if !sawSkillContext {
-		t.Fatalf("second request context = %v, want steer skill context", fp.Requests[1].RequestContext)
+	assertSkillInjectedPrompt(t, steeredText, steer, "STEER SKILL BODY", "redirect with $steer")
+	for _, item := range fp.Requests[1].RequestContext {
+		if strings.Contains(item, "STEER SKILL BODY") {
+			t.Fatalf("second request context should not pin steer skill: %v", fp.Requests[1].RequestContext)
+		}
+	}
+	var activations []session.Event
+	for _, event := range readRawEvents(t, app.SessionPath) {
+		if event.Type == session.EventSkillActivation {
+			activations = append(activations, event)
+		}
+	}
+	if len(activations) != 1 || activations[0].Prompt != 1 || activations[0].Turn != 1 ||
+		activations[0].Purpose != "explicit" || activations[0].Summary != "injected" {
+		t.Fatalf("delivered steer activations = %+v, want prompt 1 turn 1 explicit/injected", activations)
 	}
 }
 
@@ -5603,7 +5640,9 @@ func TestREPLDuringPromptSteerPromptHookBlockSkipsInjection(t *testing.T) {
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
 	)
 	app := liveTestApp(t, &out, &errw, fp)
-	cfg, err := hooks.DecodeEventMap([]byte(`{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"if grep -q 'blocked steer'; then printf '{\"decision\":\"block\",\"reason\":\"blocked steer\"}'; else printf '{}'; fi"}]}]}`))
+	blockedSkill := testSkill(t, "steer", "blocked steer skill", "BLOCKED STEER SKILL BODY")
+	app.Skills = map[string]skills.Skill{"steer": blockedSkill}
+	cfg, err := hooks.DecodeEventMap([]byte(`{"UserPromptSubmit":[{"hooks":[{"type":"command","command":"if grep -q 'BLOCKED STEER SKILL BODY'; then printf '{\"decision\":\"block\",\"reason\":\"blocked steer\"}'; else printf '{}'; fi"}]}]}`))
 	if err != nil {
 		t.Fatalf("DecodeEventMap: %v", err)
 	}
@@ -5629,7 +5668,7 @@ func TestREPLDuringPromptSteerPromptHookBlockSkipsInjection(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("tool did not run")
 	}
-	writePipe(t, pw, "blocked steer\r")
+	writePipe(t, pw, "redirect with $steer\r")
 	close(releaseTurn)
 	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "second request after blocked steer")
 	_ = pw.Close()
@@ -5642,10 +5681,15 @@ func TestREPLDuringPromptSteerPromptHookBlockSkipsInjection(t *testing.T) {
 	for _, req := range fp.Requests {
 		for _, m := range req.Messages {
 			for _, b := range m.Content {
-				if b.Kind == llm.BlockText && b.Text == "blocked steer" {
+				if b.Kind == llm.BlockText && strings.Contains(b.Text, "BLOCKED STEER SKILL BODY") {
 					t.Fatalf("blocked steer was sent to provider in request: %+v", req)
 				}
 			}
+		}
+	}
+	for _, event := range readRawEvents(t, app.SessionPath) {
+		if event.Type == session.EventSkillActivation {
+			t.Fatalf("blocked steer emitted phantom skill activation: %+v", event)
 		}
 	}
 }
@@ -6522,7 +6566,7 @@ func TestAccumulatingSinkSteerDeliveredRendersAndRecords(t *testing.T) {
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
 	sink := newAccumulatingSink(app.Renderer, app, 1)
 	sink.turn = 1
-	sink.SteerDelivered("inspect this")
+	sink.SteerDelivered(agent.SteerInput{Text: "inspect this"})
 	if !strings.Contains(errw.String(), "[steer sent: inspect this]") {
 		t.Fatalf("steer delivery line missing from live output:\n%s", errw.String())
 	}

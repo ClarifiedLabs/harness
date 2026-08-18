@@ -69,7 +69,7 @@ type AssistantPhaseSink interface {
 // appended and the retained transcript validates, never on the rollback path,
 // and never when steering is disabled.
 type SteerDeliveredSink interface {
-	SteerDelivered(text string)
+	SteerDelivered(input SteerInput)
 }
 
 // ModelRequestEventSink receives diagnostics-only model request lifecycle
@@ -196,17 +196,6 @@ type RetentionEventSink interface {
 	RetentionApplied(RetentionEvent)
 }
 
-// SkillActivationEvent is diagnostics-only telemetry for explicit and
-// read-driven skill activation.
-type SkillActivationEvent struct {
-	Source string
-	Status string
-}
-
-type SkillActivationEventSink interface {
-	SkillActivated(SkillActivationEvent)
-}
-
 // RetentionPolicy selects when the live transcript retention pass runs.
 type RetentionPolicy string
 
@@ -288,6 +277,10 @@ type SteerInput struct {
 	// model; interactive protocol drivers use it only when recovering an input
 	// that was not consumed before the prompt ended.
 	CorrelationID string
+	// DeliveryMetadata is opaque caller metadata retained while inputs are queued,
+	// combined, delivered, or recovered. The agent never interprets or sends it to
+	// the model.
+	DeliveryMetadata []any
 }
 
 // TurnUsage is the accounting for one conversational turn. A turn contains one
@@ -1700,13 +1693,6 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		return fmt.Errorf("invalid or stale prompt admission")
 	}
 	a.compactFallbackNotice = compactFallbackNoticeState{}
-	var activeSkills activeSkillSet
-	// Report on the original slice so every explicit block still emits telemetry,
-	// then move recognized blocks into the pinned set: a later model re-read of
-	// the same SKILL.md then dedupes to the single pinned copy instead of
-	// duplicating the body in RequestContext.
-	reportExplicitSkillContexts(extraContext, sink)
-	extraContext = seedActiveSkills(&activeSkills, extraContext)
 	promptIndex := admission.promptIndex
 	initialPromptPending := true
 
@@ -1862,7 +1848,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			return err
 		}
 		initialPromptPending = false
-		baseRequestContext := appendPromptContext(extraContext, activeSkills.contexts(), steerContext)
+		baseRequestContext := appendPromptContext(extraContext, steerContext)
 		requestContext := a.requestContext(baseRequestContext, sink)
 		modelReq := a.modelRequest(requestContext)
 		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
@@ -2117,7 +2103,6 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		checkpoint(PromptCheckpointToolDispatch)
 		executionCalls := executionToolCalls(res.toolCalls)
 		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, promptID, turns, sink)
-		a.activateSkillReadResults(executionCalls, results, &activeSkills, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
 			Role:                llm.RoleUser,
@@ -2166,7 +2151,6 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			steerMessage.Origin = llm.MessageOriginSteer
 			a.transcript = append(a.transcript, steerMessage)
 			steerContext = append(steerContext, steered.RequestContext...)
-			reportExplicitSkillContexts(steered.RequestContext, sink)
 			guard.resetForUserSteer(&progress)
 			if err := a.validateRetainedTranscript("after in-prompt steer"); err != nil {
 				a.transcript = a.transcript[:steerIndex]
@@ -2176,7 +2160,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 				return err
 			}
 			if deliverySink, ok := sink.(SteerDeliveredSink); ok {
-				deliverySink.SteerDelivered(steered.Text)
+				deliverySink.SteerDelivered(steered)
 			}
 		}
 
@@ -2187,7 +2171,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			startClosure(ClosureTriggerErrorGuard, turns)
 			terminationReason = TerminationErrorGuard
 			sink.Notice(errorStormNotice(guard.errorRuns))
-			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
+			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
 			total = add(total, fu)
 			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
@@ -2213,7 +2197,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			} else {
 				sink.Notice(commandRepeatLoopNotice(guard.commandRuns))
 			}
-			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
+			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
 			total = add(total, fu)
 			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
@@ -2270,7 +2254,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 			startClosure(ClosureTriggerTurnBudget, turns)
 			terminationReason = TerminationTurnLimit
 			sink.Notice(maxTurnsNotice(a.maxTurns))
-			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, activeSkills.contexts(), steerContext), turns+1)
+			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
 			total = add(total, fu)
 			wastedTotal = add(wastedTotal, fw)
 			lastContext = fctx
@@ -2308,7 +2292,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 	// prompt total and is also reported separately as maintenance. A compaction
 	// error never fails the prompt — the warning was already reported and
 	// the transcript was kept intact.
-	lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink))
+	lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink)
 	if compUsage != (llm.Usage{}) {
 		total = add(total, compUsage)
@@ -2316,7 +2300,7 @@ func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission Prom
 		reportMaintenance(sink, "compaction", compUsage)
 	}
 	if err == nil && changed {
-		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, activeSkills.contexts(), steerContext), sink))
+		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	}
 	if err := a.validateTranscript("after prompt"); err != nil {
 		return err
@@ -3649,6 +3633,7 @@ func (a *Agent) drainSteer() SteerInput {
 		}
 		out.Images = append(out.Images, cloneImageBlocks(input.Images)...)
 		out.RequestContext = append(out.RequestContext, cleanContext(input.RequestContext)...)
+		out.DeliveryMetadata = append(out.DeliveryMetadata, input.DeliveryMetadata...)
 	}
 	return out
 }

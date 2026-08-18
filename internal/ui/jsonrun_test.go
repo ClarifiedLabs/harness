@@ -20,6 +20,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/runstream"
+	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/tools"
 )
@@ -811,6 +812,52 @@ func TestRunJSONInitialBoundaryRefreshesMCPAndPersistsNotice(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), notice) || !strings.Contains(string(raw), "[background:") {
 		t.Fatalf("raw.ndjson omitted streamed boundary notices:\n%s", raw)
+	}
+}
+
+func TestRunJSONSkillMentionInjectsPersistedPromptAndEcho(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
+	app, stream, _, w := newJSONRunApp(t, fp)
+	commit := testSkill(t, "commit", "Create a git commit", "JSON SKILL BODY")
+	app.Skills = map[string]skills.Skill{"commit": commit}
+
+	code := RunJSON(strings.NewReader("{\"type\":\"prompt\",\"id\":\"skill\",\"text\":\"please use $commit\"}\n"), app)
+	if code != ExitOK {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	w.Close(runstream.RunEnd{ExitCode: code})
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
+	}
+	request := fp.Requests[0]
+	assertSkillInjectedPrompt(t, request.Messages[0].Content[0].Text, commit, "JSON SKILL BODY", "please use $commit")
+	if len(request.RequestContext) != 0 {
+		t.Fatalf("JSON skill prompt should not use request context: %v", request.RequestContext)
+	}
+
+	lines := decodeRunStreamLines(t, stream.String())
+	starts := linesOfType(lines, "prompt_start")
+	users := linesOfType(lines, "user")
+	activations := linesOfType(lines, session.EventSkillActivation)
+	if len(starts) != 1 || len(users) != 1 || len(activations) != 1 {
+		t.Fatalf("skill stream events: starts=%v users=%v activations=%v", starts, users, activations)
+	}
+	wantText := request.Messages[0].Content[0].Text
+	if starts[0]["text"] != wantText || users[0]["text"] != wantText {
+		t.Fatalf("skill prompt echo mismatch: start=%v user=%v want=%q", starts[0]["text"], users[0]["text"], wantText)
+	}
+	if activations[0]["purpose"] != "explicit" || activations[0]["summary"] != "injected" {
+		t.Fatalf("skill activation = %v, want explicit/injected", activations[0])
+	}
+	var ordered []string
+	for _, line := range lines {
+		typeName, _ := line["type"].(string)
+		if typeName == "prompt_start" || typeName == "user" || typeName == session.EventSkillActivation {
+			ordered = append(ordered, typeName)
+		}
+	}
+	if got, want := strings.Join(ordered, ","), "prompt_start,user,"+session.EventSkillActivation; got != want {
+		t.Fatalf("skill event order = %q, want %q", got, want)
 	}
 }
 

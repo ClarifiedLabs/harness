@@ -58,9 +58,11 @@ func OneShot(app *App, prompt string) int {
 	if app.Renderer != nil {
 		app.Renderer.StartPrompt()
 	}
-	var skillContext []string
-	var ok bool
-	prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
+	var (
+		skillInjections int
+		ok              bool
+	)
+	prompt, skillInjections, ok = app.resolveSkillMentionContext(prompt)
 	if !ok {
 		if app.Renderer != nil {
 			app.Renderer.StopProgress()
@@ -98,6 +100,7 @@ func OneShot(app *App, prompt string) int {
 		app.RunStream.PromptStart(runstream.PromptStart{HasImages: len(images) > 0})
 	}
 	promptID := app.beginPrompt(prompt, images)
+	app.recordSkillInjections(promptID, 1, skillInjections)
 
 	ctx := context.Background()
 	if app.Interrupt != nil {
@@ -130,7 +133,6 @@ func OneShot(app *App, prompt string) int {
 	app.Renderer.StartPromptRun()
 	sink := newAccumulatingSink(app.Renderer, app, promptID)
 	promptContext := append([]string(nil), promptHook.AdditionalContext...)
-	promptContext = append(promptContext, skillContext...)
 	done := make(chan error, 1)
 	go func() {
 		done <- app.Agent.RunPromptContentWithContext(ctx, prompt, imageBlocks(images), app.promptHookContext(promptContext), promptID, sink)

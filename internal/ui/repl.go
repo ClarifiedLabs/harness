@@ -4103,9 +4103,10 @@ type promptOptions struct {
 }
 
 type preparedPrompt struct {
-	prompt        string
-	images        []inputimage.Loaded
-	promptContext []string
+	prompt          string
+	images          []inputimage.Loaded
+	promptContext   []string
+	skillInjections int
 }
 
 func (app *App) runPrompt(prompt string) {
@@ -4132,6 +4133,7 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 		}
 		admission = app.Agent.AdmitPromptContent(prepared.prompt, imageBlocks(prepared.images))
 		promptID = app.beginPrompt(prepared.prompt, prepared.images)
+		app.recordSkillInjections(promptID, 1, prepared.skillInjections)
 		return true
 	}
 	if opts.beforeBegin != nil {
@@ -4242,10 +4244,10 @@ func (app *App) prepareDetachedWaitContinuation() (func(), bool) {
 }
 
 func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnBlock bool) (preparedPrompt, error) {
-	var skillContext []string
+	var skillInjections int
 	if opts.resolveSkillMentions {
 		var ok bool
-		prompt, skillContext, ok = app.resolveSkillMentionContext(prompt)
+		prompt, skillInjections, ok = app.resolveSkillMentionContext(prompt)
 		if !ok {
 			if app.Renderer != nil && stopProgressOnBlock {
 				app.Renderer.StopProgress()
@@ -4285,8 +4287,7 @@ func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnB
 		images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
 	}
 	promptContext := append([]string(nil), promptHook.AdditionalContext...)
-	promptContext = append(promptContext, skillContext...)
-	return preparedPrompt{prompt: prompt, images: images, promptContext: promptContext}, nil
+	return preparedPrompt{prompt: prompt, images: images, promptContext: promptContext, skillInjections: skillInjections}, nil
 }
 
 func (app *App) prepareSteerInput(prompt string, opts promptOptions) (agent.SteerInput, error) {
@@ -4295,9 +4296,10 @@ func (app *App) prepareSteerInput(prompt string, opts promptOptions) (agent.Stee
 		return agent.SteerInput{}, err
 	}
 	return agent.SteerInput{
-		Text:           prepared.prompt,
-		Images:         imageBlocks(prepared.images),
-		RequestContext: prepared.promptContext,
+		Text:             prepared.prompt,
+		Images:           imageBlocks(prepared.images),
+		RequestContext:   prepared.promptContext,
+		DeliveryMetadata: skillInjectionMetadata(prepared.skillInjections),
 	}, nil
 }
 
@@ -4322,6 +4324,7 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 		begin()
 	}
 	promptID := app.beginPrompt(input.Text, nil)
+	app.recordSkillInjections(promptID, 1, skillInjectionsFromMetadata(input.DeliveryMetadata))
 	ctx := context.Background()
 	if app.Goal != nil {
 		ctx = goal.WithGeneration(ctx, app.Goal, goalGeneration)
@@ -5890,8 +5893,20 @@ func (s *accumulatingSink) Notice(msg string) {
 // SteerDelivered reports that queued in-prompt steer input was injected into
 // the transcript: the dim line renders above the live status line and is
 // recorded as a sessionrec Display line via Notice.
-func (s *accumulatingSink) SteerDelivered(text string) {
-	s.Notice("[steer sent: " + submissionPreview(text, 0) + "]")
+func (s *accumulatingSink) SteerDelivered(input agent.SteerInput) {
+	s.Notice("[steer sent: " + submissionPreview(input.Text, 0) + "]")
+	for range skillInjectionsFromMetadata(input.DeliveryMetadata) {
+		if s.otel != nil {
+			s.otel.RecordSkill("explicit", "injected")
+		}
+		s.recordEvent(session.Event{
+			Type:    session.EventSkillActivation,
+			Prompt:  s.prompt,
+			Turn:    max(s.turn, 1),
+			Purpose: "explicit",
+			Summary: "injected",
+		})
+	}
 }
 
 func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic) {
@@ -6027,19 +6042,6 @@ func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
 		Prompt:    s.prompt,
 		Turn:      s.turn + 1,
 		Retention: sessionrec.RetentionSnapshot(event),
-	})
-}
-
-func (s *accumulatingSink) SkillActivated(event agent.SkillActivationEvent) {
-	if s.otel != nil {
-		s.otel.RecordSkill(event.Source, event.Status)
-	}
-	s.recordEvent(session.Event{
-		Type:    session.EventSkillActivation,
-		Prompt:  s.prompt,
-		Turn:    max(s.turn, 1),
-		Purpose: event.Source,
-		Summary: event.Status,
 	})
 }
 

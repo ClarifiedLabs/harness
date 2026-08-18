@@ -203,7 +203,7 @@ func TestOneShotAtImageReferenceAttachesImage(t *testing.T) {
 	}
 }
 
-func TestOneShotSkillMentionAddsRequestContext(t *testing.T) {
+func TestOneShotSkillMentionInjectsPersistedPrompt(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
@@ -219,19 +219,9 @@ func TestOneShotSkillMentionAddsRequestContext(t *testing.T) {
 		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
 	}
 	req := fp.Requests[0]
-	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
-		t.Fatalf("user prompt should be preserved, got %q", got)
-	}
-	got := strings.Join(req.RequestContext, "\n\n")
-	for _, want := range []string{
-		"[active skill instructions]",
-		"name: commit",
-		"source: " + commit.Location,
-		"ONE SHOT SKILL BODY",
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("request context missing %q:\n%s", want, got)
-		}
+	assertSkillInjectedPrompt(t, req.Messages[0].Content[0].Text, commit, "ONE SHOT SKILL BODY", "please use $commit")
+	if len(req.RequestContext) != 0 {
+		t.Fatalf("one-shot skill prompt should not use request context: %v", req.RequestContext)
 	}
 }
 
@@ -306,8 +296,8 @@ func TestOneShotEscapedSkillMentionSendsLiteralDollar(t *testing.T) {
 	if got := req.Messages[0].Content[0].Text; got != "$commit" {
 		t.Fatalf("escaped prompt = %q, want %q", got, "$commit")
 	}
-	if got := strings.Join(req.RequestContext, "\n\n"); strings.Contains(got, "[active skill instructions]") {
-		t.Fatalf("escaped prompt should not add skill context:\n%s", got)
+	if strings.Contains(req.Messages[0].Content[0].Text, "<skill>") {
+		t.Fatalf("escaped prompt should not inject a skill:\n%s", req.Messages[0].Content[0].Text)
 	}
 }
 

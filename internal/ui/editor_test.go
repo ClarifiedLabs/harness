@@ -235,7 +235,7 @@ func TestREPLEditedBangTextIsPromptNotShellCommand(t *testing.T) {
 	}
 }
 
-func TestREPLEditedSkillMentionAddsRequestContext(t *testing.T) {
+func TestREPLEditedSkillMentionInjectsPersistedPrompt(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("ok")},
@@ -263,14 +263,9 @@ func TestREPLEditedSkillMentionAddsRequestContext(t *testing.T) {
 		t.Fatalf("edited prompt should send one request, got %d", len(fp.Requests))
 	}
 	req := fp.Requests[0]
-	if got := req.Messages[0].Content[0].Text; got != "please use $commit" {
-		t.Fatalf("edited prompt = %q", got)
-	}
-	got := strings.Join(req.RequestContext, "\n\n")
-	if !strings.Contains(got, "[active skill instructions]") ||
-		!strings.Contains(got, "source: "+commit.Location) ||
-		!strings.Contains(got, "EDITOR SKILL BODY") {
-		t.Fatalf("edited prompt should add skill context:\n%s", got)
+	assertSkillInjectedPrompt(t, req.Messages[0].Content[0].Text, commit, "EDITOR SKILL BODY", "please use $commit")
+	if len(req.RequestContext) != 0 {
+		t.Fatalf("edited skill prompt should not use request context: %v", req.RequestContext)
 	}
 }
 
@@ -346,14 +341,12 @@ func TestREPLEditorPrefillInteractiveSlashTextIsPromptWithEnrichment(t *testing.
 	if content[0].Kind != llm.BlockImage || content[0].ImageMediaType != "image/png" {
 		t.Fatalf("first block = %+v", content[0])
 	}
-	if content[1].Kind != llm.BlockText || content[1].Text != prompt {
-		t.Fatalf("second block = %+v, want prompt %q", content[1], prompt)
+	if content[1].Kind != llm.BlockText {
+		t.Fatalf("second block = %+v, want text", content[1])
 	}
-	got := strings.Join(fp.Requests[0].RequestContext, "\n\n")
-	if !strings.Contains(got, "[active skill instructions]") ||
-		!strings.Contains(got, "source: "+commit.Location) ||
-		!strings.Contains(got, "EDITOR PREFILL SKILL BODY") {
-		t.Fatalf("edited prompt should add skill context:\n%s", got)
+	assertSkillInjectedPrompt(t, content[1].Text, commit, "EDITOR PREFILL SKILL BODY", prompt)
+	if len(fp.Requests[0].RequestContext) != 0 {
+		t.Fatalf("edited skill prompt should not use request context: %v", fp.Requests[0].RequestContext)
 	}
 }
 

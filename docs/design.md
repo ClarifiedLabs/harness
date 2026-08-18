@@ -1917,39 +1917,37 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   `AGENTS.md`, skills, and agent prompts are still composed around it.
   `~/.agents/AGENTS.md` is appended before the current working directory's
   `AGENTS.md`; missing files are ignored and other read failures fail startup.
-  The skills catalog is rendered as `## Skills` / `### Available skills` (`name: description (file: /abs/SKILL.md)`) / `### How to use skills` with discovery, trigger (`$Name` or matching description, multiple mentions → all), missing-skill, progressive-disclosure (read `SKILL.md` completely via `read`, resolve relatives from its directory, read only routed `references/`, prefer scripts), and coordination guidance; within the always-resident catalog each description is the first sentence or 160 runes and a character budget equal to 2% of the startup model's effective context window fair-shares remaining chars round-robin (omitting extras with an omission notice); unknown windows fall back to 8,000 characters. Process-specific `rg`/LSP/Serena hints follow it. When ripgrep is on `PATH`, a short runtime hint ("When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`.") is appended to `RuntimeHints`. The
+  The skills catalog is rendered as `## Skills` / `### Available skills` (`name: description (file: /abs/SKILL.md)`) / `### How to use skills` with discovery, trigger (`$Name` or matching description, multiple mentions → all), missing-skill, progressive-disclosure (read `SKILL.md` completely via `read`, resolve relatives from its directory, read only routed `references/`, prefer scripts), and coordination guidance; within the always-resident catalog each description is the first sentence or 160 runes and a character budget equal to 2% of the startup model's effective context window fair-shares remaining chars round-robin (omitting extras with an omission notice); unknown windows fall back to 8,000 characters. Unlike Codex's diffed in-history developer-message catalog, Harness deliberately keeps this catalog in the static system prompt: discovery is fixed at startup, so the prefix remains byte-stable and survives compaction without putting system instructions in transcript history. Process-specific `rg`/LSP/Serena hints follow it. When ripgrep is on `PATH`, a short runtime hint ("When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`.") is appended to `RuntimeHints`. The
   active agent prompt is always the final section.
   `@~/path` expands through the current user's home directory; relative `@file`
   references in the config file resolve from that config file's directory.
   `-no-env` drops the env block.
 - Explicit mentions are resolved before provider work: `$skillName`, exact
   word-bounded plain names, and `skill://` / `…/SKILL.md` path mentions
-  (punctuation-tolerant, `$$` escapes to literal `$`) each activate their skill;
-  Harness reads
-  the complete `SKILL.md` once, wraps it as typed request-only active-skill
-  context, and keeps that exact context on every request for the prompt,
-  including after compaction. A read failure aborts the prompt before a model
-  call, eliminating the former activation round trip. Explicit blocks are
-  seeded into the same pinned set the read path uses, so a model re-read of an
-  explicitly activated `SKILL.md` dedupes into that single pinned context — the
-  read's receipt reports `status: already active` — while changed content still
-  reactivates and replaces it. Bodies are digest-compared after trimming at
-  most one trailing newline, so the raw-file and line-numbered-decoded forms
-  match. Discovery scans existing
+  (punctuation-tolerant, `$$` escapes to literal `$`) each select their skill.
+  Harness reads the complete `SKILL.md`, wraps it as
+  `<skill>\n<name>…</name>\n<path>…</path>\n\n{body}\n</skill>`, and prepends
+  the block to the user's text. Multiple selected skills are separated by a
+  blank line and deduplicated within that prompt. The resulting text is admitted
+  as one ordinary user-role message and persisted in transcript history; it is
+  neither request-only context nor reinjected on later requests. It remains in
+  history until ordinary compaction summarizes or removes it. Re-mentioning the
+  skill in a later prompt reads the current file and persists a new block; a
+  read failure aborts before a model call. Discovery scans existing
   `.agents/skills` roots from the Git project root through `cwd`, outer to inner,
   then the user root; project scope beats user scope and the nearest project root
   wins equal-scope name collisions.
-- Implicit skill selection remains progressive: the model sees the compact
-  catalog and may issue one `read` call. A successful complete single-file
-  read of `SKILL.md` from the beginning activates its decoded body for the rest
-  of that prompt. The transcript result is replaced with a typed activation
-  receipt containing source and digest; the exact line-numbered result is
-  archived through the ordinary artifact path. Re-reading unchanged content
-  does not duplicate active context, while changed content replaces it. Partial
-  reads stay ordinary tool results and do not activate. If a
-  configured artifact write fails, activation still succeeds but the complete
-  original result remains in the transcript instead of being replaced. Catalog
-  omission and truncation counts are emitted as
+- Implicit skill selection is plain progressive disclosure: the model sees the
+  compact catalog and reads `SKILL.md` with the ordinary `read` tool. Complete
+  and partial reads remain ordinary persisted, line-numbered tool results,
+  subject only to the generic tool-result truncation and archival policies.
+  Harness does not intercept them, replace them with activation receipts,
+  digest their bodies, pin them in request context, or force archival. The
+  catalog's "don't carry across turns" rule is prompt guidance only; when a
+  later turn needs the skill, the model re-reads `SKILL.md`. Explicit injections
+  emit `skill_activation` telemetry with source `explicit` and summary
+  `injected`; implicit reads remain visible in normal tool-read statistics.
+  Catalog omission and truncation counts are emitted as
   `harness.skill.catalog_omitted` and `harness.skill.catalog_truncated` when
   OpenTelemetry is enabled; startup also prints a concise budget warning.
 
@@ -3283,9 +3281,10 @@ Empty edited content returns to the prompt without running a turn.
 Lines starting with `/` are commands; `//` escapes a literal slash. At an
 interactive TTY prompt, lines starting with `!` run a local shell command; `!!`
 escapes a literal bang. In a normal typed prompt, `$skillName` mentions an
-available skill anywhere in the text; Harness reads the complete `SKILL.md`
-before model work and supplies it as request-only active-skill context for the
-prompt. `$$` escapes a literal `$`. Literal `@path` / `@"path with spaces"` references remain prompt text
+available skill anywhere in the text; Harness reads the complete `SKILL.md`,
+wraps it in a Codex-style `<skill>` block, and prepends it to the prompt as
+persisted user-role transcript content. Re-mention the skill to inject it again
+on a later turn. `$$` escapes a literal `$`. Literal `@path` / `@"path with spaces"` references remain prompt text
 and never expand file contents; when they point at supported image extensions,
 typed REPL prompts, initial `-i` prompts, and one-shot prompts auto-attach the
 image if the model supports image input. Pasted and external-editor prompts keep
@@ -3621,9 +3620,11 @@ type UsageTotals struct {
   and `harness session errors`; tool starts/results snapshot the active
   `model_target`, `provider`, `api_type`, and `model` for stable attribution.
   Legacy logs without those fields use the preceding `model_request`, then
-  session metadata. Legacy failures without a kind are text-classified.
-  from the recorded display line. `skill_activation` records
-  only activation source and status, not instruction contents.
+  session metadata. Legacy failures without a kind are text-classified from the
+  recorded display line. `skill_activation` records preserve the
+  legacy event type but new events carry only the explicit/injected source and
+  summary, not instruction contents; the `<skill>` body itself is ordinary user
+  transcript content.
 - Sessions store the CLI-owned previous response/interaction ID, anchored message
   count, and transcript fingerprint in `state.json`. Resume restores it only
   when continuation is enabled for the exact current target, saved/current

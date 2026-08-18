@@ -1449,11 +1449,14 @@ return to the prompt without contacting the model; `!!` sends a literal leading
 `!`. In one-shot mode, initial `-i` prompts, non-TTY/scripted input, pasted text, and edited prompts,
 `!text` is literal prompt text. In a normal typed prompt, `$name`, an exact
 word-bounded plain skill name, `skill://name`, or `…/SKILL.md` mentions the
-named skill anywhere in the text; Harness reads that skill's complete
-`SKILL.md` before the first model request and supplies it as request-only
-context. A failed read aborts the prompt before model work; a later model
-re-read of the same `SKILL.md` dedupes into that one pinned copy instead of
-duplicating it. `$$` escapes a
+named skill anywhere in the text. Harness reads that skill's complete
+`SKILL.md`, wraps it in a Codex-style `<skill>` envelope, and prepends it to the
+user prompt. That enriched prompt is persisted as one ordinary user-role
+transcript message; the body is not request-only context and is not reinjected
+on later requests. A failed read aborts before model work. Re-mention a skill to
+inject its current contents again on a later turn. If the model selects a skill
+implicitly, its `read` of `SKILL.md` remains an ordinary persisted tool result;
+Harness does not replace it with a receipt or pin the body. `$$` escapes a
 literal `$`.
 
 In terminals that support bracketed paste, pasted text fills the prompt for
@@ -2013,9 +2016,10 @@ retention epochs. Retention records include the trigger, reclaimed blocks/bytes,
 context estimates, continuation reset, and next-request shape; they never enter
 model context. Tool-result records may carry aggregate integer `result_metrics`,
 and failed results carry a structured `error_kind` plus a bounded, rune-safe
-`error_excerpt` (2 lines / 240 runes) for error analysis; skill activation records
-carry only source and status; neither includes
-skill bodies or adds model-visible content.
+`error_excerpt` (2 lines / 240 runes) for error analysis; new skill activation
+records carry only the `explicit` source and `injected` summary. The activation
+record itself includes no skill body and adds no model-visible content; the
+Codex-style `<skill>` block is already part of the persisted user event.
 New tool start/result records also snapshot `model_target`, `provider`,
 `api_type`, and `model`, making attribution stable if a resumed session later
 switches models.
