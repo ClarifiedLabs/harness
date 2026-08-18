@@ -4837,7 +4837,10 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	ready := readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
+	app.SwitchAgent = func(string) (AgentSelection, error) {
+		return AgentSelection{}, errors.New("hidden from interactive selection")
+	}
+	app.HandoffSwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
 	}
 

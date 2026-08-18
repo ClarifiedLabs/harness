@@ -630,6 +630,22 @@ func TestLSPPrewarmDefaultsAndOverride(t *testing.T) {
 	}
 }
 
+func TestFileAgentInteractiveSelectablePreservesOmissionAndExplicitFalse(t *testing.T) {
+	result := load(t, nil, nil, writeConfig(t, `{
+		"agents": {
+			"defaulted": {"description": "Defaulted custom agent"},
+			"hidden": {"description": "Delegated-only custom agent", "interactive_selectable": false}
+		}
+	}`))
+	if got := result.Config.Agents["defaulted"].InteractiveSelectable; got != nil {
+		t.Fatalf("omitted interactive_selectable = %v, want nil", *got)
+	}
+	hidden := result.Config.Agents["hidden"].InteractiveSelectable
+	if hidden == nil || *hidden {
+		t.Fatalf("explicit false interactive_selectable = %v, want false", hidden)
+	}
+}
+
 func TestSnapshotDoesNotAliasResolvedConfig(t *testing.T) {
 	result := load(t, nil, nil, writeConfig(t, `{"agents":{"custom":{"description":"Custom agent","allowed_tools":["read"]}}}`))
 	snapshot := Snapshot(result)

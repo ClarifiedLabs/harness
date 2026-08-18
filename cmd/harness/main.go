@@ -577,6 +577,10 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		fmt.Fprintf(stderr, "harness: unknown agent %q (available: %s)\n", agentName, strings.Join(agentdef.Names(agents), ", "))
 		return ui.ExitUsage
 	}
+	if !runOptions.PromptSet && !startupAgent.InteractiveSelectable {
+		fmt.Fprintf(stderr, "harness: agent %q is not available for interactive selection (available: %s)\n", agentName, strings.Join(agentdef.InteractiveNames(agents), ", "))
+		return ui.ExitUsage
+	}
 
 	catalog, err := proxyClient.Catalog(startupCtx)
 	if err != nil {
@@ -1094,6 +1098,17 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}, nil
 	}
 
+	interactiveSwitchAgent := func(name string) (ui.AgentSelection, error) {
+		definition, ok := agents[name]
+		if !ok {
+			return ui.AgentSelection{}, fmt.Errorf("unknown agent %q (available: %s)", name, strings.Join(agentdef.InteractiveNames(agents), ", "))
+		}
+		if !definition.InteractiveSelectable {
+			return ui.AgentSelection{}, fmt.Errorf("agent %q is not available for interactive selection (available: %s)", name, strings.Join(agentdef.InteractiveNames(agents), ", "))
+		}
+		return switchAgent(name)
+	}
+
 	var controlLSP func(action, agentName string) (ui.LSPSelection, error)
 	if lspControl != nil && !runOptions.PromptSet {
 		controlLSP = func(action, currentAgentName string) (ui.LSPSelection, error) {
@@ -1415,7 +1430,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		RefreshAgentSummaries: func() []ui.AgentSummary {
 			return agentSummaries(agents, delegateState.Snapshot().ToolNames)
 		},
-		SwitchAgent:                  switchAgent,
+		SwitchAgent:                  interactiveSwitchAgent,
+		HandoffSwitchAgent:           switchAgent,
 		ControlLSP:                   controlLSP,
 		Todos:                        todoStore,
 		Plans:                        planStore,
@@ -1982,13 +1998,14 @@ type agentsListOutput struct {
 }
 
 type agentListEntry struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	AllowedTools []string `json:"allowed_tools"`
-	MCPTools     string   `json:"mcp_tools"`
-	HasPrompt    bool     `json:"has_prompt"`
-	Model        string   `json:"model,omitempty"`
-	Selected     bool     `json:"selected"`
+	Name                  string   `json:"name"`
+	Description           string   `json:"description"`
+	AllowedTools          []string `json:"allowed_tools"`
+	MCPTools              string   `json:"mcp_tools"`
+	HasPrompt             bool     `json:"has_prompt"`
+	Model                 string   `json:"model,omitempty"`
+	InteractiveSelectable bool     `json:"interactive_selectable"`
+	Selected              bool     `json:"selected"`
 }
 
 func buildAgentsListOutput(cfg config.Config) (*agentsListOutput, error) {
@@ -2007,13 +2024,14 @@ func buildAgentsListOutput(cfg config.Config) (*agentsListOutput, error) {
 	for _, name := range agentdef.Names(agents) {
 		agent := agents[name]
 		out.Agents = append(out.Agents, agentListEntry{
-			Name:         name,
-			Description:  agent.Description,
-			AllowedTools: append([]string(nil), agent.AllowedTools...),
-			MCPTools:     string(agent.MCPTools),
-			HasPrompt:    strings.TrimSpace(agent.Prompt) != "",
-			Model:        agent.Model,
-			Selected:     name == selected,
+			Name:                  name,
+			Description:           agent.Description,
+			AllowedTools:          append([]string(nil), agent.AllowedTools...),
+			MCPTools:              string(agent.MCPTools),
+			HasPrompt:             strings.TrimSpace(agent.Prompt) != "",
+			Model:                 agent.Model,
+			InteractiveSelectable: agent.InteractiveSelectable,
+			Selected:              name == selected,
 		})
 	}
 	return out, nil
@@ -2081,6 +2099,9 @@ func formatAgentsListText(out agentsListOutput) string {
 		parts := []string{
 			"[" + agentListModelSummary(agent.Model) + "]",
 			"[mcp: " + agent.MCPTools + "]",
+		}
+		if agent.InteractiveSelectable {
+			parts = append(parts, "[interactive]")
 		}
 		if strings.TrimSpace(agent.Description) != "" {
 			parts = append(parts, agent.Description)
@@ -2183,13 +2204,14 @@ func fileAgentDefinitions(agents map[string]config.FileAgentConfig) map[string]a
 	out := make(map[string]agentdef.FileDefinition, len(agents))
 	for name, fa := range agents {
 		out[name] = agentdef.FileDefinition{
-			Description:     fa.Description,
-			AllowedTools:    fa.AllowedTools,
-			MCPTools:        fa.MCPTools,
-			WorkspaceAccess: fa.WorkspaceAccess,
-			Prompt:          fa.Prompt,
-			Model:           fa.Model,
-			Reasoning:       fa.Reasoning,
+			Description:           fa.Description,
+			AllowedTools:          fa.AllowedTools,
+			MCPTools:              fa.MCPTools,
+			WorkspaceAccess:       fa.WorkspaceAccess,
+			Prompt:                fa.Prompt,
+			Model:                 fa.Model,
+			Reasoning:             fa.Reasoning,
+			InteractiveSelectable: fa.InteractiveSelectable,
 		}
 	}
 	return out
@@ -2578,7 +2600,7 @@ func agentSummaries(agents map[string]agentdef.Definition, parentTools []string)
 	for _, name := range delegate.DelegatableAgentNames(parentTools, delegateAgentCandidates(agents)) {
 		delegatable[name] = true
 	}
-	names := agentdef.Names(agents)
+	names := agentdef.InteractiveNames(agents)
 	out := make([]ui.AgentSummary, 0, len(names))
 	for _, name := range names {
 		a := agents[name]

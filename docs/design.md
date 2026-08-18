@@ -4105,12 +4105,18 @@ reviewer, or the wide-open default without separate binaries.
 - **Selection** follows the standard precedence (§7): `-agent` flag >
   `HARNESS_AGENT` > `agent` in the config file > the built-in default `auto`. An
   empty value means "unspecified", so a resumed session's saved agent (§11) can
-  supply it before the `auto` fallback. `/agent <name>` switches at runtime;
-  `/agent` lists inside the REPL; `harness --agents` lists from the CLI. `/mode`
-  is a REPL alias only. Shift-Tab cycling invokes this same full runtime
+  supply it before the `auto` fallback. Root interactive startup and explicit
+  `/agent <name>` switches require `interactive_selectable:true`; `/agent` and
+  Shift-Tab expose only those agents. The field defaults to true when omitted,
+  but the built-ins explicitly enable only `auto` and `plan`. It does not gate
+  one-shot runs, delegation, child continuation, or plan handoff targets.
+  `harness --agents` lists the full resolved set and its selection metadata.
+  `/mode` is a REPL alias only. Shift-Tab cycling invokes this same full runtime
   selection path—not a display-name or model-only swap—so it recomposes the agent
   prompt, tools, model/reasoning selection, and response continuation state.
-- **Built-ins:** `auto` and `independent` expose the ordinary built-in surface,
+- **Built-ins:** `auto` and `plan` are interactive-selectable; `explore`,
+  `review`, and `independent` are not. `auto` and `independent` expose the
+  ordinary built-in surface,
   discovered MCP tools, `update_todos`, `delegate`, and background jobs.
   `explore` and `review` expose the shared read-only inspection surface plus
   `update_todos`. `plan` exposes the inspection surface, `write_tmp_file`,
@@ -4129,9 +4135,12 @@ reviewer, or the wide-open default without separate binaries.
   show`/`harness config check` error; there is no warning, generated fallback, or compatibility shim.
 - **Config `agents`** entries **field-level merge** onto a built-in of the same name:
   a non-empty `description`, `allowed_tools`, `mcp_tools`, `prompt`, `model`, or
-  `reasoning` replaces, and an omitted field inherits. Thus an override
+  `reasoning` replaces, and an omitted field inherits. `interactive_selectable`
+  is presence-aware, so explicit false replaces while omission inherits. Thus
+  an override
   of `auto`, `explore`, `plan`, `review`, or `independent` may inherit its built-in
-  description. A new name defines a new agent (no `allowed_tools` ⇒ the full
+  description and interactive-selection policy. A new name defines a new agent
+  (`interactive_selectable` defaults to true; no `allowed_tools` ⇒ the full
   default set). Agent prompts
   accept `@file` and are expanded once at startup (fail-fast); relative config-file
   references resolve from the config file directory.

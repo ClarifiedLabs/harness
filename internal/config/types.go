@@ -232,13 +232,14 @@ type LSPServerConfig struct {
 }
 
 type FileAgentConfig struct {
-	Description     string   `json:"description"`
-	AllowedTools    []string `json:"allowed_tools"`
-	MCPTools        string   `json:"mcp_tools"`
-	WorkspaceAccess string   `json:"workspace_access"`
-	Prompt          string   `json:"prompt"`
-	Model           string   `json:"model"`
-	Reasoning       string   `json:"reasoning"`
+	Description           string   `json:"description"`
+	AllowedTools          []string `json:"allowed_tools"`
+	MCPTools              string   `json:"mcp_tools"`
+	WorkspaceAccess       string   `json:"workspace_access"`
+	Prompt                string   `json:"prompt"`
+	Model                 string   `json:"model"`
+	Reasoning             string   `json:"reasoning"`
+	InteractiveSelectable *bool    `json:"interactive_selectable,omitempty"`
 }
 
 type ImageAttachment struct {

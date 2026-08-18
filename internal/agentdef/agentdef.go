@@ -42,6 +42,10 @@ type Definition struct {
 	// e.g. low/medium/high). Empty inherits the session default. The value is
 	// validated against the live model at switch time, not here.
 	Reasoning string
+	// InteractiveSelectable controls whether a root interactive session may
+	// start with or switch to this agent. It does not affect one-shot runs,
+	// delegation, child continuation, or plan handoffs.
+	InteractiveSelectable bool
 }
 
 // MCPToolsMode controls which discovered MCP tools are exposed to an agent.
@@ -64,15 +68,18 @@ const (
 // drive the field-level merge: they inherit from the same-named built-in, or
 // for new agents from the defaults (default tool set, no prompt). Description
 // is required parent-facing "when to use" metadata for new agents; a built-in
-// override may omit it and inherit the built-in description.
+// override may omit it and inherit the built-in description. A nil
+// InteractiveSelectable inherits the built-in value or defaults to true for a
+// new custom agent.
 type FileDefinition struct {
-	Description     string   `json:"description"`
-	AllowedTools    []string `json:"allowed_tools"`
-	MCPTools        string   `json:"mcp_tools"`
-	WorkspaceAccess string   `json:"workspace_access"`
-	Prompt          string   `json:"prompt"`
-	Model           string   `json:"model"`
-	Reasoning       string   `json:"reasoning"`
+	Description           string   `json:"description"`
+	AllowedTools          []string `json:"allowed_tools"`
+	MCPTools              string   `json:"mcp_tools"`
+	WorkspaceAccess       string   `json:"workspace_access"`
+	Prompt                string   `json:"prompt"`
+	Model                 string   `json:"model"`
+	Reasoning             string   `json:"reasoning"`
+	InteractiveSelectable *bool    `json:"interactive_selectable,omitempty"`
 }
 
 // Builtins returns fresh copies of the five built-in agents keyed by name.
@@ -83,43 +90,48 @@ func Builtins() map[string]Definition {
 	reviewPrompt, _ := prompts.BuiltinAgentPrompt("review")
 	return map[string]Definition{
 		"auto": {
-			Name:            "auto",
-			Description:     "General-purpose agent.",
-			AllowedTools:    defaultTools(),
-			MCPTools:        MCPToolsAll,
-			WorkspaceAccess: WorkspaceAccessExclusive,
+			Name:                  "auto",
+			Description:           "General-purpose agent.",
+			InteractiveSelectable: true,
+			AllowedTools:          defaultTools(),
+			MCPTools:              MCPToolsAll,
+			WorkspaceAccess:       WorkspaceAccessExclusive,
 		},
 		"explore": {
-			Name:            "explore",
-			Description:     "Broad read-only search, tracing, and root-cause analysis; not known-file lookup.",
-			AllowedTools:    inspectionTools(),
-			MCPTools:        MCPToolsReadOnly,
-			WorkspaceAccess: WorkspaceAccessReadOnly,
-			Prompt:          explorePrompt,
+			Name:                  "explore",
+			Description:           "Broad read-only search, tracing, and root-cause analysis; not known-file lookup.",
+			InteractiveSelectable: false,
+			AllowedTools:          inspectionTools(),
+			MCPTools:              MCPToolsReadOnly,
+			WorkspaceAccess:       WorkspaceAccessReadOnly,
+			Prompt:                explorePrompt,
 		},
 		"independent": {
-			Name:            "independent",
-			Description:     "End-to-end work without user input.",
-			AllowedTools:    defaultTools(),
-			MCPTools:        MCPToolsAll,
-			WorkspaceAccess: WorkspaceAccessExclusive,
-			Prompt:          independentPrompt,
+			Name:                  "independent",
+			Description:           "End-to-end work without user input.",
+			InteractiveSelectable: false,
+			AllowedTools:          defaultTools(),
+			MCPTools:              MCPToolsAll,
+			WorkspaceAccess:       WorkspaceAccessExclusive,
+			Prompt:                independentPrompt,
 		},
 		"plan": {
-			Name:            "plan",
-			Description:     "Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
-			AllowedTools:    planTools(),
-			MCPTools:        MCPToolsReadOnly,
-			WorkspaceAccess: WorkspaceAccessReadOnly,
-			Prompt:          planPrompt,
+			Name:                  "plan",
+			Description:           "Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
+			InteractiveSelectable: true,
+			AllowedTools:          planTools(),
+			MCPTools:              MCPToolsReadOnly,
+			WorkspaceAccess:       WorkspaceAccessReadOnly,
+			Prompt:                planPrompt,
 		},
 		"review": {
-			Name:            "review",
-			Description:     "Findings-first review of a concrete code change; read-only.",
-			AllowedTools:    inspectionTools(),
-			MCPTools:        MCPToolsReadOnly,
-			WorkspaceAccess: WorkspaceAccessReadOnly,
-			Prompt:          reviewPrompt,
+			Name:                  "review",
+			Description:           "Findings-first review of a concrete code change; read-only.",
+			InteractiveSelectable: false,
+			AllowedTools:          inspectionTools(),
+			MCPTools:              MCPToolsReadOnly,
+			WorkspaceAccess:       WorkspaceAccessReadOnly,
+			Prompt:                reviewPrompt,
 		},
 	}
 }
@@ -162,7 +174,7 @@ func Resolve(file map[string]FileDefinition) map[string]Definition {
 	for name, fm := range file {
 		a, ok := agents[name]
 		if !ok {
-			a = Definition{Name: name, AllowedTools: defaultTools(), MCPTools: MCPToolsAll, WorkspaceAccess: WorkspaceAccessExclusive}
+			a = Definition{Name: name, AllowedTools: defaultTools(), MCPTools: MCPToolsAll, WorkspaceAccess: WorkspaceAccessExclusive, InteractiveSelectable: true}
 		}
 		allowedOverride := len(fm.AllowedTools) > 0
 		if fm.Description != "" {
@@ -200,6 +212,9 @@ func Resolve(file map[string]FileDefinition) map[string]Definition {
 		}
 		if fm.Reasoning != "" {
 			a.Reasoning = fm.Reasoning
+		}
+		if fm.InteractiveSelectable != nil {
+			a.InteractiveSelectable = *fm.InteractiveSelectable
 		}
 		agents[name] = a
 	}
@@ -257,6 +272,19 @@ func Validate(agents map[string]Definition) error {
 // Names returns the agent names in sorted order, for listing and error text.
 func Names(agents map[string]Definition) []string {
 	return slices.Sorted(maps.Keys(agents))
+}
+
+// InteractiveNames returns sorted names available for root interactive
+// startup, explicit switching, and Shift-Tab cycling.
+func InteractiveNames(agents map[string]Definition) []string {
+	var out []string
+	for name, definition := range agents {
+		if definition.InteractiveSelectable {
+			out = append(out, name)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // ImplementationAgentNames returns sorted names of agents whose WorkspaceAccess is exclusive.

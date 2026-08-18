@@ -649,7 +649,9 @@ environment variables, JSON paths, types, and defaults. The concise
   resolves the model proxy catalog, then exits before prewarm, session hooks,
   session writes, or any model stream.
 - `--agents` prints the resolved agent list without contacting the model proxy.
-  `--models` prints the configured proxy model catalog. Use `--format json` with
+  Text output marks interactive-selectable agents with `[interactive]`; JSON
+  output includes `interactive_selectable` for every agent. `--models` prints
+  the configured proxy model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
 - Context-efficiency knobs are config-file-only except where noted:
   `agents_md_warn_bytes`, `compact_keep_turns`, `compact_keep_tokens`,
@@ -1656,9 +1658,12 @@ budget, or interactive goal menu are provided.
 ## Agents
 
 An agent definition bundles a set of allowed tools with extra system-prompt
-instructions and an optional model target override. Select one with
-`-agent <name>`, `HARNESS_AGENT`, or `agent` in the config file. Switch
-mid-session with `/agent <name>`.
+instructions and an optional model target override. Root interactive sessions
+can start with or switch to agents whose `interactive_selectable` setting is
+true, using `-agent <name>`, `HARNESS_AGENT`, config `agent`, or `/agent <name>`.
+The setting defaults to true when omitted. It does not restrict one-shot runs,
+delegation or child continuation, and plan handoffs may still target hidden
+implementation agents.
 
 Shift-Tab switches use the same full agent runtime selection as `/agent` and emit
 the existing `[agent switched: <name>]` notice and provider/model line.
@@ -1674,15 +1679,16 @@ prewarm would be wasted. Standalone `/compact` keeps immediate prewarming;
 submitting a real prompt cancels any pending delayed warmup. Harness does not
 issue speculative generated completions to prewarm other providers.
 
-Five agents are built in:
+Five agents are built in. Only `auto` and `plan` are interactive-selectable by
+default; the other built-ins remain available for one-shot runs and delegation.
 
-| agent | tools | behavior |
-|---|---|---|
-| `auto` | `read`, `view_image`, `edit`, `write`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
-| `explore` | `read`, `view_image`, `shell`, `web_fetch`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
-| `plan` | `read`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
-| `review` | the same read-only local and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
-| `independent` | the same local tools as `auto`, plus discovered MCP tools, `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
+| agent | interactive | tools | behavior |
+|---|---|---|---|
+| `auto` | yes | `read`, `view_image`, `edit`, `write`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
+| `explore` | no | `read`, `view_image`, `shell`, `web_fetch`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
+| `plan` | yes | `read`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
+| `review` | no | the same read-only local and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
+| `independent` | no | the same local tools as `auto`, plus discovered MCP tools, `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
@@ -1702,6 +1708,7 @@ value. Other fields continue to merge onto a built-in of the same name:
       "allowed_tools": ["read", "shell"],
       "mcp_tools": "read_only",
       "workspace_access": "read_only",
+      "interactive_selectable": false,
       "model": "anthropic:claude-opus-4-8",
       "prompt": "Review the diff and surrounding code for security issues. Report only concrete findings."
     }
@@ -1710,7 +1717,10 @@ value. Other fields continue to merge onto a built-in of the same name:
 ```
 
 An agent without `model` inherits the current session target. When set, `model`
-is a complete `<provider>:<model>` model-proxy target ID.
+is a complete `<provider>:<model>` model-proxy target ID. New custom agents
+default to `interactive_selectable: true`; set it to false for agents intended
+only for one-shot execution or delegation. Built-in overrides inherit each
+built-in's explicit value unless the field is set.
 
 Each agent can set `mcp_tools` to control automatic exposure of discovered MCP
 tools: `disabled`, `read_only`, or `all`. Explicit `mcp__...` names in

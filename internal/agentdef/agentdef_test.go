@@ -17,12 +17,16 @@ func TestBuiltins(t *testing.T) {
 	if len(m) != 5 {
 		t.Fatalf("want 5 builtin agents, got %d: %v", len(m), Names(m))
 	}
+	wantInteractive := map[string]bool{"auto": true, "explore": false, "independent": false, "plan": true, "review": false}
 	for name, a := range m {
 		if a.Name != name {
 			t.Errorf("agent %q has Name %q", name, a.Name)
 		}
 		if a.Description == "" {
 			t.Errorf("agent %q has empty description", name)
+		}
+		if a.InteractiveSelectable != wantInteractive[name] {
+			t.Errorf("agent %q InteractiveSelectable = %t, want %t", name, a.InteractiveSelectable, wantInteractive[name])
 		}
 	}
 
@@ -246,6 +250,31 @@ func TestResolveNewAgentInheritsDefaultTools(t *testing.T) {
 	}
 	if rev.MCPTools != MCPToolsAll {
 		t.Errorf("MCPTools = %q, want all", rev.MCPTools)
+	}
+}
+
+func TestResolveInteractiveSelectableDefaultsAndOverrides(t *testing.T) {
+	enabled, disabled := true, false
+	m := Resolve(map[string]FileDefinition{
+		"explore": {InteractiveSelectable: &enabled},
+		"plan":    {InteractiveSelectable: &disabled},
+		"custom":  {Description: "Use for custom interactive work."},
+		"worker":  {Description: "Use for delegated work.", InteractiveSelectable: &disabled},
+	})
+	if !m["explore"].InteractiveSelectable {
+		t.Fatal("explicit true did not override hidden built-in")
+	}
+	if m["plan"].InteractiveSelectable {
+		t.Fatal("explicit false did not override selectable built-in")
+	}
+	if !m["custom"].InteractiveSelectable {
+		t.Fatal("new custom agent should default to interactive selectable")
+	}
+	if m["worker"].InteractiveSelectable {
+		t.Fatal("explicit false custom agent is interactive selectable")
+	}
+	if got := InteractiveNames(m); !slices.Equal(got, []string{"auto", "custom", "explore"}) {
+		t.Fatalf("InteractiveNames = %v", got)
 	}
 }
 

@@ -195,6 +195,9 @@ type App struct {
 	AvailableAgents       []AgentSummary // sorted agent names/descriptions for /agent listing
 	RefreshAgentSummaries func() []AgentSummary
 	SwitchAgent           func(name string) (AgentSelection, error)
+	// HandoffSwitchAgent may select an implementation agent that is hidden from
+	// ordinary root interactive selection. Nil falls back to SwitchAgent.
+	HandoffSwitchAgent func(name string) (AgentSelection, error)
 
 	// RefreshMCP, when set, is consulted at the idle-prompt boundary (just
 	// before a typed prompt starts) to pick up proxy tool-list changes.
@@ -3721,11 +3724,15 @@ func (app *App) applyAgentSwitch(name string) error {
 }
 
 func (app *App) applyAgentSwitchWithPrewarm(name string, prewarm bool) error {
-	if app.SwitchAgent == nil {
+	return app.applyAgentSwitchUsing(name, prewarm, app.SwitchAgent)
+}
+
+func (app *App) applyAgentSwitchUsing(name string, prewarm bool, switchAgent func(string) (AgentSelection, error)) error {
+	if switchAgent == nil {
 		return fmt.Errorf("agent switch unavailable")
 	}
 	oldProvider, oldModel := app.Provider, app.Model
-	selection, err := app.SwitchAgent(name)
+	selection, err := switchAgent(name)
 	if err != nil {
 		return err
 	}
@@ -3947,7 +3954,11 @@ func (app *App) handoffCommand(arg string, readLine func(string) (string, error)
 // The switch is attempted before any destructive step so a failed switch leaves
 // the session and recorded plan untouched.
 func (app *App) handoffToImplementation(req handoff.Request) bool {
-	if err := app.applyAgentSwitch(req.Agent); err != nil {
+	switchAgent := app.HandoffSwitchAgent
+	if switchAgent == nil {
+		switchAgent = app.SwitchAgent
+	}
+	if err := app.applyAgentSwitchUsing(req.Agent, true, switchAgent); err != nil {
 		fmt.Fprintf(app.Errw, "[handoff failed: %v]\n", err)
 		return false
 	}

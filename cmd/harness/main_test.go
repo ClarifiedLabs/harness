@@ -241,13 +241,14 @@ func (p *fakeModelProxy) addTarget(target protocol.Target) {
 }
 
 type testInfoAgentJSON struct {
-	Name         string   `json:"name"`
-	Description  string   `json:"description"`
-	AllowedTools []string `json:"allowed_tools"`
-	MCPTools     string   `json:"mcp_tools"`
-	HasPrompt    bool     `json:"has_prompt"`
-	Model        string   `json:"model"`
-	Selected     bool     `json:"selected"`
+	Name                  string   `json:"name"`
+	Description           string   `json:"description"`
+	AllowedTools          []string `json:"allowed_tools"`
+	MCPTools              string   `json:"mcp_tools"`
+	HasPrompt             bool     `json:"has_prompt"`
+	Model                 string   `json:"model"`
+	InteractiveSelectable bool     `json:"interactive_selectable"`
+	Selected              bool     `json:"selected"`
 }
 
 type testInfoModelJSON struct {
@@ -1771,12 +1772,12 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 	got := out.String()
 	for _, want := range []string{
 		"agents:\n",
-		"auto                 [default model] [mcp: all] General-purpose agent.",
+		"auto                 [default model] [mcp: all] [interactive] General-purpose agent.",
 		"explore              [default model] [mcp: read_only] Broad read-only search",
 		"independent          [default model] [mcp: all] End-to-end work without user input.",
-		"plan                 [default model] [mcp: read_only] Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
+		"plan                 [default model] [mcp: read_only] [interactive] Collaborative implementation planning; explores freely (including running commands) but does not modify the project.",
 		"review               [default model] [mcp: read_only] Findings-first review of a concrete code change; read-only.",
-		"security (selected)  [openai:gpt-5.5] [mcp: all] Security review",
+		"security (selected)  [openai:gpt-5.5] [mcp: all] [interactive] Security review",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("agents output missing %q:\n%s", want, got)
@@ -1967,13 +1968,50 @@ func TestRunAgentsFlagJSONListsResolvedAgentsWithoutProxy(t *testing.T) {
 		t.Fatalf("metadata = version %d default %q selected %q\n%s", got.Version, got.DefaultAgent, got.SelectedAgent, out.String())
 	}
 	security := findJSONAgent(t, got.Agents, "security")
-	if !security.Selected || security.Model != "openai:gpt-5.5" || security.Description != "Security review" {
+	if !security.Selected || security.Model != "openai:gpt-5.5" || security.Description != "Security review" || !security.InteractiveSelectable {
 		t.Fatalf("security agent = %+v\n%s", security, out.String())
 	}
 	plan := findJSONAgent(t, got.Agents, "plan")
-	if !plan.HasPrompt || plan.MCPTools != "read_only" || len(plan.AllowedTools) == 0 {
+	if !plan.HasPrompt || plan.MCPTools != "read_only" || len(plan.AllowedTools) == 0 || !plan.InteractiveSelectable {
 		t.Fatalf("plan agent = %+v\n%s", plan, out.String())
 	}
+	if explore := findJSONAgent(t, got.Agents, "explore"); explore.InteractiveSelectable {
+		t.Fatalf("explore agent unexpectedly interactive selectable = %+v\n%s", explore, out.String())
+	}
+}
+
+func TestRunRejectsHiddenAgentOnlyForInteractiveRoot(t *testing.T) {
+	t.Run("interactive", func(t *testing.T) {
+		fp := llmtest.New("fake")
+		env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
+			"-model", "claude-opus-4-8",
+			"-agent", "explore",
+		}, fp, "")
+		env.stdinPiped = false
+		code := run(env)
+		if code != ui.ExitUsage || !strings.Contains(errw.String(), `agent "explore" is not available for interactive selection`) {
+			t.Fatalf("exit = %d, stderr = %q", code, errw.String())
+		}
+		if proxy.catalogRequests != 0 {
+			t.Fatalf("interactive rejection fetched catalog %d time(s)", proxy.catalogRequests)
+		}
+	})
+
+	t.Run("one shot", func(t *testing.T) {
+		fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}}, Stop: llm.StopEndTurn})
+		env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{
+			"-model", "claude-opus-4-8",
+			"-agent", "explore",
+			"-p", "inspect",
+		}, fp, "")
+		code := run(env)
+		if code != ui.ExitOK {
+			t.Fatalf("exit = %d, stderr = %q", code, errw.String())
+		}
+		if proxy.catalogRequests != 1 || len(proxy.requests) != 1 {
+			t.Fatalf("catalog requests = %d, stream requests = %d", proxy.catalogRequests, len(proxy.requests))
+		}
+	})
 }
 
 func TestRunAgentsAndModelsFlagsJSONPrintSingleObject(t *testing.T) {
@@ -5304,6 +5342,26 @@ func expectedPlanToolNames() []string {
 func expectedDefaultToolNames() []string {
 	names := tools.DefaultNames()
 	return append(names, "delegate", "background_jobs", "update_todos")
+}
+
+func TestAgentSummariesHideNonInteractiveAgentsWithoutAffectingDelegation(t *testing.T) {
+	agents := agentdef.Builtins()
+	got := agentSummaries(agents, expectedDefaultToolNames())
+	var names []string
+	for _, summary := range got {
+		names = append(names, summary.Name)
+	}
+	if !slices.Equal(names, []string{"auto", "plan"}) {
+		t.Fatalf("interactive summary names = %v, want [auto plan]", names)
+	}
+
+	var candidateNames []string
+	for _, candidate := range delegateAgentCandidates(agents) {
+		candidateNames = append(candidateNames, candidate.Name)
+	}
+	if !slices.Equal(candidateNames, agentdef.Names(agents)) {
+		t.Fatalf("delegate candidates = %v, want all agents %v", candidateNames, agentdef.Names(agents))
+	}
 }
 
 func TestEnableInteractivePlanHandoff(t *testing.T) {
