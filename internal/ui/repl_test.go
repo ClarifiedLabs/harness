@@ -526,6 +526,256 @@ func TestREPLHelpPromptExit(t *testing.T) {
 	}
 }
 
+func TestREPLContinueAfterAPIErrorWithoutUserMessage(t *testing.T) {
+	var out, errw bytes.Buffer
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
+	fp := llmtest.New("fake",
+		fail, fail, fail,
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("recovered answer")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 8, OutputTokens: 3},
+		},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+
+	if code := Run(strings.NewReader("task\n/continue\n/exit\n"), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 4 {
+		t.Fatalf("provider requests = %d, want three failed attempts plus continuation", fp.RequestCount())
+	}
+	for i, req := range fp.Requests {
+		if len(req.Messages) != 1 || req.Messages[0].Role != llm.RoleUser || req.Messages[0].Content[0].Text != "task" {
+			t.Fatalf("request %d messages = %+v, want only original task", i+1, req.Messages)
+		}
+		if strings.Contains(strings.ToLower(transcriptTextForUI(req.Messages)), "continue") {
+			t.Fatalf("request %d contains /continue text: %+v", i+1, req.Messages)
+		}
+	}
+	if !strings.Contains(out.String(), "recovered answer") || !strings.Contains(errw.String(), "[continuing after API error]") {
+		t.Fatalf("continuation output missing; stdout=%q stderr=%q", out.String(), errw.String())
+	}
+	messages := app.Agent.Transcript()
+	if len(messages) != 2 || messages[0].Content[0].Text != "task" || messages[1].Content[0].Text != "recovered answer" {
+		t.Fatalf("transcript = %+v, want original prompt plus recovered assistant", messages)
+	}
+	if err := llm.ValidateTranscript(messages); err != nil {
+		t.Fatalf("transcript invalid: %v", err)
+	}
+
+	var users, usages, notices []session.Event
+	for _, event := range readRawEvents(t, app.SessionPath) {
+		switch event.Type {
+		case session.EventUser:
+			users = append(users, event)
+		case session.EventPromptUsage:
+			usages = append(usages, event)
+		case session.EventNotice:
+			if event.Display == "[continuing after API error]" {
+				notices = append(notices, event)
+			}
+		}
+	}
+	if len(users) != 1 || users[0].Prompt != 1 || users[0].Text != "task" {
+		t.Fatalf("user replay events = %+v, want only prompt 1 task", users)
+	}
+	if len(usages) != 2 || usages[0].Prompt != 1 || usages[0].TerminationReason != string(agent.TerminationError) || usages[1].Prompt != 2 || usages[1].TerminationReason != string(agent.TerminationModelCompleted) {
+		t.Fatalf("prompt usage events = %+v, want distinct failed/recovered prompt IDs", usages)
+	}
+	if len(notices) != 1 || notices[0].Prompt != 2 {
+		t.Fatalf("continuation notices = %+v, want one notice on prompt 2", notices)
+	}
+	loaded, err := session.Load(app.SessionPath)
+	if err != nil {
+		t.Fatalf("reload continued session: %v", err)
+	}
+	if loaded.Prompt != 2 || len(loaded.Messages) != 2 {
+		t.Fatalf("reloaded session prompt/messages = %d/%d, want 2/2", loaded.Prompt, len(loaded.Messages))
+	}
+	if err := llm.ValidateTranscript(loaded.Messages); err != nil {
+		t.Fatalf("reloaded transcript invalid: %v", err)
+	}
+}
+
+func TestREPLContinuePreservesHookContextAndPendingImages(t *testing.T) {
+	var out, errw bytes.Buffer
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
+	fp := llmtest.New("fake", fail, fail, fail, llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.HookContext = []string{"session hook context"}
+	callsPath := filepath.Join(t.TempDir(), "prompt-hook-calls")
+	command := fmt.Sprintf("printf 'called\\n' >> %q; printf 'prompt-only hook context'", callsPath)
+	configJSON, err := json.Marshal(map[string]any{
+		"UserPromptSubmit": []any{map[string]any{
+			"hooks": []any{map[string]any{"type": "command", "command": command}},
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := hooks.DecodeEventMap(configJSON)
+	if err != nil {
+		t.Fatalf("DecodeEventMap: %v", err)
+	}
+	app.Hooks = &hooks.Runner{Config: cfg}
+	imagePath := writeUIImage(t)
+
+	input := "task\n/image " + imagePath + "\n/continue\n/exit\n"
+	if code := Run(strings.NewReader(input), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d; stderr=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 4 {
+		t.Fatalf("provider requests = %d, want 4", fp.RequestCount())
+	}
+	calls, err := os.ReadFile(callsPath)
+	if err != nil {
+		t.Fatalf("read prompt-hook calls: %v", err)
+	}
+	if string(calls) != "called\n" {
+		t.Fatalf("UserPromptSubmit calls = %q, want exactly one", calls)
+	}
+	if len(app.PendingImages) != 1 || app.PendingImages[0].Info.Path != imagePath {
+		t.Fatalf("pending images after /continue = %+v, want queued image untouched", app.PendingImages)
+	}
+	continuation := fp.Requests[3]
+	contextText := strings.Join(continuation.RequestContext, "\n")
+	if !strings.Contains(contextText, "session hook context") || !strings.Contains(contextText, "prompt-only hook context") {
+		t.Fatalf("continuation request context = %q, want original global and prompt-hook context", contextText)
+	}
+	for _, message := range continuation.Messages {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockImage {
+				t.Fatalf("continuation consumed pending image: %+v", continuation.Messages)
+			}
+		}
+	}
+}
+
+func TestREPLContinueUnavailableAndRejectsArguments(t *testing.T) {
+	t.Run("startup and arguments", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		fp := llmtest.New("fake")
+		app := newTestApp(t, &out, &errw, fp)
+		if code := Run(strings.NewReader("/continue\n/continue now\n/exit\n"), app, nil); code != ExitOK {
+			t.Fatalf("exit code = %d", code)
+		}
+		if fp.RequestCount() != 0 {
+			t.Fatalf("unavailable /continue contacted provider %d times", fp.RequestCount())
+		}
+		if !strings.Contains(errw.String(), "[nothing to continue;") || !strings.Contains(errw.String(), "usage: /continue") {
+			t.Fatalf("missing unavailable/usage notices: %q", errw.String())
+		}
+	})
+
+	t.Run("after clean completion", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("complete")}, Stop: llm.StopEndTurn})
+		app := newTestApp(t, &out, &errw, fp)
+		if code := Run(strings.NewReader("task\n/continue\n/exit\n"), app, nil); code != ExitOK {
+			t.Fatalf("exit code = %d", code)
+		}
+		if fp.RequestCount() != 1 {
+			t.Fatalf("/continue after success made an extra request: %d", fp.RequestCount())
+		}
+		if !strings.Contains(errw.String(), "[nothing to continue;") {
+			t.Fatalf("missing unavailable notice: %q", errw.String())
+		}
+	})
+}
+
+func TestPromptRunContinuationEligibilityClassification(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	requestContext := []string{"original"}
+	app.finishPromptRun(&llm.APIError{Message: "failed"}, requestContext)
+	requestContext[0] = "mutated"
+	got, ok := app.apiContinuationContext()
+	if !ok || len(got) != 1 || got[0] != "original" {
+		t.Fatalf("armed context = %+v/%v, want cloned original", got, ok)
+	}
+	got[0] = "also mutated"
+	got, _ = app.apiContinuationContext()
+	if got[0] != "original" {
+		t.Fatalf("returned continuation context aliases state: %+v", got)
+	}
+	app.command("/usage", nil)
+	if !app.apiContinuationAvailable() {
+		t.Fatal("read-only command cleared continuation eligibility")
+	}
+
+	for _, err := range []error{
+		nil,
+		context.Canceled,
+		context.DeadlineExceeded,
+		errors.New("non-API failure"),
+		errors.Join(&llm.APIError{Message: "failed"}, context.Canceled),
+	} {
+		app.finishPromptRun(&llm.APIError{Message: "re-arm"}, nil)
+		app.finishPromptRun(err, []string{"new"})
+		if app.apiContinuationAvailable() {
+			t.Errorf("error %v left continuation armed", err)
+		}
+	}
+}
+
+func TestREPLContinueRearmsAfterAnotherAPIError(t *testing.T) {
+	var out, errw bytes.Buffer
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
+	fp := llmtest.New("fake",
+		fail, fail, fail,
+		fail, fail, fail,
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("finally recovered")}, Stop: llm.StopEndTurn},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	if code := Run(strings.NewReader("task\n/continue\n/continue\n/exit\n"), app, nil); code != ExitOK {
+		t.Fatalf("exit code = %d; stderr=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 7 || app.PromptNumber != 3 || !strings.Contains(out.String(), "finally recovered") {
+		t.Fatalf("repeated continuation result: requests=%d prompt=%d stdout=%q", fp.RequestCount(), app.PromptNumber, out.String())
+	}
+	var users, usages int
+	for _, event := range readRawEvents(t, app.SessionPath) {
+		if event.Type == session.EventUser {
+			users++
+		}
+		if event.Type == session.EventPromptUsage {
+			usages++
+		}
+	}
+	if users != 1 || usages != 3 {
+		t.Fatalf("repeated continuation replay users/usages = %d/%d, want 1/3", users, usages)
+	}
+}
+
+func TestREPLNewPromptAndClearInvalidateContinuation(t *testing.T) {
+	t.Run("new prompt", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
+		fp := llmtest.New("fake", fail, fail, fail, llmtest.Step{Events: []llm.StreamEvent{textDelta("replacement done")}, Stop: llm.StopEndTurn})
+		app := newTestApp(t, &out, &errw, fp)
+		if code := Run(strings.NewReader("failed task\nnew task\n/continue\n/exit\n"), app, nil); code != ExitOK {
+			t.Fatalf("exit code = %d", code)
+		}
+		if fp.RequestCount() != 4 || app.PromptNumber != 2 {
+			t.Fatalf("new prompt invalidation requests/prompt = %d/%d, want 4/2", fp.RequestCount(), app.PromptNumber)
+		}
+	})
+
+	t.Run("clear", func(t *testing.T) {
+		var out, errw bytes.Buffer
+		fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
+		fp := llmtest.New("fake", fail, fail, fail)
+		app := newTestApp(t, &out, &errw, fp)
+		if code := Run(strings.NewReader("failed task\n/clear\n/continue\n/exit\n"), app, nil); code != ExitOK {
+			t.Fatalf("exit code = %d", code)
+		}
+		if fp.RequestCount() != 3 || app.PromptNumber != 0 {
+			t.Fatalf("clear invalidation requests/prompt = %d/%d, want 3/0", fp.RequestCount(), app.PromptNumber)
+		}
+	})
+}
+
 func TestREPLCommandDocumentationMatchesVocabulary(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join("..", "..", "docs", "usage.md"))
 	if err != nil {
@@ -4726,11 +4976,15 @@ func TestTreeCommandBranchesBeforeSelectedPromptAndPrefillsIt(t *testing.T) {
 	if err := app.ensureSessionTree(); err != nil {
 		t.Fatalf("ensureSessionTree: %v", err)
 	}
+	app.finishPromptRun(&llm.APIError{Message: "failed"}, nil)
 	selected := app.SessionTree.Entries[2]
 	read := func(string) (string, error) { return "n", nil }
 	result := app.command("/tree "+selected.ID, read)
 	if !result.prefillSet || result.prefill != "second" {
 		t.Fatalf("prefill = %q/%v, want second/true", result.prefill, result.prefillSet)
+	}
+	if app.apiContinuationAvailable() {
+		t.Fatal("successful /tree branch preserved stale API continuation")
 	}
 	text := transcriptTextForUI(app.Agent.Transcript())
 	if strings.Contains(text, "second answer") || !strings.Contains(text, "working directory was not reverted") {
@@ -4798,6 +5052,7 @@ func TestForkCommandCreatesChildSessionWithFreshUsage(t *testing.T) {
 	}
 	parentID := app.SessionTree.Header.ID
 	originalPath := app.SessionPath
+	app.finishPromptRun(&llm.APIError{Message: "failed"}, nil)
 	selected := app.SessionTree.Entries[2]
 	result := app.command("/fork "+selected.ID, func(string) (string, error) { return "n", nil })
 	if !result.prefillSet || result.prefill != "second" {
@@ -4805,6 +5060,9 @@ func TestForkCommandCreatesChildSessionWithFreshUsage(t *testing.T) {
 	}
 	if app.SessionPath == originalPath || app.usage.InputTokens != 0 {
 		t.Fatalf("fork path/usage = %q/%+v", app.SessionPath, app.usage)
+	}
+	if app.apiContinuationAvailable() {
+		t.Fatal("successful /fork preserved stale API continuation")
 	}
 	loaded, err := session.Load(app.SessionPath)
 	if err != nil {
@@ -4844,12 +5102,16 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl system"}, nil
 	}
 
+	app.finishPromptRun(&llm.APIError{Message: "failed"}, nil)
 	app.handoffToImplementation(handoff.Request{
 		Agent:    "auto",
 		PlanPath: ready.Path,
 		Message:  "preserve the public API",
 	})
 
+	if app.apiContinuationAvailable() {
+		t.Fatal("successful handoff preserved stale API continuation")
+	}
 	msgs := app.Agent.Transcript()
 	if len(msgs) != 1 {
 		t.Fatalf("want a single seeded message, got %d", len(msgs))

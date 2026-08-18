@@ -121,6 +121,7 @@ func (app *App) navigateTree(target string, readLine func(string) (string, error
 		fmt.Fprintf(app.Errw, "[tree failed: %v]\n", err)
 		return false
 	}
+	app.clearAPIContinuation()
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetProxySessionID()
 	app.ArmTodoContext()
@@ -186,6 +187,7 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 		app.saveOrWarn(app.SessionPath)
 		app.Background.Clear()
 	}
+	app.clearAPIContinuation()
 	app.SessionTree = tree
 	app.SessionPath = path
 	app.Created = created

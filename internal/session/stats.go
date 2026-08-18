@@ -397,6 +397,11 @@ func collectSessionStatsWithFallback(dir string, child *ChildMeta) (collectedSes
 		case EventBranch:
 			navigations++
 		case EventPromptUsage:
+			// Host continuations such as REPL /continue deliberately have no
+			// EventUser, but their fresh accounting IDs still represent prompts.
+			if ev.Prompt > 0 {
+				prompts[ev.Prompt] = struct{}{}
+			}
 			if ev.TerminationReason != "" {
 				if terminationCounts == nil {
 					terminationCounts = make(map[string]int)

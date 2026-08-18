@@ -1688,13 +1688,25 @@ func (a *Agent) RunPromptContentWithContext(ctx context.Context, userText string
 // RunAdmittedPromptWithContext executes a prompt previously inserted by
 // AdmitPromptContent. Callers must execute admissions in creation order and at
 // most once; Agent prompt execution is serialized by its owner.
-func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission PromptAdmission, extraContext []string, promptID int, sink EventSink) (retErr error) {
+func (a *Agent) RunAdmittedPromptWithContext(ctx context.Context, admission PromptAdmission, extraContext []string, promptID int, sink EventSink) error {
 	if admission.agent != a || admission.promptIndex < 0 || admission.promptIndex >= len(a.transcript) || a.transcript[admission.promptIndex].Origin != llm.MessageOriginPrompt {
 		return fmt.Errorf("invalid or stale prompt admission")
 	}
+	return a.runPromptLoopWithContext(ctx, admission.promptIndex, true, extraContext, promptID, sink)
+}
+
+// ContinuePromptWithContext resumes model work from the current valid transcript
+// boundary without appending a message. It is intended for a host that assigns a
+// fresh prompt/accounting ID after a terminal provider API failure.
+func (a *Agent) ContinuePromptWithContext(ctx context.Context, extraContext []string, promptID int, sink EventSink) error {
+	if len(a.transcript) == 0 {
+		return fmt.Errorf("cannot continue an empty transcript")
+	}
+	return a.runPromptLoopWithContext(ctx, len(a.transcript), false, extraContext, promptID, sink)
+}
+
+func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, initialPromptPending bool, extraContext []string, promptID int, sink EventSink) (retErr error) {
 	a.compactFallbackNotice = compactFallbackNoticeState{}
-	promptIndex := admission.promptIndex
-	initialPromptPending := true
 
 	var total llm.Usage
 	var maintenanceTotal llm.Usage

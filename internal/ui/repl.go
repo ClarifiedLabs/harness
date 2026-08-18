@@ -341,6 +341,15 @@ type App struct {
 	// of context cancellation. It is read by the REPL loop to pause an active goal
 	// after a user interruption; deadline expiry does not count as interruption.
 	lastPromptInterrupted bool
+
+	// pendingAPIContinuation is process-local recovery state for /continue. A
+	// non-nil state is distinct from an armed continuation with no request-only
+	// context; it is deliberately not persisted across resume.
+	pendingAPIContinuation *apiContinuationState
+}
+
+type apiContinuationState struct {
+	requestContext []string
 }
 
 type queuedMaintenanceUsage struct {
@@ -359,6 +368,7 @@ const helpText = `commands:
   /help            list commands
   /exit, /quit     save and exit
   /clear           reset conversation; rotate to a fresh session directory
+  /continue        retry after the latest live prompt ended with an API error
   /compact [focus] force compaction now with optional one-shot summary focus
   /tree [entry]    browse the conversation tree and branch in this session
   /fork [entry]    branch before a prior prompt into a new session
@@ -1062,6 +1072,30 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		startRun(run)
 		return false, ExitOK
 	}
+	startAPIContinuation := func() (exit bool, code int) {
+		cancelShiftTabPrewarm()
+		if app.Renderer != nil {
+			app.Renderer.SubmittedPromptSeparator()
+			app.Renderer.StartPrompt()
+		}
+		ctx, cancel, interrupted := exitContext()
+		err := app.refreshMCP(ctx)
+		if interrupted() || errors.Is(err, context.Canceled) {
+			cancel()
+			return true, ExitInterrupt
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			return true, ExitInterrupt
+		}
+		cancel()
+		run, ok := app.prepareAPIContinuation()
+		if !ok {
+			return false, ExitOK
+		}
+		startRun(run)
+		return false, ExitOK
+	}
 	startPreparedPromptInteraction := func(input agent.SteerInput) (exit bool, code int) {
 		interruptionRevision, ownsActiveGoal := uint64(0), false
 		if app.Goal != nil && app.GoalAutoContinue {
@@ -1122,6 +1156,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				return startPromptInteraction(action.prefill, true, true, false, false, 0)
 			}
 			return false, ExitOK
+		}
+		if action.continueAfterAPIError {
+			return startAPIContinuation()
 		}
 		if action.run {
 			if input.echoWhenDequeued || action.echoEditedPrompt {
@@ -1770,17 +1807,18 @@ type replReadRequest struct {
 }
 
 type replAction struct {
-	prompt               string
-	run                  bool
-	exit                 bool
-	shell                bool
-	shellCommand         string
-	echoEditedPrompt     bool
-	resolveSkillMentions bool
-	attachPromptImages   bool
-	goalPrompt           bool
-	goalContinuation     bool
-	goalRevision         uint64
+	prompt                string
+	run                   bool
+	exit                  bool
+	shell                 bool
+	shellCommand          string
+	echoEditedPrompt      bool
+	resolveSkillMentions  bool
+	attachPromptImages    bool
+	goalPrompt            bool
+	goalContinuation      bool
+	goalRevision          uint64
+	continueAfterAPIError bool
 	// prefill deposits text into the next prompt as editable content instead
 	// of running a turn. Used when returning from an external editor so the
 	// user can review before submitting.
@@ -1791,14 +1829,15 @@ type replAction struct {
 }
 
 type replCommandResult struct {
-	exit                 bool
-	prompt               string
-	prefill              string
-	prefillSet           bool
-	resolveSkillMentions bool
-	attachPromptImages   bool
-	goalPrompt           bool
-	goalRevision         uint64
+	exit                  bool
+	prompt                string
+	prefill               string
+	prefillSet            bool
+	resolveSkillMentions  bool
+	attachPromptImages    bool
+	goalPrompt            bool
+	goalRevision          uint64
+	continueAfterAPIError bool
 }
 
 const (
@@ -2030,6 +2069,9 @@ func (app *App) handlePromptInput(input replInput, readCommandLine func(string) 
 		}
 		if result.prefillSet {
 			return replAction{prefill: result.prefill, prefillSet: true, prefillModelPrompt: true}
+		}
+		if result.continueAfterAPIError {
+			return replAction{continueAfterAPIError: true}
 		}
 		if result.prompt != "" {
 			return replAction{prompt: result.prompt, run: true, resolveSkillMentions: result.resolveSkillMentions, attachPromptImages: result.attachPromptImages, goalPrompt: result.goalPrompt, goalRevision: result.goalRevision}
@@ -2572,6 +2614,14 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		return replCommandResult{exit: true}
 	case "/clear":
 		app.clear()
+	case "/continue":
+		if arg != "" {
+			fmt.Fprintln(app.Errw, "usage: /continue")
+		} else if !app.apiContinuationAvailable() {
+			fmt.Fprintln(app.Errw, "[nothing to continue; the last prompt did not end with an API error]")
+		} else {
+			return replCommandResult{continueAfterAPIError: true}
+		}
 	case "/compact":
 		app.compact(arg)
 	case "/tree":
@@ -2806,7 +2856,7 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 // knownCommands is the meta-command vocabulary used for "did you mean …?"
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
-	"/help", "/exit", "/quit", "/clear", "/compact", "/tree", "/fork", "/clone", "/context", "/prompt", "/usage",
+	"/help", "/exit", "/quit", "/clear", "/continue", "/compact", "/tree", "/fork", "/clone", "/context", "/prompt", "/usage",
 	"/max-turns", "/tools", "/lsp", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
 }
@@ -4009,6 +4059,7 @@ func (app *App) handoffToImplementation(req handoff.Request) bool {
 		fmt.Fprintf(app.Errw, "[handoff: tree update failed: %v]\n", err)
 		return false
 	}
+	app.clearAPIContinuation()
 	app.Agent.SetTranscript(seedMessages)
 	app.Agent.SetResponseState(nil)
 	if app.Todos != nil {
@@ -4054,6 +4105,7 @@ func (app *App) clear() {
 			return
 		}
 	}
+	app.clearAPIContinuation()
 	app.RecordOTelSession()
 	if app.Background != nil {
 		app.stopBackgroundJobs()
@@ -4120,6 +4172,41 @@ type preparedPrompt struct {
 	skillInjections int
 }
 
+func cloneRequestContext(contexts []string) []string {
+	return append([]string(nil), contexts...)
+}
+
+func (app *App) clearAPIContinuation() {
+	app.pendingAPIContinuation = nil
+}
+
+func (app *App) apiContinuationAvailable() bool {
+	return app != nil && app.pendingAPIContinuation != nil
+}
+
+func (app *App) apiContinuationContext() ([]string, bool) {
+	if !app.apiContinuationAvailable() {
+		return nil, false
+	}
+	return cloneRequestContext(app.pendingAPIContinuation.requestContext), true
+}
+
+// finishPromptRun centralizes process-local /continue eligibility for every
+// interactive model-bound run. Cancellation takes precedence even if an error
+// chain also contains an APIError.
+func (app *App) finishPromptRun(err error, requestContext []string) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		app.clearAPIContinuation()
+		return
+	}
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		app.pendingAPIContinuation = &apiContinuationState{requestContext: cloneRequestContext(requestContext)}
+		return
+	}
+	app.clearAPIContinuation()
+}
+
 func (app *App) runPrompt(prompt string) {
 	if run, ok := app.preparePromptRun(prompt, promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
 		run()
@@ -4131,6 +4218,7 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 	if err != nil {
 		return nil, false
 	}
+	requestContext := app.promptHookContext(prepared.promptContext)
 	preflightCtx := opts.preflightContext
 	if preflightCtx == nil {
 		preflightCtx = context.Background()
@@ -4142,6 +4230,7 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 		if preflightCtx.Err() != nil {
 			return false
 		}
+		app.clearAPIContinuation()
 		admission = app.Agent.AdmitPromptContent(prepared.prompt, imageBlocks(prepared.images))
 		promptID = app.beginPrompt(prepared.prompt, prepared.images)
 		app.recordSkillInjections(promptID, 1, prepared.skillInjections)
@@ -4201,7 +4290,8 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 		}
 
 		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(prepared.promptContext), promptID, sink)
+		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
+		app.finishPromptRun(err, requestContext)
 		sink.FlushEvents()
 		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
@@ -4218,6 +4308,7 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 // delivery remain identical to a top-level prompt.
 func (app *App) prepareDetachedWaitContinuation() (func(), bool) {
 	admission, promptID := app.admitInternalPrompt(detachedBackgroundWaitContinuation, detachedBackgroundWaitCause)
+	requestContext := app.promptHookContext(nil)
 	ctx := context.Background()
 	var cancel context.CancelFunc
 	if app.Interrupt != nil {
@@ -4243,10 +4334,58 @@ func (app *App) prepareDetachedWaitContinuation() (func(), bool) {
 		}
 
 		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(nil), promptID, sink)
+		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
+		app.finishPromptRun(err, requestContext)
 		sink.FlushEvents()
 		// Deliberately do not call goalOnPromptEnd or alter its interruption state:
 		// this host-created turn must not consume, pause, or otherwise mutate a goal.
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
+			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
+		}
+		app.saveOrWarn(app.SessionPath)
+	}, true
+}
+
+// prepareAPIContinuation starts a fresh accounting prompt from the existing
+// transcript boundary. It deliberately skips prompt admission, hooks, skills,
+// pending images, goal admission, and EventUser recording.
+func (app *App) prepareAPIContinuation() (func(), bool) {
+	requestContext, ok := app.apiContinuationContext()
+	if !ok {
+		return nil, false
+	}
+	app.clearAPIContinuation()
+	promptID := app.beginContinuationPrompt()
+	ctx := context.Background()
+	var cancel context.CancelFunc
+	if app.Interrupt != nil {
+		ctx, cancel = context.WithCancel(ctx)
+		app.Interrupt.BeginPrompt(func() {
+			if app.Renderer != nil {
+				app.Renderer.CancelRequested()
+			}
+			cancel()
+		})
+	}
+
+	app.Renderer.StartPromptRun()
+	return func() {
+		if app.OnPromptFinished != nil {
+			defer app.OnPromptFinished()
+		}
+		if app.Interrupt != nil {
+			defer func() {
+				app.Interrupt.EndPrompt()
+				cancel()
+			}()
+		}
+
+		sink := newREPLSink(app.Renderer, app, promptID)
+		sink.Notice("[continuing after API error]")
+		err := app.Agent.ContinuePromptWithContext(ctx, requestContext, promptID, sink)
+		app.finishPromptRun(err, requestContext)
+		sink.FlushEvents()
+		// A host recovery attempt never admits, advances, or pauses a goal.
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
 		}
@@ -4318,9 +4457,11 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 	if steerInputEmpty(input) {
 		return nil, false
 	}
+	requestContext := app.promptHookContext(input.RequestContext)
 	goalRevision, goalGeneration, goalActive := uint64(0), uint64(0), false
 	var admission agent.PromptAdmission
 	begin := func() bool {
+		app.clearAPIContinuation()
 		admission = app.Agent.AdmitPromptContent(input.Text, input.Images)
 		return true
 	}
@@ -4364,7 +4505,8 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 		}
 
 		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(input.RequestContext), promptID, sink)
+		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
+		app.finishPromptRun(err, requestContext)
 		sink.FlushEvents()
 		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
@@ -4703,6 +4845,12 @@ func (app *App) beginPrompt(prompt string, images []inputimage.Loaded) int {
 	return app.beginPromptWithPurpose(prompt, images, "")
 }
 
+func (app *App) beginContinuationPrompt() int {
+	app.drainMaintenanceUsage()
+	app.PromptNumber++
+	return app.PromptNumber
+}
+
 // beginPromptWithPurpose records an optional host-derived cause on the normal
 // prompt boundary. The transcript admission remains prompt-origin so compaction
 // and session trees recognize it as a real top-level turn.
@@ -4721,6 +4869,7 @@ func (app *App) beginPromptWithPurpose(prompt string, images []inputimage.Loaded
 }
 
 func (app *App) admitInternalPrompt(prompt, purpose string) (agent.PromptAdmission, int) {
+	app.clearAPIContinuation()
 	admission := app.Agent.AdmitPromptContent(prompt, nil)
 	return admission, app.beginPromptWithPurpose(prompt, nil, purpose)
 }

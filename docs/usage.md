@@ -1515,6 +1515,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/help` | list commands |
 | `/exit`, `/quit` | save, print a session token summary, and exit |
 | `/clear` | echo the discarded session token/cost totals, then reset the conversation and rotate to a fresh session directory |
+| `/continue` | after the latest prompt in this live REPL ends with an API error, retry model work from the current transcript boundary under a fresh prompt/accounting ID without adding a user message |
 | `/compact` | force compaction now |
 | `/tree [entry]` | browse the conversation tree and branch in place; selecting a user prompt rewinds to its parent and pre-fills that prompt for editing |
 | `/fork [entry]` | select a prior user prompt and branch before it into a new session with fresh usage accounting |
@@ -1559,6 +1560,17 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/skills` | list available skills |
 | `/vi on\|off` | enable or disable vi-style prompt editing (persisted as the default) |
 | `!command` | run a local shell command at an interactive TTY prompt |
+
+`/continue` is process-local recovery for the most recent non-cancelled model API
+failure. It reuses the valid current transcript and the failed prompt's
+request-only hook context, while dynamic TODO, goal, and background context is
+regenerated normally for each request. The command does not submit its literal
+text, add a user-role message, invoke `UserPromptSubmit`, resolve skills, or
+consume pending images. A repeated API failure leaves it available again. A
+successful run, cancellation, non-API failure, newer ordinary or host-created
+model prompt, `/clear`, or conversation branch invalidates it. Model, agent,
+and reasoning switches may be made first and apply to the retry. Eligibility is
+not restored after process restart or `-resume`.
 
 Anthropic extended thinking and 1-hour prompt-cache writes appear as separate
 reasoning and `cache write (1h)` usage buckets. They remain disjoint from output

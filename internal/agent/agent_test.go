@@ -3356,6 +3356,106 @@ func TestInvalidToolArgumentStreamIsRetried(t *testing.T) {
 	}
 }
 
+func TestContinuePromptWithContextResumesClosedToolBoundaryWithoutMessage(t *testing.T) {
+	fail := llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 10}}},
+		Err:    &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true},
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "call_probe", "probe", `{}`)},
+			Stop:   llm.StopToolUse,
+			Usage:  llm.Usage{InputTokens: 5, OutputTokens: 2},
+		},
+		fail, fail, fail,
+		fail,
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("recovered")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 7, OutputTokens: 3},
+		},
+	)
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "probe", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) {
+		return "probe result", nil
+	}})
+	a := newAgent(fp, reg, Options{})
+	a.SetSleep(func(time.Duration) {})
+	originalSink := &recordSink{}
+	requestContext := []string{"original prompt hook context"}
+
+	err := a.RunPromptContentWithContext(context.Background(), "inspect", nil, requestContext, 41, originalSink)
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("RunPrompt error = %v, want exhausted API error", err)
+	}
+	mustValid(t, a.Transcript())
+	if len(a.Transcript()) != 3 {
+		t.Fatalf("failed prompt transcript = %s, want closed user/tool-use/tool-result boundary", dump(a.Transcript()))
+	}
+	beforeContinuation := dump(a.Transcript())
+	assertPromptTermination(t, originalSink, TerminationError)
+	if got := originalSink.promptUsage[0].Turns; got != 1 {
+		t.Fatalf("failed prompt turns = %d, want completed tool turn only", got)
+	}
+
+	continuationSink := &recordSink{}
+	if err := a.ContinuePromptWithContext(context.Background(), requestContext, 42, continuationSink); err != nil {
+		t.Fatalf("ContinuePromptWithContext: %v", err)
+	}
+	mustValid(t, a.Transcript())
+	if len(fp.Requests) != 6 {
+		t.Fatalf("provider requests = %d, want 6", len(fp.Requests))
+	}
+	for i := 4; i < len(fp.Requests); i++ {
+		req := fp.Requests[i]
+		if len(req.Messages) != 3 {
+			t.Fatalf("continuation request %d messages = %d, want existing closed boundary: %s", i+1, len(req.Messages), dump(req.Messages))
+		}
+		if req.Messages[0].Role != llm.RoleUser || req.Messages[0].Content[0].Text != "inspect" || req.Messages[0].Origin != llm.MessageOriginPrompt {
+			t.Fatalf("continuation request %d original prompt = %+v", i+1, req.Messages[0])
+		}
+		if req.Messages[1].Role != llm.RoleAssistant || req.Messages[1].Content[0].Kind != llm.BlockToolUse {
+			t.Fatalf("continuation request %d tool call = %+v", i+1, req.Messages[1])
+		}
+		if req.Messages[2].Role != llm.RoleUser || req.Messages[2].Content[0].Kind != llm.BlockToolResult || req.Messages[2].Content[0].ResultText != "probe result" {
+			t.Fatalf("continuation request %d tool result = %+v", i+1, req.Messages[2])
+		}
+		if got := strings.Join(req.RequestContext, "\n"); !strings.Contains(got, requestContext[0]) {
+			t.Fatalf("continuation request %d context = %q, want original request-only context", i+1, got)
+		}
+		if strings.Contains(strings.ToLower(dump(req.Messages)), "continue") {
+			t.Fatalf("continuation request %d contains synthetic continue message: %s", i+1, dump(req.Messages))
+		}
+	}
+	msgs := a.Transcript()
+	if len(msgs) != 4 || dump(msgs[:3]) != beforeContinuation || msgs[3].Role != llm.RoleAssistant || msgs[3].Content[0].Text != "recovered" {
+		t.Fatalf("recovered transcript = %s, want prior boundary plus one assistant turn", dump(msgs))
+	}
+	assertPromptTermination(t, continuationSink, TerminationModelCompleted)
+	if got := continuationSink.promptUsage[0].Turns; got != 1 {
+		t.Fatalf("continuation turns = %d, want independent turn numbering", got)
+	}
+	wantAttempts := []turnAttemptEvent{{turn: 1, attempt: 1}, {turn: 1, attempt: 2}}
+	if !slices.Equal(continuationSink.attemptStarts, wantAttempts) {
+		t.Fatalf("continuation attempts = %+v, want %+v", continuationSink.attemptStarts, wantAttempts)
+	}
+	if len(continuationSink.completedTurns) != 1 || continuationSink.completedTurns[0].Attempts != 2 {
+		t.Fatalf("continuation completed turns = %+v, want one retried turn", continuationSink.completedTurns)
+	}
+}
+
+func TestContinuePromptWithContextRejectsEmptyTranscript(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{})
+	sink := &recordSink{}
+	if err := a.ContinuePromptWithContext(context.Background(), nil, 1, sink); err == nil || !strings.Contains(err.Error(), "empty transcript") {
+		t.Fatalf("ContinuePromptWithContext error = %v, want clear empty-transcript error", err)
+	}
+	if len(sink.promptUsage) != 0 {
+		t.Fatalf("empty continuation emitted prompt usage: %+v", sink.promptUsage)
+	}
+}
+
 func TestMidStreamRetryBudgetExhausted(t *testing.T) {
 	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
 	fp := llmtest.New("fake", fail, fail, fail)

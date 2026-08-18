@@ -1615,6 +1615,16 @@ run post-prompt maintenance if needed
 emit prompt_usage(prompt, completedTurns)
 ```
 
+After a live REPL prompt terminates with a non-cancelled provider `*APIError`,
+the host may call the same loop through `ContinuePromptWithContext`. That entry
+point starts at the current validated, closed transcript boundary and appends no
+message before the provider request. The REPL's `/continue` path assigns a new
+prompt/accounting ID and restores the original request-only prompt context;
+dynamic sink-provided context is still sampled on every request. Stateful
+Responses/Interactions continuation and their full-history fallback therefore
+follow the ordinary `modelRequest` rules rather than a dialect-specific recovery
+path.
+
 `EventSink` remains the required rendering contract. `SteerDeliveredSink` is an
 optional sink interface: after a queued in-prompt steer is appended as a
 validated `MessageOriginSteer` user message, the agent calls `SteerDelivered` so
@@ -3292,11 +3302,17 @@ literal-safety semantics and do not auto-attach from `@` references.
 
 The canonical command inventory and operator-facing behavior live in the
 [usage reference](usage.md#repl-commands). `internal/ui.App.command` dispatches
-those commands; state-changing commands such as `/clear`, `/compact`, `/model`,
-`/agent`, `/goal`, and `/handoff` also invalidate or rotate the relevant
-continuation and prewarm state described in their owning sections. `/clear`
-starts a new cache affinity; context/model/tool changes preserve the current
-conversation affinity.
+those commands. `/continue` is a dedicated asynchronous host action, not an
+empty or synthetic prompt: it bypasses user-prompt hooks, skills, pending images,
+goal admission, and user echo, and remains available only in the current process
+after the latest model-bound run ends with a non-cancelled API error. Read-only
+commands and runtime model/agent/reasoning switches preserve it; a newer admitted
+model prompt or successful semantic context replacement clears it. `/compact`
+also preserves this API-recovery eligibility because it is an invariant-preserving
+rewrite of the same active work. Other state-changing commands update or rotate
+their own goal, continuation, and prewarm state as described in their owning
+sections. `/clear` starts a new cache affinity; context/model/tool changes
+preserve the current conversation affinity.
 
 `internal/goal` is a standard-library-only leaf package. One root `*goal.Store`
 holds `{objective, status, continuations, set_at}`. `/goal` shows the current
@@ -3604,7 +3620,13 @@ type UsageTotals struct {
   analysis can detect switches without trusting mutable final session metadata.
   `turn_attempt_start`, `turn_attempt_abandoned`, and `turn_attempt_usage` describe
   provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
-  closes the top-level prompt and carries its successful compaction count;
+  closes the top-level prompt and carries its successful compaction count. A
+  host `/continue` recovery receives a fresh prompt ID, so its notice, attempts,
+  checkpoints, turns, and one terminal `prompt_usage` record are independent of
+  the failed prompt. It deliberately emits no `EventUser` and contributes no new
+  transcript block; saving synchronizes only the recovered assistant/tool suffix
+  onto the existing active leaf. The eligibility and original request-only hook
+  context are process-local and are not reconstructed by resume.
   `maintenance_usage` accounts for compaction,
   prewarming and branch-summary calls without creating turns.
   `model_request` records proxy/request lifecycle and every API issue with timing,

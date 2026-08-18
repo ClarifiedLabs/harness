@@ -280,6 +280,25 @@ func TestStatsDoesNotCountFailedFirstAttemptAsTurnOrRetry(t *testing.T) {
 	}
 }
 
+func TestStatsCountsPromptUsageWithoutUserEvent(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	saveStatsFixture(t, dir, Session{}, []Event{
+		{Type: EventUser, Prompt: 1, Text: "task"},
+		{Type: EventPromptUsage, Prompt: 1, TerminationReason: "error"},
+		{Type: EventNotice, Prompt: 2, Display: "[continuing after API error]"},
+		{Type: EventTurnAttemptUsage, Prompt: 2, Turn: 1, Attempt: 1},
+		{Type: EventPromptUsage, Prompt: 2, TerminationReason: "model_completed"},
+	})
+
+	report, err := collectStats(dir)
+	if err != nil {
+		t.Fatalf("collectStats: %v", err)
+	}
+	if report.root.prompts != 2 {
+		t.Fatalf("prompts = %d, want user prompt plus no-user continuation", report.root.prompts)
+	}
+}
+
 func TestStatsDelegateHierarchyAndNoDoubleCounting(t *testing.T) {
 	base := time.Date(2026, 7, 18, 2, 0, 0, 0, time.UTC)
 	rootDir := filepath.Join(t.TempDir(), "session")
