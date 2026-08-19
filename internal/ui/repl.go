@@ -594,33 +594,34 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	defer close(readReq)
 
 	var (
-		promptPrinted             bool
-		readPending               bool
-		inputEnded                bool
-		inputErr                  error
-		active                    bool
-		activeReadPause           bool
-		plainPromptRead           bool
-		prompt                    string
-		pendingPrefill            string // text deposited into the next prompt
-		pendingPrefillModelPrompt bool   // submitted prefill bypasses command/shell dispatch
-		pendingPrefillPasted      bool   // retained pure-paste classification across Shift-Tab
-		queued                    []replInput
-		preparedQueued            []agent.SteerInput
-		promptDone                <-chan struct{}
-		restoreEsc                func() error
-		escPresses                escapePresses
-		pendingShiftTabPrewarm    <-chan time.Time
-		pendingIdleCompaction     <-chan time.Time
-		idleCompactionDone        <-chan idleCompactionFinished
-		cancelIdleCompactionWork  context.CancelFunc
-		idleCompactionDiscard     bool
-		idleCompactionModelKey    string
-		idleCompactionStarted     time.Time
-		idleCompactionTrigger     int
-		idleCompactionContext     int
-		idleCompactionMessages    int
-		pendingGoalCheckpoint     bool
+		promptPrinted                bool
+		readPending                  bool
+		inputEnded                   bool
+		inputErr                     error
+		active                       bool
+		activeReadPause              bool
+		plainPromptRead              bool
+		prompt                       string
+		pendingPrefill               string // text deposited into the next prompt
+		pendingPrefillModelPrompt    bool   // submitted prefill bypasses command/shell dispatch
+		pendingPrefillPasted         bool   // retained pure-paste classification across boundaries
+		pendingPrefillPasteSummaries []pasteSummary
+		queued                       []replInput
+		preparedQueued               []agent.SteerInput
+		promptDone                   <-chan struct{}
+		restoreEsc                   func() error
+		escPresses                   escapePresses
+		pendingShiftTabPrewarm       <-chan time.Time
+		pendingIdleCompaction        <-chan time.Time
+		idleCompactionDone           <-chan idleCompactionFinished
+		cancelIdleCompactionWork     context.CancelFunc
+		idleCompactionDiscard        bool
+		idleCompactionModelKey       string
+		idleCompactionStarted        time.Time
+		idleCompactionTrigger        int
+		idleCompactionContext        int
+		idleCompactionMessages       int
+		pendingGoalCheckpoint        bool
 	)
 	var goalChanges <-chan struct{}
 	if app.Goal != nil {
@@ -910,9 +911,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		if usePromptEditor {
 			// Keep the terminal in raw/echo-off mode for the whole prompt so typed
 			// keystrokes feed the live during-prompt input line instead of garbling
-			// scrolling output. Bracketed paste is suppressed so a paste arrives
-			// as plain keystrokes the capture can accumulate (during-prompt input).
-			_ = term.SetBracketedPaste(false)
+			// scrolling output. Leave bracketed paste enabled: active-turn input uses
+			// the same explicit paste parser and timing fallback as the idle prompt.
 			reader.beginPromptCapture()
 			if app.Renderer != nil {
 				app.Renderer.SetInputLine("", 0)
@@ -1127,6 +1127,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			pendingPrefill = input.text
 			pendingPrefillModelPrompt = input.modelPrompt
 			pendingPrefillPasted = input.pasted
+			pendingPrefillPasteSummaries = clonePasteSummaries(input.pasteSummaries)
 			promptPrinted = false
 			if app.cycleAgent() {
 				scheduleShiftTabPrewarm()
@@ -1147,6 +1148,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				pendingPrefill = action.prefill
 				pendingPrefillModelPrompt = action.prefillModelPrompt
 				pendingPrefillPasted = false
+				pendingPrefillPasteSummaries = nil
 			} else {
 				// Without the prompt editor there is no way to prefill for
 				// review; echo the loaded text and submit it directly,
@@ -1211,6 +1213,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			pendingPrefill = res.input.text
 			pendingPrefillModelPrompt = false
 			pendingPrefillPasted = res.input.pasted
+			pendingPrefillPasteSummaries = clonePasteSummaries(res.input.pasteSummaries)
 			return pendingPrefill != "", false, ExitOK
 		default:
 			if exit, code := handleIdleReadResult(res); exit {
@@ -1279,8 +1282,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					// Release the blocked during-prompt keystroke read so any
 					// unsubmitted partial buffer becomes the next prompt's editable
 					// prefill. A line already submitted with Enter is queued below.
-					// The terminal stays in raw mode for the line editor; only
-					// bracketed paste is restored.
+					// The terminal stays in raw mode and bracketed paste remains enabled
+					// for the line editor.
 					if readPending {
 						reader.cancelPromptRead()
 						res := <-inputs
@@ -1288,23 +1291,25 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 						if res.ok && res.input.deposit {
 							pendingPrefill = res.input.text
 							pendingPrefillModelPrompt = false
-							pendingPrefillPasted = false
+							pendingPrefillPasted = res.input.pasted
+							pendingPrefillPasteSummaries = clonePasteSummaries(res.input.pasteSummaries)
 						} else if res.ok && !res.input.escape && !res.input.interrupt && (res.input.text != "" || res.input.edit) {
 							res.input = app.markQueuedSubmission(res.input, 0)
 							queued = append(queued, res.input)
 						} else {
 							// The read returned via a keystroke (interrupt/Esc)
 							// rather than the cancel; the typed buffer is intact.
-							pendingPrefill = reader.promptBuffer()
+							buffered := reader.promptBufferInput()
+							pendingPrefill = buffered.text
 							pendingPrefillModelPrompt = false
-							pendingPrefillPasted = false
+							pendingPrefillPasted = buffered.pasted
+							pendingPrefillPasteSummaries = clonePasteSummaries(buffered.pasteSummaries)
 						}
 						reader.drainPromptCancel()
 					}
 					// When no read is pending an EOF-driven deposit was already
 					// stashed in pendingPrefill via the active inputs case; leave
 					// it as-is.
-					_ = term.SetBracketedPaste(true)
 				} else {
 					disableActivePromptTerm()
 				}
@@ -1453,7 +1458,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					// until the prompt ends.
 					pendingPrefill = input.text
 					pendingPrefillModelPrompt = false
-					pendingPrefillPasted = false
+					pendingPrefillPasted = input.pasted
+					pendingPrefillPasteSummaries = clonePasteSummaries(input.pasteSummaries)
 					activeReadPause = true
 					continue
 				}
@@ -1588,10 +1594,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			promptPrinted = true
 		}
 		if !plainPromptRead {
-			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill, prefillModelPrompt: pendingPrefillModelPrompt, prefillPasted: pendingPrefillPasted})
+			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill, prefillModelPrompt: pendingPrefillModelPrompt, prefillPasted: pendingPrefillPasted, prefillPasteSummaries: pendingPrefillPasteSummaries})
 			pendingPrefill = ""
 			pendingPrefillModelPrompt = false
 			pendingPrefillPasted = false
+			pendingPrefillPasteSummaries = nil
 		}
 		var detachedWaitReady <-chan struct{}
 		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && !app.hasPendingHandoffRequest() && app.Background != nil {
@@ -1744,14 +1751,15 @@ func promptLineEditorEnabled(in io.Reader, w io.Writer) bool {
 }
 
 type replInput struct {
-	text        string
-	pasted      bool
-	edit        bool
-	cycleAgent  bool
-	escape      bool
-	escapeTail  bool
-	interrupt   bool
-	interactive bool
+	text           string
+	pasted         bool
+	pasteSummaries []pasteSummary
+	edit           bool
+	cycleAgent     bool
+	escape         bool
+	escapeTail     bool
+	interrupt      bool
+	interactive    bool
 	// echoWhenDequeued marks input the user submitted while another prompt was
 	// active. If it later starts a model prompt from the queue, replay that prompt
 	// line before the separator. Host-created goal continuations share the queue
@@ -1802,8 +1810,10 @@ type replReadRequest struct {
 	// prefillModelPrompt marks the submitted prefill as model-bound prompt text;
 	// used for external editor output reviewed in the line editor.
 	prefillModelPrompt bool
-	// prefillPasted retains pure-paste literal classification across Shift-Tab.
-	prefillPasted bool
+	// prefillPasted and prefillPasteSummaries retain paste classification and
+	// collapsed display ranges across active-turn deposits and Shift-Tab.
+	prefillPasted         bool
+	prefillPasteSummaries []pasteSummary
 }
 
 type replAction struct {
@@ -2237,7 +2247,7 @@ type replReader struct {
 	// the idle prompt redraws the multi-row terminal region, while the active prompt mirrors
 	// buf/cursor onto the single status line via onPromptInput (it cannot use the
 	// multi-row redraw while output streams). promptState is created fresh at each
-	// prompt start; onPromptInput renders the live buffer and cursor, and cancelable
+	// prompt start; onPromptInput renders the live display buffer and cursor, and cancelable
 	// releases a blocked read so a partial buffer can be deposited at the prompt boundary.
 	promptState   *lineEditState
 	promptVi      viLineState
@@ -2305,7 +2315,7 @@ func (rr *replReader) read(req replReadRequest) (replInput, bool, error) {
 			rr.editor.noHistory = restoreNoHistory
 			rr.editor.cycleAgent = restoreCycleAgent
 		}()
-		input, ok, err := rr.editor.readPrefilledClassified(req.prompt, req.prefill, req.prefillPasted)
+		input, ok, err := rr.editor.readPrefilledWithPasteState(req.prompt, req.prefill, req.prefillPasted, req.prefillPasteSummaries)
 		if ok {
 			input.interactive = true
 			if req.prefillModelPrompt {
@@ -2343,6 +2353,7 @@ func (rr *replReader) beginPromptCapture() {
 	rr.promptState = &lineEditState{}
 	rr.promptVi = viLineState{mode: viModeInsert}
 	rr.promptHistory = rr.editor.historyState()
+	rr.editor.resetPasteTracking(rr.promptState, false)
 }
 
 // readDuringPrompt captures keystrokes during an active prompt with echo off, sharing the
@@ -2357,7 +2368,7 @@ func (rr *replReader) readDuringPrompt() (replInput, bool, error) {
 	}
 	s := rr.promptState
 	for {
-		r, _, err := rr.r.ReadRune()
+		result, err := rr.editor.readKey(&rr.promptVi, s, &rr.promptHistory, "", true)
 		if err != nil {
 			if errors.Is(err, errReadCanceled) {
 				return rr.depositPromptBuffer(), true, nil
@@ -2367,13 +2378,6 @@ func (rr *replReader) readDuringPrompt() (replInput, bool, error) {
 					return dep, true, nil
 				}
 				return replInput{}, false, nil
-			}
-			return replInput{}, false, err
-		}
-		result, err := rr.editor.handleKey(&rr.promptVi, s, &rr.promptHistory, "", r, true)
-		if err != nil {
-			if errors.Is(err, errReadCanceled) {
-				return rr.depositPromptBuffer(), true, nil
 			}
 			return replInput{}, false, err
 		}
@@ -2415,12 +2419,10 @@ func (rr *replReader) readDuringPrompt() (replInput, bool, error) {
 // depositPromptBuffer returns the accumulated buffer as an editable deposit and
 // resets the prompt-edit state for the next prompt.
 func (rr *replReader) depositPromptBuffer() replInput {
-	text := ""
-	if rr.promptState != nil {
-		text = string(rr.promptState.buf)
-	}
+	input := rr.promptBufferInput()
+	input.deposit = true
 	rr.resetPromptBuffer()
-	return replInput{text: text, deposit: true}
+	return input
 }
 
 // resetPromptBuffer clears the during-prompt buffer and cursor and emits an empty
@@ -2430,6 +2432,7 @@ func (rr *replReader) resetPromptBuffer() {
 		rr.promptState.buf = nil
 		rr.promptState.cursor = 0
 		rr.promptState.clearPasteSummaries()
+		rr.editor.resetPasteTracking(rr.promptState, false)
 	}
 	rr.emitPromptInput()
 }
@@ -2437,7 +2440,7 @@ func (rr *replReader) resetPromptBuffer() {
 func (rr *replReader) emitPromptInput() {
 	if rr.onPromptInput != nil {
 		if rr.promptState != nil {
-			rr.onPromptInput(string(rr.promptState.buf), rr.promptState.cursor)
+			rr.onPromptInput(string(rr.promptState.displayRunes()), rr.promptState.displayCursor())
 			return
 		}
 		rr.onPromptInput("", 0)
@@ -2460,12 +2463,17 @@ func (rr *replReader) drainPromptCancel() {
 	}
 }
 
-// promptBuffer returns the current during-prompt buffer without consuming it.
-func (rr *replReader) promptBuffer() string {
+// promptBufferInput returns the current during-prompt buffer and its paste
+// display/classification metadata without consuming it.
+func (rr *replReader) promptBufferInput() replInput {
 	if rr.promptState == nil {
-		return ""
+		return replInput{}
 	}
-	return string(rr.promptState.buf)
+	return replInput{
+		text:           string(rr.promptState.buf),
+		pasted:         rr.editor.purePaste,
+		pasteSummaries: clonePasteSummaries(rr.promptState.pasteSummaries),
+	}
 }
 
 type lineTerminator byte

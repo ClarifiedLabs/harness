@@ -1461,9 +1461,10 @@ implicitly, its `read` of `SKILL.md` remains an ordinary persisted tool result;
 Harness does not replace it with a receipt or pin the body. `$$` escapes a
 literal `$`.
 
-In terminals that support bracketed paste, pasted text fills the prompt for
-review and is submitted as one literal prompt when you press Enter, preserving
-embedded newlines. Each paste event is classified independently after newline
+In terminals that support bracketed paste, pasted text fills the normal prompt
+or active-turn steering input for review and is submitted as one literal message
+when you press Enter, preserving embedded newlines. Each paste event is
+classified independently after newline
 normalization: a range of at most 1,000 normalized UTF-8 bytes renders inline,
 including multiline content, while a range over 1,000 bytes shows a one-line
 `[N bytes of pasted content]` placeholder wherever it occurs in the prompt. The
@@ -1606,7 +1607,10 @@ Ctrl-C and double-Esc cancel the active prompt.
 
 By default, model-bound input submitted with Enter while a prompt is running is
 injected as a user message before the next model request. This lets you redirect
-the current work without canceling and retyping the prompt.
+the current work without canceling and retyping the prompt. The active-turn input
+uses the normal prompt editor's editing and paste behavior, so a multiline paste
+fills one buffer and one Enter submits one steer; Ctrl-C and double-Esc remain
+active-turn cancellation gestures.
 
 - `!shell`, `/commands`, and `/edit` retain their queued behavior and run at the
   next idle prompt.

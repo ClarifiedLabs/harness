@@ -156,6 +156,19 @@ func (e *promptLineEditor) configurePasteHeuristic(enabled bool, now func() time
 	e.now = now
 }
 
+// resetPasteTracking starts paste classification for a fresh editable buffer.
+// Both the idle prompt and active-turn input call this so explicit bracketed
+// pastes and the timing fallback have identical state at read boundaries.
+func (e *promptLineEditor) resetPasteTracking(s *lineEditState, purePaste bool) {
+	e.pasteMode = false
+	e.pasteCRPending = false
+	e.purePaste = purePaste
+	e.lastKeyTime = time.Time{}
+	e.prevBufferEmpty = len(s.buf) == 0
+	e.prevCursor = s.cursor
+	e.pasteStart = s.cursor
+}
+
 // pasteHeuristicEnabled reports whether the non-bracketed paste-burst heuristic
 // is active. It defaults on and is disabled by HARNESS_REPL_PASTE_HEURISTIC=off.
 func pasteHeuristicEnabled() bool {
@@ -337,6 +350,10 @@ func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, boo
 }
 
 func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, purePaste bool) (replInput, bool, error) {
+	return e.readPrefilledWithPasteState(prompt, prefill, purePaste, nil)
+}
+
+func (e *promptLineEditor) readPrefilledWithPasteState(prompt, prefill string, purePaste bool, summaries []pasteSummary) (replInput, bool, error) {
 	state := lineEditState{prompt: prompt}
 	defer e.clearPromptSnapshot()
 	depositCanceled := func() (replInput, bool, error) {
@@ -344,22 +361,17 @@ func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, pureP
 		if err := e.erasePromptState(&state); err != nil {
 			return replInput{}, false, err
 		}
-		return replInput{text: string(state.buf), pasted: e.purePaste, deposit: true}, true, nil
+		return replInput{text: string(state.buf), pasted: e.purePaste, pasteSummaries: clonePasteSummaries(state.pasteSummaries), deposit: true}, true, nil
 	}
 	if prefill != "" {
 		state.setText(prefill)
 	}
+	state.pasteSummaries = clonePasteSummaries(summaries)
 	// Each prompt starts fresh: paste mode and the pure-paste literal flag must not
 	// carry over from a previous prompt (a typed prompt after a pasted one is
 	// authored, not literal). lastKeyTime is reset so the first keystroke of this
 	// prompt cannot be mistaken for a paste continuation.
-	e.pasteMode = false
-	e.pasteCRPending = false
-	e.purePaste = purePaste
-	e.lastKeyTime = time.Time{}
-	e.prevBufferEmpty = len(state.buf) == 0
-	e.prevCursor = state.cursor
-	e.pasteStart = state.cursor
+	e.resetPasteTracking(&state, purePaste)
 	history := e.historyState()
 	vi := viLineState{mode: viModeInsert}
 	e.refreshViPrompt(&vi, &state)
@@ -372,7 +384,7 @@ func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, pureP
 	}
 
 	for {
-		r, size, err := e.r.ReadRune()
+		result, err := e.readKey(&vi, &state, &history, prompt, false)
 		if err != nil {
 			if errors.Is(err, errReadCanceled) {
 				return depositCanceled()
@@ -391,16 +403,6 @@ func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, pureP
 			e.tracef("read error: %v", err)
 			return replInput{}, false, err
 		}
-		e.tracef("read rune=%s size=%d buffered=%d", traceRune(r), size, e.r.Buffered())
-		e.updatePasteTiming(&state)
-
-		result, err := e.handleKey(&vi, &state, &history, prompt, r, false)
-		if err != nil {
-			if errors.Is(err, errReadCanceled) {
-				return depositCanceled()
-			}
-			return replInput{}, false, err
-		}
 		if result.done {
 			return result.input, result.ok, nil
 		}
@@ -410,6 +412,19 @@ func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, pureP
 			}
 		}
 	}
+}
+
+// readKey reads and dispatches one keystroke through the editor's shared input
+// path. Keeping timing-based paste classification here prevents the idle prompt
+// and active-turn input loops from drifting apart.
+func (e *promptLineEditor) readKey(v *viLineState, s *lineEditState, h *lineEditHistory, prompt string, duringPrompt bool) (viEditResult, error) {
+	r, size, err := e.r.ReadRune()
+	if err != nil {
+		return viEditResult{}, err
+	}
+	e.tracef("read rune=%s size=%d buffered=%d", traceRune(r), size, e.r.Buffered())
+	e.updatePasteTiming(s)
+	return e.handleKey(v, s, h, prompt, r, duringPrompt)
 }
 
 // handleKey dispatches one decoded keystroke against the shared editor state. It
@@ -548,6 +563,10 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 	case rune(lineTermEscape):
 		action, text, err := e.readEscape()
 		if err != nil {
+			if action == lineEditPaste {
+				e.insertBracketedPaste(s, text)
+				return viEditResult{redraw: true}, err
+			}
 			if errors.Is(err, io.EOF) {
 				e.tracef("escape read eof")
 				return viEditResult{ok: false, done: true}, nil
@@ -654,16 +673,7 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 				h.next(s)
 			}
 		case lineEditPaste:
-			if !duringPrompt {
-				wasEmpty := len(s.buf) == 0
-				s.insertPastedText(text)
-				if wasEmpty {
-					e.purePaste = true
-				}
-				e.tracef("bracketed paste inserts len=%d summaries=%d", len(text), len(s.pasteSummaries))
-				break
-			}
-			s.insertString(text)
+			e.insertBracketedPaste(s, text)
 		}
 		return viEditResult{redraw: true}, nil
 	default:
@@ -707,7 +717,7 @@ func (e *promptLineEditor) submitDuringPrompt(s *lineEditState) viEditResult {
 	s.buf = nil
 	s.cursor = 0
 	s.clearPasteSummaries()
-	e.purePaste = false
+	e.resetPasteTracking(s, false)
 	return viEditResult{input: replInput{text: text, pasted: pasted, interactive: true}, ok: true, done: true, redraw: true}
 }
 
@@ -737,7 +747,7 @@ func (e *promptLineEditor) cycleAgentInput(s *lineEditState, duringPrompt bool) 
 		return viEditResult{}, err
 	}
 	return viEditResult{
-		input: replInput{text: string(s.buf), pasted: e.purePaste, cycleAgent: true},
+		input: replInput{text: string(s.buf), pasted: e.purePaste, pasteSummaries: clonePasteSummaries(s.pasteSummaries), cycleAgent: true},
 		ok:    true,
 		done:  true,
 	}, nil
@@ -787,78 +797,95 @@ func (e *promptLineEditor) readEscape() (lineEditAction, string, error) {
 		e.tracef("escape interpreted as bare")
 		return lineEditEscape, "", nil
 	}
-	b, err := e.r.Peek(1)
-	if err != nil {
-		if errors.Is(err, io.EOF) {
-			e.tracef("escape peek eof; interpreted as bare")
-			return lineEditEscape, "", nil
+	canceled := false
+	var b []byte
+	for {
+		var err error
+		b, err = e.r.Peek(1)
+		if errors.Is(err, errReadCanceled) {
+			// Once an escape sequence has started, consume it atomically. This is
+			// especially important for bracketed paste: handing a partial marker to
+			// the next prompt would expose paste newlines as submit keystrokes.
+			canceled = true
+			continue
 		}
-		return lineEditIgnore, "", err
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				e.tracef("escape peek eof; interpreted as bare")
+				return lineEditEscape, "", cancellationError(canceled)
+			}
+			return lineEditIgnore, "", err
+		}
+		break
 	}
 	if len(b) == 0 {
 		e.tracef("escape peek empty; interpreted as bare")
-		return lineEditEscape, "", nil
+		return lineEditEscape, "", cancellationError(canceled)
 	}
 	if b[0] != '[' && b[0] != 'O' {
 		e.tracef("escape next=%s is not a sequence starter; interpreted as bare", traceByte(b[0]))
-		return lineEditEscape, "", nil
+		return lineEditEscape, "", cancellationError(canceled)
 	}
-	c, err := e.r.ReadByte()
+	c, readCanceled, err := e.readBytePastCancellation()
+	canceled = canceled || readCanceled
 	if err != nil {
 		return lineEditIgnore, "", err
 	}
 	e.tracef("escape introducer next=%s buffered=%d", traceByte(c), e.r.Buffered())
 	switch c {
 	case '[':
-		seq, err := e.readCSI()
+		seq, readCanceled, err := e.readCSI()
+		canceled = canceled || readCanceled
 		if err != nil {
 			return lineEditIgnore, "", err
 		}
 		e.tracef("csi raw seq=%q", seq)
 		switch seq {
 		case "A":
-			return lineEditHistoryPrev, "", nil
+			return lineEditHistoryPrev, "", cancellationError(canceled)
 		case "B":
-			return lineEditHistoryNext, "", nil
+			return lineEditHistoryNext, "", cancellationError(canceled)
 		case "C":
-			return lineEditRight, "", nil
+			return lineEditRight, "", cancellationError(canceled)
 		case "D":
-			return lineEditLeft, "", nil
+			return lineEditLeft, "", cancellationError(canceled)
 		case "3~":
-			return lineEditDelete, "", nil
+			return lineEditDelete, "", cancellationError(canceled)
 		case "200~":
-			text, err := e.readBracketedPaste()
+			text, readCanceled, err := e.readBracketedPaste()
+			canceled = canceled || readCanceled
 			if err != nil {
 				return lineEditIgnore, "", err
 			}
-			return lineEditPaste, text, nil
+			return lineEditPaste, text, cancellationError(canceled)
 		default:
 			action, text := e.actionForKeySequence(seq)
-			return action, text, nil
+			return action, text, cancellationError(canceled)
 		}
 	case 'O':
-		c, err := e.r.ReadByte()
+		c, readCanceled, err := e.readBytePastCancellation()
+		canceled = canceled || readCanceled
 		if err != nil {
 			return lineEditIgnore, "", err
 		}
 		switch c {
 		case 'A':
-			return lineEditHistoryPrev, "", nil
+			return lineEditHistoryPrev, "", cancellationError(canceled)
 		case 'B':
-			return lineEditHistoryNext, "", nil
+			return lineEditHistoryNext, "", cancellationError(canceled)
 		case 'C':
-			return lineEditRight, "", nil
+			return lineEditRight, "", cancellationError(canceled)
 		case 'D':
-			return lineEditLeft, "", nil
+			return lineEditLeft, "", cancellationError(canceled)
 		case 'H':
-			return lineEditHome, "", nil
+			return lineEditHome, "", cancellationError(canceled)
 		case 'F':
-			return lineEditEnd, "", nil
+			return lineEditEnd, "", cancellationError(canceled)
 		default:
-			return lineEditIgnore, "", nil
+			return lineEditIgnore, "", cancellationError(canceled)
 		}
 	default:
-		return lineEditIgnore, "", nil
+		return lineEditIgnore, "", cancellationError(canceled)
 	}
 }
 
@@ -876,16 +903,37 @@ func (e *promptLineEditor) escapeSequenceAvailable() bool {
 	return e.escapeSequenceReady(wait)
 }
 
-func (e *promptLineEditor) readCSI() (string, error) {
-	var b strings.Builder
+func (e *promptLineEditor) readBytePastCancellation() (byte, bool, error) {
+	canceled := false
 	for {
 		c, err := e.r.ReadByte()
+		if errors.Is(err, errReadCanceled) {
+			canceled = true
+			continue
+		}
+		return c, canceled, err
+	}
+}
+
+func cancellationError(canceled bool) error {
+	if canceled {
+		return errReadCanceled
+	}
+	return nil
+}
+
+func (e *promptLineEditor) readCSI() (string, bool, error) {
+	var b strings.Builder
+	canceled := false
+	for {
+		c, readCanceled, err := e.readBytePastCancellation()
+		canceled = canceled || readCanceled
 		if err != nil {
-			return b.String(), err
+			return b.String(), canceled, err
 		}
 		b.WriteByte(c)
 		if c >= '@' && c <= '~' {
-			return b.String(), nil
+			return b.String(), canceled, nil
 		}
 	}
 }
@@ -1703,19 +1751,31 @@ func lineEditActionName(action lineEditAction) string {
 	}
 }
 
-func (e *promptLineEditor) readBracketedPaste() (string, error) {
+func (e *promptLineEditor) readBracketedPaste() (string, bool, error) {
 	var b strings.Builder
+	canceled := false
 	for {
-		c, err := e.r.ReadByte()
+		c, readCanceled, err := e.readBytePastCancellation()
+		canceled = canceled || readCanceled
 		if err != nil {
-			return normalizePastedNewlines(b.String()), err
+			return normalizePastedNewlines(b.String()), canceled, err
 		}
 		b.WriteByte(c)
 		text := b.String()
 		if strings.HasSuffix(text, bracketedPasteEnd) {
-			return normalizePastedNewlines(strings.TrimSuffix(text, bracketedPasteEnd)), nil
+			text = normalizePastedNewlines(strings.TrimSuffix(text, bracketedPasteEnd))
+			return text, canceled, nil
 		}
 	}
+}
+
+func (e *promptLineEditor) insertBracketedPaste(s *lineEditState, text string) {
+	wasEmpty := len(s.buf) == 0
+	s.insertPastedText(text)
+	if wasEmpty {
+		e.purePaste = true
+	}
+	e.tracef("bracketed paste inserts len=%d summaries=%d", len(text), len(s.pasteSummaries))
 }
 
 // normalizePastedNewlines rewrites a pasted block's line endings to '\n'.
@@ -1829,6 +1889,18 @@ type pasteSummary struct {
 	start int
 	end   int
 	label []rune
+}
+
+func clonePasteSummaries(summaries []pasteSummary) []pasteSummary {
+	if len(summaries) == 0 {
+		return nil
+	}
+	cloned := make([]pasteSummary, len(summaries))
+	for i, summary := range summaries {
+		cloned[i] = summary
+		cloned[i].label = append([]rune(nil), summary.label...)
+	}
+	return cloned
 }
 
 // displayRunes returns the full prompt with summarized paste ranges replaced by

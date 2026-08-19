@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"bufio"
 	"bytes"
 	"io"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"harness/internal/term"
@@ -1264,6 +1266,26 @@ func TestPromptLineEditorInputTraceWritesRawAndCSIEvents(t *testing.T) {
 		if !strings.Contains(trace, want) {
 			t.Fatalf("trace missing %q:\n%s", want, trace)
 		}
+	}
+}
+
+func TestPromptLineEditorCancellationDuringBareEscapeDepositsBuffer(t *testing.T) {
+	source := &steppedReader{steps: []readerStep{
+		{data: []byte("\x1b")},
+		{err: errReadCanceled},
+		{data: []byte("x")},
+	}}
+	r := bufio.NewReader(source)
+	editor := newPromptLineEditorWithReader(r, io.Discard)
+	editor.escapeSequenceReady = func(time.Duration) bool { return true }
+
+	input, ok, err := editor.readPrefilled("> ", "draft")
+	if err != nil || !ok || !input.deposit || input.text != "draft" {
+		t.Fatalf("canceled bare Escape = %+v ok=%v err=%v, want draft deposit", input, ok, err)
+	}
+	next, err := r.ReadByte()
+	if err != nil || next != 'x' {
+		t.Fatalf("byte after canceled bare Escape = %q err=%v, want unconsumed x", next, err)
 	}
 }
 

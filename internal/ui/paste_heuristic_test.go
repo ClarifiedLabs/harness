@@ -104,6 +104,43 @@ func TestPromptLineEditorNonBracketedPasteBurstSubmitsAsOnePrompt(t *testing.T) 
 	}
 }
 
+// Active-turn input uses the same non-bracketed paste fallback as the idle
+// prompt. Raw terminals commonly deliver pasted line breaks as CR, so each CR
+// must insert a newline until a later manual Enter submits one steering input.
+func TestDuringPromptNonBracketedPasteBurstSubmitsAsOneInput(t *testing.T) {
+	paste := "also fyi - same issue\n==> Running uninstall script /bin/sh\nError: Failure while executing"
+	wire := strings.ReplaceAll(paste, "\n", "\r") + "\r"
+	runes := []rune(wire)
+	rr := newDuringPromptTestReader(wire)
+	clock := &scheduledClock{}
+	at := time.Unix(1_000_000, 0)
+	for i := range runes {
+		if i > 0 {
+			gap := 8 * time.Millisecond
+			if i == len(runes)-1 {
+				gap = pasteExitGap + time.Millisecond
+			}
+			at = at.Add(gap)
+		}
+		clock.times = append(clock.times, at)
+	}
+	rr.editor.configurePasteHeuristic(true, clock.now)
+
+	input, ok, err := rr.readDuringPrompt()
+	if err != nil {
+		t.Fatalf("readDuringPrompt = %v", err)
+	}
+	if !ok {
+		t.Fatal("readDuringPrompt returned ok=false")
+	}
+	if input.text != paste {
+		t.Fatalf("active-turn input = %q, want one multiline input %q", input.text, paste)
+	}
+	if !input.pasted || !input.interactive {
+		t.Fatalf("active-turn input classification = %+v, want pasted interactive input", input)
+	}
+}
+
 // Single-line typing with realistic human inter-keystroke gaps (well above the
 // paste-enter threshold) must not be mistaken for a paste: Enter submits
 // normally and the line is treated as typed (not literal).

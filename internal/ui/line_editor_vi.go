@@ -162,6 +162,13 @@ func (e *promptLineEditor) handleViNormalInput(v *viLineState, s *lineEditState,
 	case rune(lineTermEscape):
 		action, text, err := e.readEscape()
 		if err != nil {
+			if action == lineEditPaste {
+				result, actionErr := e.handleViNormalAction(v, s, h, prompt, action, text, duringPrompt)
+				if actionErr != nil {
+					return viEditResult{}, actionErr
+				}
+				return result, err
+			}
 			if err == io.EOF {
 				return viEditResult{ok: false, done: true}, nil
 			}
@@ -249,29 +256,22 @@ func (e *promptLineEditor) handleViNormalAction(v *viLineState, s *lineEditState
 		return e.handleViNormalText(v, s, h, text), nil
 	case lineEditPaste:
 		v.resetCommand()
-		if len(s.buf) == 0 && !duringPrompt {
+		if len(s.buf) == 0 {
 			s.setPasteSummary(text)
 			e.purePaste = true
 			e.viEnterInsert(v, s)
 			return viEditResult{redraw: true}, nil
 		}
-		if !duringPrompt {
-			idx := s.cursor
-			if len(s.buf) > 0 {
-				idx++
+		idx := s.cursor + 1
+		s.cursor = idx
+		s.insertPastedText(text)
+		for _, summary := range s.pasteSummaries {
+			if idx >= summary.start && idx < summary.end {
+				s.cursor = summary.start
+				break
 			}
-			s.cursor = idx
-			s.insertPastedText(text)
-			for _, summary := range s.pasteSummaries {
-				if idx >= summary.start && idx < summary.end {
-					s.cursor = summary.start
-					break
-				}
-			}
-			s.viClampNormalCursor()
-			return viEditResult{redraw: true}, nil
 		}
-		e.viPasteText(s, []rune(text), false)
+		s.viClampNormalCursor()
 		return viEditResult{redraw: true}, nil
 	default:
 		v.resetCommand()

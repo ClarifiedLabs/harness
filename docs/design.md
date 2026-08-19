@@ -3174,8 +3174,11 @@ in emacs mode or after entering vi normal mode with Esc) clears that mark, so th
 treated as typed (honoring `!`/`/`/`$`). Pasting into a non-empty prompt inserts
 the range at the cursor and collapses it only when it exceeds the byte threshold.
 Bracketed paste markers (`\x1b[200~`..`\x1b[201~`) are the primary mechanism; the
-complete range is classified once its explicit end marker arrives. When a terminal
-does not honor bracketed paste, a timing-based heuristic on the interactive TTY
+complete range is classified once its explicit end marker arrives. Reporting stays
+enabled while a model turn is active, and the live steering buffer uses the same
+parser, paste classification, display summaries, and timing fallback as the idle
+prompt. When a terminal does not honor bracketed paste, a timing-based heuristic
+on the interactive TTY
 raw line editor detects a fast keystroke burst (bytes arriving within ~10ms of the
 previous one, roughly 100 characters per second) and treats newlines in the burst
 as inserts instead of submitting, exiting after a ~150ms gap. Because this
@@ -3280,13 +3283,16 @@ shape is reset to the terminal default when leaving the prompt or REPL; terminal
 do not support DECSCUSR should ignore the sequences.
 
 Ctrl-G opens the external prompt editor from the raw-mode prompt with the current draft.
-During an active REPL turn, harness restores the prompt terminal mode and temporarily
-configures Escape as the second canonical-mode line delimiter so Esc-Esc can cancel the
-turn; typeahead lines are queued for the next prompt. Bracketed paste is disabled while
-Escape is armed, then restored when the prompt returns. Before launching the editor,
+During an active REPL turn, the raw editor stays enabled and captures a live steering
+buffer with the idle prompt's editing and paste behavior. Its intentional input-routing
+exceptions are Ctrl-C and double-Esc, which cancel the active turn; submitted commands
+and other non-model-bound input remain queued. Bracketed-paste reporting stays enabled.
+On the fallback path without the raw prompt editor, harness instead restores the prompt
+terminal mode, configures Escape as the second canonical-mode line delimiter, and
+disables bracketed paste until the prompt returns. Before launching the external editor,
 harness restores the original termios and disables bracketed paste so the editor owns a
-normal TTY; after it exits, the REPL reapplies its prompt settings. `!command`
-shell escapes use the same terminal handoff.
+normal TTY; after it exits, the REPL reapplies its prompt settings. `!command` shell
+escapes use the same terminal handoff.
 
 External editor prompt files use `$VISUAL`, then `$EDITOR`, then `vi`, attached to
 `/dev/tty`. The temp file contains visible output only from the latest completed

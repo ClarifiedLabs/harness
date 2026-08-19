@@ -6492,6 +6492,64 @@ func TestMarkQueuedSubmissionCoversPromptBoundaryRecovery(t *testing.T) {
 	}
 }
 
+// A pure paste that is still unsubmitted when the active turn completes keeps
+// its literal classification when it becomes the next idle prompt's prefill.
+func TestREPLDuringPromptPasteDepositedOnCompletionStaysLiteral(t *testing.T) {
+	var out, errw lockedBuffer
+	inPrompt := make(chan struct{})
+	releaseTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{Stop: llm.StopEndTurn, Block: func(context.Context) { close(inPrompt); <-releaseTurn }},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("literal answer")}, Stop: llm.StopEndTurn},
+	)
+	app := liveTestApp(t, &out, &errw, fp)
+	app.RunShellCommand = func(command string) error {
+		t.Fatalf("deposited active-turn paste ran as shell command %q", command)
+		return nil
+	}
+	delivered := make(chan struct{}, 4)
+	app.onInputDelivered = func() { delivered <- struct{}{} }
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "first\r")
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("initial input was not delivered")
+	}
+	select {
+	case <-inPrompt:
+	case <-time.After(time.Second):
+		t.Fatal("turn did not start")
+	}
+
+	pasted := "!echo must-stay-literal\n" + strings.Repeat("x", pasteSummaryBytes)
+	writePipe(t, pw, bracketedPasteStart+pasted+bracketedPasteEnd)
+	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
+	waitFor(t, func() bool { return strings.Contains(errw.String(), placeholder) }, "active-turn paste summary")
+	close(releaseTurn)
+	select {
+	case <-delivered:
+	case <-time.After(time.Second):
+		t.Fatal("active-turn paste was not deposited at prompt completion")
+	}
+
+	writePipe(t, pw, "\r")
+	waitFor(t, func() bool { return fp.RequestCount() == 2 }, "literal request from deposited paste")
+	_ = pw.Close()
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != "first|"+pasted {
+		t.Fatalf("prompts = %q, want deposited paste preserved literally", got)
+	}
+}
+
 // Partial during-prompt input that is not submitted with Enter is still deposited
 // into the next prompt as editable prefill and requires a manual Enter.
 func TestREPLDuringPromptPartialInputDepositedOnCompletion(t *testing.T) {
@@ -6593,6 +6651,166 @@ func TestREPLDuringPromptInputDepositedOnInterrupt(t *testing.T) {
 	}
 	if got := transcriptPrompts(app); got != "first|wip" {
 		t.Fatalf("prompts = %q, want first|wip (typed text deposited on interrupt)", got)
+	}
+}
+
+// A bracketed paste during an active turn uses the idle prompt's complete paste
+// semantics: it fills the buffer without submitting, preserves the full text,
+// collapses a large range for display, and submits one literal input on Enter.
+func TestREPLDuringPromptBracketedPasteUsesIdleEditorSemantics(t *testing.T) {
+	pasted := "first line\n" + strings.Repeat("x", pasteSummaryBytes)
+	rr := newDuringPromptTestReader(bracketedPasteStart + pasted + bracketedPasteEnd + "\r")
+	var displayed string
+	rr.onPromptInput = func(buf string, _ int) { displayed = buf }
+
+	input, done, err := pumpDuringPromptKey(rr)
+	if err != nil {
+		t.Fatalf("paste: %v", err)
+	}
+	if done {
+		t.Fatalf("paste submitted before Enter: %+v", input)
+	}
+	if got := string(rr.promptState.buf); got != pasted {
+		t.Fatalf("active-turn paste buffer = %q, want full content", got)
+	}
+	if !rr.editor.purePaste {
+		t.Fatal("paste into empty active-turn buffer was not classified as a pure paste")
+	}
+	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
+	if displayed != placeholder {
+		t.Fatalf("active-turn paste display = %q, want %q", displayed, placeholder)
+	}
+
+	input, done, err = pumpDuringPromptKey(rr)
+	if err != nil {
+		t.Fatalf("Enter: %v", err)
+	}
+	if !done || input.text != pasted || !input.pasted || !input.interactive {
+		t.Fatalf("submitted active-turn paste = %+v done=%v, want one literal interactive input", input, done)
+	}
+
+	// Prompt completion before Enter deposits the same full text, literal mark,
+	// and collapsed display range into the next idle editor.
+	rr = newDuringPromptTestReader(bracketedPasteStart + pasted + bracketedPasteEnd)
+	if _, done, err := pumpDuringPromptKey(rr); err != nil || done {
+		t.Fatalf("paste before deposit: done=%v err=%v", done, err)
+	}
+	deposited := rr.depositPromptBuffer()
+	if !deposited.deposit || !deposited.pasted || deposited.text != pasted || len(deposited.pasteSummaries) != 1 {
+		t.Fatalf("deposited active-turn paste = %+v, want full paste metadata", deposited)
+	}
+	var prefillOut bytes.Buffer
+	prefillEditor := newPromptLineEditor(strings.NewReader("\r"), &prefillOut)
+	input, ok, err := prefillEditor.readPrefilledWithPasteState("> ", deposited.text, deposited.pasted, deposited.pasteSummaries)
+	if err != nil || !ok || !input.pasted || input.text != pasted {
+		t.Fatalf("deposited paste prefill = %+v ok=%v err=%v", input, ok, err)
+	}
+	if !strings.Contains(prefillOut.String(), placeholder) || strings.Contains(prefillOut.String(), pasted) {
+		t.Fatalf("deposited paste did not retain collapsed display: %q", prefillOut.String())
+	}
+}
+
+// Cancellation at a prompt boundary can arrive anywhere while the terminal is
+// delivering a bracketed paste. The parser completes that atomic paste before
+// returning the cancellation deposit, preserving all bytes in emacs and vi
+// normal modes and consuming both markers exactly once.
+func TestREPLDuringPromptCancellationCompletesBracketedPaste(t *testing.T) {
+	pasted := "first line\nsecond line"
+	tests := []struct {
+		name          string
+		steps         []readerStep
+		viNormal      bool
+		sequenceReady bool
+	}{
+		{
+			name: "body",
+			steps: []readerStep{
+				{data: []byte(bracketedPasteStart + "first line\r")},
+				{err: errReadCanceled},
+				{data: []byte("second line" + bracketedPasteEnd)},
+			},
+		},
+		{
+			name: "vi normal body",
+			steps: []readerStep{
+				{data: []byte(bracketedPasteStart + "first line\r")},
+				{err: errReadCanceled},
+				{data: []byte("second line" + bracketedPasteEnd)},
+			},
+			viNormal: true,
+		},
+		{
+			name: "opening CSI",
+			steps: []readerStep{
+				{data: []byte(bracketedPasteStart[:2])},
+				{err: errReadCanceled},
+				{data: []byte(bracketedPasteStart[2:] + "first line\rsecond line" + bracketedPasteEnd)},
+			},
+		},
+		{
+			name: "before opening introducer",
+			steps: []readerStep{
+				{data: []byte(bracketedPasteStart[:1])},
+				{err: errReadCanceled},
+				{data: []byte(bracketedPasteStart[1:] + "first line\rsecond line" + bracketedPasteEnd)},
+			},
+			sequenceReady: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &steppedReader{steps: tt.steps}
+			r := bufio.NewReader(source)
+			rr := &replReader{r: r, editor: newPromptLineEditorWithReader(r, io.Discard)}
+			if tt.viNormal {
+				rr.editor.setEditMode(string(promptEditModeVi))
+			}
+			if tt.sequenceReady {
+				rr.editor.escapeSequenceReady = func(time.Duration) bool { return true }
+			}
+			rr.beginPromptCapture()
+			if tt.viNormal {
+				rr.promptVi.mode = viModeNormal
+			}
+
+			input, ok, err := rr.readDuringPrompt()
+			if err != nil || !ok {
+				t.Fatalf("readDuringPrompt = %+v ok=%v err=%v", input, ok, err)
+			}
+			if !input.deposit || !input.pasted || input.text != pasted {
+				t.Fatalf("canceled bracketed paste = %+v, want complete deposited paste %q", input, pasted)
+			}
+			if source.next != len(source.steps) {
+				t.Fatalf("reader consumed %d/%d steps; paste tail or marker remains", source.next, len(source.steps))
+			}
+		})
+	}
+}
+
+func TestREPLDuringPromptViNormalBracketedPasteStaysLiteral(t *testing.T) {
+	pasted := "!echo must-stay-literal\n" + strings.Repeat("x", pasteSummaryBytes)
+	rr := newDuringPromptTestReader("\x1b" + bracketedPasteStart + pasted + bracketedPasteEnd + "\r")
+	rr.editor.setEditMode(string(promptEditModeVi))
+	rr.beginPromptCapture()
+	var displayed string
+	rr.onPromptInput = func(buf string, _ int) { displayed = buf }
+
+	input, done, err := pumpDuringPromptKey(rr)
+	if err != nil || !done || !input.escape || rr.promptVi.mode != viModeNormal {
+		t.Fatalf("enter vi normal mode = %+v done=%v mode=%v err=%v", input, done, rr.promptVi.mode, err)
+	}
+	input, done, err = pumpDuringPromptKey(rr)
+	if err != nil || done {
+		t.Fatalf("paste in vi normal mode = %+v done=%v err=%v", input, done, err)
+	}
+	placeholder := fmt.Sprintf(pasteSummaryPlaceholder, len(pasted))
+	if !rr.editor.purePaste || displayed != placeholder {
+		t.Fatalf("vi normal paste: pure=%v display=%q, want literal collapsed %q", rr.editor.purePaste, displayed, placeholder)
+	}
+	input, done, err = pumpDuringPromptKey(rr)
+	if err != nil || !done || !input.interactive || !input.pasted || input.text != pasted {
+		t.Fatalf("vi normal paste submit = %+v done=%v err=%v", input, done, err)
 	}
 }
 
@@ -6863,6 +7081,33 @@ func TestREPLDuringPromptCtrlGRequestsEdit(t *testing.T) {
 // bufio.Reader seeded with input, mirroring the live read loop where readDuringPrompt
 // reads a rune and hands it to handleKey (which reads escape-sequence tails from
 // the same reader).
+type readerStep struct {
+	data []byte
+	err  error
+}
+
+type steppedReader struct {
+	steps []readerStep
+	next  int
+}
+
+func (r *steppedReader) Read(p []byte) (int, error) {
+	if r.next >= len(r.steps) {
+		return 0, io.EOF
+	}
+	step := &r.steps[r.next]
+	if len(step.data) > 0 {
+		n := copy(p, step.data)
+		step.data = step.data[n:]
+		if len(step.data) == 0 {
+			r.next++
+		}
+		return n, nil
+	}
+	r.next++
+	return 0, step.err
+}
+
 func newDuringPromptTestReader(input string) *replReader {
 	r := bufio.NewReader(strings.NewReader(input))
 	ed := newPromptLineEditorWithReader(r, io.Discard)
@@ -6876,11 +7121,7 @@ func newDuringPromptTestReader(input string) *replReader {
 // redraw. It returns the resulting input/done flag (done=false for ordinary
 // edits; done=true only for interrupt/escape/edit/EOF gestures).
 func pumpDuringPromptKey(rr *replReader) (replInput, bool, error) {
-	r, _, err := rr.r.ReadRune()
-	if err != nil {
-		return replInput{}, false, err
-	}
-	res, err := rr.editor.handleKey(&rr.promptVi, rr.promptState, &rr.promptHistory, "", r, true)
+	res, err := rr.editor.readKey(&rr.promptVi, rr.promptState, &rr.promptHistory, "", true)
 	if err != nil {
 		return replInput{}, false, err
 	}
