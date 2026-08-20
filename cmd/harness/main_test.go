@@ -3968,8 +3968,9 @@ func delegateAgentProperty(t *testing.T, req llm.Request) ([]string, string) {
 	return nil, ""
 }
 
-// Default (auto) agent advertises the default tool set plus delegate and carries
-// no agent-specific section.
+// The default (auto) agent advertises the default tool set, which includes the
+// delegate, todo, and plan coordination tools, and carries no agent-specific
+// section.
 func TestRunDefaultAgentTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
@@ -3986,7 +3987,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
-func TestRunInteractiveAutoExposesTodosButNotPlanHandoffOrGoalTools(t *testing.T) {
+func TestRunInteractiveAutoExposesTodosAndPlanButNotHandoffOrGoalTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -3994,10 +3995,12 @@ func TestRunInteractiveAutoExposesTodosButNotPlanHandoffOrGoalTools(t *testing.T
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	names := toolNames(fp.Requests[0])
-	if !slices.Contains(names, "update_todos") {
-		t.Fatalf("interactive auto tools missing update_todos: %v", names)
+	for _, name := range []string{"update_todos", "record_plan"} {
+		if !slices.Contains(names, name) {
+			t.Fatalf("interactive auto tools missing %s: %v", name, names)
+		}
 	}
-	for _, name := range []string{"record_plan", "handoff", "create_goal", "update_goal"} {
+	for _, name := range []string{"handoff", "create_goal", "update_goal"} {
 		if slices.Contains(names, name) {
 			t.Fatalf("interactive auto tools unexpectedly include removed %s: %v", name, names)
 		}
@@ -5335,13 +5338,13 @@ func expectedPlanToolNames() []string {
 	names := expectedInspectionToolNames()
 	// plan's realized tool list is the shared inspection set (which now includes
 	// shell) followed by the main-registered coordination tools in catalog
-	// order.
-	return append(names, "write_tmp_file", "delegate", "background_jobs", "record_plan")
+	// order. Like every built-in, plan keeps update_todos.
+	return append(names, "write_tmp_file", "delegate", "background_jobs", "update_todos", "record_plan")
 }
 
 func expectedDefaultToolNames() []string {
 	names := tools.DefaultNames()
-	return append(names, "delegate", "background_jobs", "update_todos")
+	return append(names, "delegate", "background_jobs", "update_todos", "record_plan")
 }
 
 func TestAgentSummariesHideNonInteractiveAgentsWithoutAffectingDelegation(t *testing.T) {

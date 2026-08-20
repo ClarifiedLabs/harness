@@ -149,14 +149,15 @@ func inspectionTools() []string {
 func planTools() []string {
 	// shell comes from the shared inspection set; plan adds no first-class
 	// file-mutation tools (edit and write), so "don't modify the
-	// project" stays a prompt-level contract (prompts/agents/plan.txt).
-	names := slices.DeleteFunc(inspectionTools(), func(name string) bool { return name == "update_todos" })
+	// project" stays a prompt-level contract (prompts/agents/plan.txt). Like
+	// every built-in, plan keeps update_todos for its working checklist.
+	names := inspectionTools()
 	return append(names, "write_tmp_file", "record_plan", "delegate", "background_jobs")
 }
 
 func defaultTools() []string {
 	names := tools.DefaultNames()
-	return append(names, "update_todos", "delegate", "background_jobs")
+	return append(names, "update_todos", "record_plan", "delegate", "background_jobs")
 }
 
 // DefaultTools returns the default allowed-tool set that auto/independent and

@@ -37,6 +37,9 @@ func TestBuiltins(t *testing.T) {
 	if !slices.Equal(auto.AllowedTools, defaultTools()) {
 		t.Errorf("auto tools = %v, want default set", auto.AllowedTools)
 	}
+	if !slices.Contains(auto.AllowedTools, "update_todos") || !slices.Contains(auto.AllowedTools, "record_plan") {
+		t.Errorf("auto tools = %v; want both update_todos and record_plan", auto.AllowedTools)
+	}
 	if auto.MCPTools != MCPToolsAll {
 		t.Errorf("auto MCPTools = %q, want %q", auto.MCPTools, MCPToolsAll)
 	}
@@ -66,14 +69,14 @@ func TestBuiltins(t *testing.T) {
 		}
 	}
 	for name, def := range m {
-		if name == "plan" {
-			if !slices.Contains(def.AllowedTools, "record_plan") || slices.Contains(def.AllowedTools, "update_todos") {
-				t.Errorf("plan coordination tools = %v; want record_plan without update_todos", def.AllowedTools)
-			}
-			continue
+		// Every built-in keeps update_todos. record_plan belongs to the default
+		// set (auto, independent, default-inheriting custom) and the plan agent.
+		if !slices.Contains(def.AllowedTools, "update_todos") {
+			t.Errorf("built-in %s missing update_todos: %v", name, def.AllowedTools)
 		}
-		if !slices.Contains(def.AllowedTools, "update_todos") || slices.Contains(def.AllowedTools, "record_plan") {
-			t.Errorf("built-in %s coordination tools = %v; want update_todos without record_plan", name, def.AllowedTools)
+		wantRecordPlan := name == "auto" || name == "independent" || name == "plan"
+		if wantRecordPlan != slices.Contains(def.AllowedTools, "record_plan") {
+			t.Errorf("built-in %s record_plan = %t, want %t: %v", name, slices.Contains(def.AllowedTools, "record_plan"), wantRecordPlan, def.AllowedTools)
 		}
 	}
 
@@ -369,24 +372,49 @@ func TestResolveReasoningOverride(t *testing.T) {
 	}
 }
 
-func TestDefaultToolsIncludeTodosButOmitPlanGoalAndHandoffTools(t *testing.T) {
+func TestDefaultToolsIncludeTodosAndPlanButOmitGoalAndHandoffTools(t *testing.T) {
 	def := defaultTools()
-	if !slices.Contains(def, "update_todos") {
-		t.Errorf("default tools missing update_todos: %v", def)
+	for _, name := range []string{"update_todos", "record_plan"} {
+		if !slices.Contains(def, name) {
+			t.Errorf("default tools missing %s: %v", name, def)
+		}
 	}
-	for _, name := range []string{"record_plan", "create_goal", "update_goal", "handoff"} {
+	for _, name := range []string{"create_goal", "update_goal", "handoff"} {
 		if slices.Contains(def, name) {
 			t.Errorf("default tools unexpectedly include removed %s: %v", name, def)
 		}
 	}
 }
 
-func TestPlanToolsOnlyIncludePlanCoordinationTool(t *testing.T) {
-	pt := planTools()
-	if !slices.Contains(pt, "record_plan") {
-		t.Errorf("plan tools missing record_plan: %v", pt)
+// Every default-inheriting agent (auto, independent, and custom agents without
+// an explicit allowed_tools list) gets both coordination tools.
+func TestDefaultInheritingAgentsIncludeTodosAndRecordPlan(t *testing.T) {
+	builtins := Builtins()
+	for _, name := range []string{"auto", "independent"} {
+		def := builtins[name]
+		if !slices.Equal(def.AllowedTools, defaultTools()) {
+			t.Errorf("%s tools = %v, want default set %v", name, def.AllowedTools, defaultTools())
+		}
+		if !slices.Contains(def.AllowedTools, "update_todos") || !slices.Contains(def.AllowedTools, "record_plan") {
+			t.Errorf("%s tools = %v; want both update_todos and record_plan", name, def.AllowedTools)
+		}
 	}
-	for _, name := range []string{"update_todos", "handoff", "create_goal", "update_goal"} {
+	m := Resolve(map[string]FileDefinition{"custom_impl": {Description: "Implement things."}})
+	custom := m["custom_impl"]
+	if !slices.Equal(custom.AllowedTools, defaultTools()) {
+		t.Errorf("custom default-inheriting tools = %v, want default set %v", custom.AllowedTools, defaultTools())
+	}
+}
+
+func TestPlanToolsIncludeCoordinationTools(t *testing.T) {
+	pt := planTools()
+	// Every built-in keeps update_todos; plan adds record_plan on top.
+	for _, name := range []string{"update_todos", "record_plan"} {
+		if !slices.Contains(pt, name) {
+			t.Errorf("plan tools missing %s: %v", name, pt)
+		}
+	}
+	for _, name := range []string{"handoff", "create_goal", "update_goal"} {
 		if slices.Contains(pt, name) {
 			t.Errorf("plan tools unexpectedly include %q: %v", name, pt)
 		}

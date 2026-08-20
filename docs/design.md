@@ -2531,7 +2531,7 @@ this subsection records the common runner those argv tools point at.
   interval remains capped at 96. A successful update or delivered recovery
   reminder resets the schedule. Transport and provider-compatibility retries
   reuse the attached context and do not advance the round count.
-- Every built-in agent except `plan` exposes `update_todos`. Each delegate gets
+- Every built-in agent exposes `update_todos`, including `plan`. Each delegate gets
   a private store. Custom agent whitelists may omit it.
 
 ### 9.14 `delegate`
@@ -2919,8 +2919,11 @@ body and writes `<session>/plans/NNNN-<slug>.plan.md` through a temporary file,
 creates a new immutable artifact; the synchronized store keeps only the latest
 `plan.Plan` pointer for persistence, display, and handoff.
 
-`record_plan` is exposed to the `plan` agent instead of `update_todos`. It
-requires a live session directory and is therefore unavailable where no session
+`record_plan` is part of the default coordination tool set: `auto`,
+`independent`, and default-inheriting custom agents receive it in addition to
+`update_todos`, and the `plan` agent receives it alongside `update_todos` as
+well.
+It requires a live session directory and is therefore unavailable where no session
 artifact can be written. Delegate children receive private plan stores and write
 under their own child session directories.
 
@@ -4165,11 +4168,11 @@ reviewer, or the wide-open default without separate binaries.
 - **Built-ins:** `auto` and `plan` are interactive-selectable; `explore`,
   `review`, and `independent` are not. `auto` and `independent` expose the
   ordinary built-in surface,
-  discovered MCP tools, `update_todos`, `delegate`, and background jobs.
-  `explore` and `review` expose the shared read-only inspection surface plus
+  discovered MCP tools, `update_todos`, `record_plan`, `delegate`, and background
+  jobs. `explore` and `review` expose the shared read-only inspection surface plus
   `update_todos`. `plan` exposes the inspection surface, `write_tmp_file`,
-  `record_plan`, `delegate`, and background jobs, but deliberately omits
-  `update_todos`; interactive root plan sessions additionally expose
+  `update_todos`, `record_plan`, `delegate`, and background jobs; interactive
+  root plan sessions additionally expose
   `handoff`. Delegated and one-shot plan agents do not.
   `explore`, `plan`, and `review` have no first-class file-mutation tools and
   use read-only MCP exposure. `auto` and `independent` advertise `git` rather

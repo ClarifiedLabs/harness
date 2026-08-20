@@ -236,7 +236,7 @@ Mixed read/write commands such as `branch`, `config`, `remote`, `reflog`,
 disables pagers, optional locks, filesystem monitors, external diff/textconv
 helpers, prompts, output-file flags, and signature helpers.
 
-`update_todos` is available to every built-in agent except `plan`. Use it as
+`update_todos` is available to every built-in agent, including `plan`. Use it as
 an advisory checklist for meaningful multi-step work, update it at phase
 boundaries, and do not spend a turn only on bookkeeping. Each call replaces
 the complete list with `{step,status}` entries. Status is `pending`,
@@ -251,14 +251,20 @@ off after another 24, 48, and 96 rounds, capped at 96 thereafter. A successful
 update or delivered recovery reminder resets the cadence, and transport retries
 do not advance it. Child agents receive private TODO stores.
 
-The `plan` agent receives `record_plan` instead of `update_todos`. It writes a
+`record_plan` is part of the default coordination tool set. The `plan` agent
+receives it alongside `update_todos`; `auto`, `independent`, and
+default-inheriting custom agents receive it in addition to `update_todos`, so a
+session can capture a durable implementation plan and later run `/handoff`
+without switching agents first. `record_plan` writes a
 self-contained Markdown artifact to `<session>/plans/NNNN-<slug>.plan.md` with
 temp-file-then-rename durability and makes that artifact the session's latest
 plan. Older plan files remain immutable. In an interactive root session, the
 plan agent may call `handoff`; Harness displays the full latest
 plan, asks for approval, archives the planning transcript, and seeds the
 implementation agent with the complete plan. Delegated plan agents may record
-private child plans but cannot request an interactive handoff.
+private child plans but cannot request an interactive handoff. Agents with
+`record_plan` but not `handoff` (`auto`, `independent`, default-inheriting
+custom) can record plans; use `/handoff` to review and approve one.
 
 ## File Mutation
 

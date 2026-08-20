@@ -1700,11 +1700,11 @@ default; the other built-ins remain available for one-shot runs and delegation.
 
 | agent | interactive | tools | behavior |
 |---|---|---|---|
-| `auto` | yes | `read`, `view_image`, `edit`, `write`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `delegate`, and background job tools | the default; the model decides what to do |
+| `auto` | yes | `read`, `view_image`, `edit`, `write`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `record_plan`, `delegate`, and background job tools | the default; the model decides what to do |
 | `explore` | no | `read`, `view_image`, `shell`, `web_fetch`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
-| `plan` | yes | `read`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
+| `plan` | yes | `read`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `update_todos`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
 | `review` | no | the same read-only local and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
-| `independent` | no | the same local tools as `auto`, plus discovered MCP tools, `update_todos`, `delegate`, and background job tools | complete the task end-to-end without pausing for input |
+| `independent` | no | the same local tools as `auto`, plus discovered MCP tools | complete the task end-to-end without pausing for input |
 
 Define new agents or override built-ins in the config file under `agents`.
 **Breaking configuration rule:** every new custom agent must have a nonblank
@@ -1768,7 +1768,7 @@ target otherwise comes from `--handoff-agent`, `HARNESS_HANDOFF_AGENT`, config
 `handoff_agent`, or the `auto` default. Handoffs require an interactive session
 and are unavailable in one-shot mode.
 
-Non-plan built-in agents use `update_todos` for an advisory checklist. Each call
+All built-in agents use `update_todos` for an advisory checklist. Each call
 replaces the complete `{step,status}` list, and the statuses never complete,
 block, or otherwise control the agent loop. The unresolved list is restored on
 resume and injected once after compaction or another transcript rewrite so the
