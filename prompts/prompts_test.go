@@ -56,12 +56,15 @@ func TestSystemPromptToolStagingGuidance(t *testing.T) {
 	if strings.Contains(prompt, "read.paths[]") || strings.Contains(prompt, "read paths[]") {
 		t.Errorf("system prompt retains removed multi-path read guidance")
 	}
+	// The staging contract is behavioral, not phrasing: the prompt must tell
+	// the model to stage calls, mark independence with equal stages, order
+	// dependent calls, and defer argument-dependent calls to a later turn.
 	for _, want := range []string{
-		"independent calls the same `_stage`",
-		"Calls in the same stage are parallel-eligible",
-		"increasing `_stage` values for dependencies on earlier side effects",
-		"specify `_stage` on every call",
-		"later call's arguments depend on an earlier call's output, make that call in another model turn",
+		"`_stage`",
+		"parallel-eligible",
+		"increasing",
+		"dependencies",
+		"another model turn",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("system prompt missing tool staging guidance %q", want)

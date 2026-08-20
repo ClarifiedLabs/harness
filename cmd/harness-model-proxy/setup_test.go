@@ -53,7 +53,7 @@ func TestRunSetupWritesOnlySelectedModelsAndNoProxyDefault(t *testing.T) {
 	if !strings.Contains(out.String(), "(0 enabled)") {
 		t.Fatalf("model selector should start with no enabled models, output=%q", out.String())
 	}
-	if !strings.Contains(out.String(), "Select at least one model before continuing.") {
+	if !strings.Contains(out.String(), setupSaveEmptySelectionPrompt) {
 		t.Fatalf("saving without a selected model should explain the required selection, output=%q", out.String())
 	}
 	if !strings.Contains(out.String(), "*") || !strings.Contains(out.String(), "\x1b[1m") {

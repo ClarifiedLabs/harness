@@ -831,7 +831,7 @@ func TestContextOverflowWithoutWindowShrinksCurrentTurnAndRetries(t *testing.T) 
 	if len(trimmed) >= len(full) || !strings.Contains(trimmed, retentionTrimMarker) {
 		t.Fatalf("retry tool result was not trimmed: len=%d text=%q", len(trimmed), trimmed)
 	}
-	if !slices.Contains(sink.notices, "[context overflow: compacting and retrying request]") {
+	if !slices.Contains(sink.notices, NoticeContextOverflowCompacting) {
 		t.Fatalf("notices = %+v, want context overflow retry notice", sink.notices)
 	}
 	if sink.rewriteCalls != 1 {
@@ -1170,7 +1170,7 @@ func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
 	if a.disabledReasoningReplay["some-other-domain"] {
 		t.Fatal("encrypted fallback disabled an unrelated replay domain")
 	}
-	const notice = "[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]"
+	const notice = NoticeReasoningReplayDisabled
 	if !slices.Contains(sink.notices, notice) {
 		t.Fatalf("notices = %v, want %q", sink.notices, notice)
 	}
@@ -1534,7 +1534,7 @@ func TestMaxTokensStopEmitsNotice(t *testing.T) {
 		t.Fatalf("RunPrompt: %v", err)
 	}
 	mustValid(t, a.Transcript())
-	if !slices.Contains(sink.notices, "[stopped: model reached max tokens]") {
+	if !slices.Contains(sink.notices, NoticeStoppedMaxTokens) {
 		t.Fatalf("max-token stop notice missing: %v", sink.notices)
 	}
 }
@@ -3174,7 +3174,7 @@ func TestResponsesStatefulDisablesAndRetriesWhenStoreRejected(t *testing.T) {
 	if state := a.ResponseState(); state != nil {
 		t.Fatalf("response state = %+v, want nil", state)
 	}
-	if !slices.Contains(sink.notices, "[responses state disabled: provider rejected stored responses; retrying stateless]") {
+	if !slices.Contains(sink.notices, NoticeResponsesStateDisabledRejected) {
 		t.Fatalf("notices = %+v, want responses-state disabled notice", sink.notices)
 	}
 	if got := sink.completedTurns[0]; got.Attempts != 2 || got.Wasted.InputTokens != 14 || got.Usage.InputTokens != 20 {

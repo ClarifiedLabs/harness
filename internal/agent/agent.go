@@ -1947,7 +1947,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				if learned > 0 && a.observeContextWindow(learned) {
 					sink.Notice(fmt.Sprintf("[context window adjusted: provider reported %d tokens; retrying request]", learned))
 				} else {
-					sink.Notice("[context overflow: compacting and retrying request]")
+					sink.Notice(NoticeContextOverflowCompacting)
 				}
 				compUsage, changed, cerr := a.compactTriggered(ctx, sink, "context-overflow")
 				if compUsage != (llm.Usage{}) {
@@ -1979,7 +1979,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 		if err != nil && modelReq.request.StoreResponse && !res.hasPartialOutput() && storeResponseRejected(err) {
 			a.SetResponsesStateful(false)
-			sink.Notice("[responses state disabled: provider rejected stored responses; retrying stateless]")
+			sink.Notice(NoticeResponsesStateDisabledRejected)
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 
@@ -1988,7 +1988,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
-			sink.Notice("[responses state reset: previous response unavailable; retrying with full context]")
+			sink.Notice(NoticeResponsesStateResetUnavailable)
 			a.noteContinuationFailure(sink)
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
@@ -2001,7 +2001,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			hasProviderOwnedReasoning(modelReq.request.Messages) &&
 			invalidEncryptedContent(err) {
 			a.disableCurrentReasoningReplay()
-			sink.Notice("[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]")
+			sink.Notice(NoticeReasoningReplayDisabled)
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 
@@ -2027,7 +2027,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				completeTurn()
 			}
 			if cancelled {
-				sink.Notice("[cancelled]")
+				sink.Notice(NoticeCancelled)
 			}
 			if verr := a.validateTranscript("after failed turn"); verr != nil {
 				err = errors.Join(err, verr)
@@ -2503,7 +2503,7 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 	res, err := attempts.request(ctx, modelReq.request, modelReq.estimate)
 	if err != nil && !res.hasPartialOutput() && hasProviderOwnedReasoning(modelReq.request.Messages) && invalidEncryptedContent(err) {
 		a.disableCurrentReasoningReplay()
-		sink.Notice("[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]")
+		sink.Notice(NoticeReasoningReplayDisabled)
 		modelReq = a.modelRequest(requestContext)
 		modelReq.request.Tools = nil
 		modelReq.request.ServerTools = nil
@@ -3473,9 +3473,9 @@ func storeResponseRejected(err error) bool {
 func stopReasonNotice(reason llm.StopReason) string {
 	switch reason {
 	case llm.StopMaxTokens:
-		return "[stopped: model reached max tokens]"
+		return NoticeStoppedMaxTokens
 	case llm.StopStop:
-		return "[stopped: stop sequence matched]"
+		return NoticeStoppedStopSequence
 	default:
 		return ""
 	}

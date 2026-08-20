@@ -2080,8 +2080,16 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 			t.Errorf("/tools output missing %q:\n%s", want, got)
 		}
 	}
-	viewImageCol := toolSummaryDescriptionColumn(t, got, "view_image", "Attach a local PNG, JPEG, WebP, or GIF image to inspect.")
-	editCol := toolSummaryDescriptionColumn(t, got, "edit", "Replace exact unique oldText; the file must already exist.")
+	description := func(name string) string {
+		t.Helper()
+		tool, ok := reg.Lookup(name)
+		if !ok {
+			t.Fatalf("registry missing tool %q", name)
+		}
+		return tool.Description()
+	}
+	viewImageCol := toolSummaryDescriptionColumn(t, got, "view_image", description("view_image"))
+	editCol := toolSummaryDescriptionColumn(t, got, "edit", description("edit"))
 	if viewImageCol != editCol {
 		t.Errorf("built-in description separators not aligned:\n%s", got)
 	}

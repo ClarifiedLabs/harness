@@ -26,6 +26,10 @@ import (
 	"harness/internal/ui"
 )
 
+// setupSaveEmptySelectionPrompt is printed when the user saves the model
+// selector without enabling any model.
+const setupSaveEmptySelectionPrompt = "Select at least one model before continuing."
+
 type setupMainConfig struct {
 	ProviderConfigs        []string `json:"provider_configs"`
 	DefaultContextWindow   int      `json:"default_context_window"`
@@ -962,7 +966,7 @@ func pickSetupModels(readLine func(string) (string, error), w io.Writer, provide
 		case strings.EqualFold(input, "save"):
 			selected := selectedSetupModels(items)
 			if len(selected) == 0 {
-				fmt.Fprintln(w, "Select at least one model before continuing.")
+				fmt.Fprintln(w, setupSaveEmptySelectionPrompt)
 				continue
 			}
 			return selected, nil

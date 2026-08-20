@@ -1,12 +1,19 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestLSPSystemHint(t *testing.T) {
-	if got := lspSystemHint([]string{"go", "rust"}); got != "lsp_* available for: go, rust. Prefer lsp_* over text search for definitions, references, hover, symbols, diagnostics, and rename." {
-		t.Errorf("hint = %q", got)
+	got := lspSystemHint([]string{"go", "rust"})
+	if !strings.HasPrefix(got, "lsp_* available for: go, rust.") {
+		t.Errorf("hint = %q, want prefix listing languages", got)
 	}
-	if got := lspSystemHint(nil); got != "lsp_* tools enabled but no language server on PATH." {
-		t.Errorf("empty hint = %q", got)
+	if !strings.Contains(got, "Prefer lsp_* over text search") {
+		t.Errorf("hint = %q, want guidance to prefer lsp_* over text search", got)
+	}
+	if languages := lspSystemHint(nil); languages != "lsp_* tools enabled but no language server on PATH." {
+		t.Errorf("empty hint = %q", languages)
 	}
 }

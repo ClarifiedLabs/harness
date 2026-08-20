@@ -1240,7 +1240,7 @@ func TestRunREPLModelCommandPromptsConfiguredProviderAndModel(t *testing.T) {
 	}
 	stderr := errw.String()
 	if !strings.Contains(stderr, "Models for targets 1-4 of 4") ||
-		!strings.Contains(stderr, "Price: input/output USD per 1M tokens") ||
+		!strings.Contains(stderr, ui.ModelPickerPriceLegend) ||
 		!strings.Contains(stderr, "$5/$30 ≤272k · $10/$45 >272k") ||
 		!strings.Contains(stderr, "model switched") {
 		t.Fatalf("/model should render tiered target pricing and acknowledge switch, stderr=%q", stderr)
@@ -2362,7 +2362,7 @@ func TestRunPromptsForReplacementModelWhenConfiguredSelectionUnavailable(t *test
 			stderr := errw.String()
 			for _, want := range []string{
 				tc.wantError,
-				"Press Enter to select a different model.",
+				startupModelRetryPrompt,
 				"Select a model target",
 				tc.wantLine,
 			} {
@@ -2388,7 +2388,7 @@ func TestRunOneShotUnavailableConfiguredSelectionDoesNotPrompt(t *testing.T) {
 	if !strings.Contains(stderr, `target "xiaomi:mimo-v2.5-pro" is not available from the model proxy`) {
 		t.Fatalf("stderr should explain unavailable provider, got %q", stderr)
 	}
-	if strings.Contains(stderr, "Press Enter to select a different model.") {
+	if strings.Contains(stderr, startupModelRetryPrompt) {
 		t.Fatalf("one-shot invalid model should not prompt, stderr=%q", stderr)
 	}
 }
@@ -3282,7 +3282,7 @@ func TestRunSessionStatsResolvesBareSessionIDFromForeignCWD(t *testing.T) {
 	_ = t.TempDir()
 	var out, errw bytes.Buffer
 	code := run(environment{
-		args: []string{"session", "stats", id},
+		args:   []string{"session", "stats", id},
 		stdout: &out, stderr: &errw,
 		getenv: func(k string) string {
 			if k == "XDG_STATE_HOME" {
@@ -3304,7 +3304,7 @@ func TestRunSessionStatsResolvesBareSessionIDFromForeignCWD(t *testing.T) {
 	out.Reset()
 	errw.Reset()
 	code = run(environment{
-		args: []string{"session", "errors", "20260101T000000Z"},
+		args:   []string{"session", "errors", "20260101T000000Z"},
 		stdout: &out, stderr: &errw,
 		getenv: func(k string) string {
 			if k == "XDG_STATE_HOME" {

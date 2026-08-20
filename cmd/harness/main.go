@@ -61,7 +61,11 @@ import (
 
 const modelProxyCheckTimeout = 2 * time.Second
 
-const rgSystemHint = "When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`."
+// startupModelRetryPrompt is printed when the configured model is unavailable
+// and the user should pick another before continuing.
+const startupModelRetryPrompt = "Press Enter to select a different model."
+
+const rgSystemHint = "When you search for text or files, prefer `rg` or `rg --files`; it is much faster than alternatives like `grep`."
 
 func main() {
 	sigCh := make(chan os.Signal, 1)
@@ -625,7 +629,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 		if configuredSelectionUnavailable {
 			fmt.Fprintf(stderr, "harness: %v\n", err)
-			if _, err := readStartupLine("Press Enter to select a different model."); err != nil {
+			if _, err := readStartupLine(startupModelRetryPrompt); err != nil {
 				fmt.Fprintf(stderr, "harness: model selection: %v\n", err)
 				return ui.ExitUsage
 			}

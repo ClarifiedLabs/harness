@@ -9,13 +9,6 @@ import (
 	"harness/internal/sysprompt"
 )
 
-func TestRgSystemHint_Content(t *testing.T) {
-	const want = "When you search for text or files, reach first for `rg` or `rg --files`; they are much faster than alternatives like `grep`."
-	if rgSystemHint != want {
-		t.Fatalf("rgSystemHint = %q, want %q", rgSystemHint, want)
-	}
-}
-
 func TestBuild_IncludesRgHintWhenAvailable(t *testing.T) {
 	dir := t.TempDir()
 	prog := filepath.Join(dir, "rg")

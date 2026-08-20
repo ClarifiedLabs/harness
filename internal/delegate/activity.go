@@ -319,13 +319,13 @@ var safeNoticePatterns = []*regexp.Regexp{
 }
 
 var safeFixedNotices = map[string]bool{
-	"[cancelled]":                                         true,
-	"[stopped: model reached max tokens]":                 true,
-	"[stopped: stop sequence matched]":                    true,
-	"[context overflow: compacting and retrying request]": true,
-	"[responses state disabled: provider rejected stored responses; retrying stateless]": true,
-	"[responses state reset: previous response unavailable; retrying with full context]": true,
-	"[compact: transcript over budget but nothing left to shrink]":                       true,
+	agent.NoticeCancelled:                      true,
+	agent.NoticeStoppedMaxTokens:               true,
+	agent.NoticeStoppedStopSequence:            true,
+	agent.NoticeContextOverflowCompacting:      true,
+	agent.NoticeResponsesStateDisabledRejected: true,
+	agent.NoticeResponsesStateResetUnavailable: true,
+	agent.NoticeCompactNothingToShrink:         true,
 }
 
 func safeNoticeLine(message string) (string, bool) {

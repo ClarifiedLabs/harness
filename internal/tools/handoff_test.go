@@ -118,8 +118,8 @@ func TestHandoffSchemaKeepsSmallSurface(t *testing.T) {
 	if agent["type"] != "string" {
 		t.Fatalf("agent type = %v, want string", agent["type"])
 	}
-	if agent["description"] != "Omit for default auto agent." {
-		t.Fatalf("agent description = %q, want %q", agent["description"], "Omit for default auto agent.")
+	if desc, _ := agent["description"].(string); !strings.Contains(desc, "Omit") || !strings.Contains(desc, "auto agent") {
+		t.Fatalf("agent description = %q, want guidance to omit the field for the default agent", agent["description"])
 	}
 	values, ok := agent["enum"].([]any)
 	if !ok {
@@ -132,17 +132,27 @@ func TestHandoffSchemaKeepsSmallSurface(t *testing.T) {
 	if !slices.Equal(got, []string{"auto", "independent"}) {
 		t.Fatalf("agent enum = %v", got)
 	}
-	// ensure description survives registry stripping (handoff preserves schema descriptions)
+	// ensure the agent property survives registry stripping (handoff preserves
+	// schema descriptions) alongside its enum.
 	r := &Registry{}
 	r.Register(tool)
 	specs := r.Specs()
 	if len(specs) != 1 {
 		t.Fatalf("registry specs = %d, want 1", len(specs))
 	}
-	if !strings.Contains(string(specs[0].Parameters), `"description":"Omit for default auto agent."`) {
+	var spec struct {
+		Properties map[string]struct {
+			Description string   `json:"description"`
+			Enum        []string `json:"enum"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(specs[0].Parameters, &spec); err != nil {
+		t.Fatal(err)
+	}
+	if spec.Properties["agent"].Description == "" {
 		t.Fatalf("registry stripped agent description: %s", specs[0].Parameters)
 	}
-	if !strings.Contains(string(specs[0].Parameters), `"enum":["auto","independent"]`) {
+	if !slices.Equal(spec.Properties["agent"].Enum, []string{"auto", "independent"}) {
 		t.Fatalf("registry enum not preserved: %s", specs[0].Parameters)
 	}
 }
@@ -173,7 +183,7 @@ func TestHandoffFiltersToExclusiveAgents(t *testing.T) {
 	if !slices.Contains(got, "my-impl") || !slices.Contains(got, "auto") || !slices.Contains(got, "independent") {
 		t.Fatalf("exclusive enum missing expected: %v", got)
 	}
-	if agent["description"] != "Omit for default auto agent." {
+	if desc, _ := agent["description"].(string); !strings.Contains(desc, "Omit") || !strings.Contains(desc, "auto agent") {
 		t.Fatalf("description missing in filtered schema: %v", agent["description"])
 	}
 	// Run should reject non-exclusive

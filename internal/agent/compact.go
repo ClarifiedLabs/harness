@@ -665,7 +665,7 @@ func (a *Agent) noticeCurrentNoShrink(sink EventSink, trigger string) {
 		}
 		a.compactFallbackNotice.noShrink = true
 	}
-	sink.Notice("[compact: transcript over budget but nothing left to shrink]")
+	sink.Notice(NoticeCompactNothingToShrink)
 }
 
 func (a *Agent) noticeCurrentShrink(sink EventSink, trigger string, before, after int) {
