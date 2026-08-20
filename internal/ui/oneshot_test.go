@@ -259,7 +259,7 @@ func TestOneShotStandaloneUnknownSkillSkipsProvider(t *testing.T) {
 	}
 }
 
-func TestOneShotSkillLoadFailureSkipsProvider(t *testing.T) {
+func TestOneShotSkillLoadFailureWarnsAndContinues(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
@@ -267,14 +267,21 @@ func TestOneShotSkillLoadFailureSkipsProvider(t *testing.T) {
 		"commit": {Name: "commit", Description: "Create a git commit", Location: filepath.Join(t.TempDir(), "missing", "SKILL.md")},
 	}
 
-	if code := OneShot(app, "$commit"); code != ExitUsage {
-		t.Fatalf("exit code = %d, want %d", code, ExitUsage)
+	if code := OneShot(app, "$commit"); code != ExitOK {
+		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
 	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("provider requests = %d, want 0", len(fp.Requests))
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want 1", len(fp.Requests))
 	}
-	if !strings.Contains(errw.String(), `skill activation failed: read skill "commit"`) {
-		t.Fatalf("missing skill load error, errw=%q", errw.String())
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "$commit" {
+		t.Fatalf("prompt = %q, want the raw prompt", got)
+	}
+	if strings.Contains(req.Messages[0].Content[0].Text, "<skill>") {
+		t.Fatalf("unreadable skill should not be injected:\n%s", req.Messages[0].Content[0].Text)
+	}
+	if !strings.Contains(errw.String(), `warning: skill not injected: read skill "commit"`) {
+		t.Fatalf("missing skill warning, errw=%q", errw.String())
 	}
 }
 

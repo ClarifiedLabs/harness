@@ -1,10 +1,14 @@
 package ui
 
 import (
+	"bytes"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"harness/internal/llm"
+	"harness/internal/llm/llmtest"
 	"harness/internal/skills"
 )
 
@@ -88,15 +92,51 @@ func TestResolveSkillMentionsSupportsColonNames(t *testing.T) {
 	}
 }
 
-func TestResolveSkillMentionsReportsLoadFailure(t *testing.T) {
-	res := resolveSkillMentions("$commit", map[string]skills.Skill{
-		"commit": {Name: "commit", Description: "Create a git commit", Location: "/missing/SKILL.md"},
+func TestResolveSkillMentionsMissingSkillWarnsAndInjectsOthers(t *testing.T) {
+	commit := testSkill(t, "commit", "Create a git commit", "COMMIT BODY")
+	missing := skills.Skill{Name: "plans", Description: "Plan work", Location: filepath.Join(t.TempDir(), "gone", "SKILL.md")}
+	res := resolveSkillMentions("use $commit and $plans", map[string]skills.Skill{
+		"commit": commit,
+		"plans":  missing,
 	})
-	if res.Err == nil || !strings.Contains(res.Err.Error(), `read skill "commit"`) {
-		t.Fatalf("Err = %v, want skill read failure", res.Err)
+	if res.Unknown != "" {
+		t.Fatalf("Unknown = %q, want none", res.Unknown)
 	}
-	if res.Injected != 0 || res.Prompt != "$commit" {
-		t.Fatalf("failed injection changed prompt: %+v", res)
+	if res.Injected != 1 {
+		t.Fatalf("Injected = %d, want 1 (readable block only)", res.Injected)
+	}
+	if got := strings.Count(res.Prompt, "<skill>"); got != 1 {
+		t.Fatalf("prompt contains %d <skill> blocks, want 1:\n%s", got, res.Prompt)
+	}
+	for _, want := range []string{"<name>commit</name>", "COMMIT BODY", "\n\nuse $commit and $plans"} {
+		if !strings.Contains(res.Prompt, want) {
+			t.Fatalf("prompt missing %q:\n%s", want, res.Prompt)
+		}
+	}
+	if strings.Contains(res.Prompt, "<name>plans</name>") {
+		t.Fatalf("unreadable skill should not be injected:\n%s", res.Prompt)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], `read skill "plans" at `+missing.Location) {
+		t.Fatalf("Warnings = %v, want unreadable plans skill warning", res.Warnings)
+	}
+}
+
+func TestResolveSkillMentionsAllMissingSkillsRunRawPrompt(t *testing.T) {
+	missing := skills.Skill{Name: "commit", Description: "Create a git commit", Location: filepath.Join(t.TempDir(), "missing", "SKILL.md")}
+	res := resolveSkillMentions("please use $commit", map[string]skills.Skill{
+		"commit": missing,
+	})
+	if res.Unknown != "" {
+		t.Fatalf("Unknown = %q, want none", res.Unknown)
+	}
+	if res.Injected != 0 {
+		t.Fatalf("Injected = %d, want 0", res.Injected)
+	}
+	if res.Prompt != "please use $commit" {
+		t.Fatalf("Prompt = %q, want the raw prompt without a prefix", res.Prompt)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], `read skill "commit"`) {
+		t.Fatalf("Warnings = %v, want unreadable commit skill warning", res.Warnings)
 	}
 }
 
@@ -118,6 +158,67 @@ func TestResolveSkillMentionsStandaloneUnknownSkill(t *testing.T) {
 	}
 	if res.Injected != 0 {
 		t.Fatalf("Injected = %d, want 0", res.Injected)
+	}
+}
+
+func TestResolveSkillMentionContextWarnsAndContinuesOnMissingSkill(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	missing := filepath.Join(t.TempDir(), "gone", "SKILL.md")
+	app.Skills = map[string]skills.Skill{
+		"plans": {Name: "plans", Description: "Plan work", Location: missing},
+	}
+
+	prompt, injected, ok := app.resolveSkillMentionContext("$plans hello")
+	if !ok {
+		t.Fatal("missing skill should not block the prompt")
+	}
+	if injected != 0 {
+		t.Fatalf("Injected = %d, want 0", injected)
+	}
+	if prompt != "$plans hello" {
+		t.Fatalf("prompt = %q, want the raw prompt without a prefix", prompt)
+	}
+	if want := "warning: skill not injected: read skill \"plans\" at " + missing; !strings.Contains(errw.String(), want) {
+		t.Fatalf("missing warning %q in errw=%q", want, errw.String())
+	}
+}
+
+func TestResolveSkillMentionContextStillBlocksUnknownSkill(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Skills = map[string]skills.Skill{
+		"commit": {Name: "commit", Description: "Create a git commit", Location: "/skills/commit/SKILL.md"},
+	}
+
+	if _, _, ok := app.resolveSkillMentionContext("$typo"); ok {
+		t.Fatal("unknown skill should still block the prompt")
+	}
+	if !strings.Contains(errw.String(), `unknown skill "typo"`) {
+		t.Fatalf("missing unknown-skill notice, errw=%q", errw.String())
+	}
+}
+
+func TestREPLMissingSkillMentionWarnsAndRunsPrompt(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Skills = map[string]skills.Skill{
+		"plans": {Name: "plans", Description: "Plan work", Location: filepath.Join(t.TempDir(), "gone", "SKILL.md")},
+	}
+
+	if code := Run(strings.NewReader("$plans hello\n/exit\n"), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("provider requests = %d, want 1", fp.RequestCount())
+	}
+	req := fp.Requests[0]
+	if got := req.Messages[0].Content[0].Text; got != "$plans hello" {
+		t.Fatalf("prompt = %q, want the raw prompt", got)
+	}
+	if !strings.Contains(errw.String(), "warning: skill not injected: read skill \"plans\"") {
+		t.Fatalf("missing warning, errw=%q", errw.String())
 	}
 }
 

@@ -14,7 +14,9 @@ type skillMentionResolution struct {
 	Prompt   string
 	Injected int
 	Unknown  string
-	Err      error
+	// Warnings names selected skills whose SKILL.md could not be read.
+	// Read failures are non-fatal: the prompt runs without those blocks.
+	Warnings []string
 }
 
 func normalizeSkillPath(p string) string {
@@ -131,11 +133,8 @@ func resolveSkillMentions(prompt string, available map[string]skills.Skill) skil
 		}
 	}
 	if len(selected) > 0 {
-		prefix, err := explicitSkillPrefix(selected)
-		if err != nil {
-			return skillMentionResolution{Prompt: resolvedPrompt, Err: err}
-		}
-		return skillMentionResolution{Prompt: prefix + resolvedPrompt, Injected: len(selected)}
+		prefix, injected, warnings := explicitSkillPrefix(selected)
+		return skillMentionResolution{Prompt: prefix + resolvedPrompt, Injected: injected, Warnings: warnings}
 	}
 	if name, ok := standaloneUnknownSkillMention(prompt); ok {
 		return skillMentionResolution{Prompt: resolvedPrompt, Unknown: name}
@@ -214,16 +213,24 @@ func unescapeDollarEscapes(prompt string) string {
 	return b.String()
 }
 
-func explicitSkillPrefix(selected []skills.Skill) (string, error) {
+// explicitSkillPrefix builds injection blocks from the readable skills and
+// reports one warning per unreadable skill instead of failing the whole
+// prompt. injected counts the blocks actually built, so a fully unreadable
+// selection yields an empty prefix and no separator.
+func explicitSkillPrefix(selected []skills.Skill) (prefix string, injected int, warnings []string) {
 	blocks := make([]string, 0, len(selected))
 	for _, skill := range selected {
 		body, err := skill.Read()
 		if err != nil {
-			return "", fmt.Errorf("read skill %q at %s: %w", skill.Name, skill.Location, err)
+			warnings = append(warnings, fmt.Errorf("read skill %q at %s: %w", skill.Name, skill.Location, err).Error())
+			continue
 		}
 		blocks = append(blocks, skills.InjectionBlock(skill.Name, skill.Location, body))
 	}
-	return strings.Join(blocks, "\n\n") + "\n\n", nil
+	if len(blocks) == 0 {
+		return "", 0, warnings
+	}
+	return strings.Join(blocks, "\n\n") + "\n\n", len(blocks), warnings
 }
 
 func (app *App) resolveSkillMentionContext(prompt string) (string, int, bool) {
@@ -232,9 +239,8 @@ func (app *App) resolveSkillMentionContext(prompt string) (string, int, bool) {
 		fmt.Fprintf(app.Errw, "unknown skill %q; type /skills\n", res.Unknown)
 		return res.Prompt, 0, false
 	}
-	if res.Err != nil {
-		fmt.Fprintf(app.Errw, "skill activation failed: %v\n", res.Err)
-		return res.Prompt, 0, false
+	for _, warning := range res.Warnings {
+		fmt.Fprintf(app.Errw, "warning: skill not injected: %s\n", warning)
 	}
 	return res.Prompt, res.Injected, true
 }

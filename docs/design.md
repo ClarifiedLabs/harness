@@ -1942,11 +1942,19 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   as one ordinary user-role message and persisted in transcript history; it is
   neither request-only context nor reinjected on later requests. It remains in
   history until ordinary compaction summarizes or removes it. Re-mentioning the
-  skill in a later prompt reads the current file and persists a new block; a
-  read failure aborts before a model call. Discovery scans existing
-  `.agents/skills` roots from the Git project root through `cwd`, outer to inner,
-  then the user root; project scope beats user scope and the nearest project root
-  wins equal-scope name collisions.
+  skill in a later prompt reads the current file and persists a new block; if a
+  selected skill's `SKILL.md` cannot be read (for example the directory was
+  removed mid-session), the read failure is non-fatal: Harness prints one
+  stderr warning per unreadable skill naming the skill and its catalog path
+  (`warning: skill not injected: read skill …`), omits that skill's block, and
+  still runs the prompt; readable skills mentioned alongside it are injected
+  normally and `skill_activation` telemetry counts only blocks actually built.
+  Discovery remains fixed at startup, so a stale catalog entry keeps matching
+  until restart. Unknown skills are a different failure class: a standalone
+  `$typo` mention still prints `unknown skill` and rejects the prompt. Discovery
+  scans existing `.agents/skills` roots from the Git project root through
+  `cwd`, outer to inner, then the user root; project scope beats user scope and
+  the nearest project root wins equal-scope name collisions.
 - Implicit skill selection is plain progressive disclosure: the model sees the
   compact catalog and reads `SKILL.md` with the ordinary `read` tool. Complete
   and partial reads remain ordinary persisted, line-numbered tool results,
