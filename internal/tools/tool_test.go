@@ -901,27 +901,32 @@ func TestDispatchFormatsJSONUnmarshalTypeErrors(t *testing.T) {
 	tests := []struct {
 		name  string
 		input string
-		want  string
+		want  []string
 	}{
 		{
 			name:  "array field received string",
 			input: `{"args":"-n TODO ."}`,
-			want:  `invalid arguments: invalid value for "args": expected an array of strings; got string`,
+			want:  []string{`invalid arguments: invalid value for "args": expected an array of strings; got string`},
 		},
 		{
 			name:  "integer field received string",
 			input: `{"timeout_seconds":"5"}`,
-			want:  `invalid arguments: invalid value for "timeout_seconds": expected an integer; got string`,
+			want:  []string{`invalid arguments: invalid value for "timeout_seconds": expected an integer; got string`},
 		},
 		{
 			name:  "array element has wrong type",
 			input: `{"args":["-n",7]}`,
-			want:  `invalid arguments: invalid value for "args.1": expected a string; got number`,
+			// Go 1.27 added array indexes to UnmarshalTypeError.Field. Keep the
+			// test exact for both the module's Go 1.26 baseline and newer Go.
+			want: []string{
+				`invalid arguments: invalid value for "args": expected a string; got number`,
+				`invalid arguments: invalid value for "args.1": expected a string; got number`,
+			},
 		},
 		{
 			name:  "object field received array",
 			input: `{"options":[]}`,
-			want:  `invalid arguments: invalid value for "options": expected an object; got array`,
+			want:  []string{`invalid arguments: invalid value for "options": expected an object; got array`},
 		},
 	}
 	for _, tt := range tests {
@@ -930,7 +935,7 @@ func TestDispatchFormatsJSONUnmarshalTypeErrors(t *testing.T) {
 			if !res.IsError {
 				t.Fatalf("Dispatch result = %+v, want error", res)
 			}
-			if res.Text != tt.want {
+			if !slices.Contains(tt.want, res.Text) {
 				t.Fatalf("Text = %q, want %q", res.Text, tt.want)
 			}
 			if strings.Contains(res.Text, "Go struct field") || strings.Contains(res.Text, "[]string") {
