@@ -565,6 +565,34 @@ func (m *Manager) handleDiagnostics(ctx context.Context, args toolArgs) (*mcp.Ca
 	return textResult(out), nil
 }
 
+// DiagnosticsAfterWrite synchronizes path from disk and waits for the language
+// server's next diagnostics publication. applicable is false when no configured,
+// available server can handle the path; callers may then leave a successful file
+// mutation result unchanged. This is the non-MCP integration point used by the
+// Harness write/edit wrappers.
+func (m *Manager) DiagnosticsAfterWrite(ctx context.Context, path string, timeout time.Duration) (text string, applicable bool, err error) {
+	ft, errRes := m.targetFor(ctx, path)
+	if errRes != nil {
+		return "", false, nil
+	}
+	uri, _, err := m.prepareDoc(ft, uriForPath(ft.abs))
+	if err != nil {
+		return "", true, err
+	}
+	if timeout <= 0 {
+		timeout = defaultDiagnosticsTimeout
+	}
+	diagnostics, complete, err := ft.cl.WaitDiagnostics(ctx, uri, timeout)
+	if err != nil {
+		return "", true, err
+	}
+	out := formatDiagnostics(diagnostics, ft.abs)
+	if !complete {
+		out += "\n(diagnostics may be incomplete; the server did not finish analysis before the timeout)"
+	}
+	return out, true, nil
+}
+
 func (m *Manager) handleCallHierarchy(ctx context.Context, args toolArgs) (*mcp.CallToolResult, error) {
 	direction := strings.TrimSpace(args.Direction)
 	if direction != "incoming" && direction != "outgoing" {

@@ -321,6 +321,7 @@ var safeNoticePatterns = []*regexp.Regexp{
 var safeFixedNotices = map[string]bool{
 	agent.NoticeCancelled:                      true,
 	agent.NoticeStoppedMaxTokens:               true,
+	agent.NoticeContinuingMaxTokens:            true,
 	agent.NoticeStoppedStopSequence:            true,
 	agent.NoticeContextOverflowCompacting:      true,
 	agent.NoticeResponsesStateDisabledRejected: true,

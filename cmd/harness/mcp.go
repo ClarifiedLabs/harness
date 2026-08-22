@@ -26,6 +26,11 @@ import (
 // MCP startup timing budget.
 var mcpRegisterTimeout = 5 * time.Second
 
+// optionalToolSchemaBudget keeps ordinary MCP/LSP catalogs native while moving
+// unusually large optional surfaces behind tool_catalog. The catalog is a
+// prompt optimization, not a dispatch or permission boundary.
+const optionalToolSchemaBudget = 32 << 10
+
 // setupMCP connects to the already-running HTTP proxy, registers the
 // discovered tools into catalog, and returns the live conn plus its initial
 // registration summary and a cleanup func. It NEVER fails harness startup: if
@@ -177,19 +182,39 @@ func (a *asyncMCPRegistration) take() (asyncMCPResult, bool) {
 }
 
 func subsetForAgentTools(catalog *tools.Registry, names []string, pending *asyncMCPRegistration) (*tools.Registry, error) {
+	// tool_catalog is synthesized per-agent after the subset is built and is not
+	// present in the process-wide catalog. Ignore it when a live runtime tool list
+	// is reused to launch a same-agent delegate.
+	names = slices.DeleteFunc(slices.Clone(names), func(name string) bool {
+		return name == tools.ToolCatalogName
+	})
+	var sub *tools.Registry
+	var err error
 	if pending == nil || pending.applied.Load() {
-		return catalog.Subset(names)
-	}
-	filtered := make([]string, 0, len(names))
-	for _, name := range names {
-		if strings.HasPrefix(name, "mcp__") {
-			if _, ok := catalog.Lookup(name); !ok {
-				continue
+		sub, err = catalog.Subset(names)
+	} else {
+		filtered := make([]string, 0, len(names))
+		for _, name := range names {
+			if strings.HasPrefix(name, "mcp__") {
+				if _, ok := catalog.Lookup(name); !ok {
+					continue
+				}
 			}
+			filtered = append(filtered, name)
 		}
-		filtered = append(filtered, name)
+		sub, err = catalog.Subset(filtered)
 	}
-	return catalog.Subset(filtered)
+	if err != nil {
+		return nil, err
+	}
+	var optional []string
+	for _, name := range sub.Names() {
+		if strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "lsp_") {
+			optional = append(optional, name)
+		}
+	}
+	tools.EnableLazyToolSpecs(sub, optional, optionalToolSchemaBudget)
+	return sub, nil
 }
 
 // augmentAgentsWithMCP appends discovered MCP tool names according to each

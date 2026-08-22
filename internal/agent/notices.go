@@ -10,6 +10,9 @@ const (
 	NoticeCancelled = "[cancelled]"
 	// NoticeStoppedMaxTokens reports a provider stop for reaching the output token limit.
 	NoticeStoppedMaxTokens = "[stopped: model reached max tokens]"
+	// NoticeContinuingMaxTokens reports the single automatic continuation allowed
+	// after a provider truncates an ordinary assistant response.
+	NoticeContinuingMaxTokens = "[model reached max tokens: requesting one continuation]"
 	// NoticeStoppedStopSequence reports a provider stop on a stop sequence.
 	NoticeStoppedStopSequence = "[stopped: stop sequence matched]"
 	// NoticeContextOverflowCompacting reports an input-overflow retry after compaction.

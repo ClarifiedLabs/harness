@@ -65,6 +65,49 @@ func TestWriteFileOverwrite(t *testing.T) {
 	}
 }
 
+func TestWriteFileExpectedSHA256(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "old\n")
+
+	if _, err := runWriteFile(t, map[string]any{
+		"path": p, "content": "new\n", "expected_sha256": sha256Hex([]byte("old\n")),
+	}); err != nil {
+		t.Fatalf("guarded overwrite: %v", err)
+	}
+	assertFileContent(t, p, "new\n")
+
+	_, err := runWriteFile(t, map[string]any{
+		"path": p, "content": "clobbered\n", "expected_sha256": sha256Hex([]byte("old\n")),
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed since it was read") {
+		t.Fatalf("stale write error = %v", err)
+	}
+	assertFileContent(t, p, "new\n")
+}
+
+func TestWriteFileExpectedSHA256RejectsMissingPath(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "missing.txt")
+	_, err := runWriteFile(t, map[string]any{
+		"path": p, "content": "new\n", "expected_sha256": sha256Hex([]byte("old\n")),
+	})
+	if err == nil || !strings.Contains(err.Error(), "disappeared since it was read") {
+		t.Fatalf("missing guarded write error = %v", err)
+	}
+	if _, statErr := os.Stat(p); !os.IsNotExist(statErr) {
+		t.Fatalf("guarded write created missing path: %v", statErr)
+	}
+}
+
+func TestFileSHA256ArgumentsRejectMalformedDigest(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	mustWrite(t, p, "old\n")
+	if _, err := runWriteFile(t, map[string]any{"path": p, "content": "new", "expected_sha256": "not-a-digest"}); err == nil || !strings.Contains(err.Error(), "64-character") {
+		t.Fatalf("malformed digest error = %v", err)
+	}
+}
+
 func TestWriteFileEmptyContentAllowed(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "empty.txt")

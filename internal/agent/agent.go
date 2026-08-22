@@ -1726,6 +1726,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	appendBoundary := a.measuredBoundary // transcript length measured by lastInput (drives the r44 trigger)
 	var steerContext []string
 	forcePromptWorkSynthesis := false
+	outputContinuations := 0
 	var terminationReason TerminationReason
 	var closureTrigger ClosureTrigger
 	var closureTurn int
@@ -2071,6 +2072,25 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				forcePromptWorkSynthesis = true
 				continue
 			}
+			// A normal response may be cut off by the provider's output ceiling. Keep
+			// the partial assistant message already appended above and request exactly
+			// one continuation, provided the prompt's explicit turn/token/cost budgets
+			// still allow another paid request. The loop's ordinary proactive trigger
+			// compacts first when this extra request would approach the context window.
+			if res.stopReason == llm.StopMaxTokens && outputContinuations == 0 &&
+				(unlimited || turns < a.maxTurns) &&
+				(a.maxPromptTokens <= 0 || totalTokens(total) < a.maxPromptTokens) &&
+				(a.maxPromptCostUSD <= 0 || !total.CostKnown || total.CostUSD < a.maxPromptCostUSD) {
+				outputContinuations++
+				sink.Notice(NoticeContinuingMaxTokens)
+				message := a.textMessage(llm.RoleUser, "[The previous response was truncated by the output-token limit. Continue from the exact point it stopped without repeating completed content.]")
+				message.Origin = llm.MessageOriginInternal
+				a.transcript = append(a.transcript, message)
+				if err := a.validateTranscript("after max-token continuation"); err != nil {
+					return err
+				}
+				continue
+			}
 			if notice := stopReasonNotice(res.stopReason); notice != "" {
 				sink.Notice(notice)
 			}
@@ -2122,6 +2142,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			Content:             results,
 			ParallelToolBatches: parallelBatches,
 		})
+		a.refreshToolSpecs()
 		if err := a.validateTranscript("after tool results"); err != nil {
 			return err
 		}
@@ -2319,6 +2340,19 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	}
 
 	return nil
+}
+
+func (a *Agent) refreshToolSpecs() {
+	next := a.tools.Specs()
+	if slices.EqualFunc(a.toolSpecs, next, func(left, right llm.ToolSchema) bool {
+		return left.Name == right.Name && left.Description == right.Description && string(left.Parameters) == string(right.Parameters)
+	}) {
+		return
+	}
+	a.toolSpecs = next
+	a.compactionRuntimeVersion++
+	a.retentionEpochArmed = true
+	a.resetResponseState()
 }
 
 func (a *Agent) applyContextEpoch(sink EventSink) error {
@@ -3170,6 +3204,7 @@ func resultBlock(r llm.ToolResult, toolName string) llm.ContentBlock {
 		ResultForID:   r.ForID,
 		ResultText:    r.Text,
 		ResultError:   r.IsError,
+		ResultUseless: r.Useless,
 		ResultContent: append([]llm.ContentBlock(nil), r.Content...),
 	}
 }

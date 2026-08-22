@@ -377,6 +377,9 @@ The agent loop has several controls against runaway work:
   cache, output, and reasoning tokens reach the configured budget.
 - `-max-prompt-cost` applies the equivalent cumulative USD ceiling when provider
   usage reports a known cost. Unpriced models cannot enforce this limit.
+- When a normal model response reaches its output-token ceiling, Harness requests
+  one continuation from the exact stopping point if the turn, token, and cost
+  budgets permit it. A second ceiling stop ends the prompt with a visible notice.
 - `-tool-timeout` is a per-tool-call backstop; `shell`'s own
   `timeout_seconds` remains authoritative.
 - `-goal-max-continuations` caps autonomous `/goal` continuation prompts before
@@ -725,6 +728,9 @@ environment variables, JSON paths, types, and defaults. The concise
   auto-exposure, and `lsp.tools` registers only the listed subset of LSP tools
   (empty = core set, `["all"]` = full surface). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
+  If one agent's included MCP/LSP declarations exceed 32 KiB, Harness exposes
+  them lazily through `tool_catalog`; activate selected names there to publish
+  their direct schemas on the next model turn.
 - Serena can be launched independently with `lsp.serena.enable=true` or
   `HARNESS_LSP_SERENA_ENABLE=true`; this does not imply `lsp.enable=true`.
 - A single turn's output is capped at the configured

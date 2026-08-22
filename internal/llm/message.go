@@ -145,9 +145,12 @@ type ContentBlock struct {
 
 	// BlockToolResult (we answer a tool call). ResultContent is shallow,
 	// supplementary model-visible content; it is currently restricted to images.
-	ResultForID   string         `json:"result_for_id,omitempty"` // matches a ToolUseID
-	ResultText    string         `json:"result_text,omitempty"`
-	ResultError   bool           `json:"result_error,omitempty"`
+	ResultForID string `json:"result_for_id,omitempty"` // matches a ToolUseID
+	ResultText  string `json:"result_text,omitempty"`
+	ResultError bool   `json:"result_error,omitempty"`
+	// ResultUseless is harness-only compaction metadata. Provider adapters ignore
+	// it while the live result stays visible; summary preparation may elide it.
+	ResultUseless bool           `json:"result_useless,omitempty"`
 	ResultContent []ContentBlock `json:"result_content,omitempty"`
 
 	// BlockThinking (assistant extended-thinking; replayed verbatim on the same
@@ -196,6 +199,7 @@ const (
 	ToolErrorPathNotFound         ToolErrorKind = "path_not_found"
 	ToolErrorEditOldTextNotFound  ToolErrorKind = "edit_oldtext_not_found"
 	ToolErrorEditOldTextAmbiguous ToolErrorKind = "edit_oldtext_ambiguous"
+	ToolErrorStaleFile            ToolErrorKind = "stale_file"
 	ToolErrorHookBlocked          ToolErrorKind = "hook_blocked"
 	ToolErrorBlocked              ToolErrorKind = "blocked"
 	ToolErrorUnsupportedModality  ToolErrorKind = "unsupported_modality"
@@ -228,6 +232,7 @@ type ToolResult struct {
 	Text          string
 	Content       []ContentBlock
 	IsError       bool
+	Useless       bool
 	Truncated     bool
 	OriginalText  string
 	OriginalBytes int

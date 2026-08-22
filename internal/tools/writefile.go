@@ -7,13 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"harness/internal/llm"
 )
 
 const writeFileSchema = `{
   "type": "object",
-  "properties": {
-    "path": {"type": "string", "description": "Destination file."},
-    "content": {"type": "string", "description": "Complete content; empty allowed."}
+	"properties": {
+		"path": {"type": "string", "description": "Destination file."},
+		"content": {"type": "string", "description": "Complete content; empty allowed."},
+		"expected_sha256": {"type": "string", "description": "Optional digest from read; reject a stale overwrite."}
   },
   "required": ["path", "content"]
 }`
@@ -47,14 +50,19 @@ func (writeFile) MutatedPaths(input json.RawMessage) ([]string, error) {
 
 func (writeFile) Run(ctx context.Context, input json.RawMessage) (string, error) {
 	var args struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path           string `json:"path"`
+		Content        string `json:"content"`
+		ExpectedSHA256 string `json:"expected_sha256"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
 	}
 	if args.Path == "" {
 		return "", badArgs("path is required")
+	}
+	expected, err := normalizeSHA256(args.ExpectedSHA256, "expected_sha256")
+	if err != nil {
+		return "", err
 	}
 	if strings.HasSuffix(args.Path, "/") || strings.HasSuffix(args.Path, string(os.PathSeparator)) {
 		return "", fmt.Errorf("%s has a trailing slash; provide a file path, not a directory", args.Path)
@@ -65,6 +73,19 @@ func (writeFile) Run(ctx context.Context, input json.RawMessage) (string, error)
 			return "", fmt.Errorf("%s is a directory", args.Path)
 		}
 		overwrote = true
+		if expected != "" {
+			current, err := os.ReadFile(args.Path)
+			if err != nil {
+				return "", err
+			}
+			if err := checkExpectedSHA256(args.Path, expected, current); err != nil {
+				return "", err
+			}
+		}
+	} else if !os.IsNotExist(err) {
+		return "", err
+	} else if expected != "" {
+		return "", WithKind(fmt.Errorf("%s disappeared since it was read; expected sha256 %s; re-read the path and retry", args.Path, expected), llm.ToolErrorStaleFile)
 	}
 
 	if parent := filepath.Dir(args.Path); parent != "" {
@@ -88,20 +109,23 @@ func (writeFile) Run(ctx context.Context, input json.RawMessage) (string, error)
 // indexes the mutation; the sentinel marks the input as already trimmed.
 func (writeFile) RetentionInputReceipt(input json.RawMessage) (json.RawMessage, bool) {
 	var args struct {
-		Path    string `json:"path"`
-		Content string `json:"content"`
+		Path           string `json:"path"`
+		Content        string `json:"content"`
+		ExpectedSHA256 string `json:"expected_sha256"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil || args.Path == "" {
 		return nil, false
 	}
 	receipt, err := json.Marshal(struct {
-		Path       string `json:"path"`
-		Superseded string `json:"_superseded"`
-		Bytes      int    `json:"original_bytes"`
+		Path           string `json:"path"`
+		ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+		Superseded     string `json:"_superseded"`
+		Bytes          int    `json:"original_bytes"`
 	}{
-		Path:       args.Path,
-		Superseded: "content omitted; later successful write to this path exists; read the file if needed",
-		Bytes:      len(args.Content),
+		Path:           args.Path,
+		ExpectedSHA256: args.ExpectedSHA256,
+		Superseded:     "content omitted; later successful write to this path exists; read the file if needed",
+		Bytes:          len(args.Content),
 	})
 	if err != nil {
 		return nil, false

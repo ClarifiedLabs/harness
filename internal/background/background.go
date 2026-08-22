@@ -1138,7 +1138,8 @@ func (t *JobsTool) RunResult(ctx context.Context, input json.RawMessage) (tools.
 		if len(args.IDs) > 0 || strings.TrimSpace(args.Until) != "" {
 			return tools.RunResult{}, fmt.Errorf("ids and until are only valid for wait")
 		}
-		return tools.RunResult{Text: formatList(t.manager.List())}, nil
+		jobs := t.manager.List()
+		return tools.RunResult{Text: formatList(jobs), Useless: len(jobs) == 0}, nil
 	case "get":
 		if len(args.IDs) > 0 || strings.TrimSpace(args.Until) != "" {
 			return tools.RunResult{}, fmt.Errorf("ids and until are only valid for wait")
@@ -1255,11 +1256,12 @@ func formatWaitResult(result WaitResult, timeout time.Duration) tools.RunResult 
 	text := formatWait(result, timeout)
 	originalResult, changed := waitResultWithOriginalText(result)
 	if !changed {
-		return tools.RunResult{Text: text}
+		return tools.RunResult{Text: text, Useless: result.TimedOut}
 	}
 	return tools.RunResult{
 		Text:         text,
 		OriginalText: formatWait(originalResult, timeout),
+		Useless:      result.TimedOut,
 	}
 }
 

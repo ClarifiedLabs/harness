@@ -58,6 +58,11 @@ removes the LSP runtime hint. It does not rewrite the config file. Servers remai
 lazy after enabling, so `loaded languages: none` is expected until an LSP tool is
 used successfully.
 
+When the selected agent's combined optional MCP/LSP declarations exceed 32 KiB,
+Harness initially exposes them through `tool_catalog` instead of sending every
+schema. Use its `list` or `describe` actions, then `activate` the needed `lsp_*`
+names; their direct schemas appear on the next model turn.
+
 ### Prewarming
 
 When `lsp.prewarm` is enabled (the default; disable with `lsp.prewarm: false` or
@@ -147,6 +152,13 @@ language-server commands and rejects create/delete/rename file operations before
 writing. An optional `timeout_ms` waits for fresh pushed diagnostics before asking
 for actions; otherwise the latest already-published diagnostics are used. The same
 file-operation rule applies to rename; format operations are single-file text edits.
+
+Native LSP also augments successful built-in `edit` and `write` calls. Harness
+synchronizes up to eight unique supported mutation paths, waits concurrently up
+to three seconds for fresh pushed diagnostics, and appends them to the mutation
+result in path order. Unsupported paths and unavailable servers are skipped.
+Diagnostics failures are supplemental and do not fail or roll back the mutation;
+failed mutations do not run this follow-up.
 
 A call on a file type with no configured server, a missing server binary, or a
 server that does not implement that operation returns a normal tool error. The

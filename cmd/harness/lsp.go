@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"harness/internal/agentdef"
@@ -26,6 +28,137 @@ type lspRuntime struct {
 	prewarm bool
 	logger  *slog.Logger
 }
+
+const maxPostMutationDiagnosticFiles = 8
+
+// PostMutationDiagnostics returns bounded, path-ordered diagnostics for files
+// successfully changed through Harness's built-in write/edit tools. Unsupported
+// paths and unavailable servers are silent so LSP remains optional.
+func (r *lspRuntime) PostMutationDiagnostics(ctx context.Context, paths []string) string {
+	if r == nil || !r.enabled || len(paths) == 0 {
+		return ""
+	}
+	unique := make([]string, 0, min(len(paths), maxPostMutationDiagnosticFiles))
+	seen := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" || seen[path] {
+			continue
+		}
+		seen[path] = true
+		unique = append(unique, path)
+		if len(unique) == maxPostMutationDiagnosticFiles {
+			break
+		}
+	}
+	results := make([]string, len(unique))
+	var wg sync.WaitGroup
+	for i, path := range unique {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			text, applicable, err := r.mgr.DiagnosticsAfterWrite(ctx, path, 3*time.Second)
+			if !applicable {
+				return
+			}
+			if err != nil {
+				results[i] = fmt.Sprintf("%s: diagnostics unavailable: %v", path, err)
+				return
+			}
+			results[i] = text
+		}()
+	}
+	wg.Wait()
+	results = slices.DeleteFunc(results, func(value string) bool { return value == "" })
+	return strings.Join(results, "\n")
+}
+
+type mutationDiagnosticsTool struct {
+	base     tools.Tool
+	diagnose func(context.Context, []string) string
+}
+
+func installMutationDiagnostics(catalog *tools.Registry, runtime *lspRuntime) {
+	if catalog == nil || runtime == nil {
+		return
+	}
+	for _, name := range []string{"edit", "write"} {
+		base, ok := catalog.Lookup(name)
+		if !ok {
+			continue
+		}
+		if _, ok := base.(tools.FileMutationReporter); !ok {
+			continue
+		}
+		catalog.Register(&mutationDiagnosticsTool{base: base, diagnose: runtime.PostMutationDiagnostics})
+	}
+}
+
+func (t *mutationDiagnosticsTool) Name() string                        { return t.base.Name() }
+func (t *mutationDiagnosticsTool) Description() string                 { return t.base.Description() }
+func (t *mutationDiagnosticsTool) Schema() json.RawMessage             { return t.base.Schema() }
+func (t *mutationDiagnosticsTool) ReadOnly(input json.RawMessage) bool { return t.base.ReadOnly(input) }
+
+func (t *mutationDiagnosticsTool) PreserveSchemaDescriptions() bool {
+	preserver, ok := t.base.(tools.SchemaDescriptionPreserver)
+	return ok && preserver.PreserveSchemaDescriptions()
+}
+
+func (t *mutationDiagnosticsTool) MutatedPaths(input json.RawMessage) ([]string, error) {
+	return t.base.(tools.FileMutationReporter).MutatedPaths(input)
+}
+
+func (t *mutationDiagnosticsTool) RetentionInputReceipt(input json.RawMessage) (json.RawMessage, bool) {
+	trimmer, ok := t.base.(tools.InputTrimmer)
+	if !ok {
+		return nil, false
+	}
+	return trimmer.RetentionInputReceipt(input)
+}
+
+func (t *mutationDiagnosticsTool) RequiresSequential(input json.RawMessage) bool {
+	sequential, ok := t.base.(tools.SequentialTool)
+	return ok && sequential.RequiresSequential(input)
+}
+
+func (t *mutationDiagnosticsTool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	result, err := t.RunResult(ctx, input)
+	return result.Text, err
+}
+
+func (t *mutationDiagnosticsTool) RunResult(ctx context.Context, input json.RawMessage) (tools.RunResult, error) {
+	var result tools.RunResult
+	var err error
+	if resultTool, ok := t.base.(tools.ResultTool); ok {
+		result, err = resultTool.RunResult(ctx, input)
+	} else {
+		result.Text, err = t.base.Run(ctx, input)
+	}
+	if err != nil || t.diagnose == nil {
+		return result, err
+	}
+	paths, pathErr := t.MutatedPaths(input)
+	if pathErr != nil {
+		return result, nil
+	}
+	diagnostics := strings.TrimSpace(t.diagnose(ctx, paths))
+	if diagnostics == "" {
+		return result, nil
+	}
+	suffix := "\n\nLSP diagnostics after mutation:\n" + diagnostics
+	result.Text += suffix
+	if result.OriginalText != "" {
+		result.OriginalText += suffix
+	}
+	return result, nil
+}
+
+var _ tools.Tool = (*mutationDiagnosticsTool)(nil)
+var _ tools.ResultTool = (*mutationDiagnosticsTool)(nil)
+var _ tools.FileMutationReporter = (*mutationDiagnosticsTool)(nil)
+var _ tools.InputTrimmer = (*mutationDiagnosticsTool)(nil)
+var _ tools.SequentialTool = (*mutationDiagnosticsTool)(nil)
+var _ tools.SchemaDescriptionPreserver = (*mutationDiagnosticsTool)(nil)
 
 // newLSPRuntime prepares the static tool surface without launching a language
 // server. Keeping the manager available while disabled makes /lsp enable a

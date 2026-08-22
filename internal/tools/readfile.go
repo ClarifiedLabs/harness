@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,10 +25,11 @@ const readDirectoryCap = 200
 
 const readFileSchema = `{
   "type": "object",
-  "properties": {
-    "path": {"type": "string", "description": "File or directory."},
-    "offset": {"type": "integer", "description": "First line; 1-based."},
-    "limit": {"type": "integer", "description": "Maximum lines; default 500."}
+	"properties": {
+		"path": {"type": "string", "description": "File or directory."},
+		"offset": {"type": "integer", "description": "First line; 1-based."},
+		"limit": {"type": "integer", "description": "Maximum lines; default 500."},
+		"include_sha256": {"type": "boolean", "description": "Prepend full-file SHA-256 for an edit/write precondition."}
   },
   "required": ["path"]
 }`
@@ -37,9 +39,10 @@ type readFile struct {
 }
 
 type readFileArgs struct {
-	Path   string `json:"path"`
-	Offset int    `json:"offset"`
-	Limit  int    `json:"limit"`
+	Path          string `json:"path"`
+	Offset        int    `json:"offset"`
+	Limit         int    `json:"limit"`
+	IncludeSHA256 bool   `json:"include_sha256"`
 
 	// Accepted aliases deliberately stay out of the model-facing schema.
 	FilePath      string `json:"file_path"`
@@ -114,7 +117,49 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 	if err != nil {
 		return "", notExistingPathError(args.Path, err)
 	}
+	if args.IncludeSHA256 {
+		digest, regular, err := fileSHA256(ctx, args.Path)
+		if err != nil {
+			return "", err
+		}
+		if regular {
+			out = fmt.Sprintf("[sha256:%s]\n%s", digest, out)
+		}
+	}
 	return out, nil
+}
+
+func fileSHA256(ctx context.Context, path string) (digest string, regular bool, err error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false, err
+	}
+	if !info.Mode().IsRegular() {
+		return "", false, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	buf := make([]byte, 32*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
+		}
+		n, readErr := f.Read(buf)
+		if n > 0 {
+			_, _ = h.Write(buf[:n])
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return "", false, readErr
+		}
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), true, nil
 }
 
 // firstNonEmpty returns the first argument whose value is non-empty after

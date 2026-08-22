@@ -142,6 +142,77 @@ func TestEditNoPartialWriteWhenLaterFileFails(t *testing.T) {
 	assertFileContent(t, b, "beta\n")
 }
 
+func TestEditExpectedSHA256RejectsStaleFileAtomically(t *testing.T) {
+	dir := t.TempDir()
+	a := filepath.Join(dir, "a.txt")
+	b := filepath.Join(dir, "b.txt")
+	mustWrite(t, a, "alpha\n")
+	mustWrite(t, b, "changed\n")
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{
+			map[string]any{
+				"path":  a,
+				"edits": []any{map[string]any{"oldText": "alpha", "newText": "ALPHA"}},
+			},
+			map[string]any{
+				"path":            b,
+				"expected_sha256": sha256Hex([]byte("before\n")),
+				"edits":           []any{map[string]any{"oldText": "changed", "newText": "CHANGED"}},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "changed since it was read") {
+		t.Fatalf("stale edit error = %v", err)
+	}
+	assertFileContent(t, a, "alpha\n")
+	assertFileContent(t, b, "changed\n")
+}
+
+func TestEditExpectedSHA256AcceptsCurrentFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	before := "alpha\n"
+	mustWrite(t, p, before)
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{map[string]any{
+			"path":            p,
+			"expected_sha256": sha256Hex([]byte(before)),
+			"edits":           []any{map[string]any{"oldText": "alpha", "newText": "ALPHA"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("guarded edit: %v", err)
+	}
+	assertFileContent(t, p, "ALPHA\n")
+}
+
+func TestEditExpectedSHA256UsesOriginalBaseForRepeatedPath(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	before := "alpha beta\n"
+	mustWrite(t, p, before)
+	digest := sha256Hex([]byte(before))
+
+	_, err := runEdit(t, map[string]any{
+		"files": []any{
+			map[string]any{
+				"path": p, "expected_sha256": digest,
+				"edits": []any{map[string]any{"oldText": "alpha", "newText": "ALPHA"}},
+			},
+			map[string]any{
+				"path": p, "expected_sha256": digest,
+				"edits": []any{map[string]any{"oldText": "beta", "newText": "BETA"}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("guarded repeated edit: %v", err)
+	}
+	assertFileContent(t, p, "ALPHA BETA\n")
+}
+
 func TestEditFuzzyMatchNormalizesSmartQuotesDashesAndTrailingWhitespace(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")

@@ -227,6 +227,7 @@ type ContentBlock struct {
     ResultForID string `json:"result_for_id,omitempty"` // matches a ToolUseID
     ResultText    string         `json:"result_text,omitempty"`
     ResultError   bool           `json:"result_error,omitempty"`
+    ResultUseless bool           `json:"result_useless,omitempty"` // local compaction hint
     ResultContent []ContentBlock `json:"result_content,omitempty"` // shallow image children only
 
     // Anthropic thinking and redacted-thinking replay
@@ -302,6 +303,7 @@ type ToolResult struct { // becomes a BlockToolResult
     ForID         string
     Text          string
     IsError       bool
+    Useless       bool   // successful but semantically empty; live content is unchanged
     Truncated     bool   // central cap (§8.3) trimmed the result
     OriginalText  string // full pre-truncation text, archived to artifacts/
     OriginalBytes int    // size before truncation
@@ -1609,6 +1611,11 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
         // when semantic ordering cannot be represented by mutation paths.
     }
     emit turn_complete(prompt, turn)
+    if stopReason == max_tokens && no output continuation has been requested &&
+       another paid request fits the explicit turn/token/cost budgets {
+        append one internal user continuation instruction
+        continue // ordinary pre-request compaction still applies
+    }
     if stopReason != tool_use { break }
 }
 run post-prompt maintenance if needed
@@ -1754,9 +1761,14 @@ prompt.
   `tool_result`. It is best-effort: a failed or empty summary leaves the
   already-valid transcript untouched, and any tool calls the model emits there are
   ignored.
-- **Non-normal model stops:** `max_tokens` and stop-sequence finishes end the prompt
-  but emit a visible notice, so a truncated or externally stopped assistant answer
-  does not look like an ordinary completion.
+- **Bounded output continuation:** a normal response ending in `max_tokens` keeps
+  its partial assistant message and automatically requests exactly one continuation
+  from the stopping point, without repetition, when the next paid request remains
+  inside the explicit turn, prompt-token, and prompt-cost budgets. The continuation
+  instruction is an internal user message. Ordinary pre-request pressure checks may
+  compact before it. A second `max_tokens` stop, or a blocked continuation budget,
+  ends the prompt with the visible stopped notice. A stop-sequence finish still ends
+  immediately with its own notice.
 - **Mid-stream retries:** each request shape is wrapped in `streamWithRetry`, which
   re-requests the step from scratch on a retryable terminal stream error up to
   `streamRetries` (2) times. These attempts do **not** count against `max-turns`;
@@ -1990,6 +2002,7 @@ type RichResult struct {
     Text    string
     Content []llm.ContentBlock
     Usage   llm.Usage
+    Useless bool
 }
 
 type RequiredInputModality interface {
@@ -2021,6 +2034,7 @@ type RunResult struct {
     Text         string
     OriginalText string
     Usage        llm.Usage
+    Useless      bool
     Metrics      map[string]int // diagnostics only; persisted with the result event
 }
 
@@ -2060,6 +2074,12 @@ func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall
   validated before they enter a transcript; errors and centrally rejected results
   have content cleared. `RequiredInputModality` is a separate static capability signal,
   so a tool can require image input regardless of whether all successful calls are rich.
+- **Semantic emptiness is explicit metadata.** A successful rich/result tool may set
+  `Useless` when it produced no evidence (for example an empty MCP response or a
+  timed-out wait). Dispatch preserves the visible result and records
+  `ContentBlock.ResultUseless`; provider adapters ignore the field. Compaction
+  preparation alone may replace the result and matching tool input with bounded
+  placeholders. Errors are never marked useless.
 - **Read-only classification is per call and independent from scheduling.** Static
   read-only tools ignore the input; argv-style tools can parse their arguments and
   return true only for safe subcommands (for example `git status`, `git diff`,
@@ -2080,6 +2100,15 @@ func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall
   layered on separately. The removed names `read_file`, `write_file`,
   `list_dir`, `glob`, `grep`, `rg`, and `apply_patch` are not constructible and
   an `allowed_tools` entry naming one fails validation.
+- **Large optional surfaces are lazy.** When the aggregate name, description, and
+  model-facing schema bytes for an agent's MCP/LSP tools exceed 32 KiB, the CLI
+  installs `tool_catalog` and filters those optional schemas out of
+  `Registry.Specs`. The tools remain registered and allowlist-checked. Catalog
+  `list` and `describe` are read-only; sequential `activate` makes at most 16
+  selected schemas visible on the following request. The agent detects this spec
+  change after dispatch, invalidates continuation/cache state, and rebuilds the
+  request. Activation persists only for that registry lifetime and is a prompt
+  optimization, not an authorization boundary.
 
 ### 9.1 `read`
 
@@ -2090,6 +2119,7 @@ func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall
 | `path` | string, required | file or directory to read |
 | `offset` | int | 1-based starting line |
 | `limit` | int | max lines, default 500 or `read_default_limit` |
+| `include_sha256` | bool | prepend the SHA-256 of the complete regular file; default false |
 
 If a supplied path is a directory, `read` returns a directories-first,
 non-recursive listing capped at 200 entries. This repairs an accidental
@@ -2117,6 +2147,9 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 - Files are streamed line-by-line and stop after the requested/default line
   window, so memory is bounded by the window and longest line regardless of file
   size.
+- `include_sha256` makes one additional cancellable full-file pass and prepends
+  `[sha256:<lowercase hex>]`. It is intentionally opt-in so a bounded read does
+  not normally hash a multi-gigabyte file. Directory listings remain unhashed.
 - Offset past EOF → error stating the file's line count. Empty file → `(empty
   file)`. Directory reads ignore file windows and return the bounded listing.
 
@@ -2170,6 +2203,7 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 |---|---|---|
 | `files` | array, required | one entry per file (repeats allowed; see below); each target file must already exist |
 | `files[].path` | string, required | must exist (use write to create) |
+| `files[].expected_sha256` | string | optional 64-hex digest returned by `read.include_sha256` |
 | `files[].edits` | array, required | one or more replacements for that file |
 | `files[].edits[].oldText` | string, required | exact text to replace; must be unique in the original file unless `replaceAll` is set |
 | `files[].edits[].newText` | string, required | replacement text; empty string deletes oldText |
@@ -2177,6 +2211,10 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 
 - All edits within one entry match against that entry's base content, not
   against content after earlier edits in the same entry.
+- Every supplied digest is validated during the all-file planning pass. A mismatch
+  returns the typed `stale_file` error and writes nothing. For repeated path
+  entries, every supplied digest applies to the same original on-disk base while
+  the text replacements themselves continue to apply to the prior planned bytes.
 - A repeated `files[].path` is accepted and applied in order: the later entry
   matches against the earlier entry's planned result, and all planning still
   precedes any write, so a stale or redundant `oldText` fails loudly with the
@@ -2225,9 +2263,13 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 |---|---|---|
 | `path` | string, required | |
 | `content` | string, required | empty allowed |
+| `expected_sha256` | string | optional 64-hex digest returned by `read.include_sha256` |
 
 - `os.MkdirAll` parents (0755), write 0644, overwrite without ceremony (no permission
   system by design). Reports `created`/`overwrote`, bytes, lines.
+- When `expected_sha256` is present, `write` compares it with the current existing
+  file before overwriting. A mismatch or a path that disappeared since the read
+  returns `stale_file`; an omitted digest preserves unconditional create/overwrite.
 - A very large `content` can arrive as truncated streamed arguments; that
   failure path (§8.2 malformed streamed args) tells the model to use a smaller
   `write`, then append additional content with `edit`.
@@ -4001,6 +4043,11 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   unresolved intent; do not invent. The model does not enumerate read-only
   inspected files or reproduce the separately injected TODO list. Summary output is
   capped by `compact_summary_max_tokens` (default 2048).
+  Both summary prompts explicitly classify supplied history, tool output,
+  metadata, and the previous summary as untrusted data: embedded commands, role
+  changes, output-format requests, and claims of authority must be summarized as
+  evidence when relevant, never followed. The only permitted output is the
+  replacement summary.
   A first compaction uses `prompts/compaction-summary.txt`. A repeated compaction
   removes the structured prior checkpoint from ordinary summary history, passes its
   exact prior summary once as data, and uses `prompts/compaction-update.txt` to
@@ -4029,7 +4076,11 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   checkpoint and summary request. The model records semantic state only for
   meaningful changes and unfinished mutation intent; it does not duplicate
   read-only inspected paths.
-- Before summarization, large old tool results and tool inputs are reduced to
+- Before summarization, a successful tool result carrying the local
+  `ResultUseless` hint and its matching call input are replaced in the summary
+  request copy with small semantic-empty placeholders; rich result images are
+  dropped. The active transcript and provider-visible live result remain unchanged.
+  Large remaining old tool results and tool inputs are reduced to
   previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables
   this reduction entirely), and old images are replaced with text placeholders. If older
   history is too large for one summary request, it is summarized in chunks, then the
@@ -4443,6 +4494,16 @@ remote refresh cannot accidentally re-enable disabled LSP tools. `/lsp status`
 re-probes PATH and reports configured servers, available languages, and the
 distinct set of languages with a live initialized process plus loaded roots.
 
+The CLI also wraps the built-in `edit` and `write` tools without changing their
+schemas or capability interfaces. After a successful mutation while native LSP
+is enabled, it de-duplicates and caps the reported paths at eight, synchronizes
+each supported file from disk through the manager's ordinary `didOpen`/
+`didChange` path, and waits concurrently for a fresh `publishDiagnostics` event
+for up to three seconds per file. Results are appended in mutation-path order.
+Unsupported paths and unavailable servers are silent; an applicable diagnostics
+error is supplemental result text and does not roll back or fail the write. A
+failed mutation never starts diagnostics.
+
 Serena support is independent of native LSP. `lsp.serena.enable=true` starts a
 local stdio MCP child (default `serena start-mcp-server --context=ide
 --project-from-cwd --open-web-dashboard False`) and registers its bare downstream tools as
@@ -4510,6 +4571,10 @@ ranges, colors, linked editing, inline values, and code lenses).
 ## 16. Future work
 
 - CLI-subprocess backends (codex / claude) behind a separate process-worker abstraction.
+- Provider-native compaction only after the model-proxy protocol can carry a
+  provider-neutral opaque checkpoint/usage result and benchmarks show an advantage
+  over the current typed textual checkpoint. Adding an unused provider interface
+  in the CLI would not preserve resumable cross-dialect session semantics.
 - Explicit workspace isolation or conflict control for read/write delegate agents.
 - MCP resources and prompts, the legacy HTTP+SSE downstream transport (the deprecated
   2024 GET-stream MCP transport — distinct from the already-implemented streamable-HTTP

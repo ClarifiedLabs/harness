@@ -87,7 +87,7 @@ func (t *Tool) RunRich(ctx context.Context, input json.RawMessage) (tools.RichRe
 	if err != nil {
 		return tools.RichResult{}, err
 	}
-	return tools.RichResult{Text: text, Content: content}, nil
+	return tools.RichResult{Text: text, Content: content, Useless: strings.TrimSpace(text) == "" && len(content) == 0}, nil
 }
 
 func (t *Tool) call(ctx context.Context, input json.RawMessage) (*mcp.CallToolResult, error) {

@@ -671,6 +671,18 @@ func TestDispatchPreservesResultToolOriginal(t *testing.T) {
 	}
 }
 
+func TestDispatchPreservesSemanticUselessHint(t *testing.T) {
+	r := &Registry{}
+	r.Register(resultFakeTool{
+		fakeTool: newOK("empty", "ordinary path should not run"),
+		result:   RunResult{Text: "nothing found", Useless: true},
+	})
+	res := r.Dispatch(context.Background(), llm.ToolCall{ID: "u1", Name: "empty", Input: json.RawMessage(`{}`)})
+	if res.IsError || !res.Useless || res.Text != "nothing found" {
+		t.Fatalf("dispatch result = %+v", res)
+	}
+}
+
 // The file tools must be reachable from outside the package; consumers (e.g.
 // internal/agent) cannot register unexported tool types. Default() exposes a
 // registry with all available built-ins so they are not dead code.
@@ -904,7 +916,7 @@ func TestDispatchFormatsJSONUnmarshalTypeErrors(t *testing.T) {
 		{
 			name:  "array element has wrong type",
 			input: `{"args":["-n",7]}`,
-			want:  `invalid arguments: invalid value for "args": expected a string; got number`,
+			want:  `invalid arguments: invalid value for "args.1": expected a string; got number`,
 		},
 		{
 			name:  "object field received array",

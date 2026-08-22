@@ -1523,10 +1523,16 @@ func TestPrewarmFuncSkipsInvalidRichTranscript(t *testing.T) {
 }
 
 func TestMaxTokensStopEmitsNotice(t *testing.T) {
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("partial final")},
-		Stop:   llm.StopMaxTokens,
-	})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("partial final")},
+			Stop:   llm.StopMaxTokens,
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("continued but still truncated")},
+			Stop:   llm.StopMaxTokens,
+		},
+	)
 	a := newAgent(fp, tools.Default(), Options{})
 	sink := &recordSink{}
 
@@ -1536,6 +1542,36 @@ func TestMaxTokensStopEmitsNotice(t *testing.T) {
 	mustValid(t, a.Transcript())
 	if !slices.Contains(sink.notices, NoticeStoppedMaxTokens) {
 		t.Fatalf("max-token stop notice missing: %v", sink.notices)
+	}
+	if !slices.Contains(sink.notices, NoticeContinuingMaxTokens) {
+		t.Fatalf("max-token continuation notice missing: %v", sink.notices)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want one original plus one bounded continuation", len(fp.Requests))
+	}
+	transcript := a.Transcript()
+	if len(transcript) != 4 || transcript[2].Origin != llm.MessageOriginInternal ||
+		!strings.Contains(transcript[2].Content[0].Text, "Continue from the exact point") {
+		t.Fatalf("continuation transcript = %+v", transcript)
+	}
+}
+
+func TestMaxTokensContinuationHonorsTurnBudget(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("partial final")},
+		Stop:   llm.StopMaxTokens,
+	})
+	a := newAgent(fp, tools.Default(), Options{MaxTurns: 1})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want no continuation past turn budget", len(fp.Requests))
+	}
+	if slices.Contains(sink.notices, NoticeContinuingMaxTokens) || !slices.Contains(sink.notices, NoticeStoppedMaxTokens) {
+		t.Fatalf("notices = %v", sink.notices)
 	}
 }
 
@@ -2720,6 +2756,30 @@ func TestToolSpecsReturnsDeepCopy(t *testing.T) {
 	req := a.ContextRequest()
 	if req.Tools[0].Name != "read" || req.Tools[0].Parameters[0] == 'x' {
 		t.Fatalf("ContextRequest used mutated specs: %+v", req.Tools[0])
+	}
+}
+
+func TestAgentRefreshesSpecsAfterLazyToolActivation(t *testing.T) {
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "mcp__demo__search", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) {
+		return "search result", nil
+	}})
+	if !tools.EnableLazyToolSpecs(reg, []string{"mcp__demo__search"}, 1) {
+		t.Fatal("lazy catalog was not installed")
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "catalog", tools.ToolCatalogName, `{"action":"activate","names":["mcp__demo__search"]}`)}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, reg, Options{})
+	if err := a.RunPrompt(context.Background(), "find it", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := specNames(fp.Requests[0].Tools); !slices.Equal(got, []string{tools.ToolCatalogName}) {
+		t.Fatalf("first request tools = %v", got)
+	}
+	if got := specNames(fp.Requests[1].Tools); !slices.Equal(got, []string{"mcp__demo__search", tools.ToolCatalogName}) {
+		t.Fatalf("second request tools = %v", got)
 	}
 }
 

@@ -1261,6 +1261,16 @@ func TestJobsToolWaitPreservesBackgroundOriginal(t *testing.T) {
 	}
 }
 
+func TestJobsToolEmptyListIsSemanticallyUseless(t *testing.T) {
+	result, err := NewJobsTool(NewManager(Options{})).RunResult(context.Background(), json.RawMessage(`{"action":"list"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Useless || result.Text != "No background jobs." {
+		t.Fatalf("empty list result = %+v", result)
+	}
+}
+
 func awaitJobDone(t *testing.T, m *Manager, id string) {
 	t.Helper()
 	m.mu.Lock()

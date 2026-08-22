@@ -152,6 +152,57 @@ func TestManagerDefinition(t *testing.T) {
 	}
 }
 
+func TestManagerDiagnosticsAfterWrite(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "a.go")
+	if err := os.WriteFile(src, []byte("package main\n\nfunc broken() { missing() }\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	m := NewManager(goConfig(), "lsp", nil)
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, root string) (*lspClient, error) {
+		conn, _ := fakeLSP(t, func(server **jsonrpc.Peer) jsonrpc.PeerOptions {
+			return jsonrpc.PeerOptions{
+				Handlers: map[string]jsonrpc.Handler{"initialize": initOK},
+				Notifications: map[string]jsonrpc.NotificationHandler{
+					"initialized": func(context.Context, json.RawMessage) {},
+					"textDocument/didOpen": func(_ context.Context, raw json.RawMessage) {
+						var opened DidOpenParams
+						_ = json.Unmarshal(raw, &opened)
+						_ = (*server).Notify("textDocument/publishDiagnostics", json.RawMessage(`{"uri":"`+opened.TextDocument.URI+`","version":1,"diagnostics":[{"range":{"start":{"line":2,"character":16},"end":{"line":2,"character":23}},"severity":1,"message":"undefined: missing","source":"compiler"}]}`))
+					},
+				},
+			}
+		})
+		cl := newClient(conn, root, nil)
+		if _, err := cl.Initialize(ctx, nil); err != nil {
+			return nil, err
+		}
+		return cl, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	text, applicable, err := m.DiagnosticsAfterWrite(ctx, src, time.Second)
+	if err != nil || !applicable {
+		t.Fatalf("DiagnosticsAfterWrite = %q, %v, %v", text, applicable, err)
+	}
+	if !strings.Contains(text, "undefined: missing") || !strings.Contains(text, "a.go:3:17") {
+		t.Fatalf("diagnostics = %q", text)
+	}
+}
+
+func TestManagerDiagnosticsAfterWriteSkipsUnsupportedPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "notes.unknown")
+	if err := os.WriteFile(path, []byte("text"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	text, applicable, err := NewManager(goConfig(), "lsp", nil).DiagnosticsAfterWrite(context.Background(), path, time.Millisecond)
+	if err != nil || applicable || text != "" {
+		t.Fatalf("DiagnosticsAfterWrite = %q, %v, %v", text, applicable, err)
+	}
+}
+
 func TestManagerRenameAppliesEdits(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "a.go")

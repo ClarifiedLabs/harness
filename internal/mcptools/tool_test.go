@@ -157,6 +157,20 @@ func TestRunRichPreservesDirectImageAndInvokesOnce(t *testing.T) {
 	}
 }
 
+func TestRunRichMarksEmptySuccessfulMCPResultUseless(t *testing.T) {
+	provider := &scriptedProvider{result: &mcp.CallToolResult{}}
+	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{{Name: "mcp__test__empty", InputSchema: json.RawMessage(`{"type":"object"}`)}})
+	defer cleanup()
+	tool := &Tool{name: "mcp__test__empty", conn: conn}
+	result, err := tool.RunRich(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Useless || result.Text != "" || len(result.Content) != 0 {
+		t.Fatalf("empty MCP result = %+v", result)
+	}
+}
+
 func TestRunRichInvalidImageBecomesTextPlaceholder(t *testing.T) {
 	provider := &scriptedProvider{result: &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "image", MimeType: "image/png", Data: "not-base64"}}}}
 	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{{Name: "mcp__test__image", InputSchema: json.RawMessage(`{"type":"object"}`)}})

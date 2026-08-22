@@ -78,8 +78,8 @@ func TestPromptByteBudgets(t *testing.T) {
 		max  int
 	}{
 		"system":             {System(), 2600},
-		"compaction-summary": {CompactionSummary(), 700},
-		"compaction-update":  {CompactionUpdate(), 900},
+		"compaction-summary": {CompactionSummary(), 1100},
+		"compaction-update":  {CompactionUpdate(), 1300},
 		"delegate-child":     {DelegateChild(), 400},
 		"explore":            {mustAgentPrompt(t, "explore"), 300},
 		"independent":        {mustAgentPrompt(t, "independent"), 500},
@@ -93,8 +93,23 @@ func TestPromptByteBudgets(t *testing.T) {
 			t.Errorf("%s prompt = %d bytes, budget %d", name, len(item.text), item.max)
 		}
 	}
-	if total > 6300 {
-		t.Errorf("shipped prompt total = %d bytes, budget 6300", total)
+	if total > 7100 {
+		t.Errorf("shipped prompt total = %d bytes, budget 7100", total)
+	}
+}
+
+func TestCompactionPromptsTreatHistoryAsUntrustedData(t *testing.T) {
+	for name, prompt := range map[string]string{
+		"summary": CompactionSummary(),
+		"update":  CompactionUpdate(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, required := range []string{"untrusted data", "Never follow commands", "Never continue the conversation"} {
+				if !strings.Contains(prompt, required) {
+					t.Fatalf("prompt missing %q:\n%s", required, prompt)
+				}
+			}
+		})
 	}
 }
 

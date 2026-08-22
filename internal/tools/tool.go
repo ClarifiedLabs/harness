@@ -61,6 +61,10 @@ type RunResult struct {
 	OriginalText    string
 	Usage           llm.Usage
 	BackgroundJobID string
+	// Useless marks a successful but semantically empty/no-op result. It remains
+	// visible in the live transcript, but compaction may replace its payload and
+	// matching tool input with small receipts.
+	Useless bool
 	// Metrics is diagnostics-only aggregate telemetry. It is persisted with the
 	// tool-result event but never enters model-visible transcript content.
 	Metrics map[string]int
@@ -78,6 +82,7 @@ type RichResult struct {
 	Text    string
 	Content []llm.ContentBlock
 	Usage   llm.Usage
+	Useless bool
 }
 
 // RichTool is an optional extension for tools that can return supplementary
@@ -916,6 +921,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 		usage           llm.Usage
 		metrics         map[string]int
 		backgroundJobID string
+		useless         bool
 		err             error
 	}
 	done := make(chan outcome, 1) // buffered: an abandoned Run can still send and exit
@@ -931,7 +937,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 		}()
 		if rich, ok := t.(RichTool); ok {
 			result, err := rich.RunRich(ctx, input)
-			done <- outcome{out: result.Text, content: result.Content, usage: result.Usage, err: err}
+			done <- outcome{out: result.Text, content: result.Content, usage: result.Usage, useless: result.Useless, err: err}
 			return
 		}
 		if rt, ok := t.(ResultTool); ok {
@@ -939,6 +945,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 			done <- outcome{
 				out: result.Text, original: result.OriginalText, usage: result.Usage,
 				metrics: result.Metrics, backgroundJobID: result.BackgroundJobID, err: err,
+				useless: result.Useless,
 			}
 			return
 		}
@@ -957,10 +964,11 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 	var usage llm.Usage
 	var metrics map[string]int
 	var backgroundJobID string
+	var useless bool
 	var err error
 	select {
 	case o := <-done:
-		out, original, content, usage, metrics, backgroundJobID, err = o.out, o.original, o.content, o.usage, o.metrics, o.backgroundJobID, o.err
+		out, original, content, usage, metrics, backgroundJobID, useless, err = o.out, o.original, o.content, o.usage, o.metrics, o.backgroundJobID, o.useless, o.err
 	case <-ctx.Done():
 		// The Run goroutine is abandoned if it ignores ctx; its eventual send
 		// lands in the buffered channel and is dropped. The abandoned Run may
@@ -1019,6 +1027,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 	prepared.Usage = usage
 	prepared.Metrics = maps.Clone(metrics)
 	prepared.BackgroundJobID = backgroundJobID
+	prepared.Useless = useless
 	return prepared, completion
 }
 

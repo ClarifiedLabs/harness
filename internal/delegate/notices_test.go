@@ -14,6 +14,7 @@ func TestSafeFixedNoticesMatchAgentConstants(t *testing.T) {
 	want := map[string]bool{
 		agent.NoticeCancelled:                      true,
 		agent.NoticeStoppedMaxTokens:               true,
+		agent.NoticeContinuingMaxTokens:            true,
 		agent.NoticeStoppedStopSequence:            true,
 		agent.NoticeContextOverflowCompacting:      true,
 		agent.NoticeResponsesStateDisabledRejected: true,

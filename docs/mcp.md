@@ -329,6 +329,13 @@ allowed as a strict whitelist. One-shot runs use the tool list discovered before
 the model request; REPL runs may gain remote MCP tools after background discovery
 succeeds.
 
+When one agent's combined optional MCP/LSP declarations exceed 32 KiB, Harness
+keeps the tools registered but initially publishes only `tool_catalog`. Its
+`list` action filters names and descriptions, `describe` returns exact schemas,
+and sequential `activate` publishes up to 16 selected direct schemas on the next
+model turn. This reduces repeated prompt overhead; it does not bypass the agent's
+MCP policy or `allowed_tools` checks.
+
 When MCP is enabled, Harness trusts `readOnlyHint` annotations from the
 configured MCP server path so advertised read-only tools can be exposed to
 `read_only` agents. All MCP calls inherit default-parallel scheduling regardless

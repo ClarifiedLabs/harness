@@ -62,6 +62,38 @@ func TestReadFileNumbering(t *testing.T) {
 	}
 }
 
+func TestReadFileOptionalSHA256(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	content := "alpha\nbeta\n"
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runReadFile(t, map[string]any{"path": p, "include_sha256": true})
+	if err != nil {
+		t.Fatalf("read with digest: %v", err)
+	}
+	wantPrefix := "[sha256:" + sha256Hex([]byte(content)) + "]\n"
+	if !strings.HasPrefix(out, wantPrefix) || !strings.Contains(out, "1\talpha") {
+		t.Fatalf("digest read = %q, want prefix %q and numbered content", out, wantPrefix)
+	}
+}
+
+func TestReadFileSHA256IsOptIn(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("alpha\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runReadFile(t, map[string]any{"path": p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out, "sha256:") {
+		t.Fatalf("ordinary read unexpectedly hashed the whole file: %q", out)
+	}
+}
+
 func TestReadFileOffsetLimit(t *testing.T) {
 	dir := t.TempDir()
 	p := filepath.Join(dir, "f.txt")

@@ -1586,6 +1586,43 @@ func TestPrepareSummaryMessagesDegradesRichResultImagesOnDeepCopy(t *testing.T) 
 	}
 }
 
+func TestPrepareSummaryMessagesDisabledPreviewKeepsRichResultImages(t *testing.T) {
+	for _, maxBytes := range []int{0, -1} {
+		msgs := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+			Kind: llm.BlockToolResult, ResultForID: "call", ResultText: "attached",
+			ResultContent: []llm.ContentBlock{{Kind: llm.BlockImage, ImageData: "image-data"}},
+		}}}}
+		got := prepareSummaryMessages(msgs, maxBytes)
+		if content := got[0].Content[0].ResultContent; len(content) != 1 || content[0].ImageData != "image-data" {
+			t.Fatalf("maxBytes=%d result content = %+v", maxBytes, content)
+		}
+	}
+}
+
+func TestPrepareSummaryMessagesElidesSemanticallyUselessPairPayload(t *testing.T) {
+	input := json.RawMessage(`{"query":"large but empty search"}`)
+	msgs := []llm.Message{
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{
+			Kind: llm.BlockToolUse, ToolUseID: "call-empty", ToolName: "search", ToolInput: input,
+		}}},
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{{
+			Kind: llm.BlockToolResult, ResultForID: "call-empty", ToolName: "search",
+			ResultText: "no matches", ResultUseless: true,
+		}}},
+	}
+
+	got := prepareSummaryMessages(msgs, 4096)
+	if strings.Contains(string(got[0].Content[0].ToolInput), "large but empty search") {
+		t.Fatalf("summary retained useless tool input: %s", got[0].Content[0].ToolInput)
+	}
+	if !strings.Contains(got[1].Content[0].ResultText, "semantically empty") {
+		t.Fatalf("summary result = %q", got[1].Content[0].ResultText)
+	}
+	if string(msgs[0].Content[0].ToolInput) != string(input) || msgs[1].Content[0].ResultText != "no matches" {
+		t.Fatalf("summary preparation mutated source: %+v", msgs)
+	}
+}
+
 func TestTruncateLargestBlockReplacesRichResultImage(t *testing.T) {
 	const imageData = "c2Vuc2l0aXZlLWltYWdlLWRhdGE="
 	msgs := []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{

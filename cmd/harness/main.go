@@ -970,6 +970,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			}
 		}
 	}
+	installMutationDiagnostics(toolCatalog, lspControl)
 	var serenaSummary mcptools.Summary
 	if cfg.LSP.Serena.Enable {
 		summary, cleanup, ok := setupSerena(startupCtx, cfg.LSP.Serena, toolCatalog, logger)

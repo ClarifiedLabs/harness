@@ -20,6 +20,7 @@ This page is the operational overview.
 | `update_todos` | replace the current advisory TODO list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
+| `tool_catalog` | conditionally list, describe, and activate optional MCP/LSP tools |
 | `record_plan` | Record a complete implementation plan for handoff to an implementation agent |
 | `handoff` | Handoff the recorded plan to an implementation agent (interactive plan agent; `agent` enum = exclusive agents `auto`, `independent`, plus custom `workspace_access: exclusive`; omit for default `auto`) |
 
@@ -28,6 +29,14 @@ The default registry is `read`, `view_image`, `edit`, `write`, `shell`, and
 `git_readonly` when the host `git` binary is available, plus `write_tmp_file`.
 Coordination tools and discovered MCP/LSP tools are registered separately for
 the agents that expose them.
+
+When the aggregate model-facing declarations for an agent's optional MCP/LSP
+tools exceed 32 KiB, Harness keeps those tools registered but initially hides
+their schemas behind `tool_catalog`. `list` filters the available catalog,
+`describe` returns exact schemas for up to 16 names, and `activate` publishes
+selected schemas on the next model turn. Activation lasts for that agent
+runtime. This is a context optimization, not an authorization boundary; agent
+tool allowlists are still enforced when the registry is constructed.
 
 The former callable names `read_file`, `write_file`, `list_dir`, `glob`, `grep`,
 `rg`, and `apply_patch` are removed from the catalog and cannot be restored with
@@ -66,6 +75,13 @@ belongs to `shell` with a host command such as `rg --files` or `find`. `edit`
 takes an optional per-edit `replaceAll` flag that replaces every
 occurrence of `oldText` instead of requiring a unique match, reporting the
 replacement count.
+
+Set `read.include_sha256` to prepend the full file's SHA-256 digest. Pass that
+digest as `files[].expected_sha256` to `edit` or `expected_sha256` to `write` to
+reject a mutation when the file changed after it was read. Digest checks happen
+during mutation preflight, so a stale multi-file edit writes nothing and reports
+the `stale_file` error kind. Hashing the full file is opt-in; ordinary bounded
+reads retain their streaming behavior.
 
 When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
 `mcp__<server>__<tool>`. When [LSP](lsp.md) is enabled, native `lsp_*` code
@@ -269,6 +285,11 @@ custom) can record plans; use `/handoff` to review and approve one.
 ## File Mutation
 
 `edit` and `write` are the built-in file mutation tools.
+A mutation may carry the SHA-256 precondition returned by
+`read.include_sha256`; a mismatch or a previously read file that disappeared
+fails as `stale_file` before any write. `edit` applies this check to every file
+as part of its existing all-files preflight. Omitting the digest preserves the
+unconditional behavior.
 A repeated `edit` `files[].path` is applied in order against the earlier
 entry's result rather than rejected; a stale `oldText` in a repeated entry
 fails with the ordinary not-found error and nothing is written.
@@ -288,6 +309,14 @@ repository-wide diff. On a color terminal, displayed diff content and added/
 removed rows use the configured `color_theme` dark/light code palette; changing
 the palette does not change `show_diffs`, snapshot generation, diff text, or
 full-row background-erase behavior.
+
+With native LSP enabled, a successful built-in `edit` or `write` also synchronizes
+each changed supported file with its configured language server and appends the
+fresh published diagnostics to the tool result. Up to eight unique paths are
+queried concurrently with a three-second wait per path, then rendered in mutation
+order. Unsupported paths and unavailable servers remain silent; a diagnostics
+failure is reported as supplemental text and never changes a successful mutation
+into a failed one. Failed mutations do not request diagnostics.
 
 ## Delegation
 
@@ -573,6 +602,12 @@ removes an old read-only result body, Harness leaves a typed receipt with the
 tool, status, byte counts, bounded head, and recovery path; the exact original
 is preserved in the same artifact store. If that artifact write fails, the
 original stays in live context instead of being discarded.
+
+Tool adapters can mark a successful result as semantically empty (currently an
+empty MCP result, an empty background-job list, or a timed-out background wait).
+The hint does not alter the live result or provider request. It only lets a later
+compaction summary replace that result and its matching tool input with small
+placeholders, avoiding summary budget spent on a call that produced no evidence.
 
 Disabled optional CLI-backed default tools are reported on stderr at startup.
 These warnings are suppressed by `-q` / `--quiet` or `--log-level error`.

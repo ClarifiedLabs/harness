@@ -1009,29 +1009,42 @@ func (a *Agent) summaryChunkBudget() int {
 }
 
 func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Message {
-	if maxToolResultBytes == 0 {
-		return msgs
-	}
+	const uselessResultReceipt = "[semantically empty tool result omitted from compaction summary]"
 	out := make([]llm.Message, len(msgs))
+	uselessCalls := make(map[string]bool)
+	for _, message := range msgs {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockToolResult && block.ResultUseless && block.ResultForID != "" {
+				uselessCalls[block.ResultForID] = true
+			}
+		}
+	}
 	for i, m := range msgs {
 		out[i] = llm.Message{Role: m.Role, Time: m.Time, Phase: m.Phase, Content: cloneContentBlocks(m.Content)}
 		for j := range out[i].Content {
 			b := &out[i].Content[j]
 			switch b.Kind {
 			case llm.BlockToolResult:
-				if len(b.ResultText) > maxToolResultBytes {
+				if b.ResultUseless {
+					b.ResultText = uselessResultReceipt
+					b.ResultContent = nil
+				} else if maxToolResultBytes > 0 && len(b.ResultText) > maxToolResultBytes {
 					b.ResultText = b.ResultText[:maxToolResultBytes] +
 						fmt.Sprintf("\n[summary input truncated: showing first %d of %d bytes; raw content archived if compaction succeeds]", maxToolResultBytes, len(b.ResultText))
 				}
-				degradeToolResultImages(b, func(child llm.ContentBlock) bool {
-					return len(child.ImageData) > maxToolResultBytes
-				})
+				if maxToolResultBytes > 0 {
+					degradeToolResultImages(b, func(child llm.ContentBlock) bool {
+						return len(child.ImageData) > maxToolResultBytes
+					})
+				}
 			case llm.BlockToolUse:
-				if len(b.ToolInput) > maxToolResultBytes {
+				if uselessCalls[b.ToolUseID] {
+					b.ToolInput = json.RawMessage(`{"_omitted":"matching result was semantically empty"}`)
+				} else if maxToolResultBytes > 0 && len(b.ToolInput) > maxToolResultBytes {
 					b.ToolInput, _ = shortenedToolInput(b.ToolInput, maxToolResultBytes)
 				}
 			case llm.BlockImage:
-				if len(b.ImageData) > maxToolResultBytes {
+				if maxToolResultBytes > 0 && len(b.ImageData) > maxToolResultBytes {
 					*b = llm.ContentBlock{
 						Kind: llm.BlockText,
 						Text: imageSummaryPlaceholder(*b),

@@ -27,8 +27,9 @@ const editSchema = `{
       "description": "Applied in order; duplicate paths see prior results. One entry shares a base.",
       "items": {
         "type": "object",
-        "properties": {
-          "path": {"type": "string", "description": "Must exist."},
+		"properties": {
+			"path": {"type": "string", "description": "Must exist."},
+			"expected_sha256": {"type": "string", "description": "Optional digest from read; reject if the file changed."},
           "edits": {
             "type": "array",
             "minItems": 1,
@@ -61,8 +62,9 @@ type editArgs struct {
 }
 
 type editFile struct {
-	Path  string      `json:"path"`
-	Edits []editBlock `json:"edits"`
+	Path           string      `json:"path"`
+	ExpectedSHA256 string      `json:"expected_sha256"`
+	Edits          []editBlock `json:"edits"`
 }
 
 type editBlock struct {
@@ -72,8 +74,9 @@ type editBlock struct {
 }
 
 type rawEditFile struct {
-	Path  string         `json:"path"`
-	Edits []rawEditBlock `json:"edits"`
+	Path           string         `json:"path"`
+	ExpectedSHA256 string         `json:"expected_sha256"`
+	Edits          []rawEditBlock `json:"edits"`
 }
 
 type rawEditBlock struct {
@@ -84,6 +87,7 @@ type rawEditBlock struct {
 
 type plannedEditFile struct {
 	path         string
+	originalSHA  string
 	content      string
 	body         string // LF-normalized updated content, used to render the snippet
 	bom          string
@@ -263,7 +267,11 @@ func decodeEditArgs(input json.RawMessage) (editArgs, error) {
 			}
 			edits = append(edits, editBlock{OldText: *block.OldText, NewText: *block.NewText, ReplaceAll: block.ReplaceAll})
 		}
-		files = append(files, editFile{Path: file.Path, Edits: edits})
+		expected, err := normalizeSHA256(file.ExpectedSHA256, fmt.Sprintf("files[%d].expected_sha256", i))
+		if err != nil {
+			return editArgs{}, err
+		}
+		files = append(files, editFile{Path: file.Path, ExpectedSHA256: expected, Edits: edits})
 	}
 	return editArgs{Files: files}, nil
 }
@@ -288,6 +296,9 @@ func planEditFiles(files []editFile) ([]plannedEditFile, int, int, error) {
 			// stale or redundant oldText fails loudly with the ordinary not-found
 			// error before anything is written; nothing is silently double-applied.
 			prev := &plans[idx]
+			if err := checkExpectedSHA256Digest(file.Path, file.ExpectedSHA256, prev.originalSHA); err != nil {
+				return nil, 0, 0, err
+			}
 			updated, replacements, fuzzyMatches, regions, err := applyEditBlocks(prev.body, file.Edits, file.Path)
 			if err != nil {
 				return nil, 0, 0, err
@@ -315,6 +326,9 @@ func planEditFiles(files []editFile) ([]plannedEditFile, int, int, error) {
 		if err != nil {
 			return nil, 0, 0, err
 		}
+		if err := checkExpectedSHA256(file.Path, file.ExpectedSHA256, data); err != nil {
+			return nil, 0, 0, err
+		}
 
 		bom, text := stripUTF8BOM(string(data))
 		ending := detectLineEnding(text)
@@ -324,6 +338,7 @@ func planEditFiles(files []editFile) ([]plannedEditFile, int, int, error) {
 		}
 		plans = append(plans, plannedEditFile{
 			path:         file.Path,
+			originalSHA:  sha256Hex(data),
 			content:      bom + restoreLineEndings(updated, ending),
 			body:         updated,
 			bom:          bom,
