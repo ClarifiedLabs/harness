@@ -809,6 +809,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		CompactTimeoutSeconds:     cfg.CompactTimeoutSeconds,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		NativeCompaction:          nativeCompactionForProvider(catalog, cfg.Provider),
 		DelegateMaxTurns:          cfg.DelegateMaxTurns,
 		DelegateMaxActive:         cfg.DelegateMaxActive,
 		DelegateMaxDescendants:    cfg.DelegateMaxDescendants,
@@ -825,6 +826,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Reasoning:             reasoning,
 		ServerTools:           serverTools,
 		ResponsesStateful:     responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		NativeCompaction:      nativeCompactionForProvider(catalog, cfg.Provider),
 		Agent:                 agentName,
 		SessionPath:           sessionPath,
 		Depth:                 0,
@@ -1079,6 +1081,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		snap.Reasoning = nextReasoning
 		snap.ServerTools = webSearchServerToolsForModel(next.Provider, modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
+		snap.NativeCompaction = nativeCompactionForProvider(catalog, next.Provider)
 		snap.Agent = a.Name
 		snap.ToolNames = reg.Names()
 		delegateState.Set(snap)
@@ -1100,6 +1103,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			ServerTools:           snap.ServerTools,
 			ReasoningSet:          true,
 			ResponsesStateful:     snap.ResponsesStateful,
+			NativeCompaction:      snap.NativeCompaction,
 		}, nil
 	}
 
@@ -1221,6 +1225,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		snap.Reasoning = nextReasoning
 		snap.ServerTools = webSearchServerToolsForModel(next.Provider, modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
+		snap.NativeCompaction = nativeCompactionForProvider(catalog, next.Provider)
 		delegateState.Set(snap)
 		reasoning = nextReasoning
 		serverTools = snap.ServerTools
@@ -1239,6 +1244,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			ServerTools:           snap.ServerTools,
 			ReasoningSet:          true,
 			ResponsesStateful:     snap.ResponsesStateful,
+			NativeCompaction:      snap.NativeCompaction,
 		}, nil
 	}
 
@@ -1265,6 +1271,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Hooks:                     hookRunner,
 		ShowDiffs:                 cfg.ShowDiffs,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		NativeCompaction:          nativeCompactionForProvider(catalog, cfg.Provider),
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
 		RetentionFloorTokens:      cfg.RetentionFloorTokens,
 		RetentionKeepTurns:        cfg.RetentionKeepTurns,
@@ -1322,6 +1329,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		ReasoningReplayDomain: selection.ReasoningReplayDomain,
 		ServerTools:           serverTools,
 		ResponsesStateful:     responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		NativeCompaction:      nativeCompactionForProvider(catalog, cfg.Provider),
 		System:                systemPrompt,
 		Agent:                 agentName,
 		ToolNames:             activeToolNames,
@@ -2070,6 +2078,7 @@ type modelListEntry struct {
 	Variant                  string     `json:"variant,omitempty"`
 	APIType                  string     `json:"api_type,omitempty"`
 	ContinuationStateful     bool       `json:"continuation_stateful,omitempty"`
+	NativeCompaction         bool       `json:"native_compaction,omitempty"`
 	Prewarm                  bool       `json:"prewarm,omitempty"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                bool       `json:"reasoning"`
@@ -2146,6 +2155,7 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
 			Variant:                  strings.TrimSpace(target.Variant),
 			APIType:                  strings.TrimSpace(target.APIType),
 			ContinuationStateful:     target.ContinuationStateful,
+			NativeCompaction:         target.NativeCompaction,
 			Prewarm:                  target.Prewarm,
 			PricePerMillionTokensUSD: modelListPrice(target.Price),
 			Reasoning:                target.Reasoning,
@@ -2573,6 +2583,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		ReasoningReplayDomain: reasoningReplayDomain,
 		ServerTools:           serverTools,
 		ResponsesStateful:     responsesStatefulForProvider(cfg, modelCatalog, providerName),
+		NativeCompaction:      nativeCompactionForProvider(modelCatalog, providerName),
 		System:                system,
 		Agent:                 target,
 		Tools:                 reg,
@@ -2754,6 +2765,11 @@ func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, p
 	}
 	target, ok := catalogTarget(catalog, providerID)
 	return ok && target.ContinuationStateful
+}
+
+func nativeCompactionForProvider(catalog protocol.Catalog, providerID string) bool {
+	target, ok := catalogTarget(catalog, providerID)
+	return ok && target.NativeCompaction
 }
 
 func prewarmForProvider(catalog protocol.Catalog, providerID string) bool {

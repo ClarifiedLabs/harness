@@ -263,6 +263,7 @@ type testInfoModelJSON struct {
 	Variant                  string     `json:"variant"`
 	APIType                  string     `json:"api_type"`
 	ContinuationStateful     bool       `json:"continuation_stateful"`
+	NativeCompaction         bool       `json:"native_compaction"`
 	Prewarm                  bool       `json:"prewarm"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
 	Reasoning                bool       `json:"reasoning"`
@@ -1638,6 +1639,23 @@ func TestResponsesStatefulForProviderUsesCatalogAndConfig(t *testing.T) {
 	cfg.ResponsesStateful = false
 	if responsesStatefulForProvider(cfg, catalog, "openai:gpt-5.5") {
 		t.Fatal("disabled Responses continuation was treated as stateful")
+	}
+}
+
+func TestNativeCompactionForProviderRequiresCatalogCapability(t *testing.T) {
+	catalog := protocol.Catalog{Targets: []protocol.Target{
+		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}, NativeCompaction: true},
+		{ID: "openai-codex:gpt-5.5"},
+	}}
+	for _, target := range []string{"openai:gpt-5.5", "gpt-5.5"} {
+		if !nativeCompactionForProvider(catalog, target) {
+			t.Fatalf("native compaction target %q was not recognized", target)
+		}
+	}
+	for _, target := range []string{"openai-codex:gpt-5.5", "missing"} {
+		if nativeCompactionForProvider(catalog, target) {
+			t.Fatalf("target %q unexpectedly enabled native compaction", target)
+		}
 	}
 }
 

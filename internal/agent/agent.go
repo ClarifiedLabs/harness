@@ -538,6 +538,10 @@ type Options struct {
 	// ResponsesStateful enables Responses API previous_response_id chaining.
 	// Main only sets it when the selected provider is Responses-capable.
 	ResponsesStateful bool
+	// NativeCompaction enables an explicitly advertised provider-native
+	// compaction capability. The optional provider interface is still checked at
+	// runtime; textual compaction remains the fallback.
+	NativeCompaction bool
 	// RetentionPolicy selects live-transcript retention behavior. The zero value
 	// uses the provider-aware automatic policy.
 	RetentionPolicy RetentionPolicy
@@ -609,6 +613,11 @@ type Agent struct {
 	// §8.1). It is non-nil only while RunAdmittedPromptWithContext executes.
 	failGuard         *failureGuard
 	responsesStateful bool
+	nativeCompaction  bool
+	// disabledNativeCompaction is keyed by provider replay domain. It suppresses
+	// a checkpoint rejected by its originating provider while retaining the full
+	// semantic transcript for an immediate stateless retry.
+	disabledNativeCompaction map[string]bool
 	// continuationFailures counts consecutive unavailable continuation attempts,
 	// whether found by a local probe or rejected by the provider. Three in a row
 	// disables stateful mode for the rest of the run.
@@ -684,6 +693,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		hooks:                     opts.Hooks,
 		showDiffs:                 opts.ShowDiffs,
 		responsesStateful:         opts.ResponsesStateful,
+		nativeCompaction:          opts.NativeCompaction,
 		retentionPolicy:           normalizeRetentionPolicy(opts.RetentionPolicy),
 		retentionFloorTokens:      opts.RetentionFloorTokens,
 		retentionKeepTurnsSetting: opts.RetentionKeepTurns,
@@ -872,6 +882,20 @@ func (a *Agent) SetResponsesStateful(enabled bool) {
 		return
 	}
 	a.responsesStateful = enabled
+	a.retentionEpochArmed = true
+	a.resetResponseState()
+}
+
+// SetNativeCompaction changes whether subsequent foreground compactions may use
+// a provider-native canonical context window. Provider switches call this with
+// the selected target capability; existing checkpoints remain durable but are
+// ignored outside their replay domain.
+func (a *Agent) SetNativeCompaction(enabled bool) {
+	if a.nativeCompaction == enabled {
+		return
+	}
+	a.nativeCompaction = enabled
+	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
 	a.resetResponseState()
 }
@@ -1196,13 +1220,16 @@ func (a *Agent) EstimateContext() ContextEstimate {
 // With no prior measurement (boundary 0, lastInput 0) it degrades to a full
 // transcript estimate.
 func (a *Agent) triggerTokens(lastInput, boundary int) int {
+	if lastInput <= 0 {
+		return estimateTokens(a.providerVisibleMessages(a.transcript))
+	}
 	if boundary < 0 {
 		boundary = 0
 	}
 	if boundary > len(a.transcript) {
 		boundary = len(a.transcript)
 	}
-	return lastInput + estimateTokens(a.transcript[boundary:])
+	return lastInput + estimateTokens(a.providerVisibleMessages(a.transcript[boundary:]))
 }
 
 // anchorContextEstimate anchors the reported context total to the last
@@ -1338,9 +1365,12 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 
 func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []llm.Message) modelRequest {
 	payloadMessages, usedPrevious := a.payloadMessagesIn(transcript)
-	payloadStart := len(transcript) - len(payloadMessages)
 	visibleTranscript := a.providerVisibleMessages(transcript)
 	payloadMessages = a.providerVisibleMessages(payloadMessages)
+	visiblePayloadStart := len(visibleTranscript) - len(payloadMessages)
+	if visiblePayloadStart < 0 {
+		visiblePayloadStart = 0
+	}
 	estimate := a.estimatePayloadContextForTranscript(requestContext, visibleTranscript, payloadMessages)
 	req := llm.Request{
 		Model:                a.model,
@@ -1355,7 +1385,7 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		RequestContext:       append([]string(nil), requestContext...),
 		ProxySessionID:       a.proxySessionID,
 		CacheAffinityID:      a.cacheAffinityID,
-		CachePolicy:          a.cachePolicyForTranscript(visibleTranscript, payloadStart, false),
+		CachePolicy:          a.cachePolicyForTranscript(visibleTranscript, visiblePayloadStart, false),
 		EstimatedInputTokens: estimate.Total,
 		ContextWindowHint:    estimate.Window,
 	}
@@ -1387,34 +1417,56 @@ func providerOwnedReasoningBlock(kind llm.BlockKind) bool {
 // provider boundary uses this helper; the durable transcript is never mutated.
 func (a *Agent) providerVisibleMessages(messages []llm.Message) []llm.Message {
 	domain := a.reasoningReplayDomain
-	disabled := a.disabledReasoningReplay[domain]
-	var out []llm.Message
-	for i, message := range messages {
-		var content []llm.ContentBlock
-		for j, block := range message.Content {
-			if !providerOwnedReasoningBlock(block.Kind) ||
-				(!disabled && block.ReasoningReplayDomain == domain) {
-				if content != nil {
+	disabledReasoning := a.disabledReasoningReplay[domain]
+	nativeIndex := -1
+	if a.nativeCompaction && !a.disabledNativeCompaction[domain] {
+		for i := len(messages) - 1; i >= 0 && nativeIndex < 0; i-- {
+			for _, block := range messages[i].Content {
+				if block.Kind == llm.BlockProviderCompaction && block.ReasoningReplayDomain == domain {
+					nativeIndex = i
+					break
+				}
+			}
+		}
+	}
+	start := 0
+	if nativeIndex >= 0 {
+		start = nativeIndex
+	}
+	out := make([]llm.Message, 0, len(messages)-start)
+	for i := start; i < len(messages); i++ {
+		message := messages[i]
+		content := make([]llm.ContentBlock, 0, len(message.Content))
+		for _, block := range message.Content {
+			switch {
+			case block.Kind == llm.BlockProviderCompaction:
+				if i == nativeIndex && block.ReasoningReplayDomain == domain {
 					content = append(content, block)
 				}
-				continue
-			}
-			if out == nil {
-				out = append([]llm.Message(nil), messages...)
-			}
-			if content == nil {
-				content = make([]llm.ContentBlock, 0, len(message.Content)-1)
-				content = append(content, message.Content[:j]...)
+			case !providerOwnedReasoningBlock(block.Kind):
+				content = append(content, block)
+			case !disabledReasoning && block.ReasoningReplayDomain == domain:
+				content = append(content, block)
 			}
 		}
-		if content != nil {
-			out[i].Content = content
+		if len(content) == 0 {
+			continue
 		}
-	}
-	if out == nil {
-		return messages
+		message.Content = content
+		out = append(out, message)
 	}
 	return out
+}
+
+func hasProviderCompaction(messages []llm.Message) bool {
+	for _, message := range messages {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockProviderCompaction {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasProviderOwnedReasoning(messages []llm.Message) bool {
@@ -1446,6 +1498,52 @@ func (a *Agent) disableCurrentReasoningReplay() {
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
 	a.resetResponseState()
+}
+
+func (a *Agent) disableCurrentNativeCompaction() {
+	if a.disabledNativeCompaction == nil {
+		a.disabledNativeCompaction = make(map[string]bool)
+	}
+	domain := a.reasoningReplayDomain
+	if domain == "" || a.disabledNativeCompaction[domain] {
+		return
+	}
+	a.disabledNativeCompaction[domain] = true
+	a.compactionRuntimeVersion++
+	a.retentionEpochArmed = true
+	a.resetResponseState()
+}
+
+// discardCurrentNativeCompaction removes rejected opaque checkpoints for the
+// active compatibility domain. The provider-neutral semantic transcript was
+// retained alongside them, so this loses no conversational state and prevents
+// a resumed session from retrying the same invalid encrypted content.
+func (a *Agent) discardCurrentNativeCompaction() bool {
+	domain := a.reasoningReplayDomain
+	kept := make([]llm.Message, 0, len(a.transcript))
+	removed := false
+	for _, message := range a.transcript {
+		matches := false
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockProviderCompaction && block.ReasoningReplayDomain == domain {
+				matches = true
+				break
+			}
+		}
+		if matches {
+			removed = true
+			continue
+		}
+		kept = append(kept, message)
+	}
+	if !removed {
+		return false
+	}
+	a.transcript = kept
+	a.validatedPrefix = 0
+	a.clearMeasuredContext()
+	a.retentionEpochArmed = true
+	return true
 }
 
 // DebugRequest snapshots the next provider-neutral model request without
@@ -1836,7 +1934,13 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 		continuationPresent := a.validResponseStateFor(a.transcript)
 		previousRequestMode := a.retentionRequestMode(continuationPresent)
-		retention := a.applyRetentionPolicyWithDecision(sink, retentionDecision)
+		retention := retentionPass{}
+		// A native compactable target retains the semantic transcript so provider
+		// switches can fall back to it. If native compaction fails, its textual
+		// fallback still applies the existing bounded degradation ladder.
+		if !a.nativeCompactionEligible("auto", false, "") {
+			retention = a.applyRetentionPolicyWithDecision(sink, retentionDecision)
+		}
 		retention.event.ContinuationStatePresent = continuationPresent
 		retention.event.PreviousRequestMode = previousRequestMode
 		if retention.changed {
@@ -1991,6 +2095,23 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			a.resetResponseState()
 			sink.Notice(NoticeResponsesStateResetUnavailable)
 			a.noteContinuationFailure(sink)
+			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
+			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+
+			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
+
+		}
+		if err != nil &&
+			!res.hasPartialOutput() &&
+			hasProviderCompaction(modelReq.request.Messages) &&
+			invalidEncryptedContent(err) {
+			a.disableCurrentNativeCompaction()
+			if a.discardCurrentNativeCompaction() {
+				notifyTranscriptRewritten(sink)
+			}
+			lastInput = 0
+			appendBoundary = 0
+			sink.Notice(NoticeNativeCompactionReplayDisabled)
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
 			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
 
@@ -2333,6 +2454,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		reportMaintenance(sink, "compaction", compUsage)
 	}
 	if err == nil && changed {
+		lastInput = 0
+		appendBoundary = 0
 		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	}
 	if err := a.validateTranscript("after prompt"); err != nil {

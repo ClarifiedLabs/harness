@@ -180,7 +180,7 @@ type Message struct {
     Role                Role                `json:"role"`
     Time                time.Time           `json:"time,omitempty"`
     Phase               string              `json:"phase,omitempty"` // assistant only: commentary | final_answer
-    Origin              MessageOrigin       `json:"origin,omitempty"` // prompt | steer | internal | compaction_checkpoint
+    Origin              MessageOrigin       `json:"origin,omitempty"` // prompt | steer | internal | compaction_checkpoint | provider_compaction
     Content             []ContentBlock      `json:"content"`
     ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
     Compaction          *CompactionMetadata `json:"compaction,omitempty"`
@@ -196,6 +196,7 @@ const (
     BlockThinking         BlockKind = "thinking"
     BlockRedactedThinking BlockKind = "redacted_thinking"
     BlockReasoning        BlockKind = "reasoning"
+    BlockProviderCompaction BlockKind = "provider_compaction"
 )
 
 // ContentBlock is a tagged union; exactly the fields for Kind are set.
@@ -238,6 +239,10 @@ type ContentBlock struct {
     // Responses encrypted reasoning replay
     ReasoningID        string `json:"reasoning_id,omitempty"`
     ReasoningEncrypted string `json:"reasoning_encrypted,omitempty"`
+
+    // Provider-native canonical input items; valid only on a hidden
+    // provider_compaction checkpoint message
+    ProviderCompaction []json.RawMessage `json:"provider_compaction,omitempty"`
 }
 ```
 
@@ -253,9 +258,9 @@ Design notes:
   `_stage`. Scheduling and execution use per-call copies with that reserved field
   removed; tool classifiers, hooks, dispatch guards, built-in implementations, and
   MCP/LSP adapters never receive it.
-- **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). The sole opaque
-  provider step is a hidden Gemini Interactions Google Search call/result needed
-  for stateless signature replay; incompatible dialects ignore it.
+- **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). Opaque provider
+  steps include Gemini Interactions Google Search replay and a provider-native
+  compaction window. Incompatible dialects ignore them.
 - **`Origin` is transcript-only provenance.** It preserves prompt, steering,
   internal, and compaction-checkpoint boundaries; provider adapters ignore it.
 - **Reasoning blocks are opaque replay state.** Anthropic thinking/signatures,
@@ -264,6 +269,11 @@ Design notes:
   `ReasoningReplayDomain`. Request assembly replays them only when that domain
   matches the selected target; filtering is request-only and never rewrites the
   transcript. They are never treated as ordinary user-visible text.
+- **Provider compaction checkpoints are opaque replay state.** A checkpoint is a
+  hidden user message whose sole block contains the provider's complete canonical
+  input-item array and the active `ReasoningReplayDomain`. Same-domain request
+  assembly replays every item in order and then the transcript suffix; other
+  domains omit the checkpoint without deleting the provider-neutral history.
 - **`ParallelToolBatches` is local scheduling metadata.** It appears on the user message
   carrying tool results and is ignored by provider request builders. Each entry names,
   in emission order, every tool-use ID in one same-stage default-parallel island whose
@@ -395,6 +405,15 @@ type Provider interface {
 
 type InputTokenCounter interface {
     CountInputTokens(ctx context.Context, req Request) (InputTokenCount, error)
+}
+
+type ContextCompactor interface {
+    CompactContext(ctx context.Context, req Request) (CompactedContext, error)
+}
+
+type CompactedContext struct {
+    Items []json.RawMessage // complete canonical input array, kept in order
+    Usage Usage
 }
 
 type Request struct {
@@ -629,6 +648,7 @@ Edge cases:
 | Response format | provider default unless explicitly requested by a caller | provider default | provider default | forced to plain text; generated media is rejected |
 | Token cap | input-aware `max_output_tokens` | input-aware `max_completion_tokens` for `api.openai.com`; `max_tokens` for compatible/custom endpoints | required input-aware `max_tokens` | input-aware `generation_config.max_output_tokens` |
 | Input token count | `POST /responses/input_tokens`; `codex_oauth` uses a local `o200k_base` estimate | local `o200k_base` estimate | `POST /v1/messages/count_tokens` | provider-neutral local estimate |
+| Standalone compaction | opt-in `POST /responses/compact`; returned items are replayed unchanged | not supported | not supported | not supported |
 | Streaming usage | final `response.usage` | `stream_options.include_usage` | message start/delta | final interaction usage, including cached and thought tokens |
 | Stop sequences | not sent | `stop` | `stop_sequences` | `generation_config.stop_sequences` |
 | Temperature | omitted when nil | omitted when nil | omitted when nil | always omitted |
@@ -649,7 +669,7 @@ unsupported.
 
 | Surface | Supported | Intentionally unsupported |
 |---|---|---|
-| Operations | streaming `POST /responses`; `POST /responses/input_tokens` | retrieve/delete/cancel/compact, conversations, background work |
+| Operations | streaming `POST /responses`; `POST /responses/input_tokens`; opt-in `POST /responses/compact` | retrieve/delete/cancel, conversations, background work |
 | Request controls | model/input/instructions, functions and hosted web search, output cap, temperature, reasoning summaries/encrypted replay, prompt cache key, service tier, stored continuation | arbitrary output formats, moderation, metadata, tool choice, sampling/logprob controls, safety/user identifiers |
 | Content/items | text and image input; message text/refusal, reasoning summary, function calls/results, hosted web-search status | file/audio input; generated media, computer/code/shell/patch/MCP/custom tools |
 | Stream/usage | text/refusal/reasoning-summary/function deltas, terminal/error events, cached input, non-reasoning output, and reasoning tokens | raw reasoning disclosure, annotations, and unused total-token fields |
@@ -1472,6 +1492,18 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   `/responses/input_tokens` endpoint. Unsupported providers return `501` with
   `code:"input_token_count_unsupported"`. Count requests are best-effort
   preflight diagnostics and are not added to usage or cost aggregation.
+- `POST /v1/compact` accepts `{target_id, request}` and returns
+  `{context:{items,usage}}`. The proxy exposes `native_compaction:true` in a
+  target's catalog metadata when its Responses provider config explicitly sets
+  `responses_compaction:true`, or when the capability is unset for a managed
+  provider with the canonical OpenAI API or ChatGPT Codex identity and base URL.
+  An explicit `false` always wins; API shape alone is not treated as evidence
+  for manual or compatible providers.
+  The handler resolves model/tier/auth exactly as a stream does, calls the
+  optional `ContextCompactor`, prices and records returned usage, and applies the
+  same API-key cost budget. Unsupported targets return `501` with
+  `code:"context_compaction_unsupported"`. Managed setup enables the capability
+  for the official OpenAI API and ChatGPT Codex, but not compatible endpoints.
 - **Usage aggregation and model-proxy budgets.** The proxy keeps a mutex-guarded
   `{provider, model}` usage map and serves it read-only at `GET /v1/usage` as
   `{"instance":..., "since":..., "models":[{provider, model, requests, input_tokens, output_tokens,
@@ -1515,10 +1547,12 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   cardinality growth. The `key` label is the authorizing API key's stored `Name`
   (stashed in the request context by the auth middleware) or the sentinel
   `"anonymous"` when auth is disabled. Token counters
-  are recorded for every `/v1/stream` that produced usage, priced or not — a
-  deliberate superset of `/v1/usage`'s priced-only cost rollup — while
+  are recorded for every `/v1/stream` or `/v1/compact` request that produced
+  usage, priced or not — a deliberate superset of `/v1/usage`'s priced-only
+  cost rollup — while
   `cost_usd_total` is recorded only when the model's price is known.
-  `requests_total`/`errors_total` cover every `/v1/stream` attempt, including ones
+  `requests_total`/`errors_total` cover every `/v1/stream` and `/v1/compact`
+  attempt, including ones
   that fail before the target resolves (malformed/oversized/unknown `target_id`,
   with `provider`/`model` omitted) and ones rejected by API-key auth (401); a
   client disconnecting mid-stream is not counted as an error. An empty label value
@@ -3962,6 +3996,33 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
 
 ## 12. Compaction (`internal/agent/compact.go`)
 
+- **Provider-native foreground path.** When the selected proxy target advertises
+  native compaction, ordinary automatic compaction and an unfocused `/compact`
+  send the complete current provider-visible window plus `Request.System` to the
+  provider's standalone compaction endpoint. The request also carries the active
+  tool schemas, server tools, reasoning controls, cache key, and service tier so
+  the provider sees the same model contract as an ordinary turn. ChatGPT Codex
+  requests add stable installation/session/thread/window headers, and its
+  response may omit the public API's `object` discriminator as long as the output
+  still validates as a canonical compaction window. The input must already fit
+  the provider context window. Harness persists the complete returned item array
+  in a hidden domain-scoped checkpoint and never parses, prunes, or summarizes its
+  contents. Subsequent same-domain requests send that canonical window followed
+  by newer transcript messages. The semantic transcript remains intact, so a
+  model/provider switch simply omits the opaque checkpoint and replays normal
+  history. TODO, goal, hook, and background state remain request-only overlays
+  and are added fresh to every active model round; the system prompt remains on
+  `Request.System`.
+- Native compaction resets any stored-response continuation anchor and starts a
+  fresh stateless baseline. An endpoint failure disables the path for that
+  replay domain for the current process and falls through to textual compaction.
+  If a later request rejects a persisted checkpoint's encrypted
+  content, Harness disables that checkpoint and retries once from the preserved
+  semantic transcript. Focused manual compaction, continuation handoff,
+  all-history child compaction, and speculative idle work keep using textual
+  checkpoints because they need Harness-owned summary semantics or detached
+  application. Live retention is skipped while native compaction is available,
+  preserving the semantic history needed for cross-provider fallback.
 - **Trigger:** when `max(reported input tokens, estimated full-request footprint)`
   reaches `compact_trigger_percent` (default **78%**) of the model's effective/learned
   context window. Successful compaction targets `compact_target_percent` (default
@@ -4571,10 +4632,9 @@ ranges, colors, linked editing, inline values, and code lenses).
 ## 16. Future work
 
 - CLI-subprocess backends (codex / claude) behind a separate process-worker abstraction.
-- Provider-native compaction only after the model-proxy protocol can carry a
-  provider-neutral opaque checkpoint/usage result and benchmarks show an advantage
-  over the current typed textual checkpoint. Adding an unused provider interface
-  in the CLI would not preserve resumable cross-dialect session semantics.
+- Benchmark provider-native compaction against typed textual checkpoints on
+  long tool-heavy sessions, including latency, token cost, cache behavior, and
+  answer quality after provider switches.
 - Explicit workspace isolation or conflict control for read/write delegate agents.
 - MCP resources and prompts, the legacy HTTP+SSE downstream transport (the deprecated
   2024 GET-stream MCP transport — distinct from the already-implemented streamable-HTTP

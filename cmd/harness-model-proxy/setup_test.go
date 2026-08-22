@@ -361,6 +361,9 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	if provider.ResponsesStateful != nil {
 		t.Fatalf("codex responses_stateful = %v, want omitted default", provider.ResponsesStateful)
 	}
+	if provider.ResponsesCompaction == nil || !*provider.ResponsesCompaction {
+		t.Fatalf("codex responses_compaction = %v, want enabled", provider.ResponsesCompaction)
+	}
 	if provider.ResponsesWebSocket != nil {
 		t.Fatalf("codex responses_websocket = %v, want omitted runtime default", provider.ResponsesWebSocket)
 	}
@@ -1111,6 +1114,9 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	if provider.ResponsesStateful != nil {
 		t.Fatalf("codex responses_stateful after refresh = %v, want omitted default", provider.ResponsesStateful)
 	}
+	if provider.ResponsesCompaction == nil || !*provider.ResponsesCompaction {
+		t.Fatalf("codex responses_compaction after refresh = %v, want enabled", provider.ResponsesCompaction)
+	}
 	if provider.ResponsesWebSocket != nil {
 		t.Fatalf("codex responses_websocket after refresh = %v, want omitted runtime default", provider.ResponsesWebSocket)
 	}
@@ -1834,6 +1840,41 @@ func testSetupCatalogWithOpenAI() *modelcatalog.Catalog {
 		},
 	}
 	return catalog
+}
+
+func TestSetupProviderEnablesCompactionForFirstPartyOpenAIResponses(t *testing.T) {
+	openAI := testSetupCatalogWithOpenAI().Providers["openai"]
+	openAICfg := setupProviderFromCatalog(openAI, "sk-test", nil, []modelcatalog.Model{openAI.Models["gpt-test"]})
+	if openAICfg.APIType != "responses" || openAICfg.ResponsesCompaction == nil || !*openAICfg.ResponsesCompaction {
+		t.Fatalf("OpenAI setup config = %+v, want Responses compaction enabled", openAICfg)
+	}
+
+	codex := openAI
+	codex.ID = modelcatalog.OpenAICodexProviderID
+	codex.API = modelcatalog.OpenAICodexProviderBaseURL
+	codexCfg := setupProviderFromCatalog(codex, "", &auth.Config{Type: auth.TypeCodexOAuth}, []modelcatalog.Model{openAI.Models["gpt-test"]})
+	if codexCfg.ResponsesCompaction == nil || !*codexCfg.ResponsesCompaction {
+		t.Fatalf("Codex setup config responses_compaction = %v, want enabled", codexCfg.ResponsesCompaction)
+	}
+}
+
+func TestSetupProviderPreservesExplicitCodexCompactionOptOut(t *testing.T) {
+	disabled := false
+	current := llm.ProviderConfig{
+		Name:                modelcatalog.OpenAICodexProviderID,
+		APIType:             "responses",
+		BaseURL:             modelcatalog.OpenAICodexProviderBaseURL,
+		Managed:             true,
+		ResponsesCompaction: &disabled,
+	}
+	meta := modelcatalog.Provider{
+		ID:  modelcatalog.OpenAICodexProviderID,
+		API: modelcatalog.OpenAICodexProviderBaseURL,
+	}
+	next := setupProviderFromCurrent(current, &meta, nil)
+	if next.ResponsesCompaction == nil || *next.ResponsesCompaction {
+		t.Fatalf("Codex responses_compaction = %v, want preserved false", next.ResponsesCompaction)
+	}
 }
 
 func testCodexModelsCatalogJSON() string {

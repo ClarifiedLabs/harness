@@ -517,6 +517,8 @@ func treeEntryPreview(entry session.Entry) string {
 					}
 				case llm.BlockImage:
 					parts = append(parts, "[image "+block.ImageName+"]")
+				case llm.BlockProviderCompaction:
+					parts = append(parts, "[provider compaction]")
 				}
 			}
 		}

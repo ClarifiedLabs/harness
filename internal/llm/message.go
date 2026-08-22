@@ -43,6 +43,7 @@ const (
 	MessageOriginSteer                MessageOrigin = "steer"
 	MessageOriginInternal             MessageOrigin = "internal"
 	MessageOriginCompactionCheckpoint MessageOrigin = "compaction_checkpoint"
+	MessageOriginProviderCompaction   MessageOrigin = "provider_compaction"
 )
 
 // CompactionMetadata is transcript-only state carried by a synthetic
@@ -113,6 +114,10 @@ const (
 	// BlockInteractionStep carries a complete provider-managed Interactions
 	// step needed for stateless replay. It is never rendered or dispatched.
 	BlockInteractionStep BlockKind = "interaction_step"
+	// BlockProviderCompaction carries a provider-native canonical context window.
+	// It is replayed only to the same configured model compatibility domain and
+	// is never rendered, summarized, or dispatched as conversational content.
+	BlockProviderCompaction BlockKind = "provider_compaction"
 )
 
 // ContentBlock is a tagged union; exactly the fields for Kind are set.
@@ -175,6 +180,10 @@ type ContentBlock struct {
 
 	// BlockInteractionStep
 	InteractionStep json.RawMessage `json:"interaction_step,omitempty"`
+
+	// BlockProviderCompaction. Each entry is one opaque provider input item in
+	// canonical order. The compatibility domain uses ReasoningReplayDomain above.
+	ProviderCompaction []json.RawMessage `json:"provider_compaction,omitempty"`
 }
 
 // ToolCall is a flat view of a BlockToolUse, carried from the agent loop into

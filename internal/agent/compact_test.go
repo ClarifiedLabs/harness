@@ -74,6 +74,202 @@ func turnLabel(i int) string {
 	return string(rune('A' + i))
 }
 
+type nativeCompactionProvider struct {
+	*llmtest.FakeProvider
+	result   llm.CompactedContext
+	err      error
+	requests []llm.Request
+}
+
+func (p *nativeCompactionProvider) CompactContext(_ context.Context, req llm.Request) (llm.CompactedContext, error) {
+	p.requests = append(p.requests, req)
+	return p.result, p.err
+}
+
+func nativeCompactedItems() []json.RawMessage {
+	return []json.RawMessage{
+		json.RawMessage(`{"type":"message","role":"user","content":[{"type":"input_text","text":"retained state"}]}`),
+		json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"opaque-window"}`),
+	}
+}
+
+func TestNativeCompactionKeepsSemanticTranscriptAndReplaysCanonicalWindow(t *testing.T) {
+	original := makeTurns(10)
+	provider := &nativeCompactionProvider{
+		FakeProvider: llmtest.New("responses"),
+		result: llm.CompactedContext{
+			Items: nativeCompactedItems(),
+			Usage: llm.Usage{InputTokens: 200, OutputTokens: 20},
+		},
+	}
+	a := newAgent(provider, tools.Default(), Options{
+		Model: "gpt-5.5", ReasoningReplayDomain: "openai:gpt-5", NativeCompaction: true,
+		Reasoning:   llm.ReasoningConfig{Effort: "high", Summary: "concise"},
+		ServerTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}},
+	})
+	a.SetTranscript(cloneMessages(original))
+
+	usage, err := a.Compact(context.Background(), &recordSink{})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if usage != provider.result.Usage || len(provider.requests) != 1 {
+		t.Fatalf("native compact usage/requests = %+v/%d", usage, len(provider.requests))
+	}
+	if !reflect.DeepEqual(provider.requests[0].Messages, original) {
+		t.Fatalf("native compact input changed semantic history")
+	}
+	if !reflect.DeepEqual(provider.requests[0].Tools, a.toolSpecs) ||
+		!reflect.DeepEqual(provider.requests[0].ServerTools, a.serverTools) ||
+		provider.requests[0].Reasoning != a.reasoning {
+		t.Fatalf("native compact request omitted model controls: %+v", provider.requests[0])
+	}
+	transcript := a.Transcript()
+	if len(transcript) != len(original)+1 || !reflect.DeepEqual(transcript[:len(original)], original) {
+		t.Fatalf("native compaction rewrote semantic transcript: before=%d after=%d", len(original), len(transcript))
+	}
+	checkpoint := transcript[len(transcript)-1]
+	if checkpoint.Origin != llm.MessageOriginProviderCompaction || len(checkpoint.Content) != 1 ||
+		checkpoint.Content[0].Kind != llm.BlockProviderCompaction {
+		t.Fatalf("checkpoint = %+v", checkpoint)
+	}
+	if got, want := a.triggerTokens(0, 0), estimateTokens(a.providerVisibleMessages(transcript)); got != want {
+		t.Fatalf("post-compaction trigger estimate = %d, want provider-visible %d", got, want)
+	} else if got >= estimateTokens(transcript) {
+		t.Fatalf("post-compaction trigger still counts preserved semantic history: visible=%d full=%d", got, estimateTokens(transcript))
+	}
+
+	request := a.DebugRequest(false, "", nil, nil).Request
+	if len(request.Messages) != 1 || request.Messages[0].Content[0].Kind != llm.BlockProviderCompaction {
+		t.Fatalf("same-domain request messages = %+v, want canonical checkpoint only", request.Messages)
+	}
+	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+		t.Fatalf("repeat Compact: %v", err)
+	}
+	if got := len(a.Transcript()); got != len(original)+1 {
+		t.Fatalf("repeat native compaction accumulated checkpoints: messages=%d", got)
+	}
+	if len(provider.requests) != 2 || !hasProviderCompaction(provider.requests[1].Messages) {
+		t.Fatalf("repeat native compaction requests = %+v", provider.requests)
+	}
+
+	a.SetReasoningReplayDomain("other-provider:model")
+	request = a.DebugRequest(false, "", nil, nil).Request
+	if !reflect.DeepEqual(request.Messages, original) {
+		t.Fatalf("cross-domain request did not recover semantic history: got %d messages", len(request.Messages))
+	}
+}
+
+func TestNativeCompactionUnsupportedFallsBackToTextualCheckpoint(t *testing.T) {
+	provider := &nativeCompactionProvider{
+		FakeProvider: llmtest.New("responses", summaryStep("TEXTUAL SUMMARY", 100, 10)),
+		err:          llm.ErrContextCompactionUnsupported,
+	}
+	a := newAgent(provider, tools.Default(), Options{
+		Model: "gpt-5.5", ReasoningReplayDomain: "compatible-domain", NativeCompaction: true,
+	})
+	transcript := append(makeTurns(10), llm.Message{
+		Role:   llm.RoleUser,
+		Origin: llm.MessageOriginProviderCompaction,
+		Content: []llm.ContentBlock{{
+			Kind:                  llm.BlockProviderCompaction,
+			ReasoningReplayDomain: "compatible-domain",
+			ProviderCompaction:    nativeCompactedItems(),
+		}},
+	})
+	a.SetTranscript(transcript)
+
+	usage, err := a.Compact(context.Background(), &recordSink{})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if usage != (llm.Usage{InputTokens: 100, OutputTokens: 10}) {
+		t.Fatalf("fallback usage = %+v", usage)
+	}
+	if len(provider.requests) != 1 || provider.RequestCount() != 1 {
+		t.Fatalf("native/textual requests = %d/%d, want 1/1", len(provider.requests), provider.RequestCount())
+	}
+	if hasProviderCompaction(provider.FakeProvider.Requests[0].Messages) {
+		t.Fatal("textual fallback replayed a stale native checkpoint")
+	}
+	if got := a.Transcript()[0]; got.Origin != llm.MessageOriginCompactionCheckpoint || got.Compaction == nil {
+		t.Fatalf("fallback checkpoint = %+v", got)
+	}
+	if hasProviderCompaction(a.Transcript()) {
+		t.Fatal("textual fallback retained a stale native checkpoint")
+	}
+	if a.nativeCompactionAvailable() {
+		t.Fatal("unsupported native compaction remained enabled for the replay domain")
+	}
+}
+
+func TestRejectedNativeCheckpointRetriesSemanticTranscriptAndIsDiscarded(t *testing.T) {
+	original := makeTurns(2)
+	provider := &nativeCompactionProvider{
+		FakeProvider: llmtest.New("responses",
+			llmtest.Step{Err: &llm.APIError{StatusCode: 400, Code: "invalid_encrypted_content", Message: "bad checkpoint"}},
+			summaryStep("recovered", 40, 4),
+		),
+		result: llm.CompactedContext{Items: nativeCompactedItems()},
+	}
+	a := newAgent(provider, tools.Default(), Options{
+		Model: "gpt-5.5", ReasoningReplayDomain: "openai:gpt-5", NativeCompaction: true,
+	})
+	a.SetTranscript(cloneMessages(original))
+	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "next", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if provider.RequestCount() != 2 {
+		t.Fatalf("stream requests = %d, want rejected checkpoint plus semantic retry", provider.RequestCount())
+	}
+	if !hasProviderCompaction(provider.FakeProvider.Requests[0].Messages) {
+		t.Fatal("first stream request did not use the native checkpoint")
+	}
+	if hasProviderCompaction(provider.FakeProvider.Requests[1].Messages) || len(provider.FakeProvider.Requests[1].Messages) != len(original)+1 {
+		t.Fatalf("semantic retry messages = %+v", provider.FakeProvider.Requests[1].Messages)
+	}
+	if hasProviderCompaction(a.Transcript()) {
+		t.Fatal("rejected provider checkpoint remained in durable transcript")
+	}
+	if countNoticesContaining(sink.notices, "provider rejected the checkpoint") != 1 {
+		t.Fatalf("checkpoint rejection notices = %v", sink.notices)
+	}
+}
+
+func TestNativeCheckpointStatefulSuffixUsesVisibleCacheBoundary(t *testing.T) {
+	provider := &nativeCompactionProvider{
+		FakeProvider: llmtest.New("responses"),
+		result:       llm.CompactedContext{Items: nativeCompactedItems()},
+	}
+	a := newAgent(provider, tools.Default(), Options{
+		Model: "gpt-5.5", ReasoningReplayDomain: "openai:gpt-5", NativeCompaction: true, ResponsesStateful: true,
+	})
+	a.SetTranscript(makeTurns(4))
+	if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	anchor := len(a.transcript)
+	digest, err := llm.FingerprintMessages(a.transcript)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.responseState = llm.ResponseState{PreviousResponseID: "resp_1", AnchorMessages: anchor, AnchorDigest: digest}
+	a.transcript = append(a.transcript, userText("new suffix"))
+
+	req := a.modelRequest(nil)
+	if !req.usedPrevious || len(req.request.Messages) != 1 || req.request.Messages[0].Content[0].Text != "new suffix" {
+		t.Fatalf("stateful native suffix request = %+v", req)
+	}
+	if req.request.CachePolicy.StableMessagePrefix < 0 || req.request.CachePolicy.StableMessagePrefix > len(req.request.Messages) {
+		t.Fatalf("visible cache boundary = %d for %d payload messages", req.request.CachePolicy.StableMessagePrefix, len(req.request.Messages))
+	}
+}
+
 func TestMaintenanceRequestIdentitiesAreDeterministicAndPurposeScoped(t *testing.T) {
 	fp := llmtest.New("fake",
 		summaryStep("compaction", 1, 1),

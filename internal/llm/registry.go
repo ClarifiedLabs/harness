@@ -56,6 +56,7 @@ type ProviderConfig struct {
 	PromptCache             PromptCacheConfig `json:"prompt_cache,omitempty"`
 	ResponsesStateful       *bool             `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket      *bool             `json:"responses_websocket,omitempty"`
+	ResponsesCompaction     *bool             `json:"responses_compaction,omitempty"`
 	InteractionsStateful    *bool             `json:"interactions_stateful,omitempty"`
 	ServerTools             []string          `json:"server_tools,omitempty"`
 	ServiceTiers            []ServiceTier     `json:"service_tiers,omitempty"`

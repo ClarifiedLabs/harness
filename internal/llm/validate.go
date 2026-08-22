@@ -41,6 +41,19 @@ func ValidateMessageContent(msgs []Message) error {
 				if !validInteractionStep(block.InteractionStep) {
 					return fmt.Errorf("message %d block %d: invalid interaction step", i, j)
 				}
+			case BlockProviderCompaction:
+				if message.Role != RoleUser || message.Origin != MessageOriginProviderCompaction {
+					return fmt.Errorf("message %d block %d: provider compaction requires a provider-compaction user message", i, j)
+				}
+				if len(message.Content) != 1 {
+					return fmt.Errorf("message %d block %d: provider compaction must be the message's only block", i, j)
+				}
+				if block.ReasoningReplayDomain == "" {
+					return fmt.Errorf("message %d block %d: provider compaction replay domain is empty", i, j)
+				}
+				if err := validateProviderCompactionItems(block.ProviderCompaction); err != nil {
+					return fmt.Errorf("message %d block %d: %w", i, j, err)
+				}
 			}
 		}
 	}
@@ -128,7 +141,38 @@ func imageBlockHasForeignFields(block ContentBlock) bool {
 		block.ReasoningEncrypted != "" ||
 		block.InteractionThoughtSummary != "" ||
 		block.InteractionThoughtSignature != "" ||
-		len(block.InteractionStep) > 0
+		len(block.InteractionStep) > 0 ||
+		len(block.ProviderCompaction) > 0
+}
+
+func validateProviderCompactionItems(items []json.RawMessage) error {
+	if len(items) == 0 {
+		return fmt.Errorf("provider compaction has no items")
+	}
+	foundCompaction := false
+	for i, raw := range items {
+		if len(raw) == 0 || !json.Valid(raw) {
+			return fmt.Errorf("provider compaction item %d is invalid JSON", i)
+		}
+		var header struct {
+			Type             string `json:"type"`
+			ID               string `json:"id"`
+			EncryptedContent string `json:"encrypted_content"`
+		}
+		if err := json.Unmarshal(raw, &header); err != nil || header.Type == "" {
+			return fmt.Errorf("provider compaction item %d has no type", i)
+		}
+		if header.Type == "compaction" {
+			if header.ID == "" || header.EncryptedContent == "" {
+				return fmt.Errorf("provider compaction item %d is missing id or encrypted_content", i)
+			}
+			foundCompaction = true
+		}
+	}
+	if !foundCompaction {
+		return fmt.Errorf("provider compaction window has no compaction item")
+	}
+	return nil
 }
 
 func validInteractionStep(raw json.RawMessage) bool {

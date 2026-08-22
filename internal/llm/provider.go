@@ -27,6 +27,21 @@ type InputTokenCounter interface {
 	CountInputTokens(ctx context.Context, req Request) (InputTokenCount, error)
 }
 
+// ContextCompactor is an optional provider capability for turning the current
+// model-visible context into a smaller canonical input window. Items are
+// provider-owned opaque input items: callers must preserve their order and
+// replay them without interpreting or pruning them.
+type ContextCompactor interface {
+	CompactContext(ctx context.Context, req Request) (CompactedContext, error)
+}
+
+// CompactedContext is the canonical provider input window returned by a native
+// compaction operation. Usage accounts for the maintenance request itself.
+type CompactedContext struct {
+	Items []json.RawMessage `json:"items"`
+	Usage Usage             `json:"usage,omitempty"`
+}
+
 // ResponseContinuationProbe is an optional Provider side interface reporting
 // whether a previous response id can still be continued on the next request.
 // Providers without transport-local continuation constraints (plain HTTP) do
@@ -38,6 +53,10 @@ type ResponseContinuationProbe interface {
 
 // ErrInputTokenCountUnsupported marks providers without preflight counting.
 var ErrInputTokenCountUnsupported = errors.New("input token count unsupported")
+
+// ErrContextCompactionUnsupported marks a provider or proxy target that does
+// not implement provider-native context compaction.
+var ErrContextCompactionUnsupported = errors.New("context compaction unsupported")
 
 // InputTokenCountScope describes which model-visible input a provider counted.
 // Stateful continuation APIs may count either the effective logical context or

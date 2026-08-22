@@ -2,6 +2,7 @@ package responses
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"harness/internal/llm"
 )
@@ -45,6 +46,11 @@ type wireReasoning struct {
 // wireInputItem covers the input item subset harness needs: messages, prior
 // function calls, and function-call outputs.
 type wireInputItem struct {
+	// Raw carries one provider-owned canonical item returned by
+	// /responses/compact. MarshalJSON emits it unchanged; Type is still populated
+	// locally so request-context insertion can preserve tool suffix adjacency.
+	Raw json.RawMessage `json:"-"`
+
 	Type string `json:"type"`
 
 	// message
@@ -64,6 +70,17 @@ type wireInputItem struct {
 	ID               string             `json:"id,omitempty"`
 	EncryptedContent string             `json:"encrypted_content,omitempty"`
 	Summary          *[]wireContentPart `json:"summary,omitempty"`
+}
+
+func (w wireInputItem) MarshalJSON() ([]byte, error) {
+	if len(w.Raw) > 0 {
+		if !json.Valid(w.Raw) {
+			return nil, fmt.Errorf("invalid raw Responses input item")
+		}
+		return w.Raw, nil
+	}
+	type plain wireInputItem
+	return json.Marshal(plain(w))
 }
 
 type wireContentPart struct {
@@ -352,6 +369,11 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 
 		for _, b := range m.Content {
 			switch b.Kind {
+			case llm.BlockProviderCompaction:
+				flushMessage()
+				for _, raw := range b.ProviderCompaction {
+					out = append(out, wireInputItem{Type: rawInputItemType(raw), Raw: raw})
+				}
 			case llm.BlockReasoning:
 				// Replay the encrypted reasoning item verbatim, immediately before
 				// the message/function_call it preceded (reasoning blocks lead the
@@ -421,6 +443,14 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 		}
 	}
 	return out
+}
+
+func rawInputItemType(raw json.RawMessage) string {
+	var header struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(raw, &header)
+	return header.Type
 }
 
 func textPartType(role llm.Role) string {

@@ -43,6 +43,28 @@ func TestValidateTranscript(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "provider compaction checkpoint",
+			msgs: []Message{{
+				Role: RoleUser, Origin: MessageOriginProviderCompaction,
+				Content: []ContentBlock{{
+					Kind: BlockProviderCompaction, ReasoningReplayDomain: "openai:gpt",
+					ProviderCompaction: []json.RawMessage{json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"opaque"}`)},
+				}},
+			}},
+			wantErr: false,
+		},
+		{
+			name: "provider compaction missing encrypted content",
+			msgs: []Message{{
+				Role: RoleUser, Origin: MessageOriginProviderCompaction,
+				Content: []ContentBlock{{
+					Kind: BlockProviderCompaction, ReasoningReplayDomain: "openai:gpt",
+					ProviderCompaction: []json.RawMessage{json.RawMessage(`{"id":"cmp_1","type":"compaction"}`)},
+				}},
+			}},
+			wantErr: true,
+		},
+		{
 			name: "assistant phase",
 			msgs: []Message{
 				userText("hi"),

@@ -459,20 +459,24 @@ func normalizeContinuationResult(result string) string {
 // streamPath is the route the proxy streams model responses on.
 const streamPath = "/v1/stream"
 
+// compactPath is the route for provider-native standalone compaction.
+const compactPath = "/v1/compact"
+
 type authAuthorizer interface {
 	Authorize(*http.Request) bool
 }
 
-// ObserveAuth wraps the authenticated handler so stream requests rejected by
+// ObserveAuth wraps the authenticated handler so model requests rejected by
 // API-key auth (401) are still metered. It re-checks store.Authorize for the
-// stream route only and records a rejected request before delegating to next
+// stream and compact routes and records a rejected request before delegating to next
 // (which writes the actual 401). When auth is not required store.Authorize is
 // always true, so nothing is counted. Counting here, rather than in the apikey
 // middleware, keeps that package free of a metrics dependency.
 func ObserveAuth(h *Handler, store authAuthorizer, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if store != nil && r.Method == http.MethodPost && r.URL.Path == streamPath && !store.Authorize(r) {
-			h.RecordRejectedStream(r)
+		modelRequest := r.Method == http.MethodPost && (r.URL.Path == streamPath || r.URL.Path == compactPath)
+		if store != nil && modelRequest && !store.Authorize(r) {
+			h.recordRejectedAuth(r, r.URL.Path == streamPath)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -483,6 +487,10 @@ func ObserveAuth(h *Handler, store authAuthorizer, next http.Handler) http.Handl
 // because the authenticated handler never decoded the body, and key is the
 // authorizing name or "anonymous".
 func (h *Handler) RecordRejectedStream(r *http.Request) {
+	h.recordRejectedAuth(r, true)
+}
+
+func (h *Handler) recordRejectedAuth(r *http.Request, continuation bool) {
 	if h.metrics == nil || h.metricFams == nil {
 		return
 	}
@@ -493,7 +501,9 @@ func (h *Handler) RecordRejectedStream(r *http.Request) {
 	labels := map[string]string{"key": key, "purpose": string(llm.RequestPurposeUnknown)}
 	h.metricFams.requests.Inc(labels)
 	h.metricFams.errors.Inc(labels)
-	h.recordContinuation("not_offered")
+	if continuation {
+		h.recordContinuation("not_offered")
+	}
 }
 
 // streamFailed reports whether a completed stream should count as an error for
@@ -507,8 +517,8 @@ func streamFailed(ctx context.Context, streamErr string, status int) bool {
 	return streamErr != "" || status >= http.StatusBadRequest
 }
 
-// recordMetrics stamps one stream request into the metrics registry. It is called
-// once per /v1/stream (including bounded retries), regardless of whether the
+// recordMetrics stamps one model request into the metrics registry. It is called
+// once per /v1/stream or /v1/compact (including bounded retries), regardless of whether the
 // target resolved (empty provider/model labels are omitted) or the model is
 // priced, so free models and pre-resolution failures still get counters. Cost is
 // recorded only when usage.CostKnown. failed is true when the stream errored or
@@ -901,6 +911,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleUsage(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/input_tokens":
 		h.handleInputTokens(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == compactPath:
+		h.handleCompact(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == streamPath:
 		h.handleStream(w, r)
 	default:
@@ -1120,6 +1132,98 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 		Source:      count.Source,
 		Scope:       llm.NormalizeInputTokenCountScope(count.Scope),
 	})
+}
+
+func (h *Handler) handleCompact(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	cw := &countingResponseWriter{ResponseWriter: w}
+	var providerID, model string
+	var usage llm.Usage
+	failed := true
+	defer func() {
+		h.recordMetrics(r, providerID, model, llm.RequestPurposeCompaction, usage, time.Since(start), failed)
+	}()
+	body, err := io.ReadAll(http.MaxBytesReader(cw, r.Body, maxStreamRequestBytes))
+	if err != nil {
+		writeError(cw, http.StatusRequestEntityTooLarge, &protocol.Error{StatusCode: http.StatusRequestEntityTooLarge, Message: "request body too large"})
+		return
+	}
+	var req protocol.CompactRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: "malformed compact request"})
+		return
+	}
+	if err := validateProxyRequestMessages(req.Request); err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "invalid_request", Message: "invalid model request content"})
+		return
+	}
+	target, err := h.resolveTarget(req.TargetID)
+	if err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
+	providerID = target.pc.Name
+	model = target.entry.Name
+	if !providerResponsesCompaction(target.pc) {
+		writeError(cw, http.StatusNotImplemented, &protocol.Error{
+			StatusCode: http.StatusNotImplemented,
+			Code:       "context_compaction_unsupported",
+			Message:    llm.ErrContextCompactionUnsupported.Error(),
+		})
+		return
+	}
+	if err := applyServiceTierForTarget(target, &req.Request); err != nil {
+		writeError(cw, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Message: err.Error()})
+		return
+	}
+	req.Request.Model = model
+	req.Request.Purpose = llm.RequestPurposeCompaction
+	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
+	req.Request.Reasoning = h.reasoningForTarget(target, req.Request.Reasoning.Profile, req.Request.Reasoning)
+	_, req.Request = prepareProviderRequest(req.Request)
+	budget, ok, _ := h.checkCostBudget(cw, r, target, req.Request, nil)
+	if !ok {
+		return
+	}
+	opts, err := h.runtimeOptionsForTarget(r.Context(), target)
+	if err != nil {
+		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
+		return
+	}
+	provider, err := h.newProvider(opts)
+	if err != nil {
+		writeError(cw, http.StatusBadRequest, protocol.ErrorFrom(err))
+		return
+	}
+	compactor, ok := provider.(llm.ContextCompactor)
+	if !ok {
+		writeError(cw, http.StatusNotImplemented, &protocol.Error{
+			StatusCode: http.StatusNotImplemented,
+			Code:       "context_compaction_unsupported",
+			Message:    llm.ErrContextCompactionUnsupported.Error(),
+		})
+		return
+	}
+	result, err := compactor.CompactContext(r.Context(), req.Request)
+	if err != nil {
+		writeError(cw, http.StatusBadGateway, protocol.ErrorFrom(err))
+		return
+	}
+	result.Usage = h.priceUsage(target.targetID, req.Request, result.Usage)
+	usage = result.Usage
+	if usage.CostKnown {
+		h.recordUsage(target.targetID, usage, usage.CostUSD)
+		if budget != nil {
+			if err := budget.Add(usage.CostUSD); err != nil {
+				h.logger.Warn("persist api key cost budget state failed", "err", err)
+			}
+		}
+	}
+	cw.Header().Set("content-type", "application/json")
+	if err := json.NewEncoder(cw).Encode(protocol.CompactResponse{Context: result}); err != nil {
+		return
+	}
+	failed = false
 }
 
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -2631,6 +2735,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				ServerTools:           targetServerTools(pc, entry),
 				APIType:               pc.APIType,
 				ContinuationStateful:  providerContinuationStateful(pc),
+				NativeCompaction:      providerResponsesCompaction(pc),
 				Prewarm:               providerResponsesWebSocket(pc),
 				Price:                 price,
 				Reasoning:             targetReasoningSupported(entry),
@@ -2747,6 +2852,22 @@ func providerResponsesWebSocket(pc llm.ProviderConfig) bool {
 		return *pc.ResponsesWebSocket
 	}
 	return pc.Auth != nil && strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth)
+}
+
+func providerResponsesCompaction(pc llm.ProviderConfig) bool {
+	if !strings.EqualFold(strings.TrimSpace(pc.APIType), "responses") {
+		return false
+	}
+	if pc.ResponsesCompaction != nil {
+		return *pc.ResponsesCompaction
+	}
+	if !pc.Managed {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(pc.Name))
+	baseURL := strings.TrimRight(strings.ToLower(strings.TrimSpace(pc.BaseURL)), "/")
+	return (name == "openai" && baseURL == "https://api.openai.com/v1") ||
+		(name == modelcatalog.OpenAICodexProviderID && baseURL == modelcatalog.OpenAICodexProviderBaseURL)
 }
 
 func modelEntryReasoning(m llm.ModelEntry) *llm.ReasoningInfo {

@@ -29,8 +29,8 @@ reasoning profiles. Use `harness --agents` to print the resolved built-in and
 config-defined agents. Both commands exit before creating a session.
 
 `--models --format json` also shows each target's `api_type`,
-`continuation_stateful`, zero-generation `prewarm` support, `server_tools`,
-price, and variant relationship
+`continuation_stateful`, standalone `native_compaction`, zero-generation
+`prewarm` support, `server_tools`, price, and variant relationship
 (`base_target_id` / `variant`). When a target advertises `web_search`,
 `-web-search auto` lets harness declare the provider-hosted web search tool for
 model calls. The default is `off`.
@@ -788,6 +788,15 @@ session and sends only the appended suffix on the next request. A missing,
 malformed, out-of-range, or fingerprint-mismatched anchor is discarded before
 the request and the complete transcript is sent safely.
 
+Responses provider configs can opt into the standalone compaction endpoint with
+`responses_compaction:true`. The model proxy advertises this capability per
+target; Harness does not infer it from `api_type:"responses"` alone. Managed
+providers using the canonical official OpenAI API or ChatGPT Codex identity and
+base URL default on, while `responses_compaction:false` explicitly disables the
+capability. Compatible and manual providers remain opt-in. A manual provider
+config should enable it only when its base URL implements
+`POST /responses/compact` with the OpenAI response-compaction contract.
+
 Live transcript retention defaults to `auto`, which batches eligible trimming
 into pressure epochs when the larger of the local and provider-derived estimates
 reaches 60% of the context window. `auto` and `pressure` do not rewrite history
@@ -937,6 +946,10 @@ WebSocket `generate:false`; only that transport returns an explicit transcript
 anchor at message zero, which the owner goroutine installs if the model,
 session, transcript, and continuation generation are still unchanged. HTTP
 warm-up usage is retained but its disposable response ID is never installed.
+ChatGPT Codex advertises standalone Responses compaction. Harness sends the
+current tool and reasoning contract plus the stable Codex request identifiers;
+if the backend rejects the operation, Harness disables native compaction for the
+current compatibility domain and falls back to textual compaction.
 After setup, run:
 
 ```sh
@@ -1317,9 +1330,9 @@ Cost budgets are attached to model-proxy API keys:
 harness-model-proxy generate-api-key -budget-usd 25 -budget-period 24h laptop
 ```
 
-New authenticated streams are rejected with HTTP 429 after the key's recorded
-known-cost spend reaches its fixed-window limit. Spend persists under the proxy
-config directory across restarts. Unpriced targets are allowed by default and do
+New authenticated streams and native compaction requests are rejected with HTTP
+429 after the key's recorded known-cost spend reaches its fixed-window limit.
+Spend persists under the proxy config directory across restarts. Unpriced targets are allowed by default and do
 not count toward the budget; add `-budget-reject-unpriced` to reject them.
 `/v1/usage` includes the authenticated key's current budget state when it has a
 budget. Both usage and budget enforcement are per pod; use one replica when a
@@ -1355,7 +1368,8 @@ bounded `purpose` (`turn`, `compaction`, `prewarm`,
 `branch_summary`, or
 `unknown`), and `key` (the API key's stored name, or `anonymous` when
 authentication is disabled). `model_proxy_build_info` carries the build version.
-Token counters are recorded for every stream that produced usage, priced or not, while
+Token counters are recorded for every stream or native compaction request that
+produced usage, priced or not, while
 `model_proxy_cost_usd_total` is recorded only when a price is known.
 `model_proxy_cache_write_tokens_total` records default-rate writes and
 `model_proxy_cache_write_1h_tokens_total` records Anthropic's 1-hour writes.
@@ -2080,6 +2094,25 @@ model context window, or on `/compact`. `compact_auto_enabled: false` disables
 only threshold-based compaction; `/compact` and provider-overflow recovery still
 work. Harness compacts toward `compact_target_percent` (default 65) after fixed
 system/tool overhead.
+
+When the active target advertises standalone Responses compaction, foreground
+automatic compaction and an unfocused `/compact` use that native endpoint. The
+provider receives the complete current provider-visible window and system
+instructions; that input must still fit its context limit. Harness stores and
+replays the provider's complete canonical item array without pruning it, then
+appends newer turns. The normal semantic transcript is retained, so switching to
+another provider/model ignores the incompatible opaque checkpoint and replays
+the provider-neutral history. Native compaction resets any stored-response
+continuation anchor. Its token usage and cost count as compaction maintenance.
+
+If native compaction is unsupported or fails, Harness disables it for the
+current compatibility domain for that run and falls back to the textual path
+below. If a later request rejects a saved native checkpoint, Harness retries
+once from the preserved semantic transcript and disables that checkpoint for the
+current compatibility domain. Focused `/compact optional focus text`, delegate
+continuation/all-history compaction, and speculative idle compaction always use
+textual summaries. Live retention is skipped while native compaction is
+available so cross-provider fallback retains full semantic history.
 
 Interactive idle compaction is an opt-in experiment. Set
 `compact_idle_after_seconds` above zero (default `0`, disabled) to prepare a

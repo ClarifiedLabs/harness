@@ -113,6 +113,7 @@ type RuntimeProfile struct {
 	CompactToolResultMaxBytes int    `json:"compact_tool_result_max_bytes,omitempty"`
 	CompactTimeoutSeconds     int    `json:"compact_timeout_seconds,omitempty"`
 	ResponsesStateful         bool   `json:"responses_stateful,omitempty"`
+	NativeCompaction          bool   `json:"native_compaction,omitempty"`
 	DelegateMaxTurns          int    `json:"delegate_max_turns,omitempty"`
 	DelegateMaxActive         int    `json:"delegate_max_active,omitempty"`
 	DelegateMaxDescendants    int    `json:"delegate_max_descendants,omitempty"`

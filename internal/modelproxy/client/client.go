@@ -342,6 +342,45 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	}, nil
 }
 
+func (p *Provider) CompactContext(ctx context.Context, req llm.Request) (llm.CompactedContext, error) {
+	body, err := json.Marshal(protocol.CompactRequest{
+		TargetID: p.targetID,
+		Request:  req,
+	})
+	if err != nil {
+		return llm.CompactedContext{}, fmt.Errorf("marshal proxy compact request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+"/v1/compact", bytes.NewReader(body))
+	if err != nil {
+		return llm.CompactedContext{}, err
+	}
+	httpReq.Header.Set("content-type", "application/json")
+	httpReq.Header.Set(requesterHeader, "harness")
+	p.client.setAuth(httpReq)
+	p.client.setTrace(httpReq)
+	resp, err := p.client.http.Do(httpReq)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return llm.CompactedContext{}, ctxErr
+		}
+		return llm.CompactedContext{}, &llm.APIError{Message: err.Error(), Retryable: true}
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		err := readHTTPError(resp)
+		var apiErr *llm.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == "context_compaction_unsupported" {
+			return llm.CompactedContext{}, llm.ErrContextCompactionUnsupported
+		}
+		return llm.CompactedContext{}, err
+	}
+	var out protocol.CompactResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return llm.CompactedContext{}, fmt.Errorf("decode proxy compact response: %w", err)
+	}
+	return out.Context, nil
+}
+
 func readHTTPError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
 	var env protocol.StreamEnvelope

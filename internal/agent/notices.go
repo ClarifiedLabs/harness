@@ -26,6 +26,9 @@ const (
 	// NoticeReasoningReplayDisabled reports disabling reasoning replay after
 	// the provider rejected encrypted reasoning content.
 	NoticeReasoningReplayDisabled = "[reasoning replay disabled: provider rejected encrypted content; retrying without opaque reasoning]"
+	// NoticeNativeCompactionReplayDisabled reports discarding an opaque native
+	// checkpoint after its originating provider rejected it.
+	NoticeNativeCompactionReplayDisabled = "[native compaction replay disabled: provider rejected the checkpoint; retrying with semantic history]"
 	// NoticeCompactNothingToShrink reports a compaction trigger with nothing
 	// left to remove from the transcript.
 	NoticeCompactNothingToShrink = "[compact: transcript over budget but nothing left to shrink]"

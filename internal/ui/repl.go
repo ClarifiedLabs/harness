@@ -60,6 +60,7 @@ type ModelSelection struct {
 	FastTargetID          string
 	ServerTools           []llm.ServerTool
 	ResponsesStateful     bool
+	NativeCompaction      bool
 	// ReasoningSet says Reasoning intentionally replaces the requested config,
 	// including zero value for provider default.
 	ReasoningSet bool
@@ -93,6 +94,7 @@ type AgentSelection struct {
 	FastTargetID          string
 	ServerTools           []llm.ServerTool
 	ResponsesStateful     bool
+	NativeCompaction      bool
 	ReasoningSet          bool
 }
 
@@ -3200,6 +3202,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	app.Agent.SetReasoning(selection.Reasoning)
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
+	app.Agent.SetNativeCompaction(selection.NativeCompaction)
 	if baseChanged {
 		app.Agent.ResetProxySessionID()
 	} else if selection.ResponsesStateful &&
@@ -3819,6 +3822,7 @@ func (app *App) applyAgentSwitchUsing(name string, prewarm bool, switchAgent fun
 	app.FastTargetID = selection.FastTargetID
 	app.Agent.SetServerTools(selection.ServerTools)
 	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
+	app.Agent.SetNativeCompaction(selection.NativeCompaction)
 	app.Agent.ResetProxySessionID()
 	app.AgentName = selection.Name
 	app.System = selection.System // so saved sessions capture the agent's prompt
@@ -5728,6 +5732,10 @@ func otelContextComposition(messages []llm.Message) otel.ContextComposition {
 			composition.ReasoningOpaqueBytes += len(block.InteractionThoughtSignature)
 		case llm.BlockInteractionStep:
 			composition.ReasoningOpaqueBytes += len(block.InteractionStep)
+		case llm.BlockProviderCompaction:
+			for _, item := range block.ProviderCompaction {
+				composition.ReasoningOpaqueBytes += len(item)
+			}
 		}
 	}
 	for _, message := range messages {

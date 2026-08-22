@@ -64,6 +64,7 @@ type Runtime struct {
 	ReasoningReplayDomain string
 	ServerTools           []llm.ServerTool
 	ResponsesStateful     bool
+	NativeCompaction      bool
 	System                string
 	Agent                 string
 	ToolNames             []string
@@ -89,6 +90,7 @@ type Launch struct {
 	ReasoningReplayDomain string
 	ServerTools           []llm.ServerTool
 	ResponsesStateful     bool
+	NativeCompaction      bool
 	System                string
 	Agent                 string
 	Tools                 *tools.Registry
@@ -757,6 +759,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		ReasoningReplayDomain:     launch.ReasoningReplayDomain,
 		ServerTools:               launch.ServerTools,
 		ResponsesStateful:         launch.ResponsesStateful,
+		NativeCompaction:          launch.NativeCompaction,
 		RetentionPolicy:           r.opts.RetentionPolicy,
 		CompactKeepTurns:          r.opts.CompactKeepTurns,
 		CompactKeepTokens:         r.opts.CompactKeepTokens,
@@ -1374,6 +1377,7 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ReasoningReplayDomain  string                `json:"reasoning_replay_domain"`
 		ServerTools            []llm.ServerTool      `json:"server_tools,omitempty"`
 		ResponsesStateful      bool                  `json:"responses_stateful"`
+		NativeCompaction       bool                  `json:"native_compaction"`
 		RetentionPolicy        agent.RetentionPolicy `json:"retention_policy"`
 		System                 string                `json:"system"`
 		Tools                  []llm.ToolSchema      `json:"tools"`
@@ -1406,6 +1410,7 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ReasoningReplayDomain:  launch.ReasoningReplayDomain,
 		ServerTools:            slices.Clone(launch.ServerTools),
 		ResponsesStateful:      launch.ResponsesStateful,
+		NativeCompaction:       launch.NativeCompaction,
 		RetentionPolicy:        r.opts.RetentionPolicy,
 		System:                 launch.System,
 		Tools:                  toolRegistry.Specs(),
@@ -1464,6 +1469,7 @@ func (r *Runner) childToolsWithCacheAffinity(parent Runtime, launch Launch, chil
 		Reasoning:         launch.Reasoning,
 		ServerTools:       launch.ServerTools,
 		ResponsesStateful: launch.ResponsesStateful,
+		NativeCompaction:  launch.NativeCompaction,
 		System:            launch.System,
 		Agent:             launch.Agent,
 		ToolNames:         names,

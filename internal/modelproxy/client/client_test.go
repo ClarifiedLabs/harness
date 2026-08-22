@@ -415,6 +415,58 @@ func TestProviderCountInputTokensUnsupported(t *testing.T) {
 	}
 }
 
+func TestProviderCompactContext(t *testing.T) {
+	var target string
+	items := []json.RawMessage{json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"opaque"}`)}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/compact" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var req protocol.CompactRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		target = req.TargetID
+		_ = json.NewEncoder(w).Encode(protocol.CompactResponse{Context: llm.CompactedContext{
+			Items: items, Usage: llm.Usage{InputTokens: 12, OutputTokens: 3},
+		}})
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := c.Provider("openai:gpt-5.5").(llm.ContextCompactor).CompactContext(context.Background(), llm.Request{Model: "gpt-5.5"})
+	if err != nil {
+		t.Fatalf("CompactContext: %v", err)
+	}
+	if target != "openai:gpt-5.5" || len(got.Items) != 1 || got.Usage.InputTokens != 12 {
+		t.Fatalf("target/context = %q/%+v", target, got)
+	}
+}
+
+func TestProviderCompactContextUnsupported(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotImplemented)
+		_ = json.NewEncoder(w).Encode(protocol.Error{
+			StatusCode: http.StatusNotImplemented,
+			Code:       "context_compaction_unsupported",
+			Message:    llm.ErrContextCompactionUnsupported.Error(),
+		})
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := New(srv.URL, srv.Client())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = c.Provider("openai").(llm.ContextCompactor).CompactContext(context.Background(), llm.Request{Model: "gpt-5.5"})
+	if !errors.Is(err, llm.ErrContextCompactionUnsupported) {
+		t.Fatalf("err = %v, want ErrContextCompactionUnsupported", err)
+	}
+}
+
 func TestClientTraceHeaders(t *testing.T) {
 	tr, err := tracing.NewTracer(true)
 	if err != nil {

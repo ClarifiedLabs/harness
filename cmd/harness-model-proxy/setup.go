@@ -64,6 +64,7 @@ type setupProviderConfig struct {
 	PromptCache             llm.PromptCacheConfig     `json:"prompt_cache,omitempty"`
 	ResponsesStateful       *bool                     `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket      *bool                     `json:"responses_websocket,omitempty"`
+	ResponsesCompaction     *bool                     `json:"responses_compaction,omitempty"`
 	InteractionsStateful    *bool                     `json:"interactions_stateful,omitempty"`
 	ServerTools             []string                  `json:"server_tools,omitempty"`
 	ServiceTiers            []llm.ServiceTier         `json:"service_tiers,omitempty"`
@@ -197,6 +198,9 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 	if existingProvider.Config.ResponsesWebSocket != nil {
 		provider.ResponsesWebSocket = existingProvider.Config.ResponsesWebSocket
+	}
+	if existingProvider.Config.ResponsesCompaction != nil {
+		provider.ResponsesCompaction = existingProvider.Config.ResponsesCompaction
 	}
 	if existingProvider.Config.InteractionsStateful != nil {
 		provider.InteractionsStateful = existingProvider.Config.InteractionsStateful
@@ -699,12 +703,14 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 		entries = append(entries, setupModelFromCatalog(model))
 	}
 	if isOpenAICodexProvider(provider) {
+		enabled := true
 		return setupProviderConfig{
 			Name:                modelcatalog.OpenAICodexProviderID,
 			APIType:             setupProviderAPIType(provider),
 			BaseURL:             setupProviderBaseURL(provider),
 			Managed:             true,
 			OmitMaxOutputTokens: true,
+			ResponsesCompaction: &enabled,
 			ServerTools:         setupProviderServerTools(modelcatalog.OpenAICodexProviderID, setupProviderAPIType(provider), setupProviderBaseURL(provider)),
 			Auth:                setupProviderAuth(provider, authCfg),
 			Models:              entries,
@@ -713,7 +719,7 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 	cfg := provider.ProviderConfig(apiKey)
 	apiType := setupProviderAPIType(provider)
 	baseURL := setupProviderBaseURL(provider)
-	return setupProviderConfig{
+	out := setupProviderConfig{
 		Name:        cfg.Name,
 		APIType:     apiType,
 		BaseURL:     baseURL,
@@ -724,6 +730,11 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 		Auth:        authCfg,
 		Models:      entries,
 	}
+	if cfg.Name == "openai" && strings.EqualFold(apiType, "responses") {
+		enabled := true
+		out.ResponsesCompaction = &enabled
+	}
+	return out
 }
 
 func setupProviderFromCurrent(current llm.ProviderConfig, meta *modelcatalog.Provider, models []modelcatalog.Model) setupProviderConfig {
@@ -763,6 +774,9 @@ func setupProviderFromCurrent(current llm.ProviderConfig, meta *modelcatalog.Pro
 	}
 	if current.ResponsesWebSocket != nil {
 		next.ResponsesWebSocket = current.ResponsesWebSocket
+	}
+	if current.ResponsesCompaction != nil {
+		next.ResponsesCompaction = current.ResponsesCompaction
 	}
 	if current.InteractionsStateful != nil {
 		next.InteractionsStateful = current.InteractionsStateful

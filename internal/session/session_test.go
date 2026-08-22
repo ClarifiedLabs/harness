@@ -658,6 +658,42 @@ func TestSaveLoadPreservesImageBlocks(t *testing.T) {
 	}
 }
 
+func TestSaveLoadPreservesProviderCompactionCheckpoint(t *testing.T) {
+	s := sampleSession()
+	s.Runtime.NativeCompaction = true
+	s.Messages = append(s.Messages, llm.Message{
+		Role:   llm.RoleUser,
+		Origin: llm.MessageOriginProviderCompaction,
+		Content: []llm.ContentBlock{{
+			Kind:                  llm.BlockProviderCompaction,
+			ReasoningReplayDomain: "openai:gpt-5.5",
+			ProviderCompaction: []json.RawMessage{
+				json.RawMessage(`{"id":"msg_1","type":"message","role":"user","content":[{"type":"input_text","text":"retained"}]}`),
+				json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"opaque"}`),
+			},
+		}},
+	})
+	if err := llm.ValidateTranscript(s.Messages); err != nil {
+		t.Fatalf("provider compaction transcript invalid before save: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := llm.ValidateTranscript(got.Messages); err != nil {
+		t.Fatalf("provider compaction transcript invalid after load: %v", err)
+	}
+	checkpoint := got.Messages[len(got.Messages)-1]
+	wantCheckpoint := s.Messages[len(s.Messages)-1]
+	if !got.Runtime.NativeCompaction || checkpoint.Origin != wantCheckpoint.Origin || !reflect.DeepEqual(checkpoint.Content, wantCheckpoint.Content) {
+		t.Fatalf("provider compaction checkpoint did not round-trip: %+v", checkpoint)
+	}
+}
+
 func TestSaveToolResultArtifactIgnoresRichImageContent(t *testing.T) {
 	dir := t.TempDir()
 	result := llm.ToolResult{

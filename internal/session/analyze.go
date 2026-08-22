@@ -722,7 +722,7 @@ func readAnalysisMetadataFile(path string) ([]byte, error) {
 func runtimeProfilePresent(runtime RuntimeProfile) bool {
 	return runtime.RetentionPolicy != "" || runtime.ContextWindow != 0 ||
 		runtime.ToolResultMaxBytes != 0 || runtime.ToolResultMaxLines != 0 ||
-		runtime.CompactToolResultMaxBytes != 0 || runtime.CompactTimeoutSeconds != 0 || runtime.ResponsesStateful ||
+		runtime.CompactToolResultMaxBytes != 0 || runtime.CompactTimeoutSeconds != 0 || runtime.ResponsesStateful || runtime.NativeCompaction ||
 		runtime.DelegateMaxTurns != 0 || runtime.DelegateMaxActive != 0 || runtime.DelegateMaxDescendants != 0 ||
 		runtime.Prewarm || runtime.SearchBackend != ""
 }

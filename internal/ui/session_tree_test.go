@@ -32,6 +32,23 @@ func TestTreeEntryPreviewRichToolResultUsesSafeMetadata(t *testing.T) {
 	}
 }
 
+func TestTreeEntryPreviewHidesProviderCompactionPayload(t *testing.T) {
+	const opaque = "secret-encrypted-provider-state"
+	entry := session.Entry{Type: session.EntrySegment, Messages: []llm.Message{{
+		Role:   llm.RoleUser,
+		Origin: llm.MessageOriginProviderCompaction,
+		Content: []llm.ContentBlock{{
+			Kind:                  llm.BlockProviderCompaction,
+			ReasoningReplayDomain: "openai:gpt-5",
+			ProviderCompaction:    []json.RawMessage{json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"` + opaque + `"}`)},
+		}},
+	}}}
+	got := treeEntryPreview(entry)
+	if got != "[provider compaction]" || strings.Contains(got, opaque) {
+		t.Fatalf("preview = %q", got)
+	}
+}
+
 func TestForkTreePageContractsHiddenLinearEntries(t *testing.T) {
 	first := treeTestPrompt("18c79f4f", "Review the most recent commit")
 	second := treeTestPrompt("899bd104", "write up a plan to address all these findings")

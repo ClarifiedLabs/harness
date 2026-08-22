@@ -473,6 +473,10 @@ func collectContextComposition(messages []llm.Message) contextCompositionStats {
 				stats.interactionOpaqueBytes += len(block.InteractionThoughtSignature)
 			case llm.BlockInteractionStep:
 				stats.otherBytes += len(block.InteractionStep)
+			case llm.BlockProviderCompaction:
+				for _, item := range block.ProviderCompaction {
+					stats.otherBytes += len(item)
+				}
 			default:
 				stats.otherBytes += len(block.Text) + len(block.ResultText) + len(block.ToolInput)
 			}

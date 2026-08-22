@@ -23,6 +23,7 @@ import (
 	"harness/internal/llm/llmtest"
 	"harness/internal/logging"
 	"harness/internal/metrics"
+	"harness/internal/modelcatalog"
 	proxyclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
@@ -33,6 +34,17 @@ type countingFakeProvider struct {
 	*llmtest.FakeProvider
 	count int
 	err   error
+}
+
+type compactingFakeProvider struct {
+	*llmtest.FakeProvider
+	request llm.Request
+	result  llm.CompactedContext
+}
+
+func (p *compactingFakeProvider) CompactContext(_ context.Context, req llm.Request) (llm.CompactedContext, error) {
+	p.request = req
+	return p.result, nil
 }
 
 type lockedLogBuffer struct {
@@ -1232,12 +1244,14 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
     "api_type": "responses",
     "base_url": "https://api.openai.com/v1",
     "api_key": "sk-test",
+	"responses_compaction": true,
     "models": [{"name":"gpt-5.5","context_window":128000}]
   },
   {
     "name": "openai-codex",
     "api_type": "responses",
     "base_url": "https://chatgpt.com/backend-api/codex",
+	"managed": true,
     "auth": {"type":"codex_oauth"},
     "models": [{"name":"gpt-5.5","context_window":128000}]
   },
@@ -1289,8 +1303,11 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
 			t.Fatalf("target %q missing from catalog: %+v", id, handler.Catalog().Targets)
 		}
 	}
-	if target := targets["openai:gpt-5.5"]; target.APIType != "responses" || !target.ContinuationStateful || target.Prewarm {
+	if target := targets["openai:gpt-5.5"]; target.APIType != "responses" || !target.ContinuationStateful || !target.NativeCompaction || target.Prewarm {
 		t.Fatalf("stateful Responses target metadata = %+v", target)
+	}
+	if target := targets["openai-codex:gpt-5.5"]; !target.NativeCompaction {
+		t.Fatalf("managed ChatGPT Codex target does not advertise native compaction: %+v", target)
 	}
 	for _, id := range []string{"openai-codex:gpt-5.5", "codex-compatible:gpt-5.5"} {
 		if target := targets[id]; !target.Prewarm {
@@ -1302,6 +1319,159 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
 	}
 	if target := targets["openrouter:openai/gpt-5.5"]; target.APIType != "openai" || target.ContinuationStateful {
 		t.Fatalf("OpenAI chat target metadata = %+v", target)
+	}
+	for _, id := range []string{"codex-compatible:gpt-5.5", "stateless-compatible:gpt-5.5", "openrouter:openai/gpt-5.5"} {
+		if target := targets[id]; target.NativeCompaction {
+			t.Fatalf("target %q unexpectedly advertises native compaction: %+v", id, target)
+		}
+	}
+}
+
+func TestProviderResponsesCompactionCapabilityResolution(t *testing.T) {
+	enabled, disabled := true, false
+	tests := []struct {
+		name string
+		pc   llm.ProviderConfig
+		want bool
+	}{
+		{name: "explicit compatible opt in", pc: llm.ProviderConfig{APIType: "responses", ResponsesCompaction: &enabled}, want: true},
+		{name: "explicit managed opt out", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Managed: true, ResponsesCompaction: &disabled}},
+		{name: "managed OpenAI", pc: llm.ProviderConfig{Name: "openai", APIType: "responses", BaseURL: "https://api.openai.com/v1/", Managed: true}, want: true},
+		{name: "managed ChatGPT Codex", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Managed: true}, want: true},
+		{name: "manual ChatGPT Codex", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL}},
+		{name: "managed renamed Codex", pc: llm.ProviderConfig{Name: "renamed", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Managed: true}},
+		{name: "managed custom URL", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: "https://example.test/v1", Managed: true}},
+		{name: "wrong dialect", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "openai", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Managed: true, ResponsesCompaction: &enabled}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := providerResponsesCompaction(tt.pc); got != tt.want {
+				t.Fatalf("providerResponsesCompaction(%+v) = %v, want %v", tt.pc, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandlerCompactUsesExplicitResponsesCapability(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "responses",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-test",
+  "responses_compaction": true,
+  "server_tools": ["web_search"],
+  "models": [{"name":"gpt-5.5","context_window":128000,"price":{"input":1,"output":2},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","high"]}]}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	provider := &compactingFakeProvider{
+		FakeProvider: llmtest.New("fake"),
+		result: llm.CompactedContext{
+			Items: []json.RawMessage{json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"opaque"}`)},
+			Usage: llm.Usage{InputTokens: 20, OutputTokens: 3},
+		},
+	}
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			return provider, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	body, err := json.Marshal(protocol.CompactRequest{
+		TargetID: "openai:gpt-5.5",
+		Request: llm.Request{
+			Model:       "catalog-name-must-not-reach-provider",
+			System:      "system instructions",
+			ServerTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}},
+			Reasoning:   llm.ReasoningConfig{Profile: "high", Summary: "concise"},
+			Messages: []llm.Message{{
+				Role:    llm.RoleUser,
+				Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "compact me"}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := srv.Client().Post(srv.URL+"/v1/compact", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST compact: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, body=%s", resp.StatusCode, data)
+	}
+	var out protocol.CompactResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		t.Fatalf("decode compact response: %v", err)
+	}
+	if provider.request.Model != "gpt-5.5" || provider.request.Purpose != llm.RequestPurposeCompaction || provider.request.System != "system instructions" {
+		t.Fatalf("provider request = %+v", provider.request)
+	}
+	if provider.request.Reasoning.Effort != "high" || provider.request.Reasoning.Summary != "concise" ||
+		len(provider.request.ServerTools) != 1 || provider.request.ServerTools[0].Kind != llm.ServerToolKindOpenAIWebSearch {
+		t.Fatalf("provider compact controls = reasoning %+v, server tools %+v", provider.request.Reasoning, provider.request.ServerTools)
+	}
+	if len(out.Context.Items) != 1 || string(out.Context.Items[0]) != `{"id":"cmp_1","type":"compaction","encrypted_content":"opaque"}` {
+		t.Fatalf("compact response = %+v", out.Context)
+	}
+	if !out.Context.Usage.CostKnown {
+		t.Fatalf("compact usage was not priced: %+v", out.Context.Usage)
+	}
+}
+
+func TestHandlerCompactRejectsUnadvertisedCapability(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+  "name": "openai",
+  "api_type": "responses",
+  "base_url": "https://api.openai.com/v1",
+  "api_key": "sk-test",
+  "models": [{"name":"gpt-5.5","context_window":128000}]
+}`), 0o600); err != nil {
+		t.Fatalf("write provider config: %v", err)
+	}
+	constructed := false
+	handler, err := NewHandler(Options{
+		ConfigDir: dir,
+		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+		New: func(factory.Options) (llm.Provider, error) {
+			constructed = true
+			return llmtest.New("fake"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	body, _ := json.Marshal(protocol.CompactRequest{TargetID: "openai:gpt-5.5", Request: llm.Request{Messages: []llm.Message{{
+		Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "compact me"}},
+	}}}})
+	resp, err := srv.Client().Post(srv.URL+"/v1/compact", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST compact: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotImplemented {
+		data, _ := io.ReadAll(resp.Body)
+		t.Fatalf("status = %d, want 501; body=%s", resp.StatusCode, data)
+	}
+	var got protocol.Error
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("decode error: %v", err)
+	}
+	if got.Code != "context_compaction_unsupported" || constructed {
+		t.Fatalf("error = %+v, provider constructed=%v", got, constructed)
 	}
 }
 
@@ -2591,7 +2761,7 @@ func TestHandlerMetricsRecordsRejectedAuth(t *testing.T) {
 	srv := httptest.NewServer(ObserveAuth(handler, store, store.Middleware(handler)))
 	defer srv.Close()
 
-	// An unauthenticated stream request is rejected with 401 before the handler,
+	// Unauthenticated model requests are rejected with 401 before the handler,
 	// but must still be metered so an auth-failure flood produces error signal.
 	body, _ := json.Marshal(protocol.StreamRequest{
 		TargetID: "openai:priced",
@@ -2606,15 +2776,24 @@ func TestHandlerMetricsRecordsRejectedAuth(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	resp, err = srv.Client().Post(srv.URL+compactPath, "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("POST compact: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated compact status = %d, want 401", resp.StatusCode)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 
 	var b strings.Builder
 	reg.Render(&b)
 	out := b.String()
 	labels := map[string]string{"key": "anonymous", "purpose": "unknown"}
-	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 1") {
+	if !strings.Contains(out, seriesLine("model_proxy_requests_total", labels)+" 2") {
 		t.Errorf("rejected auth not counted in requests_total:\n%s", out)
 	}
-	if !strings.Contains(out, seriesLine("model_proxy_errors_total", labels)+" 1") {
+	if !strings.Contains(out, seriesLine("model_proxy_errors_total", labels)+" 2") {
 		t.Errorf("rejected auth not counted in errors_total:\n%s", out)
 	}
 }

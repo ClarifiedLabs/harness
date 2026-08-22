@@ -162,6 +162,12 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 	if !a.autoCompactionEnabled() || a.compactionHooksConfigured() {
 		return nil, false, nil
 	}
+	// Native checkpoints preserve the semantic transcript and are installed by
+	// the owning foreground goroutine. Do not race them with a speculative
+	// textual rewrite at the lower idle threshold.
+	if a.nativeCompactionAvailable() {
+		return nil, false, nil
+	}
 	if estimate := a.estimateContext(nil).Total; estimate*100 < a.window()*triggerPercent {
 		return nil, false, nil
 	}
@@ -462,6 +468,14 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	}
 
 	before := a.estimateContext(nil).Total
+	nativeUsage := llm.Usage{}
+	if a.nativeCompactionEligible(trigger, collapseAll, focus) {
+		usage, changed, handled, err := a.compactNative(ctx, sink, trigger, before)
+		nativeUsage = usage
+		if handled {
+			return usage, changed, err
+		}
+	}
 	turns := completedTurnSpans(a.transcript)
 	boundary := len(a.transcript)
 	if !collapseAll {
@@ -490,7 +504,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 	fallbackReason := ""
 	fallbackUsed := false
 	fallbackNotice := ""
-	var usage llm.Usage
+	usage := nativeUsage
 	var older, kept []llm.Message
 	var readFiles, modifiedFiles []string
 	var readFilesOmitted int
@@ -524,6 +538,10 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 			}
 		}
 		compacted = append([]llm.Message{a.checkpointMessage(summary, older, "", summarySource, fallbackReason, focus, readFiles, readFilesOmitted, modifiedFiles)}, cloneMessages(kept)...)
+		// A successful textual rewrite supersedes provider-native checkpoints.
+		// Keeping one in the suffix would let a resumed same-domain session skip
+		// the new textual checkpoint and replay stale provider state instead.
+		compacted = withoutProviderCompactionMessages(compacted)
 		if collapseAll || a.estimateContextForTranscript(nil, compacted).Total <= a.window()*a.targetPercent()/100 {
 			break
 		}
@@ -589,30 +607,137 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 		sink.Notice(fallbackNotice)
 	}
 	sink.Notice(compactionReport(collapsed, before, after))
-	if a.hooks != nil && a.hooks.HasEvent(hooks.PostCompact) {
-		payload := hooks.Payload{"trigger": trigger}
-		if focus != "" {
-			payload["focus"] = focus
+	a.runPostCompactHook(ctx, sink, trigger, focus)
+	return usage, true, nil
+}
+
+func (a *Agent) nativeCompactionEligible(trigger string, collapseAll bool, focus string) bool {
+	if collapseAll || focus != "" || trigger == "idle" {
+		return false
+	}
+	return a.nativeCompactionAvailable()
+}
+
+func (a *Agent) nativeCompactionAvailable() bool {
+	if !a.nativeCompaction || a.reasoningReplayDomain == "" {
+		return false
+	}
+	if a.disabledNativeCompaction[a.reasoningReplayDomain] {
+		return false
+	}
+	_, ok := a.provider.(llm.ContextCompactor)
+	return ok
+}
+
+// compactNative appends a hidden provider-owned checkpoint while retaining the
+// semantic transcript unchanged. handled=false means the caller should execute
+// the textual compaction fallback in the same operation.
+func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger string, before int) (usage llm.Usage, changed, handled bool, err error) {
+	compactor, ok := a.provider.(llm.ContextCompactor)
+	if !ok {
+		return llm.Usage{}, false, false, nil
+	}
+	visible := a.providerVisibleMessages(a.transcript)
+	if len(visible) == 0 {
+		return llm.Usage{}, false, true, nil
+	}
+	compactCtx, cancel := context.WithTimeout(ctx, a.compactionSummaryTimeout())
+	defer cancel()
+	// A native compacted window becomes the new stateless baseline. Do not bind
+	// it to an expiring previous_response_id even when ordinary turns use one.
+	a.resetResponseState()
+	result, compactErr := compactor.CompactContext(compactCtx, llm.Request{
+		Model:                a.model,
+		Purpose:              llm.RequestPurposeCompaction,
+		System:               a.system,
+		Messages:             visible,
+		Tools:                cloneToolSpecs(a.toolSpecs),
+		ServerTools:          cloneServerTools(a.serverTools),
+		Reasoning:            a.reasoning,
+		ProxySessionID:       a.proxySessionID,
+		CacheAffinityID:      a.cacheAffinityID,
+		CachePolicy:          a.cachePolicyForTranscript(visible, 0, true),
+		EstimatedInputTokens: before,
+		ContextWindowHint:    a.window(),
+	})
+	usage = result.Usage
+	if compactErr != nil {
+		if ctx.Err() != nil {
+			return usage, false, true, ctx.Err()
 		}
-		res := a.hooks.Run(ctx, hooks.PostCompact, trigger, payload)
-		reportHookDiagnostics(sink, res.Diagnostics)
-		for _, notice := range res.Notices {
-			sink.Notice(notice)
-		}
-		if len(res.AdditionalContext) > 0 {
-			if receiver, ok := sink.(HookContextReceiver); ok {
-				receiver.AddHookContext(res.AdditionalContext)
-			}
-		}
-		if res.Block {
-			reason := res.Reason()
-			if reason == "" {
-				reason = "blocked by PostCompact hook"
-			}
-			sink.Notice("[post-compact hook blocked after compaction: " + reason + "]")
+		// The textual fallback and subsequent requests must use the preserved
+		// semantic transcript rather than an older native checkpoint. A future
+		// process may try the advertised capability again after a transient error.
+		a.disableCurrentNativeCompaction()
+		sink.Notice(fmt.Sprintf("[native compact failed: %v; using textual compaction]", compactErr))
+		return usage, false, false, nil
+	}
+	checkpoint := llm.Message{
+		Role:   llm.RoleUser,
+		Time:   a.now(),
+		Origin: llm.MessageOriginProviderCompaction,
+		Content: []llm.ContentBlock{{
+			Kind:                  llm.BlockProviderCompaction,
+			ReasoningReplayDomain: a.reasoningReplayDomain,
+			ProviderCompaction:    cloneRawMessages(result.Items),
+		}},
+	}
+	if err := llm.ValidateMessageContent([]llm.Message{checkpoint}); err != nil {
+		sink.Notice(fmt.Sprintf("[native compact failed: invalid provider checkpoint: %v; using textual compaction]", err))
+		return usage, false, false, nil
+	}
+	// Only the newest checkpoint in a compatibility domain is useful. Retain
+	// checkpoints for other domains so switching back can still reuse them.
+	a.transcript = append(withoutProviderCompactionDomain(a.transcript, a.reasoningReplayDomain), checkpoint)
+	a.validatedPrefix = 0
+	a.clearMeasuredContext()
+	a.retentionEpochArmed = true
+	a.compactions++
+	notifyTranscriptRewritten(sink)
+	a.ResetProxySessionID()
+	a.compactFallbackNotice = compactFallbackNoticeState{}
+	after := a.estimateContext(nil).Total
+	sink.Notice(fmt.Sprintf("[native compacted: canonical provider window · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
+	a.runPostCompactHook(ctx, sink, trigger, "")
+	return usage, true, true, nil
+}
+
+func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
+	if items == nil {
+		return nil
+	}
+	out := make([]json.RawMessage, len(items))
+	for i := range items {
+		out[i] = append(json.RawMessage(nil), items[i]...)
+	}
+	return out
+}
+
+func (a *Agent) runPostCompactHook(ctx context.Context, sink EventSink, trigger, focus string) {
+	if a.hooks == nil || !a.hooks.HasEvent(hooks.PostCompact) {
+		return
+	}
+	payload := hooks.Payload{"trigger": trigger}
+	if focus != "" {
+		payload["focus"] = focus
+	}
+	res := a.hooks.Run(ctx, hooks.PostCompact, trigger, payload)
+	reportHookDiagnostics(sink, res.Diagnostics)
+	for _, notice := range res.Notices {
+		sink.Notice(notice)
+	}
+	if len(res.AdditionalContext) > 0 {
+		if receiver, ok := sink.(HookContextReceiver); ok {
+			receiver.AddHookContext(res.AdditionalContext)
 		}
 	}
-	return usage, true, nil
+	if res.Block {
+		reason := res.Reason()
+		if reason == "" {
+			reason = "blocked by PostCompact hook"
+		}
+		sink.Notice("[post-compact hook blocked after compaction: " + reason + "]")
+	}
 }
 
 // degradeCurrent shrinks the live transcript in place when it is over budget and
@@ -625,7 +750,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger str
 func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 	before := a.estimateContext(nil).Total
 	budget := a.compactBudget()
-	compacted := cloneMessages(a.transcript)
+	compacted := withoutProviderCompactionMessages(cloneMessages(a.transcript))
 	a.trimToolResults(compacted, sink)
 	truncateUntilFits(compacted, budget)
 	after := a.estimateContextForTranscript(nil, compacted).Total
@@ -695,6 +820,30 @@ func cloneMessages(msgs []llm.Message) []llm.Message {
 	return out
 }
 
+func withoutProviderCompactionMessages(messages []llm.Message) []llm.Message {
+	return withoutProviderCompactionDomain(messages, "")
+}
+
+func withoutProviderCompactionDomain(messages []llm.Message, domain string) []llm.Message {
+	out := make([]llm.Message, 0, len(messages))
+	for _, message := range messages {
+		remove := false
+		if message.Origin == llm.MessageOriginProviderCompaction {
+			for _, block := range message.Content {
+				if block.Kind == llm.BlockProviderCompaction && (domain == "" || block.ReasoningReplayDomain == domain) {
+					remove = true
+					break
+				}
+			}
+		}
+		if remove {
+			continue
+		}
+		out = append(out, message)
+	}
+	return out
+}
+
 func cloneContentBlocks(blocks []llm.ContentBlock) []llm.ContentBlock {
 	if blocks == nil {
 		return nil
@@ -704,6 +853,12 @@ func cloneContentBlocks(blocks []llm.ContentBlock) []llm.ContentBlock {
 		out[i].ResultContent = cloneContentBlocks(blocks[i].ResultContent)
 		out[i].ToolInput = append(json.RawMessage(nil), blocks[i].ToolInput...)
 		out[i].InteractionStep = append(json.RawMessage(nil), blocks[i].InteractionStep...)
+		if blocks[i].ProviderCompaction != nil {
+			out[i].ProviderCompaction = make([]json.RawMessage, len(blocks[i].ProviderCompaction))
+			for j := range blocks[i].ProviderCompaction {
+				out[i].ProviderCompaction[j] = append(json.RawMessage(nil), blocks[i].ProviderCompaction[j]...)
+			}
+		}
 	}
 	return out
 }
@@ -1659,6 +1814,9 @@ func estimateTranscriptContentBlock(b llm.ContentBlock) (bytes, opaque, images i
 	bytes += len(b.ReasoningID) + len(b.InteractionThoughtSummary)
 	opaque = len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
 	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep)
+	for _, item := range b.ProviderCompaction {
+		opaque += len(item)
+	}
 	for _, child := range b.ResultContent {
 		childBytes, childOpaque, childImages := estimateTranscriptContentBlock(child)
 		bytes += childBytes
@@ -1715,6 +1873,9 @@ func estimateRequestContentBlock(b llm.ContentBlock) (bytes, opaque, images int)
 	bytes += len(b.ReasoningID) + len(b.InteractionThoughtSummary)
 	opaque = len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
 	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep)
+	for _, item := range b.ProviderCompaction {
+		opaque += len(item)
+	}
 	for _, child := range b.ResultContent {
 		childBytes, childOpaque, childImages := estimateRequestContentBlock(child)
 		bytes += childBytes

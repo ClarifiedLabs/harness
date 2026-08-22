@@ -98,6 +98,7 @@ type Target struct {
 	Variant               string    `json:"variant,omitempty"`
 	APIType               string    `json:"api_type,omitempty"`
 	ContinuationStateful  bool      `json:"continuation_stateful,omitempty"`
+	NativeCompaction      bool      `json:"native_compaction,omitempty"`
 	Prewarm               bool      `json:"prewarm,omitempty"`
 	Price                 llm.Price `json:"price,omitempty"`
 	Reasoning             bool      `json:"reasoning,omitempty"`
@@ -119,6 +120,15 @@ type TokenCountResponse struct {
 	InputTokens int                      `json:"input_tokens"`
 	Source      string                   `json:"source,omitempty"`
 	Scope       llm.InputTokenCountScope `json:"scope,omitempty"`
+}
+
+type CompactRequest struct {
+	TargetID string      `json:"target_id"`
+	Request  llm.Request `json:"request"`
+}
+
+type CompactResponse struct {
+	Context llm.CompactedContext `json:"context"`
 }
 
 type StreamEnvelope struct {
