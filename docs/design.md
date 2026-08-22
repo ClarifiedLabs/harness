@@ -3186,7 +3186,11 @@ implementation agent's TODO list, and starts the implementation prompt.
 - Tool results render as one-liners by default:
   `[grep] args=["-R","-n","func main","."] → 14 lines, 2.1KB`
   built from the tool name, key args, and a result summary. `-v` adds the first ~5 lines
-  of each result, dimmed, and also enables progress details.
+  of each result, dimmed, and also enables progress details. Absolute file-path
+  argument values (`path`, `file`, `cwd`, and read's path aliases) are displayed
+  relative to the session working directory when the path lies under it; paths
+  outside it remain absolute. This is display-only and never alters the
+  model-facing transcript or recorded `Input` JSON.
 - Large estimated contexts, payloads, or tool schemas print one warning per
   prompt because they can materially slow first response latency.
 - Per-prompt usage line:

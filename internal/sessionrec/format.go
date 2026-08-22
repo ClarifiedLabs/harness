@@ -10,6 +10,7 @@ package sessionrec
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -21,17 +22,41 @@ import (
 	"harness/internal/tools"
 )
 
+// pathArgKeys names tool-argument keys whose string values are treated as
+// filesystem paths and rendered relative to the session cwd when they lie
+// under it. Display-only; the model-facing transcript and raw Input JSON are
+// never touched.
+var pathArgKeys = map[string]struct{}{
+	"path": {}, "file": {}, "cwd": {},
+	"file_path": {}, "filePath": {}, "filepath": {}, "filename": {},
+	"absolute_path": {}, "target_file": {},
+}
+
+// DisplayPath shortens p to a path relative to cwd when p is absolute and lies
+// under cwd; otherwise it returns p unchanged. The comparison is lexical;
+// symlinks are not resolved.
+func DisplayPath(cwd, p string) string {
+	if cwd == "" || p == "" || !filepath.IsAbs(p) {
+		return p
+	}
+	rel, err := filepath.Rel(cwd, p)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return p
+	}
+	return rel
+}
+
 // ToolResultLine renders the one-line tool summary used by live output and
 // session replay.
-func ToolResultLine(call llm.ToolCall, result llm.ToolResult) string {
-	return fmt.Sprintf("[%s]%s → %s", call.Name, FormatToolArgs(call.Name, call.Input), ResultSummary(result))
+func ToolResultLine(call llm.ToolCall, result llm.ToolResult, cwd string) string {
+	return fmt.Sprintf("[%s]%s → %s", call.Name, FormatToolArgs(call.Name, call.Input, cwd), ResultSummary(result))
 }
 
 // FormatArgs renders a tool call's input object as space-prefixed key=value
 // pairs in a stable (sorted) order. String values are quoted when they contain
 // whitespace; non-scalar values (objects, arrays) are summarized by their JSON
 // so the line stays one row.
-func FormatArgs(input json.RawMessage) string {
+func FormatArgs(input json.RawMessage, cwd string) string {
 	if len(input) == 0 {
 		return ""
 	}
@@ -47,24 +72,37 @@ func FormatArgs(input json.RawMessage) string {
 
 	var b strings.Builder
 	for _, k := range keys {
-		fmt.Fprintf(&b, " %s=%s", k, FormatValue(obj[k]))
+		fmt.Fprintf(&b, " %s=%s", k, formatArgValue(k, obj[k], cwd))
 	}
 	return b.String()
+}
+
+// formatArgValue renders one argument value. Path-named string values are
+// relativized against cwd before clipping so the filename survives the clip;
+// everything else keeps the generic FormatValue rendering.
+func formatArgValue(key string, raw json.RawMessage, cwd string) string {
+	if _, ok := pathArgKeys[key]; ok {
+		var s string
+		if err := json.Unmarshal(raw, &s); err == nil {
+			return FormatScalar(DisplayPath(cwd, s))
+		}
+	}
+	return FormatValue(raw)
 }
 
 // FormatToolArgs renders the compact argument summary for one tool call. The
 // edit tool gets a dedicated path/edit-count form; everything else falls back
 // to the generic key=value rendering.
-func FormatToolArgs(name string, input json.RawMessage) string {
+func FormatToolArgs(name string, input json.RawMessage, cwd string) string {
 	if name == "edit" {
-		if args := formatEditArgs(input); args != "" {
+		if args := formatEditArgs(input, cwd); args != "" {
 			return args
 		}
 	}
-	return FormatArgs(input)
+	return FormatArgs(input, cwd)
 }
 
-func formatEditArgs(input json.RawMessage) string {
+func formatEditArgs(input json.RawMessage, cwd string) string {
 	var args struct {
 		Files []struct {
 			Path  string            `json:"path"`
@@ -77,13 +115,13 @@ func formatEditArgs(input json.RawMessage) string {
 	paths := make([]string, 0, len(args.Files))
 	edits := 0
 	for _, file := range args.Files {
-		if file.Path != "" {
-			paths = append(paths, file.Path)
+		if path := DisplayPath(cwd, file.Path); path != "" {
+			paths = append(paths, path)
 		}
 		edits += len(file.Edits)
 	}
 	if len(args.Files) == 1 {
-		return fmt.Sprintf(" path=%s edits=%d", FormatScalar(args.Files[0].Path), edits)
+		return fmt.Sprintf(" path=%s edits=%d", FormatScalar(DisplayPath(cwd, args.Files[0].Path)), edits)
 	}
 	return fmt.Sprintf(" files=%d edits=%d paths=%s", len(args.Files), edits, FormatScalar(strings.Join(paths, ",")))
 }

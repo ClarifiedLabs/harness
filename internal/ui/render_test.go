@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -146,6 +147,45 @@ func TestToolSummaryDoesNotDoubleSpaceAfterAssistantNewline(t *testing.T) {
 
 	if got := out.String(); got != "calling a tool\n" {
 		t.Errorf("tool summary should not add a second newline, got %q", got)
+	}
+}
+
+func TestToolLinesRelativizePathsUnderCWD(t *testing.T) {
+	dir := t.TempDir()
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{CWD: dir, ToolStream: true})
+
+	under := filepath.Join(dir, "sub", "file.go")
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(fmt.Sprintf(`{"path": %q}`, under))})
+	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "a\nb\n"})
+
+	got := errw.String()
+	if !strings.Contains(got, "[tool: read started path=sub/file.go]") {
+		t.Errorf("tool progress should show the relative path, got %q", got)
+	}
+	if !strings.Contains(got, "[read] path=sub/file.go → ") {
+		t.Errorf("tool summary should show the relative path, got %q", got)
+	}
+	if strings.Contains(got, under) {
+		t.Errorf("tool lines must not contain the absolute path %q, got %q", under, got)
+	}
+}
+
+func TestToolLinesKeepPathsOutsideCWD(t *testing.T) {
+	dir := t.TempDir()
+	outside := filepath.Join(string(filepath.Separator), "outside", "file.go")
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{CWD: dir, ToolStream: true})
+
+	r.ToolStart(llm.ToolCall{ID: "c1", Name: "read", Input: json.RawMessage(fmt.Sprintf(`{"path": %q}`, outside))})
+	r.ToolResult(llm.ToolResult{ForID: "c1", Text: "a\nb\n"})
+
+	got := errw.String()
+	if !strings.Contains(got, "[tool: read started path="+outside+"]") {
+		t.Errorf("tool progress should keep the absolute path, got %q", got)
+	}
+	if !strings.Contains(got, "[read] path="+outside+" → ") {
+		t.Errorf("tool summary should keep the absolute path, got %q", got)
 	}
 }
 

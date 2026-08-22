@@ -5777,6 +5777,10 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 		if app.RunStream != nil {
 			mirror = app.RunStream.Mirror
 		}
+		var cwd string
+		if r != nil {
+			cwd = r.cwd
+		}
 		s.rec = sessionrec.New(sessionrec.Config{
 			Dir:                app.SessionPath,
 			Prompt:             prompt,
@@ -5786,6 +5790,7 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 			Model:              app.Model,
 			Clock:              app.clock(),
 			ReasoningSummaries: reasoningSummaryDisplayEnabled(app.Reasoning.Summary),
+			CWD:                cwd,
 			Mirror:             mirror,
 			PriceTurnUsage: func(u llm.Usage) (float64, bool) {
 				// Price against the App's active model so a mid-prompt model

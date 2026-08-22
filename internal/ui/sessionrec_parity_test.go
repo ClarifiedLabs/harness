@@ -73,6 +73,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 	app.Now = now
 	app.Reasoning = llm.ReasoningConfig{Summary: "auto"}
 	app.Registry = llm.NewRegistryWithQualified(nil, models)
+	app.Renderer.cwd = parentDir
 
 	parent := newAccumulatingSink(app.Renderer, app, 1)
 
@@ -86,6 +87,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 		Model:              "claude-opus-4-8",
 		Clock:              now,
 		ReasoningSummaries: true,
+		CWD:                parentDir,
 		PriceTurnUsage: func(u llm.Usage) (float64, bool) {
 			return childRegistry.Cost("anthropic:claude-opus-4-8", u)
 		},
@@ -117,7 +119,13 @@ func TestChildParentRawEventParity(t *testing.T) {
 	parent.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 1, Attempt: 1, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}})
 	child.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 1, Attempt: 1, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}})
 
-	call := llm.ToolCall{ID: "call-1", Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)}
+	// The read input carries an absolute path under the parent cwd; both sides
+	// must relativize it identically (path=a.go) in the recorded Display line.
+	callInput, err := json.Marshal(map[string]string{"path": filepath.Join(parentDir, "a.go")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := llm.ToolCall{ID: "call-1", Name: "read", Input: callInput}
 	parent.ToolStart(call)
 	child.ToolStart(call)
 

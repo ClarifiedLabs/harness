@@ -32,6 +32,9 @@ type Config struct {
 	// ReasoningSummaries gates reasoning_summary recording to match the live
 	// display configuration.
 	ReasoningSummaries bool
+	// CWD is the session working directory; path args in tool Display lines
+	// are shown relative to it when they lie under it.
+	CWD string
 	// PriceTurnUsage prices unpriced turn usage (direct providers) against the
 	// active model. Nil leaves streamed cost as-is.
 	PriceTurnUsage func(llm.Usage) (cost float64, known bool)
@@ -351,7 +354,7 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 		Turn:                r.turn,
 		ToolID:              res.ForID,
 		Tool:                pending.call.Name,
-		Display:             ToolResultLine(pending.call, res),
+		Display:             ToolResultLine(pending.call, res, r.cfg.CWD),
 		DurationMS:          durationMS,
 		ResultError:         res.IsError,
 		ErrorKind:           string(res.ErrorKind),

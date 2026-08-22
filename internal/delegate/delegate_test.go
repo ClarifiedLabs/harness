@@ -1845,7 +1845,7 @@ func TestChildSinkRegistersBackgroundJobLaunchIdentity(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	sink := newChildSink(t.TempDir(), nil, false, NewProgress(), nil)
 	sink.background = starter
-	sink.configureRecorder(time.Now, nil, "child-agent", "child-provider", "child-model")
+	sink.configureRecorder(time.Now, nil, "child-agent", "child-provider", "child-model", "")
 	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
 	sink.ToolStart(llm.ToolCall{ID: "shell-call", Name: "shell"})
 	sink.ToolResult(llm.ToolResult{

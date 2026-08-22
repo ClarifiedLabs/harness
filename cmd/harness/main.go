@@ -829,6 +829,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		NativeCompaction:      nativeCompactionForProvider(catalog, cfg.Provider),
 		Agent:                 agentName,
 		SessionPath:           sessionPath,
+		CWD:                   wd,
 		Depth:                 0,
 		MaxPromptTokens:       cfg.MaxPromptTokens,
 		MaxPromptCostUSD:      cfg.MaxPromptCostUSD,
@@ -1334,6 +1335,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Agent:                 agentName,
 		ToolNames:             activeToolNames,
 		SessionPath:           sessionPath,
+		CWD:                   wd,
 		CacheAffinityID:       ag.CacheAffinityID(),
 		Depth:                 0,
 		MaxPromptTokens:       cfg.MaxPromptTokens,
@@ -1393,6 +1395,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Now:                      now,
 		TimestampLayout:          timestampLayout(cfg.TimestampMode),
 		Width:                    env.terminalCols,
+		CWD:                      wd,
 	})
 
 	app := &ui.App{

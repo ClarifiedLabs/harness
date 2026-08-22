@@ -68,6 +68,9 @@ type RenderOptions struct {
 	Now                      func() time.Time
 	TimestampLayout          string
 	Width                    func() int
+	// CWD is the session working directory for path relativization in tool
+	// display lines; empty disables it.
+	CWD string
 }
 
 // Renderer implements agent.EventSink: assistant text streams to out, while tool
@@ -92,6 +95,7 @@ type Renderer struct {
 	now                     func() time.Time
 	timestampLayout         string
 	width                   func() int
+	cwd                     string
 
 	promptRunStart   time.Time
 	currentTurnStart time.Time
@@ -200,6 +204,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		now:                     now,
 		timestampLayout:         opts.TimestampLayout,
 		width:                   opts.Width,
+		cwd:                     opts.CWD,
 		pending:                 make(map[string]llm.ToolCall),
 		activityBoundary:        make(chan struct{}),
 	}
@@ -535,12 +540,12 @@ func (r *Renderer) ToolStart(call llm.ToolCall) {
 	r.flushToolUseStarts()
 	r.pending[call.ID] = call
 	if r.toolProgress() {
-		r.dimLine(fmt.Sprintf("[tool: %s started%s]", call.Name, formatToolArgs(call.Name, call.Input)))
+		r.dimLine(fmt.Sprintf("[tool: %s started%s]", call.Name, formatToolArgs(call.Name, call.Input, r.cwd)))
 	}
 	// Tick during the (possibly long) tool-execution gap, not just model
 	// waits (r12). The next output line erases this counter again.
 	if r.liveStatus {
-		r.beginWait(fmt.Sprintf("tool: %s%s", call.Name, formatToolArgs(call.Name, call.Input)), agent.ContextEstimate{})
+		r.beginWait(fmt.Sprintf("tool: %s%s", call.Name, formatToolArgs(call.Name, call.Input, r.cwd)), agent.ContextEstimate{})
 	}
 }
 
@@ -550,7 +555,7 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 	call := r.pending[result.ForID]
 	delete(r.pending, result.ForID)
 
-	r.dimLine(ToolResultLine(call, result))
+	r.dimLine(ToolResultLine(call, result, r.cwd))
 
 	if r.verbose {
 		for _, s := range snippet(result.Text) {
@@ -1906,12 +1911,9 @@ func (r *Renderer) markAssistantTextVisibleLocked() {
 // internal/sessionrec, the canonical home shared by live rendering and the
 // session recorder, so live output and raw.ndjson can never drift.
 
-func formatArgs(input json.RawMessage) string { return sessionrec.FormatArgs(input) }
-func formatToolArgs(name string, input json.RawMessage) string {
-	return sessionrec.FormatToolArgs(name, input)
+func formatToolArgs(name string, input json.RawMessage, cwd string) string {
+	return sessionrec.FormatToolArgs(name, input, cwd)
 }
-func formatScalar(s string) string               { return sessionrec.FormatScalar(s) }
-func formatValue(raw json.RawMessage) string     { return sessionrec.FormatValue(raw) }
 func resultSummary(result llm.ToolResult) string { return sessionrec.ResultSummary(result) }
 func richImageMetadata(image llm.ContentBlock) string {
 	return sessionrec.RichImageMetadata(image)
@@ -1919,8 +1921,8 @@ func richImageMetadata(image llm.ContentBlock) string {
 
 // ToolResultLine renders the one-line tool summary used by live output and
 // session replay.
-func ToolResultLine(call llm.ToolCall, result llm.ToolResult) string {
-	return sessionrec.ToolResultLine(call, result)
+func ToolResultLine(call llm.ToolCall, result llm.ToolResult, cwd string) string {
+	return sessionrec.ToolResultLine(call, result, cwd)
 }
 
 // usageLine renders the per-prompt summary with cumulative totals (design §10):
