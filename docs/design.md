@@ -1631,12 +1631,18 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
             remove _stage from the execution copy
         if any stage value is invalid or decreases:
             return one invalid-args result per call without running hooks or tools
+        plan intra-turn call sanity guards: suppress exact-duplicate calls within
+            each stage beyond the first, and all calls past the per-turn dispatch
+            limit // suppressed calls return guard errors without running
         for each effective stage in ascending order:
             wait until every earlier stage has returned a result
-            partition same-stage calls around SequentialTool inputs and matching tool hooks
+            partition same-stage calls around SequentialTool inputs, matching tool
+                hooks, and suppressed calls
             for each default-parallel island:
                 add latest-writer dependencies for normalized mutation path keys
-                run workers after their predecessors complete // Dispatch always returns a result
+                    // suppressed calls never become dependency targets or writers
+                run workers after their predecessors complete, bounded by the
+                    per-agent concurrent-execution limit // Dispatch always returns a result
                 emit summaries/results in model order
         append ONE user message carrying all tool_result blocks, in call order
         // Ordinary registered and unknown calls in the same stage are parallel-eligible.
@@ -1740,6 +1746,32 @@ prompt.
   Prompt replay events and delegate metadata persist it. The reason records
   loop control only; acceptance criteria and repository state remain the task
   completion oracle.
+- **Intra-turn call sanity guards (`internal/agent/callguard.go`).** The
+  turn-level and failure guards below react only after damage is observable
+  across turns or failures; a single degenerate response can emit hundreds of
+  identical or excessive calls at once (observed: a model repetition loop that
+  streamed the same test command 2,252 times until the output-token cap, whose
+  unbounded parallel dispatch exhausted the machine's process table). Before
+  any dispatch, each turn's call set is planned against two limits:
+  - *Exact duplicates within a stage.* Duplicate identity is tool name +
+    normalized input hash (the failGuard key). The first occurrence runs; later
+    identical calls in the same stage are suppressed. Suppression is
+    stage-scoped because an identical call re-issued in a later stage is a
+    legitimate re-run after mutations, while identical calls within one stage
+    run concurrently and can only multiply load.
+  - *Per-turn dispatch limit.* Surviving calls beyond 128 dispatches per turn
+    (emission order) are suppressed; the model is told to split the work across
+    turns.
+  Suppressed calls are never run: like the invalid-stage preflight path they
+  skip hooks and tools and return `blocked`-kinded guard errors, so the
+  transcript stays closed and the result text steers the model; one summary
+  notice is recorded per suppressed turn. Suppressed calls produce no side
+  effects, so they never become cross-stage dependency targets or latest
+  writers for their mutation keys. Independently, parallel dispatch is bounded
+  by a per-agent semaphore of 32 concurrent tool executions — large legitimate
+  batches still complete, just not all at once — and the bound is per-agent so
+  a delegate child can never deadlock against permits held by its parent's
+  dispatch.
 - **Runaway guards (`internal/agent/loopguard.go`).** A per-run `turnGuard` (loop
   frame only, never on the shared registry) watches each tool turn:
   - *Repeated identical calls.* Each turn's call-set is reduced to an

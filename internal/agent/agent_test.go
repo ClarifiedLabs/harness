@@ -4143,7 +4143,7 @@ func TestRichResultBudgetRemainsGlobalAcrossStages(t *testing.T) {
 	crossStageDependencies := make([][]int, len(calls))
 	actualCompletions := make([]<-chan struct{}, len(calls))
 	for _, stage := range []callStage{{start: 0, end: 1}, {start: 1, end: 2}} {
-		a.dispatchCallStage(context.Background(), calls, stage, 1, 1, &recordSink{}, blocks, &richEncodedBytes, crossStageDependencies, actualCompletions)
+		a.dispatchCallStage(context.Background(), calls, stage, 1, 1, &recordSink{}, blocks, &richEncodedBytes, crossStageDependencies, actualCompletions, nil)
 	}
 	if blocks[0].ResultError || len(blocks[0].ResultContent) != 1 {
 		t.Fatalf("first-stage rich result = %+v", blocks[0])

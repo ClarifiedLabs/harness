@@ -611,7 +611,13 @@ type Agent struct {
 	showDiffs                 bool
 	// failGuard is the per-prompt repeated-identical-failure guard (design
 	// §8.1). It is non-nil only while RunAdmittedPromptWithContext executes.
-	failGuard         *failureGuard
+	failGuard *failureGuard
+	// toolRunSem bounds concurrent tool executions within this agent (design
+	// §8.1). Parallel dispatch starts one worker per call; the semaphore keeps
+	// a degenerate or simply large batch from forking hundreds of processes at
+	// once. It is per-agent so delegate children can never deadlock against
+	// permits held by their parent's dispatch.
+	toolRunSem        chan struct{}
 	responsesStateful bool
 	nativeCompaction  bool
 	// disabledNativeCompaction is keyed by provider replay domain. It suppresses
@@ -700,6 +706,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		retentionResultHeadBytes:  opts.RetentionResultHeadBytes,
 		interactive:               opts.Interactive,
 		retentionEpochArmed:       true,
+		toolRunSem:                make(chan struct{}, maxConcurrentToolRuns),
 		proxySessionID:            newProxySessionID(),
 		cacheAffinityID:           newCacheAffinityID(),
 	}
@@ -2762,8 +2769,13 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		return blocks, nil, llm.Usage{}
 	}
 
+	suppressed, duplicates, overLimit := planCallSuppression(executionCalls, stages)
+	if len(suppressed) > 0 {
+		sink.Notice(suppressionNotice(duplicates, overLimit))
+	}
+
 	var parallelBatches []llm.ParallelToolBatch
-	crossStageDependencies := a.crossStageMutationDependencies(executionCalls, stages)
+	crossStageDependencies := a.crossStageMutationDependencies(executionCalls, stages, suppressed)
 	actualCompletions := make([]<-chan struct{}, len(executionCalls))
 	richEncodedBytes, err := inputimage.ValidateMessages(a.transcript)
 	if err != nil {
@@ -2773,17 +2785,22 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 	}
 	var total llm.Usage
 	for _, stage := range stages {
-		batches, usage := a.dispatchCallStage(ctx, executionCalls, stage, promptID, turnID, sink, blocks, &richEncodedBytes, crossStageDependencies, actualCompletions)
+		batches, usage := a.dispatchCallStage(ctx, executionCalls, stage, promptID, turnID, sink, blocks, &richEncodedBytes, crossStageDependencies, actualCompletions, suppressed)
 		parallelBatches = append(parallelBatches, batches...)
 		total = add(total, usage)
 	}
 	return blocks, parallelBatches, total
 }
 
-func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, stage callStage, promptID, turnID int, sink EventSink, blocks []llm.ContentBlock, richEncodedBytes *int, crossStageDependencies [][]int, actualCompletions []<-chan struct{}) ([]llm.ParallelToolBatch, llm.Usage) {
+func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, stage callStage, promptID, turnID int, sink EventSink, blocks []llm.ContentBlock, richEncodedBytes *int, crossStageDependencies [][]int, actualCompletions []<-chan struct{}, suppressed map[int]string) ([]llm.ParallelToolBatch, llm.Usage) {
 	var parallelBatches []llm.ParallelToolBatch
 	var total llm.Usage
 	for i := stage.start; i < stage.end; {
+		if reason, blocked := suppressed[i]; blocked {
+			blocks[i] = a.emitGuardedCall(calls[i], reason, sink)
+			i++
+			continue
+		}
 		if !a.tools.SupportsParallel(calls[i]) || a.hooksHasMatchingHooks(calls[i].Name) {
 			waitForActualCompletions(crossStageDependencies[i], actualCompletions)
 			block, usage, completion := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, a.hasMutationConflictBefore(calls, i, stage.end), richEncodedBytes)
@@ -2796,6 +2813,9 @@ func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, sta
 
 		start := i
 		for i < stage.end && a.tools.SupportsParallel(calls[i]) && !a.hooksHasMatchingHooks(calls[i].Name) {
+			if _, blocked := suppressed[i]; blocked {
+				break
+			}
 			i++
 		}
 		batchCalls := calls[start:i]
@@ -2826,6 +2846,16 @@ func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, sta
 		total = add(total, usage)
 	}
 	return parallelBatches, total
+}
+
+// emitGuardedCall reports a suppressed call (design §8.1) without running it:
+// no hooks, progress, or diff capture, mirroring the invalid-stage preflight
+// path. The guard error keeps the transcript closed and steers the model.
+func (a *Agent) emitGuardedCall(call llm.ToolCall, text string, sink EventSink) llm.ContentBlock {
+	sink.ToolStart(call)
+	result := llm.ToolResult{ForID: call.ID, Text: text, IsError: true, ErrorKind: llm.ToolErrorBlocked}
+	block, _ := a.finishToolResult(result, call.Name, sink)
+	return block
 }
 
 // mutationDependencies builds latest-writer edges for normalized mutation keys.
@@ -2861,7 +2891,7 @@ func (a *Agent) mutationDependencies(calls []llm.ToolCall) ([][]int, bool) {
 	return dependencies, false
 }
 
-func (a *Agent) crossStageMutationDependencies(calls []llm.ToolCall, stages []callStage) [][]int {
+func (a *Agent) crossStageMutationDependencies(calls []llm.ToolCall, stages []callStage, suppressed map[int]string) [][]int {
 	dependencies := make([][]int, len(calls))
 	stageIndexes := make([]int, len(calls))
 	for stageIndex, stage := range stages {
@@ -2871,6 +2901,12 @@ func (a *Agent) crossStageMutationDependencies(calls []llm.ToolCall, stages []ca
 	}
 	latest := make(map[string]int)
 	for i, call := range calls {
+		if _, blocked := suppressed[i]; blocked {
+			// A suppressed call never runs, so it has no side effects: it must
+			// neither become a dependency target nor replace the real latest
+			// writer for its mutation keys.
+			continue
+		}
 		seen := make(map[int]struct{})
 		keys := a.tools.MutationKeys(call)
 		for _, key := range keys {
@@ -2971,7 +3007,9 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 			}
 			waitForActualCompletions(crossStageDependencies[idx], actualCompletions)
 			diffState := a.snapshotToolDiff(c)
+			a.toolRunSem <- struct{}{}
 			result, actualCompletion, foldFailureGuard := a.dispatchTool(ctx, c)
+			<-a.toolRunSem
 			results[idx].actualCompletion = actualCompletion
 			if (hasDependents[idx] || awaitActual[idx]) && actualCompletion != nil && (result.ErrorKind == llm.ToolErrorTimeout || result.ErrorKind == llm.ToolErrorCancelled) {
 				<-actualCompletion

@@ -206,6 +206,7 @@ func TestIdenticalFailureGuardConcurrentBatch(t *testing.T) {
 			Stop: llm.StopToolUse,
 		},
 		toolCallStep("call_3", "probe", input),
+		toolCallStep("call_4", "probe", input),
 		textStep("done"),
 	)
 	a := newAgent(fp, reg, Options{})
@@ -214,26 +215,25 @@ func TestIdenticalFailureGuardConcurrentBatch(t *testing.T) {
 	if err := a.RunPrompt(context.Background(), "probe", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
 	}
-	if len(sink.results) != 3 {
-		t.Fatalf("results = %d, want 3", len(sink.results))
+	if len(sink.results) != 4 {
+		t.Fatalf("results = %d, want 4", len(sink.results))
 	}
-	// The two concurrent identical calls race through the mutex: one records
-	// attempt 1, the other attempt 2, so exactly one carries the warn.
-	warns := 0
-	for _, r := range sink.results[:2] {
-		if !r.IsError {
-			t.Fatalf("batch result not an error: %+v", r)
-		}
-		if strings.Contains(r.Text, "[loop guard]") {
-			warns++
-		}
+	// Within one stage the intra-turn duplicate guard runs first: the first
+	// call dispatches and fails plainly; the identical sibling is suppressed
+	// without dispatch and without touching the failure guard's streak.
+	if got := sink.results[0]; !got.IsError || strings.Contains(got.Text, "[loop guard]") {
+		t.Fatalf("first batch result = %+v, want plain failure", got)
 	}
-	if warns != 1 {
-		t.Fatalf("warns across concurrent batch = %d, want exactly 1: %+v", warns, sink.results[:2])
+	if got := sink.results[1]; !got.IsError || got.ErrorKind != llm.ToolErrorBlocked || !strings.Contains(got.Text, "duplicates an identical call") {
+		t.Fatalf("second batch result = %+v, want duplicate-suppression block", got)
 	}
-	// The third identical attempt is blocked before dispatch.
-	if got := sink.results[2]; !got.IsError || got.ErrorKind != llm.ToolErrorBlocked {
-		t.Fatalf("third result = kind %q is_error=%v, want blocked", got.ErrorKind, got.IsError)
+	// Re-issues in later turns still feed the failure guard: the second
+	// cross-turn attempt warns, the third is blocked before dispatch.
+	if got := sink.results[2]; !got.IsError || !strings.Contains(got.Text, "[loop guard]") || !strings.Contains(got.Text, "2 times") {
+		t.Fatalf("third result = %q, want failure-guard warn", got.Text)
+	}
+	if got := sink.results[3]; !got.IsError || got.ErrorKind != llm.ToolErrorBlocked {
+		t.Fatalf("fourth result = kind %q is_error=%v, want blocked", got.ErrorKind, got.IsError)
 	}
 	if len(probe.inputs) != 2 {
 		t.Fatalf("tool ran %d times, want exactly 2 dispatches", len(probe.inputs))

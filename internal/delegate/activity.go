@@ -313,6 +313,7 @@ var safeNoticePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^\[stopped: prompt cost budget \$[0-9]+(?:\.[0-9]+)? reached \(\$[0-9]+(?:\.[0-9]+)? spent\)\]$`),
 	regexp.MustCompile(`^\[stopped: [0-9]+ consecutive tool turns all failed\]$`),
 	regexp.MustCompile(`^\[stopped: [0-9]+ identical tool turns repeated with no change\]$`),
+	regexp.MustCompile(`^\[loop guard\] suppressed [0-9]+ duplicate and [0-9]+ over-limit tool calls this turn \(dispatch limit [0-9]+\); suppressed calls returned guard errors without running$`),
 	regexp.MustCompile(`^\[context window adjusted: provider reported [0-9]+ tokens; retrying request\]$`),
 	regexp.MustCompile(`^\[compacted: [0-9]+ turns → checkpoint · ctx ~[0-9]+(?:\.[0-9]+)?k → ~[0-9]+(?:\.[0-9]+)?k\]$`),
 	regexp.MustCompile(`^\[compacted: archived oversized turn payload · ctx ~[0-9]+(?:\.[0-9]+)?k → ~[0-9]+(?:\.[0-9]+)?k\]$`),
