@@ -211,10 +211,10 @@ and send an explicit switch.
 
 ## Flags
 
-`harness --help` lists every root flag. Command-line configuration settings
-include their defaults and corresponding environment variables; these annotations
-are generated from the same configuration catalog used for parsing and the
-reference below.
+`harness --help` is the authoritative flag list: it is generated from the same
+configuration catalog used for parsing and includes each setting's defaults and
+corresponding environment variables. The reference below adds the behavioral
+notes.
 
 ```text
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
@@ -285,6 +285,8 @@ reference below.
 --models         list configured providers and models and exit
 --check-model-proxy    check harness-model-proxy reachability and exit
 -hooks <file>    replace configured hooks with this hook config file
+-otel-enabled, -otel-endpoint, -otel-protocol, -otel-timeout, -otel-service-name, -otel-hostname
+                  OTLP/HTTP metrics export controls (see the configuration parameters matrix)
 -config <file>    alternate config path
 -h, --help        print this usage screen and exit 0
 ```
@@ -1171,149 +1173,12 @@ models.dev availability. A provider that loses every model is deleted along
 with its `provider_configs` reference. Stored API keys, auth blocks, discovery
 overrides, and provider quirks are preserved.
 
-### Serving, probes, and rolling updates
+### Operations
 
-The model proxy exposes unauthenticated process probes on its API listener,
-outside API-key middleware:
-
-- `GET /readyz` returns `200` normally and `503` as soon as SIGTERM or SIGINT
-  starts a drain.
-- `GET /healthz` remains `200` until final teardown begins.
-- Other methods on either probe path return `405`.
-
-The first termination signal removes readiness, stops background catalog/key
-refresh work, waits for load-balancer propagation, and then gracefully closes
-the API listener without cancelling in-flight handler contexts. Once the stream
-drain reaches its bound, the server force-closes remaining requests. It then
-closes the bounded WebSocket pool and shuts down the metrics listener last.
-
-Lifecycle settings use flag > environment > config > default precedence:
-
-| Purpose | Serve flag | Environment | Config | Default |
-|---|---|---|---|---|
-| readiness propagation delay | `-drain-delay` | `HARNESS_MODEL_PROXY_DRAIN_DELAY` | `drain_delay` | `5s` |
-| maximum stream drain | `-shutdown-timeout` | `HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | `5m` |
-| process identity | `-instance-id` | `HARNESS_MODEL_PROXY_INSTANCE_ID` | `instance_id` | random 16-byte hex |
-
-Instance IDs must match `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. A Kubernetes pod
-name or UID is a useful value. It appears in request events, error diagnostics,
-`/v1/usage`, and structured logs; correlate a request by
-`(proxy_instance_id, proxy_request_id)`.
-
-A minimal Kubernetes fragment is:
-
-```yaml
-spec:
-  terminationGracePeriodSeconds: 330
-  containers:
-    - name: model-proxy
-      args:
-        - serve
-        - -listen=0.0.0.0:8765
-        - -metrics-listen=0.0.0.0:9090
-      env:
-        - name: HARNESS_MODEL_PROXY_INSTANCE_ID
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-      readinessProbe:
-        httpGet: {path: /readyz, port: 8765}
-      livenessProbe:
-        httpGet: {path: /healthz, port: 8765}
-```
-
-Set `terminationGracePeriodSeconds` greater than the drain delay plus shutdown
-timeout; use at least `330` seconds with the defaults. The metrics default
-(`127.0.0.1:9090`) is not pod-scrapable, so bind
-`-metrics-listen 0.0.0.0:9090` in a pod.
-
-Harness sends `X-Harness-Session` only on stream requests with a session ID.
-Use it for consistent hashing when Codex Responses WebSockets are enabled:
-
-```nginx
-upstream harness_model_proxy {
-    hash $http_x_harness_session consistent;
-    server model-proxy-0:8765;
-    server model-proxy-1:8765;
-}
-```
-
-```haproxy
-backend harness_model_proxy
-  balance hdr(X-Harness-Session)
-  hash-type consistent
-  server proxy0 model-proxy-0:8765 check
-  server proxy1 model-proxy-1:8765 check
-```
-
-For Envoy, use a `RING_HASH` cluster and a route header hash policy:
-
-```yaml
-route:
-  cluster: harness_model_proxy
-  hash_policy:
-    - header:
-        header_name: X-Harness-Session
-clusters:
-  - name: harness_model_proxy
-    lb_policy: RING_HASH
-```
-
-See the official [NGINX upstream hash](https://nginx.org/en/docs/http/ngx_http_upstream_module.html#hash),
-[HAProxy balancing](https://www.haproxy.com/documentation/haproxy-configuration-manual/latest/#4-balance),
-and [Envoy route hash-policy](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#config-route-v3-routeaction-hashpolicy-header)
-references for the complete surrounding configuration.
-
-Harness also accepts reverse-proxy affinity cookies. The model-proxy HTTP
-client stores them in memory and returns them on later requests to the matching
-origin. Cookies are scoped to one harness process and are not persisted across
-restarts; cookie affinity therefore pins all model-proxy traffic from that
-process, while `X-Harness-Session` supports finer logical-session routing.
-
-Stickiness improves WebSocket continuation hit rate but is never required for
-correctness. HTTP stored continuations work on any replica; a Codex
-`store:false` socket miss returns 409 and the CLI resends complete history once.
-
-For a replicated production deployment, bake `models.dev.api.json` into the
-image or mount an identical read-only copy in every pod. Set
-`models_dev_cache_ttl: 0` and treat a catalog change as a deployment. Cost
-budgets and `/v1/usage` remain deliberately per pod: strict budget enforcement
-requires one replica, and sharing one budget-state directory between independent
-replicas is unsupported because their read-modify-write cycles are not
-coordinated. `/v1/usage` includes `instance` and `since` so that per-pod reports
-are explicit.
-
-The continuation ownership change is a coordinated cutover: old and new CLI/
-proxy combinations are not wire-compatible. Finish active CLI turns, stop the
-CLIs, deploy the complete new proxy fleet without sending traffic through a
-mixed-version Service, wait for every pod to become ready, and only then
-start/update the CLI. Validate one HTTP stateful session and one Codex
-WebSocket session through a forced pod replacement. Future proxy-only rollouts
-can use the normal readiness-driven rolling strategy.
-
-### Harness-to-proxy authentication
-
-Model-proxy API-key authentication is disabled by default and becomes required
-as soon as the first key is stored in the proxy's dedicated API-key file. The
-default is `api_keys.json` next to the proxy config; `api_keys_file` selects
-another path and `serve -api-keys-file path` overrides it. Inline `api_keys` in
-the normal proxy config are rejected.
-
-Generate and store a key, then provide it to harness:
-
-```sh
-harness-model-proxy generate-api-key [-api-keys-file path] [-ttl 720h] [-budget-usd 25 -budget-period 24h] laptop
-harness --model-proxy-api-key <key> -model <provider>:<model>
-```
-
-Harness also reads `HARNESS_MODEL_PROXY_API_KEY` and the `model_proxy_api_key`
-field in `~/.config/harness/config.json`. Model-proxy keys have the `hmp_`
-prefix. Only SHA-256 hashes are stored, and the plaintext key is printed once.
-Omit `-ttl` (or use `0`) for a non-expiring key. A running proxy polls its key
-file for additions and removals; harness loads its outgoing key at process start.
-
-See [mcp.md](mcp.md#proxy-api-key-authentication) for the equivalent MCP proxy
-configuration.
+Serving lifecycle, probes, rolling-update and stickiness guidance,
+harness-to-proxy API-key authentication, Prometheus metrics, provider retry
+behavior, request tracing, and multimodal compatibility diagnostics are
+documented in [proxy.md](proxy.md).
 
 ### Usage, pricing, and budgets
 
@@ -1362,109 +1227,6 @@ explicit rate. Anthropic cache writes are split into default 5-minute and
 reported as unpriced instead of using a cheaper estimate. Anthropic hosted
 web-search request fees are excluded from `cost_usd` and cost-budget spend; its
 token charges remain included.
-
-### Prometheus metrics
-
-The proxy exposes unauthenticated Prometheus metrics on a separate listener,
-`127.0.0.1:9090` by default. Metrics break usage down by `provider`, `model`,
-bounded `purpose` (`turn`, `compaction`, `prewarm`,
-`branch_summary`, or
-`unknown`), and `key` (the API key's stored name, or `anonymous` when
-authentication is disabled). `model_proxy_build_info` carries the build version.
-Token counters are recorded for every stream or native compaction request that
-produced usage, priced or not, while
-`model_proxy_cost_usd_total` is recorded only when a price is known.
-`model_proxy_cache_write_tokens_total` records default-rate writes and
-`model_proxy_cache_write_1h_tokens_total` records Anthropic's 1-hour writes.
-
-Continuation and transport health use bounded, proxy-observable families:
-
-- `model_proxy_continuation_total{result=...}` records exactly one of
-  `not_offered`, `served`, `unavailable`, `rejected_upstream`, or `failed` per
-  stream request.
-- `model_proxy_ws_pool_events_total{event=...}` records `hit`, `miss`, `create`,
-  `evict_lru`, `evict_idle`, `evict_age`, or `overflow`.
-- `model_proxy_ws_pool_connections` and
-  `model_proxy_ws_pool_capacity` expose current pooled connections and the
-  configured bound.
-
-These families have no API-key or instance label. Prometheus scrape-target
-labels identify replicas, and all existing request/usage plus new operational
-counters can be summed across targets without double counting client-side
-retries. CLI-only resets remain in session diagnostics rather than being
-reported back to the proxy.
-
-Use `-no-metrics` to disable the endpoint or `-metrics-listen` to move it. The
-equivalent proxy-config `metrics` object accepts `enabled` and `listen`. The
-listener has an explicit lifetime and remains available until API draining,
-handler teardown, and connection-pool closure have completed.
-
-### Provider failures and retries
-
-Harness retries transient connection failures and retryable provider responses
-such as 429, 500, 502, 503, and 529. A `Retry-After` value or equivalent
-streaming error hint is honored when it is at most 60 seconds. Longer 429/529
-waits fail immediately with the original provider message so an interactive
-prompt is not silently parked for minutes or hours.
-
-Every unsuccessful upstream attempt is logged by the model proxy, including
-attempts followed by a successful retry. Session-side lifecycle records are
-described under [Session diagnostics](#session-diagnostics); the exact backoff,
-stream-retry, and cancellation rules are in
-[design section 5.5](design.md#55-errors-and-retries-internalretry).
-
-### Proxy request tracing
-
-Enable opt-in tracing to correlate a harness run across model and MCP proxy logs:
-
-```sh
-harness -trace-proxy -model <provider>:<model>
-```
-
-Harness sends standard W3C `traceparent` headers. Proxy logs that receive a valid
-trace include `trace_id`, `span_id`, `parent_span_id`, and `trace_sampled` fields.
-Tracing does not log prompts, request bodies, API keys, or authentication
-headers.
-
-### Multimodal tool-result compatibility diagnostics
-
-Image-bearing tool results have three separate compatibility layers:
-
-1. **Catalog modality:** the selected target must advertise `image` input.
-   Harness rejects a statically image-requiring tool before it reads the file
-   when this capability is absent.
-2. **Configured dialect:** the provider config's `api_type` selects the wire
-   lowering. Anthropic nests images in `tool_result.content`; OpenAI Chat emits
-   tool messages followed by one adjacent multimodal user message; Responses
-   emits function outputs followed by one adjacent user image item; Gemini
-   Interactions emits `function_result.result` text/image content.
-3. **Concrete endpoint conformance:** an OpenAI-compatible endpoint can reject a
-   valid dialect shape despite catalog metadata. On the final non-retryable,
-   targeted rejection, after normal continuation/server-tool/output-floor
-   fallbacks, the proxy attaches the structured category
-   `multimodal_tool_result_rejected`.
-
-Harness shows one concise compatibility notice with the target, remediation,
-proxy request ID, and trace ID when available. It also writes a structured
-warning to the session's `diagnostics.ndjson` with prompt/turn/attempt,
-sanitized upstream status/code/message, correlation fields, lowering strategy,
-and bounded shape metadata. The ordinary error remains available. For streaming
-requests the proxy's outer HTTP response can be `200` while the diagnostic's
-`api_status_code` records the upstream provider failure.
-`--quiet` suppresses the compatibility notice (and no verbose duplicate is
-printed), while session diagnostics still receive exactly one structured
-record when enabled.
-
-Diagnostics include image counts, MIME types, dimensions, encoded/decoded byte
-totals, and deterministic SHA-256 fingerprints. They never include prompts,
-tool arguments, result text, local paths, data URLs, or image base64. The same
-concise notice is stored as a normal `raw.ndjson` replay event. Use
-`-trace-proxy` to correlate its `trace_id` with model-proxy logs.
-
-This classification is observational only: Harness does not silently drop the
-image, resend altered text-only content, switch serializers, mutate target
-metadata, or learn a persistent endpoint quirk. Select a conforming image target
-or inspect the image outside that model call.
 
 ## REPL Commands
 
@@ -1809,70 +1571,47 @@ recovery reminders reset the cadence; request retries do not advance it.
 
 ## Sessions
 
-- A session path is a directory. `tree.ndjson` is the canonical append-only
-  conversation tree; transcript rewrites are stored as full context snapshots.
-  Splice-delta reset entries written previously remain readable for compatibility
-  without migration. `state.json` is compact mutable state
-  containing the active leaf and runtime settings; `active-turn.json` is a transient atomic recovery
-  record for the current model/tool boundary; `raw.ndjson` is the chronological
-  replay log.
-  Consecutive assistant stream fragments are stored in bounded 4 KiB
-  or 250ms chunks rather than one record per provider delta.
-  `compactions/` stores raw messages removed from active context, `children/`
-  stores child-agent transcripts and metadata, and `artifacts/tool-results/`
-  stores full outputs omitted from model context.
-- New tree records are appended and synced before `state.json` atomically moves
-  its active-leaf pointer. An interrupted final tree record is ignored on load;
-  malformed earlier records are errors. Auto-save uses
-  `~/.local/state/harness/sessions/<timestamp>`, honoring `$XDG_STATE_HOME`.
+- A session path is a directory: `tree.ndjson` is the canonical append-only
+  conversation tree, `state.json` the compact mutable state, `active-turn.json`
+  a transient atomic recovery record, and `raw.ndjson` the chronological replay
+  log; `compactions/`, `children/`, and `artifacts/tool-results/` hold archived
+  messages, child-agent transcripts, and full truncated tool outputs. The
+  storage invariants and save/recovery ordering are documented in
+  [session.md](session.md).
+- Auto-save uses `~/.local/state/harness/sessions/<timestamp>`, honoring
+  `$XDG_STATE_HOME`.
 - Harness checkpoints root and child runs before provider requests, before tool
   dispatch, and after each validated closed turn. A crash during tool execution
   recovers that open call as an explicit `interrupted` error instead of
-  automatically executing it again. Closed-turn checkpoints include the latest
-  plan, advisory TODO list, usage, cache/proxy IDs, and a safe provider continuation anchor.
+  automatically executing it again.
 - `-session <dir>` chooses an explicit session directory. Active sessions hold a
-  non-blocking OS lock on `session.lock` for process ownership; the file contains
-  the owner PID for diagnostics, but the kernel lock is authoritative and is
-  released automatically if the process exits or crashes. Starting another
-  harness with `-resume <dir>` while that session is active fails without loading
-  or modifying it. `-resume <dir>` otherwise loads its active tree path, latest
+  non-blocking OS lock on `session.lock`; starting another harness with
+  `-resume <dir>` while that session is active fails without loading or
+  modifying it. `-resume <dir>` otherwise loads its active tree path, latest
   plan, and TODO list, then continues, applying a newer active-turn recovery
-  record when present and printing the recovered boundary. Resume also prints a
-  bounded recap of the last exchange to stderr before the first prompt — the
-  most recent human prompt and assistant reply — with an explicit trailer when
-  the prior session ended mid-turn (interrupted mid-reply, during tool
-  execution, or before the model replied) rather than cleanly at the prompt.
-  Child runs still
-  marked `running` from the prior process become `abandoned`; their durable
-  checkpoint remains eligible for compatible child-ID continuation. Continued
-  children record whether they restored retained history directly or first
-  built a compact checkpoint, together with before/after/window context
-  estimates; `session stats` prints those fields and counts checkpoint summary
-  calls as maintenance. Combining distinct `-resume <source>` and
-  `-session <destination>` clones the active
-  branch into the destination with fresh usage accounting. `/clear` rotates to
-  a fresh directory.
-- `/tree` opens a searchable, paged line picker over safe tree nodes. Its compact
-  graph stays flat along linear history and adds indentation only at real forks;
-  semantic row labels and condensed tool batches keep checkpoints readable
-  within the terminal width. Selecting a human prompt branches from its parent
-  and returns the prompt (including images) to the editor; selecting another
-  node makes that node the branch point. Before moving, harness asks whether to
-  attach no summary, a default summary, or a summary with custom focus. A failed
-  summary leaves the branch unchanged.
+  record when present. Resume prints a bounded recap of the last exchange to
+  stderr before the first prompt, with an explicit trailer when the prior
+  session ended mid-turn. Child runs still marked `running` from the prior
+  process become `abandoned`; their durable checkpoint remains eligible for
+  compatible child-ID continuation. Combining distinct `-resume <source>` and
+  `-session <destination>` clones the active branch into the destination with
+  fresh usage accounting. `/clear` rotates to a fresh directory.
+- `/tree` opens a searchable, paged line picker over safe tree nodes. Selecting
+  a human prompt branches from its parent and returns the prompt (including
+  images) to the editor; selecting another node makes that node the branch
+  point. Before moving, harness asks whether to attach no summary, a default
+  summary, or a summary with custom focus; a failed summary leaves the branch
+  unchanged.
 - `/fork` presents the same compact fork graph filtered to prior human prompts,
-  then performs the selected move in a new session. Hidden tool and assistant
-  checkpoints do not add indentation. `/clone` copies the current branch into a
-  new session. Both record parent-session lineage, reset prompt/usage accounting
-  and remote continuation anchors, and preserve the current model, agent,
-  reasoning settings, latest plan, and advisory TODO list.
+  then performs the selected move in a new session. `/clone` copies the current
+  branch into a new session. Both record parent-session lineage, reset
+  prompt/usage accounting and remote continuation anchors, and preserve the
+  current model, agent, reasoning settings, latest plan, and advisory TODO list.
 - Tree navigation changes only model-visible conversation context. It never
   rewinds the working directory or Git; every new branch carries an internal
   warning telling the model to inspect current files before assuming their state.
 - Transcripts are provider-neutral, so a session started against Anthropic can
   resume against an OpenAI-compatible server and vice versa.
-- A save requested mid-turn synthesizes an `interrupted` tool result before the
-  transcript becomes immutable tree data, so resumed paths are valid for both APIs.
 
 Inspect saved sessions with:
 
@@ -1928,196 +1667,79 @@ canonical `raw.ndjson` and current local artifact metadata. The equivalent
 interactive commands are `/evidence`, `/evidence list ...`, and
 `/evidence show <id>`; none contacts the model. Catalog version 1 includes every
 typed evaluator result, every tool error, and every truncated tool result that
-declares a full-output artifact. Ordinary successful inline-only tool results
-are omitted. Stable chronological IDs use `eval-NNNNNN` and `tool-NNNNNN`;
-lists are newest first, return 20 records by default, and cap `--limit` at 100.
-Use `--kind`, `--status`, and `--prompt` together to narrow a list. Supplying a
-record ID prints that record in text mode; JSON always emits the versioned page
-envelope.
+declares a full-output artifact. Stable chronological IDs use `eval-NNNNNN` and
+`tool-NNNNNN`; lists are newest first, return 20 records by default, and cap
+`--limit` at 100. Supplying a record ID prints that record in text mode; JSON
+always emits the versioned page envelope.
 
-The catalog never reads or prints artifact bodies. It reports canonical source,
-outcome, prompt/turn, bounded error metadata, evaluator score/candidate metadata,
-reference, safe resolved path, byte size, and modification time when available.
-`available` means a regular local file has not been modified after its event;
-`stale` means its modification time is newer, so the reference may no longer
-describe the evaluated bytes. `missing`, `unreadable`, and `unsafe` distinguish
-absence, filesystem errors, and symlink/non-regular or tool-path-escape hazards.
-`external` evaluator references are outside the permitted roots and are not
-probed, `unreferenced` evaluator results supplied
-no reference, and `recorded` tool errors have bounded canonical metadata but no
-separate artifact. Relative evaluator references resolve only beneath the
-session's persisted startup working directory; absolute references are probed
-only beneath that directory or the session directory. Tool artifacts must stay
-beneath the session directory. Run the command against a child session path to
-inspect that child's stream; the first catalog version does not merge root and
-delegate streams.
+The catalog never reads or prints artifact bodies. Record status vocabulary:
+`available`, `stale` (modified after its event), `missing`, `unreadable`,
+`unsafe`, `external`, `unreferenced`, and `recorded`. Relative evaluator
+references resolve only beneath the session's persisted startup working
+directory; tool artifacts must stay beneath the session directory. Run the
+command against a child session path to inspect that child's stream; the first
+catalog version does not merge root and delegate streams. The catalog internals
+are documented in
+[trajectory.md](trajectory.md#human-only-evidence-catalog-internalsession).
 
 `session replay --follow` first renders the existing complete `raw.ndjson`
-records, then renders complete records as they are appended. It uses the same
+records, then renders complete records as they are appended, using the same
 user-facing view as ordinary replay; `-q`/`--quiet` suppresses status lines but
-keeps prompts and assistant text. Replay draws a horizontal rule after each
-prompt, prints `[turn: N waiting]` markers for recorded attempt starts, and,
-on a color terminal, dims stored status lines and colorizes recorded
-`tool_diff` events using the mutated file's path for language detection.
-Terminal replay applies the same color-gated
-syntax highlighting to recognized tagged assistant and reasoning-summary fences;
-untagged and unknown fences remain plain, and replay without ANSI emits no
-highlighting. Replay resolves `--color-theme`, `HARNESS_COLOR_THEME`, and
-`color_theme` from `--config` (or the normal default config path) with the same
-flag > environment > file > dark-default precedence. An explicitly empty theme
-flag is invalid. The focused replay loader requires a valid JSON object and a
-string `color_theme` when that field is present, but ignores all unrelated
-fields, including invalid model/provider settings. Repeated replay options that
-appear before the session path use the final parsed value. Parsing stops at the
-session path, so flag-looking tokens after it remain extra positional arguments
-and cause a usage error. ANSI enablement follows the normal environment rules:
-non-empty `NO_COLOR` always disables, while `HARNESS_NO_COLOR` is parsed as a
-boolean. Rendering uses the current theme for both replay and follow; no theme
-or ANSI metadata is persisted in the event log. Stored events and ANSI-free latest-turn output remain unchanged. A
-followed child exits successfully after its terminal metadata is observed and
-the log receives one final drain. If that
-metadata update failed, a child `prompt_usage` record can establish completion.
-A followed root session has no terminal marker and continues until interrupted.
-An existing directory without `raw.ndjson` is valid while following; a missing
-directory is an immediate error.
+keeps prompts and assistant text. Replay resolves `--color-theme`,
+`HARNESS_COLOR_THEME`, and `color_theme` with the normal flag > environment >
+file > dark-default precedence and requires no model/provider configuration; no
+theme or ANSI metadata is persisted in the event log. A followed child exits
+after its terminal metadata is observed; a followed root session has no
+terminal marker and continues until interrupted. A missing directory is an
+immediate error. Replay rendering, coalescing, and terminal-marker internals
+are documented in [session.md](session.md).
 
 `session timings` labels a prompt without a terminal `prompt_usage` event as
 `in progress` and measures its elapsed time through the latest recorded event.
 
 `session stats` prints a deterministic, human-readable report for one session:
-build/runtime attribution, root conversation turns, navigation count, tree
-entries/branches/leaves/depth, direct and delegate tool/command activity,
-calls per tool-bearing turn, standalone TODO/single-inspection turns, result
-size/truncation/timing totals and per-tool result volume, normalized repeated
-call aggregates with arguments redacted, command-step use, `SKILL.md`
-reads/activations, active-context
-composition and the latest request estimate, parallel batches, compactions,
-and a hierarchical delegate breakdown with the highest direct-token children.
-A child that has metadata and replay events
-but no `state.json` checkpoint is included with `checkpoint: unavailable`
-instead of aborting the report. The root token and cost totals come from
-`state.json` and already include delegate and compaction usage; delegate totals
-similarly include any nested delegates. The separate `Direct model activity
-(non-overlapping)` section sums `turn_attempt_usage` and `maintenance_usage`
-from each physical root and child replay exactly once and splits root from
-delegate activity. New prompt replay events
-and child metadata also expose structured termination reasons; the stats report
-summarizes them without treating them as task-success labels. When checkpoint
-events are present, conversation statistics also report closed-turn checkpoint
-count, average/maximum save duration, and lag in completed turns and seconds.
-Retention activity is reported as epoch count, pressure-versus-age passes,
-blocks/bytes trimmed, Responses-state resets, and whether the following request
-used stateful continuation or full context. When failures occurred, an `Errors`
-section follows the tool report: failed tool-result, in-band command-execution,
-effective combined, cancellation, and model-request counts,
-per-tool/kind/model breakdowns, and repeat loops (the same tool and kind
-failing at least three times consecutively).
-`--format json` emits a versioned, transcript-free machine report with per-tool
-calls/results/errors/error rates, the structured error summary, build/runtime
-identity, and reliability telemetry reconstructed from the root and all
-physically nested delegate streams. Its `usage` and `storage` sections use the
-same analyzer vocabulary described below: physical root/child and
-conversational/maintenance usage are split without folding child spend twice,
-and bounded file/reset metadata is reported without transcript bodies.
+build/runtime attribution, turns, tree shape, direct and delegate tool/command
+activity, result size/truncation totals, normalized repeated-call aggregates
+with arguments redacted, active-context composition and the latest request
+estimate, compactions, retention epochs, termination reasons, an `Errors`
+section, and a hierarchical delegate breakdown. Root token/cost totals already
+include delegate and compaction usage. `--format json` emits a versioned,
+transcript-free machine report. The full field inventory and accounting rules
+are documented in [session.md](session.md).
 
 `session analyze` emits a deterministic, versioned, transcript-free report for
 one session or a directory containing session roots. When `dir` is omitted,
 `--since D` controls recent session-root discovery (default `24h`) and `--all`
 removes that lookback; those discovery flags are mutually exclusive and do not
 apply to an explicit directory. Discovery recursively
-includes `children/<id>/` streams and never follows symlinks. The report records
-the immutable complete-record prefix byte count, event count, and SHA-256 for
-each `raw.ndjson`; missing, truncated, malformed, symlinked, and bounded-limit
-streams remain visible as unavailable or incomplete rather than being silently
-dropped. A stream is capped at a 256 MiB snapshot prefix, 16 MiB per record, and
-500,000 records; hitting a cap sets `limit_exceeded` and excludes that partial
-hierarchy from promotion distributions.
-`--before` applies an inclusive event-time cutoff and suppresses child-metadata
-fallbacks that could have been written after that cutoff. `--format json` is the
-stable analyzer-v12 input for corpus comparisons. Each item identifies its owning
-root and root-derived cohort while retaining its own provider, model, build, and
-runtime metadata. Cohort keys include the root build (including modified state)
-and behavior-changing runtime profile.
+includes `children/<id>/` streams and never follows symlinks. A stream is
+capped at a 256 MiB snapshot prefix, 16 MiB per record, and 500,000 records;
+hitting a cap sets `limit_exceeded` and excludes that partial hierarchy from
+promotion distributions. `--before` applies an inclusive event-time cutoff.
+`--format json` is the stable analyzer input for corpus comparisons (used by
+`scripts/reliabilitybench`).
 
-Reliability fields carry explicit availability. A supported signal with no
+Reliability fields carry explicit availability: a supported signal with no
 occurrences is an observed zero; a legacy or missing stream is unavailable.
-Progress reports inspection-only/no-progress streaks, first successful mutation
-and verification turns, and whether a batching steer was followed within two
-tool-bearing turns (pending cutoff cases are not failures). Hook diagnostics,
-closure triggers, workflow-status supply, context-accounting/provider-count
-scope, retention/reset totals, and arithmetic invariant violations are bounded
-counters only: prompt text, tool inputs/results, assistant text, and hook
-payloads are never copied into the report.
+The `trajectory` telemetry section reports the host-only evaluator-lane
+streaks and classifications behind the default-on `stagnation_nudge` policy
+(see [trajectory.md](trajectory.md)); candidate IDs, evidence references, and
+filesystem paths are not included in analyzer output. The full analyzer
+vocabulary — usage/storage accounting, hierarchy/cohort summaries, completion
+counters, and availability semantics — is documented in
+[session.md](session.md).
 
-The `trajectory` telemetry section is reconstructed from canonical evaluator,
-successful mutation, diff, branch, and continuation-seed events. It reports
-encoded projection bytes, transition/evaluation churn,
-branch resets, missing candidate/evidence fields, bounded-data drops, path
-observation/confirmation counts, and unconfirmed paths. Schema v12 also reports
-the active and maximum conservative
-no-improvement streak plus baseline, improvement, plateau, regression,
-indeterminate, unordered-score, evaluator-lane-reset, and delivered
-strategy-reset counts. The classifications remain host-only telemetry; only the
-bounded default-on nudge policy below changes model-visible control flow.
-`unconfirmed_mutation_paths` is an audit proxy, not a false-positive
-verdict: it is normally higher when `-show-diffs` is disabled. Candidate IDs,
-evidence references and filesystem paths are not included in analyzer output.
-The trajectory projection is always model-invisible. Harness defaults
-`stagnation_nudge` on to issue one host-authored
-strategy-reset instruction after two consecutive non-improvements in one
-evaluator lane. Set `-stagnation-nudge=false`, config
-`"stagnation_nudge": false`, or `HARNESS_STAGNATION_NUDGE=false` to disable it.
-The instruction is delivered only on an already blocking Stop-hook
-continuation, at most once for that lane, and asks the model to re-read evidence
-and test a materially different hypothesis without bypassing the evaluator.
-Improvement does not re-arm it; a handler/direction lane change or branch reset
-does. The canonical `stagnation_nudge` event is persisted before delivery and
-contains only the public threshold and observed streak—never hook output,
-handler, score, candidate, evidence reference, or instruction text.
-
-Usage comes only from physical
-`turn_attempt_usage` and `maintenance_usage` events. It exposes every normalized
-token class, root/descendant splits, priced/unpriced call coverage, known partial
-cost, hierarchy/cohort median and nearest-rank p90 values, and reconciliation
-against authoritative root state only for complete non-cutoff hierarchies.
-Storage analysis is bounded, never follows symlinks, counts physical snapshotted
-raw-file and candidate-lineage bytes, and marks missing, incomplete, malformed, symlinked,
-limit-exceeded, or cutoff-incomplete sources explicitly. Context maxima
-keep payload and effective scopes separate; public maxima clamp negatives while
-invariant counters preserve compatible-scope arithmetic errors. Execution
-completion means a terminal `prompt_usage` record exists; termination reasons
-describe loop control, not task correctness. Delegate semantic completion is a
-separate bounded record. New optional footers declare only `complete` or
-`blocked`; a missing or unusable footer produces the host compatibility outcome
-`unknown`. Analyzer schema v12 exposes only aggregate outcome, validation, and
-contract-provenance counters—never blocker text or report prose. Completion
-metadata is schema-local: use the Harness 0.5.11 binary to analyze sessions
-created before 0.5.12. Missing, invalid, host-failed, and canceled children remain
-explicit coverage failures rather than being inferred as complete; parent rework
-is currently unavailable.
-
-`session errors` lists the classified failures behind that section: every
-failed tool result and failed model request in one session (root plus delegate
-children), one row per failure with agent, model, prompt/turn, context
-percentage, tool, error kind, and a bounded excerpt. With an explicit session
-directory it analyzes that session; without one it scans sessions under the
-default sessions root created within `--since` (a duration, default `24h`;
-`--all` disables the window) and prints per-session blocks plus an overall
-footer. `--tool`, `--kind`, `--model`, and `--agent` keep only matching rows,
-and `--format json` emits the scope, summary, and rows as JSON. Error kinds
-come from the structured `error_kind` field on new logs (with a `high`
-confidence marker) and from text classification of the recorded display line
-on legacy logs; see the design document's tool failure handling section for
-the kind vocabulary.
-`--before` applies an event-time cutoff. Each JSON report records `analyzed_at`
-and, for every physical root/child stream, the complete-record byte count,
-event count, and SHA-256 used. Scans snapshot each file before reading, skip and
-report corrupt or unsupported sessions, and never combine repeat streaks across
-physical agents. A success or different failure breaks a streak. Tool failures
-are attributed to the event-time model identity; older logs use the preceding
-`model_request` before falling back to session metadata. Summaries include
-tool-result denominators, separately counted in-band command failures and
-cancellations, and an effective combined failure rate.
+`session errors` lists classified failures — every failed tool result and
+failed model request in one session (root plus delegate children) — one row per
+failure with agent, model, prompt/turn, context percentage, tool, error kind,
+and a bounded excerpt. Without a directory it scans sessions under the default
+sessions root created within `--since` (default `24h`; `--all` disables the
+window). `--tool`, `--kind`, `--model`, and `--agent` filter rows, `--before`
+applies an event-time cutoff, and `--format json` emits the scope, summary, and
+rows as JSON. Error kinds come from the structured `error_kind` field on new
+logs and from text classification on legacy logs; see the design document's
+tool failure handling section (§8.2) for the kind vocabulary and
+[session.md](session.md) for the report internals.
 
 ### Session diagnostics
 
@@ -2153,7 +1775,7 @@ Image-bearing requests omit them; malformed non-JSON responses retain only
 their byte length and SHA-256. OpenRouter `X-Generation-Id` values appear as
 `upstream_request_id` when available. Multimodal endpoint rejections add the
 sanitized records described in
-[Multimodal tool-result compatibility diagnostics](#multimodal-tool-result-compatibility-diagnostics);
+[Multimodal tool-result compatibility diagnostics](proxy.md#multimodal-tool-result-compatibility-diagnostics);
 prompts, tool arguments, local paths, result text, and image base64 remain
 excluded.
 
@@ -2162,97 +1784,43 @@ excluded.
 Compaction fires when `max(reported input tokens, estimated full-request
 footprint)` reaches `compact_trigger_percent` (default 78) of the effective
 model context window, or on `/compact`. `compact_auto_enabled: false` disables
-only threshold-based compaction; `/compact` and provider-overflow recovery still
-work. Harness compacts toward `compact_target_percent` (default 65) after fixed
-system/tool overhead.
+only threshold-based compaction; `/compact` and provider-overflow recovery
+still work. Harness compacts toward `compact_target_percent` (default 65)
+after fixed system/tool overhead.
 
-When the active target advertises standalone Responses compaction, foreground
-automatic compaction and an unfocused `/compact` use that native endpoint. The
-provider receives the complete current provider-visible window and system
-instructions; that input must still fit its context limit. Harness stores and
-replays the provider's complete canonical item array without pruning it, then
-appends newer turns. The normal semantic transcript is retained, so switching to
-another provider/model ignores the incompatible opaque checkpoint and replays
-the provider-neutral history. Native compaction resets any stored-response
-continuation anchor. Its token usage and cost count as compaction maintenance.
+When the active target advertises standalone Responses compaction, automatic
+compaction and an unfocused `/compact` use that native endpoint; the semantic
+transcript is retained, so switching provider or model simply replays normal
+history. Otherwise — and always for focused, delegate-continuation, and idle
+compaction — Harness replaces removed history with a summary checkpoint while
+keeping the newest completed whole turns (`compact_keep_tokens` /
+`compact_keep_turns`, default 8 turns; an unset token budget adapts to the
+window as `clamp(window/5, 4000, 20000)`). If the summary fails or times out,
+a sparse deterministic checkpoint takes over once the exact removed transcript
+has been archived; if archiving fails, the full transcript is kept. Archive
+and checkpoint metadata identify model-generated versus deterministic
+summaries. The full algorithm, live retention passes, and fallback rules are
+documented in [compaction.md](compaction.md).
 
-If native compaction is unsupported or fails, Harness disables it for the
-current compatibility domain for that run and falls back to the textual path
-below. If a later request rejects a saved native checkpoint, Harness retries
-once from the preserved semantic transcript and disables that checkpoint for the
-current compatibility domain. Focused `/compact optional focus text`, delegate
-continuation/all-history compaction, and speculative idle compaction always use
-textual summaries. Live retention is skipped while native compaction is
-available so cross-provider fallback retains full semantic history.
+Use `/compact optional focus text` to emphasize one manual summary. Focus is
+trimmed, recorded in hook/archive/tree metadata, and applies only to that
+successful compaction.
 
 Interactive idle compaction is an opt-in experiment. Set
 `compact_idle_after_seconds` above zero (default `0`, disabled) to prepare a
 summary after that much REPL idle time when the estimated full context has
-reached `compact_idle_trigger_percent` (default `35`; it must be lower than the
-normal trigger). The summary runs against an immutable snapshot. Submitted
-input cancels the work and starts immediately; a late result is discarded. A
-candidate is archived and applied only if both the transcript and relevant
-compaction runtime are unchanged. Sessions with `PreCompact` or `PostCompact`
-hooks skip speculative compaction because hook side effects cannot safely run
-on a candidate. `compact_auto_enabled: false` also disables idle preparation.
+reached `compact_idle_trigger_percent` (default `35`; it must be lower than
+the normal trigger). Submitted input cancels the work and starts immediately;
+a late result is discarded. Sessions with `PreCompact` or `PostCompact` hooks
+are ineligible because hook side effects cannot safely run on a candidate.
+`compact_auto_enabled: false` also disables idle preparation. `session stats`
+reports attempt outcomes, duration, and applied context reduction.
 
-Every started idle attempt records an `idle_compaction` replay event with its
-applied/discarded/failed/no-change outcome, wall time, trigger, message counts,
-and context before/after when applied. Metered summary usage returned by the
-worker is recorded as `maintenance_usage` with purpose `idle_compaction`, even
-when the candidate is discarded. `session stats` summarizes outcomes, duration,
-and applied context reduction.
-
-The recent raw suffix is selected in whole completed turns, newest first, until
-it first reaches `compact_keep_tokens` or `compact_keep_turns` (default `8`)
-turns. When `compact_keep_tokens` is unset, its budget is window-adaptive:
-`clamp(context_window/5, 4000, 20000)`, so a 32k-window model keeps a small
-suffix while a 1M-window model still caps at 20k tokens. At least the newest
-completed turn is kept. A turn is one assistant response plus its immediate
-tool-result batch, not all model calls made after one user prompt. Low-water
-pressure can retain fewer turns than the preferred suffix.
-
-Compaction's recognized file-activity index keeps every modified path but caps
-the read list at the 200 most recent first-touches, reporting the omitted count
-as `read_files_omitted` in the checkpoint JSON.
-
-Before summarization, large old tool results and large old tool inputs are
-reduced to previews (`compact_tool_result_max_bytes`, default `4096`), old images
-are replaced with placeholders, and the raw removed messages are archived under
-`compactions/`. If the old history is too large for one summary call, harness
-summarizes chunks and then summarizes the chunk summaries. Later compactions
-explicitly update the exact prior summary with only newly aged
-history; they do not re-summarize the rendered checkpoint as conversation.
-Non-quiet TTY runs show a transient elapsed-time indicator while this summary
-work is in progress. `compact_timeout_seconds` bounds the complete model-backed
-phase across all chunks and retries; it defaults to `300` seconds.
-Older raw messages are archived before replacement. The active transcript gets
-a synthetic user checkpoint containing the active prompt and steering text
-verbatim, the progress summary, the archive reference, and a deterministic
-cumulative index of successful supported `read`, `write`, and `edit` paths from
-compacted history. The index records requested paths at tool-call success
-granularity and does not infer effects from commands, Git, MCP, or custom tools. The model records semantic state only for meaningful
-changes and unfinished mutation intent; it does not duplicate read-only
-inspected paths. The advisory TODO list persists separately; an unresolved list
-is re-injected after compaction, so summaries do not duplicate it.
-
-Use `/compact optional focus text` to emphasize one manual summary. Focus is
-trimmed, recorded in hook/archive/tree metadata, and applies only to that
-successful compaction. If low-water pressure leaves only the newest complete
-turn, Harness truncates oversized tool payloads as a last resort without
-splitting a tool-use/result pair. If compaction fails validation or
-archive writing, the full transcript is kept. A foreground summary timeout or
-provider failure uses a sparse deterministic checkpoint only after the exact
-removed transcript has been archived; caller cancellation never does. Idle
-compaction failures are discarded instead. Archive and checkpoint metadata
-identify model-generated versus deterministic summaries and record a bounded
-fallback reason. `session stats` reports summary-source and fallback-reason
-counts for root and delegate compactions.
-
-Turn summaries include approximate context footprint and, when stateful Responses
-sends a smaller request than the full active conversation, the payload estimate.
-If the active context, request payload, or tool schemas are large enough to
-likely slow response startup, harness prints one warning per prompt to stderr.
+`compact_timeout_seconds` bounds the complete model-backed phase across all
+chunks and retries (default `300`). `compact_tool_result_max_bytes` (default
+`4096`) bounds old tool-result previews. If the active context, request
+payload, or tool schemas are large enough to likely slow response startup,
+harness prints one warning per prompt to stderr.
 
 ## Interrupts
 
@@ -2411,27 +1979,21 @@ harness -config examples/harness/stop-evaluator/config.json \
   -p 'Implement the requested change and verify it.'
 ```
 
-The recipe combines the built-in `auto` agent with a `Stop` hook. Its supplied
+The recipe combines the built-in `auto` agent with a `Stop` hook whose
 `verify.sh` runs `go build ./...`, `go vet ./...`, and `go test ./...`; exit 0
-accepts the result, while exit 2 returns the bounded failure log to the model
-and requests one corrective turn. That rejection output tells the corrective
-turn to fix the candidate and invoke the verifier directly before finishing:
+accepts the result, while exit 2 returns the bounded failure log and requests
+one corrective turn. The one-turn bound is the existing Stop-hook recursion
+guard, not an unbounded self-improvement loop. The script also reads
+`can_block` from hook stdin and skips expensive work for cancellation,
+provider failure, and exhausted-budget notifications. Hard turn, token, and
+cost limits still take precedence.
 
-```sh
-./examples/harness/stop-evaluator/verify.sh
-```
-
-The one-turn bound is the existing Stop-hook recursion guard, not an unbounded
-self-improvement loop. The script also reads `can_block` from hook stdin and
-skips expensive work for cancellation, provider failure, and exhausted-budget
-notifications. Hard turn, token, and cost limits still take precedence.
-
-To add the external gate in another project, copy the recipe, update the hook command
-path, and replace `verify.sh` with that project's objective checks. Keep the
-contract deterministic: print actionable failure evidence and exit 2 to reject
-a candidate, or stay quiet and exit 0 to accept it. The recipe never rewrites
-its own verifier, creates commits, or changes git history; candidate promotion
-remains an explicit user action.
+To add the external gate in another project: copy the recipe, update the hook
+command path, and replace `verify.sh` with that project's objective checks.
+Keep the contract deterministic — print actionable failure evidence and exit 2
+to reject a candidate, or stay quiet and exit 0 to accept. The recipe never
+rewrites its own verifier, creates commits, or changes git history; candidate
+promotion remains an explicit user action.
 
 ### Opt-in candidate lineage
 
@@ -2469,56 +2031,19 @@ harness -config /path/to/evaluator-config.json \
 Primary checkouts, branch-attached or detached linked worktrees, repository
 subdirectories, implicit session paths, and resume-clones are supported. The
 repository must already have a commit, and the session directory must remain
-outside the worktree so the archive cannot capture itself. Commits and
-checkouts during the session do not invalidate the chain: each accepted entry
-is a complete Git-visible tree delta from the preceding accepted entry.
-`/clear`, `/fork`, and `/clone` rotate to a fresh lineage archive with the new
-session; a startup `-resume old -session new` clone does the same. Reopening the
-same session continues its chain and requires the same physical worktree.
-Root evaluator results drive the archive; delegate results never do.
-
-An advance requires `accepted:true`, a finite `score`, `score_direction` of
-`maximize` or `minimize`, and non-empty `candidate` and `evidence_ref` fields.
-The first eligible result establishes the evaluator handler/direction lane;
-only a strict score improvement in that lane advances it. Rejected, tied,
-regressed, unordered, or incomplete results stay visible in normal evaluator
-and trajectory records but are not promoted. `evidence_ref` must name a
-repository-root-relative regular file inside the worktree after symlink
-resolution.
-
-The session contains:
-
-```text
-lineage/state.json
-lineage/base.patch
-lineage/patches/0001.patch
-lineage/evidence/0001.evidence
-lineage/restore-backups/0001.patch
-...
-```
-
-`base.patch` records the initially prepared Git-visible workspace against the
-initial base commit. Each numbered binary patch advances from the preceding
-accepted tree, and its numbered evidence file is an immutable copy. Patches are
-capped at 16 MiB, evidence files at 1 MiB, and the chain at 128 entries. The
-manifest records hashes, byte counts, scores, candidate IDs, and tree IDs; a
-resume verifies and reconstructs the chain before contacting a model.
+outside the worktree so the archive cannot capture itself.
 
 `/lineage` lists accepted checkpoints without contacting the model.
-`/lineage export <entry|best> <new-directory>` reconstructs a checkpoint into a
-new directory outside both the source worktree and session; it refuses to
-overwrite any existing path. Ignored files are not part of the Git-visible
-snapshot. `/lineage restore <entry|best>` changes worktree files only. It never
-changes the real index, commits, refs, or history, refuses a dirty worktree
-unless `--force` is explicit, and writes a bounded reverse patch under
-`lineage/restore-backups/` before every non-no-op restore. Restore backups share
-the 16 MiB patch bound and are capped at 128 per session. Immediately after a
-restore, applying the reported patch from the repository root recovers the
-pre-restore Git-visible state, for example
-`git apply /path/to/session/lineage/restore-backups/0001.patch`.
+`/lineage export <entry|best> <new-directory>` reconstructs a checkpoint into
+a new directory outside both the source worktree and session; it refuses to
+overwrite any existing path. `/lineage restore <entry|best>` changes worktree
+files only — never the real index, commits, refs, or history — refuses a
+dirty worktree unless `--force` is explicit, and writes a bounded reverse
+patch under `lineage/restore-backups/` first, so applying that patch from the
+repository root recovers the pre-restore state. Harness never automatically
+checks out, restores, commits, or promotes an entry; promotion remains an
+explicit user action.
 
-Candidate capture and promotion remain separate: Harness never automatically
-checks out, restores, commits, or promotes an entry. Interactive archive errors
-are shown at the prompt without ending the conversation; one-shot archive or
-recorder errors still make the process exit nonzero instead of silently
-claiming preservation.
+The advance-eligibility rules, archive format and bounds, chain verification,
+and rotation semantics are documented in
+[trajectory.md](trajectory.md#explicit-candidate-lineage-internallineage).

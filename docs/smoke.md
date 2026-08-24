@@ -44,9 +44,8 @@ go test -race -tags=integration ./cmd/harness/ -run TestSmoke
 ```
 
 `make test-integration` (`go test -tags=integration ./cmd/harness`) runs the
-entire integration suite. The `-run TestSmoke` command above is a scoped subset
-that selects only the harness smoke legs in this table; the LSP legs below are
-part of the same `make test-integration` run.
+entire integration suite, including the LSP legs below; the `-run TestSmoke`
+command above selects only the harness smoke legs in this table.
 
 | Leg | Test | What it asserts |
 |---|---|---|
@@ -160,9 +159,8 @@ proxy log. If the proxy is **not** running, harness emits one
 `mcp: cannot connect to proxy at http://127.0.0.1:8766: …; MCP tools unavailable`
 warning and continues toolless.
 
-To smoke a non-default proxy address, add
-`"proxy": {"listen": "127.0.0.1:8420"}` to the proxy config (or pass
-`serve -listen 127.0.0.1:8420`), then:
+To smoke a non-default proxy address, set `"proxy": {"listen": "127.0.0.1:8420"}`
+in the proxy config (or pass `serve -listen 127.0.0.1:8420`), then:
 
 ```sh
 ./harness-mcp-proxy serve -listen 127.0.0.1:8420 &
@@ -173,11 +171,10 @@ HARNESS_MCP_ENABLE=true HARNESS_MCP_PROXY=http://127.0.0.1:8420 \
   ./harness -model anthropic:claude-opus-4-8 -p "use an MCP tool to <task>"
 ```
 
-Expect: the same `mcp: connected` line for the one-shot command; one-shot uses
-the tool list discovered before the model request. In an interactive REPL,
-remote HTTP MCP discovery runs in the background and can print
-`[mcp: tool list updated; N tools]` when a successful registration is applied at
-the next prompt boundary.
+Expect: the same `mcp: connected` line. One-shot runs use the tool list
+discovered before the model request; in an interactive REPL, background
+discovery can print `[mcp: tool list updated; N tools]` when applied at the
+next prompt boundary.
 
 ### How the mock works
 
@@ -199,7 +196,7 @@ should receive only the proxy URL, provider id, and model id.
 
 The reproducible paired live-model protocol for deterministic tool-flow changes
 is recorded separately in [flowbench.md](flowbench.md), including its high
-run limits, acceptance gates, provider-cost treatment, and latest results.
+run limits, acceptance gates, and provider-cost treatment.
 
 ```sh
 go build -o harness ./cmd/harness
@@ -242,16 +239,16 @@ find "$SESSION/children" -maxdepth 2 -type f -print 2>/dev/null
 for f in "$SESSION"/children/*/meta.json; do test -e "$f" && cat "$f"; done
 ```
 
-Record the selected agent, foreground/background mode, child count, task prompt,
-report quality, whether the parent synthesized and independently verified the
-report, and whether the final parent usage/session summary includes child usage
-(the parent total must exceed the sum of parent-only model checkpoints by the child
-usage recorded in child metadata). For child runs, inspect
-`children/<id>/state.json` and `raw.ndjson` to
-confirm the fresh child transcript and tool events. The narrow and coupled rows
-must not be scored as failures merely for making zero child calls—that is their
-intended steering behavior. Compare repeated Anthropic and OpenAI results before
-changing heuristics.
+Record for each run: the selected agent, foreground/background mode, child
+count, task prompt, and report quality; whether the parent synthesized and
+independently verified the report; and whether the final parent usage/session
+summary includes child usage (the parent total must exceed the sum of
+parent-only model checkpoints by the child usage recorded in child metadata).
+For child runs, inspect `children/<id>/state.json` and `raw.ndjson` to confirm
+the fresh child transcript and tool events. The narrow and coupled rows must
+not be scored as failures merely for making zero child calls — that is their
+intended steering behavior. Compare repeated Anthropic and OpenAI results
+before changing heuristics.
 
 ### Anthropic Messages API
 

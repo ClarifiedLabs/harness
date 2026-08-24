@@ -249,6 +249,22 @@ harness-mcp-proxy tools -proxy http://127.0.0.1:8420
 `harness-mcp-proxy --version` and `harness-mcp-proxy version` both print the
 release version plus the MCP protocol version.
 
+### Request logging and tracing
+
+The MCP proxy logs one structured record per routed `tools/call` with
+requester/clientInfo, downstream MCP server name, bare and qualified tool
+name, request/response bytes, duration, `is_error`, and any protocol error.
+Unknown tools are warning records. When a valid W3C `traceparent` is present,
+the log appends `trace_id`, `span_id`, `parent_span_id`, and `trace_sampled`
+(plus `tracestate` when present). The proxy carries inbound trace metadata in
+`context.Context`; downstream HTTP MCP servers receive a child `traceparent`
+with the same trace id, while stdio downstream servers have no header channel
+and are correlated only by proxy logs.
+
+On SIGINT/SIGTERM the daemon shuts down gracefully: HTTP sessions close with
+the server, and each stdio child is reaped (close stdin → SIGTERM → SIGKILL on
+the process group, bounded by per-stage timeouts).
+
 ## Proxy API-key authentication
 
 API-key authentication is disabled by default and becomes required as soon as

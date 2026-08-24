@@ -109,7 +109,7 @@ internal/delegate        configured child-agent tool; starts child agents withou
 internal/background      process-local background job manager + tools
 internal/session         append-only conversation tree, mutable state, replay, archives, artifacts, and derived human-only evidence catalog
 internal/sessionrec      one canonical raw.ndjson recorder shared by root and delegate sinks
-internal/trajectory      bounded host-owned evaluator/mutation projection and opt-in request capsule
+internal/trajectory      bounded host-owned evaluator/mutation projection and stagnation streak tracking
 internal/lineage         explicit single-line accepted-candidate archive plus human-only export/restore controls
 internal/config          typed harness definitions, strict source resolution, provenance, and redacted projections
 internal/configmeta      package-neutral parameter catalog, source vocabulary, provenance snapshots, and deterministic reference renderers
@@ -156,98 +156,33 @@ The internal model is Anthropic-shaped — a content-block list — because it i
 superset of OpenAI's flat fields: collapsing blocks into OpenAI's shape is mechanical,
 while the reverse direction would lose structure.
 
-```go
-type Role string
+The full types live in `internal/llm/message.go` (`Role`, `Message`,
+`MessageOrigin`, `ParallelToolBatch`, `CompactionMetadata`, `BlockKind`,
+`ContentBlock`) and are not mirrored here. The load-bearing rules:
 
-const (
-    RoleUser      Role = "user"
-    RoleAssistant Role = "assistant"
-    // No tool role: tool results are content blocks on a user message.
-    // No system role: the system prompt is a Request field, not a message.
-)
+- `Role` is only `user`/`assistant`: there is no tool role (tool results are
+  content blocks on a user message) and no system role (the system prompt is a
+  `Request` field, never a message).
+- `ContentBlock` is a tagged union — exactly the fields documented for its
+  `Kind` are set:
 
-type ParallelToolBatch struct {
-    ToolUseIDs []string `json:"tool_use_ids"` // model emission order
-}
+| `Kind` | Fields | Meaning |
+|---|---|---|
+| `text` | `Text` | ordinary text |
+| `image` | `Image*` | user-provided visual input; `ImageData` is base64 without a `data:` prefix |
+| `tool_use` | `ToolUseID`, `ToolName`, `ToolInput` | assistant calls a tool; `ToolInput` is the complete JSON object |
+| `tool_result` | `ResultForID`, `ResultText`, `ResultError`, `ResultUseless`, `ResultContent` | answers a tool call; `ResultContent` carries shallow image children only; `ResultUseless` is a local compaction hint |
+| `thinking` | `Thinking`, `ThinkingSignature` | Anthropic extended thinking; the signature is echoed back verbatim |
+| `redacted_thinking` | `RedactedData` | opaque Anthropic payload, echoed verbatim, never rendered |
+| `reasoning` | `ReasoningID`, `ReasoningEncrypted` | OpenAI Responses encrypted reasoning item, replayed verbatim in stateless mode |
+| `interaction_thought` | `InteractionThoughtSummary`, `InteractionThoughtSignature` | Gemini Interactions thought; distinct from Anthropic thinking so signed state cannot cross dialects |
+| `interaction_step` | `InteractionStep` | provider-managed Interactions step for stateless replay; never rendered or dispatched |
+| `provider_compaction` | `ProviderCompaction` | provider-native canonical input items; valid only on a hidden compaction-checkpoint message |
 
-type CompactionMetadata struct {
-    Summary        string   `json:"summary"`
-    SummarySource  string   `json:"summary_source,omitempty"` // model | deterministic
-    FallbackReason string   `json:"fallback_reason,omitempty"` // timeout | provider_error
-    Focus          string   `json:"focus,omitempty"`
-    ReadFiles      []string `json:"read_files,omitempty"`
-    ModifiedFiles  []string `json:"modified_files,omitempty"`
-}
-
-type Message struct {
-    Role                Role                `json:"role"`
-    Time                time.Time           `json:"time,omitempty"`
-    Phase               string              `json:"phase,omitempty"` // assistant only: commentary | final_answer
-    Origin              MessageOrigin       `json:"origin,omitempty"` // prompt | steer | internal | compaction_checkpoint | provider_compaction
-    Content             []ContentBlock      `json:"content"`
-    ParallelToolBatches []ParallelToolBatch `json:"parallel_tool_batches,omitempty"`
-    Compaction          *CompactionMetadata `json:"compaction,omitempty"`
-}
-
-type BlockKind string
-
-const (
-    BlockText       BlockKind = "text"
-    BlockImage      BlockKind = "image"
-    BlockToolUse    BlockKind = "tool_use"
-    BlockToolResult BlockKind = "tool_result"
-    BlockThinking         BlockKind = "thinking"
-    BlockRedactedThinking BlockKind = "redacted_thinking"
-    BlockReasoning        BlockKind = "reasoning"
-    BlockProviderCompaction BlockKind = "provider_compaction"
-)
-
-// ContentBlock is a tagged union; exactly the fields for Kind are set.
-type ContentBlock struct {
-    Kind BlockKind `json:"kind"`
-
-    // Request-replay provenance for provider-owned opaque reasoning
-    ReasoningReplayDomain string `json:"reasoning_replay_domain,omitempty"`
-
-    // BlockText
-    Text string `json:"text,omitempty"`
-
-    // BlockImage (user-provided visual input)
-    ImageMediaType string `json:"image_media_type,omitempty"`
-    ImageData      string `json:"image_data,omitempty"` // base64, without data: prefix
-    ImageDetail    string `json:"image_detail,omitempty"`
-    ImageName         string `json:"image_name,omitempty"`
-    ImageWidth        int    `json:"image_width,omitempty"`
-    ImageHeight       int    `json:"image_height,omitempty"`
-    ImageBytes        int    `json:"image_bytes,omitempty"`
-    ImageEncodedBytes int    `json:"image_encoded_bytes,omitempty"`
-
-    // BlockToolUse (assistant calls a tool)
-    ToolUseID string          `json:"tool_use_id,omitempty"` // provider-issued call id
-    ToolName  string          `json:"tool_name,omitempty"`
-    ToolInput json.RawMessage `json:"tool_input,omitempty"`  // complete JSON object
-
-    // BlockToolResult (we answer a tool call)
-    ResultForID string `json:"result_for_id,omitempty"` // matches a ToolUseID
-    ResultText    string         `json:"result_text,omitempty"`
-    ResultError   bool           `json:"result_error,omitempty"`
-    ResultUseless bool           `json:"result_useless,omitempty"` // local compaction hint
-    ResultContent []ContentBlock `json:"result_content,omitempty"` // shallow image children only
-
-    // Anthropic thinking and redacted-thinking replay
-    Thinking          string `json:"thinking,omitempty"`
-    ThinkingSignature string `json:"thinking_signature,omitempty"`
-    RedactedData      string `json:"redacted_data,omitempty"`
-
-    // Responses encrypted reasoning replay
-    ReasoningID        string `json:"reasoning_id,omitempty"`
-    ReasoningEncrypted string `json:"reasoning_encrypted,omitempty"`
-
-    // Provider-native canonical input items; valid only on a hidden
-    // provider_compaction checkpoint message
-    ProviderCompaction []json.RawMessage `json:"provider_compaction,omitempty"`
-}
-```
+Replay-provenance rules for the opaque reasoning kinds
+(`ReasoningReplayDomain`, same-domain-only replay, transcript never rewritten)
+and the `Origin`/`Compaction`/`ParallelToolBatches` metadata rules are spelled
+out in the design notes below.
 
 Design notes:
 
@@ -405,77 +340,29 @@ type Provider interface {
     // or ctx cancellation aborts the underlying HTTP request.
     Stream(ctx context.Context, req Request) iter.Seq2[StreamEvent, error]
 }
-
-type InputTokenCounter interface {
-    CountInputTokens(ctx context.Context, req Request) (InputTokenCount, error)
-}
-
-type ContextCompactor interface {
-    CompactContext(ctx context.Context, req Request) (CompactedContext, error)
-}
-
-type CompactedContext struct {
-    Items []json.RawMessage // complete canonical input array, kept in order
-    Usage Usage
-}
-
-type Request struct {
-    Model       string
-    Purpose     RequestPurpose // turn|compaction|prewarm|branch_summary
-    System      string
-    Messages    []Message
-    Tools       []ToolSchema
-    ServerTools []ServerTool
-    MaxTokens   int      // 0 = automatic policy (see §5.4)
-    Temperature *float64 // nil = omit
-    Reasoning   ReasoningConfig
-    StopSeqs    []string
-    ServiceTier string // model-advertised request tier; empty = provider default
-    Speed       string // resolved provider speed control (Anthropic fast mode)
-    Betas       []string // bounded provider beta identifiers resolved by the proxy
-    EstimatedInputTokens int // caller estimate; 0 asks the dialect to estimate
-    ContextWindowHint    int // effective override or provider-learned window
-    StoreResponse      bool
-    PreviousResponseID string
-    RequestContext     []string // request-only hook/todo/goal/background context
-    ProxySessionID     string   // harness-local sticky-routing/transport-affinity key
-    CacheAffinityID    string   // harness-local conversation key for stable prompt-cache routing
-    PromptCacheKey     string   // provider-facing cache-affinity key; proxy derives from CacheAffinityID
-    CachePolicy        CachePolicy
-}
-
-type CacheTTL string
-
-const (
-    CacheTTLDefault  CacheTTL = "5m"
-    CacheTTLExtended CacheTTL = "1h"
-)
-
-type CachePolicy struct {
-    StaticTTL           CacheTTL // stable system/tool breakpoint TTL
-    StableMessagePrefix int      // leading Request.Messages safe from future retention rewrites
-}
-
-type ResponseState struct {
-    PreviousResponseID string
-    AnchorMessages     int
-    AnchorDigest       string // lowercase SHA-256 fingerprint of the represented prefix
-}
-
-type ReasoningConfig struct {
-    Profile      string // portable proxy profile; empty/default = provider default
-    Effort       string // empty = provider default
-    Enabled      *bool  // nil = provider default
-    BudgetTokens *int   // nil = provider default
-    Summary      string // Responses API summary: auto, concise, detailed; empty = omit
-}
-
-type ToolSchema struct {
-    Name        string
-    Description string
-    Parameters  json.RawMessage // JSON Schema object, owned by the tool layer
-}
 ```
+
+The remaining contract types live in `internal/llm/provider.go` and are not
+mirrored here: `InputTokenCounter` and `ContextCompactor`/`CompactedContext`
+are optional provider extensions (input-token counting and provider-native
+context compaction); `Request` is one model call's worth of provider-neutral
+input; `ReasoningConfig` carries the portable reasoning profile/effort/budget;
+`ToolSchema` is the model-facing tool declaration whose `Parameters` schema is
+owned by the tool layer. Non-obvious `Request` field semantics:
+
+| Field(s) | Rule |
+|---|---|
+| `Purpose` | `turn`\|`compaction`\|`prewarm`\|`branch_summary`; harness/proxy metadata, never forwarded upstream |
+| `MaxTokens` | `0` = automatic policy (§5.4) |
+| `ServiceTier`/`Speed`/`Betas` | resolved by the model proxy from the selected catalog target before dialect dispatch; dialects ignore beta identifiers they do not own |
+| `EstimatedInputTokens` | caller estimate of model-visible input tokens (keeps max output within the window); `0` asks the dialect to estimate |
+| `ContextWindowHint` | caller's effective window, including overrides or runtime-learned values; `0` = provider configuration |
+| `RequestContext` | request-only hook/todo/goal/background context; per-dialect placement in the prose below |
+| `ProxySessionID` | harness-local sticky-routing and transport-affinity key; never forwarded upstream |
+| `CacheAffinityID` → `PromptCacheKey` | harness-local conversation key that survives continuation resets; the proxy derives the provider-facing cache key from it |
+| `CachePolicy` | caller-owned semantic cache boundaries: `StaticTTL` (`5m`\|`1h`) for the stable system/tool breakpoint, `StableMessagePrefix` leading messages safe from future retention rewrites; dialects choose provider-specific breakpoint placement |
+| `StoreResponse`/`PreviousResponseID` | Responses stateful continuation controls |
+| `ResponseState` | resumable provider continuation state: previous response/interaction ID, anchor message count, and the lowercase SHA-256 digest of the represented prefix |
 
 `RequestContext` is request-only instruction context: Chat Completions appends it
 as a trailing system message after the transcript, Anthropic appends it as a
@@ -498,52 +385,26 @@ anchor.
 is a plain `for ev, err := range stream` with natural early-`break` cancellation, and the
 producer keeps stream state on its own stack — no goroutine lifecycle to leak.
 
-```go
-type EventKind int
+The stream-event types live in `internal/llm/provider.go` (`EventKind`,
+`StreamEvent`, `StopReason`, `ModelRequestState`). `StreamEvent` is a flat
+carrier for the tagged event kinds; `Index` disambiguates parallel tool calls
+within one turn. One line per event kind:
 
-const (
-    EventTextDelta     EventKind = iota // incremental assistant text
-    EventToolCallStart                  // tool_use began: ID + Name known
-    EventToolCallDelta                  // partial JSON args (rendering only)
-    EventToolCallDone                   // one call fully assembled
-    EventUsage                          // usage snapshot (may arrive >1x)
-    EventDone                           // turn end: StopReason + final Usage
-    EventReasoningSummary               // display-ready provider-visible reasoning summary text
-    EventAssistantPhase                 // assistant message phase metadata
-)
+| `EventKind` | Carries |
+|---|---|
+| `EventTextDelta` | incremental assistant text |
+| `EventToolCallStart` | tool_use began: ID and name known |
+| `EventToolCallDelta` | partial JSON args (rendering only) |
+| `EventToolCallDone` | one call fully assembled; malformed streamed args are replaced with a diagnostic object plus `InvalidInputError` |
+| `EventUsage` | usage snapshot (may arrive more than once) |
+| `EventDone` | turn end: `StopReason`, final usage, Responses stored-response anchor |
+| `EventReasoningSummary` | display-ready provider-visible reasoning summary text |
+| `EventAssistantPhase` | assistant message phase metadata |
+| `EventInteractionStep` | hidden complete Gemini server-managed step for stateless replay |
+| `EventModelRequest` | diagnostics-only request lifecycle metadata; never model content |
 
-type StreamEvent struct {
-    Kind EventKind
-
-    Text  string // EventTextDelta / EventReasoningSummary
-    Phase string // EventAssistantPhase
-    Signature    string // Anthropic signed-thinking replay
-    RedactedData string // Anthropic opaque redacted thinking
-    ReasoningID        string // Responses reasoning item id
-    ReasoningEncrypted string // Responses encrypted reasoning replay
-
-    // EventToolCall*; Index disambiguates parallel calls within one turn.
-    Index     int
-    ToolID    string          // Start/Done
-    ToolName  string          // Start/Done
-    ArgsDelta string          // Delta
-    ToolInput json.RawMessage // Done only: complete, valid JSON
-    InvalidInputError string  // Done only: malformed streamed args were replaced with a diagnostic object
-
-    Usage      *Usage     // EventUsage / EventDone
-    StopReason StopReason // EventDone
-    ResponseID string     // EventDone, Responses API stored-response anchor
-}
-
-type StopReason string
-
-const (
-    StopEndTurn   StopReason = "end_turn"
-    StopToolUse   StopReason = "tool_use"
-    StopMaxTokens StopReason = "max_tokens"
-    StopStop      StopReason = "stop" // stop sequence matched
-)
-```
+`StopReason` has four constants: `end_turn`, `tool_use`, `max_tokens`, `stop`
+(stop sequence matched).
 
 StopReason normalization: OpenAI `stop|length|tool_calls` and Anthropic
 `end_turn|max_tokens|model_context_window_exceeded|tool_use|stop_sequence` map
@@ -1030,35 +891,14 @@ uses the output rate for reasoning when no explicit reasoning price exists and
 derives the documented 1-hour cache-write rate as `2 × input`; explicit base,
 context-tier, service-tier, and speed-specific prices remain authoritative.
 
-`internal/llm/registry.go` holds a small registry. The structs carry JSON tags so they
-double as the proxy catalog's on-disk schema (`Price`, `ModelInfo`, `ProviderConfig`,
-`ModelEntry`), and `Cost`/`ContextWindow`/`Models` are methods on `*Registry`:
-
-```go
-type Price struct {
-    Input, Output, CacheRead, CacheWrite, CacheWrite1h float64 // USD per 1M tokens
-    Reasoning, InputAudio, OutputAudio   float64
-    Tiers []PriceTier // context-length rate steps with the same price dimensions
-}
-type PriceTier struct {
-    Threshold int
-    Input, Output, CacheRead, CacheWrite, CacheWrite1h float64
-    Reasoning, InputAudio, OutputAudio   float64
-}
-type ModelInfo struct {
-    ContextWindow   int
-    OutputLimit     int
-    InputModalities []string
-    ServerTools     []string
-    ServiceTiers   []ServiceTier
-    Price           Price
-    Shape           string
-    Reasoning       *ReasoningInfo
-}
-func (r *Registry) Cost(model string, u Usage) (usd float64, known bool)
-func (r *Registry) ContextWindow(model string) int // registry hit, else default 256_000
-func (r *Registry) Models() []string               // sorted configured model ids
-```
+`internal/llm/registry.go` holds a small registry. Its structs (`Price`,
+`PriceTier`, `ModelInfo`, `ProviderConfig`, `ModelEntry`) carry JSON tags so
+they double as the proxy catalog's on-disk schema: `Price` is USD per 1M
+tokens across input/output/cache/reasoning/audio dimensions, and `PriceTier`
+adds context-length rate steps on the same dimensions. `Cost` prices a usage
+record and reports whether the cost is known, `ContextWindow` falls back to a
+default 256,000 on a registry miss, and `Models` returns the sorted
+configured model ids.
 
 Baseline model metadata originates from the public **models.dev** catalog. The
 models.dev and public OpenAI Codex adapters, normalized baseline types, and
@@ -1626,17 +1466,13 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
                 capture usage + stop reason
     append assistant message (text blocks + tool_use blocks, emission order)
     if stopReason == tool_use {
-        currentStage := 1
-        for each call in emission order:
-            preserve raw ToolInput for the assistant transcript
-            if _stage is absent: effectiveStage = currentStage
-            else: require a positive, non-decreasing integer; currentStage = _stage
-            remove _stage from the execution copy
-        if any stage value is invalid or decreases:
-            return one invalid-args result per call without running hooks or tools
-        plan intra-turn call sanity guards: suppress exact-duplicate calls within
-            each stage beyond the first, and all calls past the per-turn dispatch
-            limit // suppressed calls return guard errors without running
+        resolve effective stages: _stage absent = inherit (starting at 1);
+            otherwise require a positive, non-decreasing integer in emission order
+        if any stage is invalid: return one invalid-args result per call
+            without running hooks or tools
+        suppress exact-duplicate calls within each stage beyond the first and
+            all calls past the per-turn dispatch limit // guard errors, no run;
+            // suppressed calls never become dependency targets or writers
         for each effective stage in ascending order:
             wait until every earlier stage has returned a result
             partition same-stage calls around SequentialTool inputs, matching tool
@@ -1648,10 +1484,6 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
                     per-agent concurrent-execution limit // Dispatch always returns a result
                 emit summaries/results in model order
         append ONE user message carrying all tool_result blocks, in call order
-        // Ordinary registered and unknown calls in the same stage are parallel-eligible.
-        // Pre/PostToolUse hooks are per-target barriers. Hidden effects remain
-        // best-effort; use stages, shell.steps, background leases, or separate turns
-        // when semantic ordering cannot be represented by mutation paths.
     }
     emit turn_complete(prompt, turn)
     if stopReason == max_tokens && no output continuation has been requested &&
@@ -1879,7 +1711,7 @@ prompt.
 fed back to the model so it can self-correct. Internal result text deliberately
 omits an `error:` marker because the error bit already carries that information;
 the terminal renderer adds one lowercase `error: ` marker, while provider adapters
-apply their wire-specific representation (§4.1).
+apply their wire-specific representation (§4 wire mapping).
 
 | Failure | Internal result text |
 |---|---|
@@ -2054,65 +1886,28 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 
 ## 9. Tool set (`internal/tools`)
 
-```go
-type Tool interface {
-    Name() string
-    Description() string     // model-facing, one line
-    Schema() json.RawMessage // JSON Schema for the input object
-    ReadOnly(input json.RawMessage) bool
-    Run(ctx context.Context, input json.RawMessage) (string, error)
-}
+The tool contract lives in `internal/tools/tool.go`. `Tool` is the required
+core — `Name`, one-line model-facing `Description`, hand-written JSON-Schema
+`Schema`, `ReadOnly(input)` policy classification, and `Run` — and `Registry`
+is the ordered map with `Register`, `Specs`, `Dispatch`, and
+`DispatchWithCompletion`. Optional satellite interfaces, detected by type
+assertion at dispatch:
 
-type RichTool interface {
-    RunRich(ctx context.Context, input json.RawMessage) (RichResult, error)
-}
-
-type RichResult struct {
-    Text    string
-    Content []llm.ContentBlock
-    Usage   llm.Usage
-    Useless bool
-}
-
-type RequiredInputModality interface {
-    RequiredInputModality() string
-}
-
-type SequentialTool interface {
-    RequiresSequential(input json.RawMessage) bool
-}
-
-type FileMutationReporter interface {
-    MutatedPaths(input json.RawMessage) ([]string, error)
-}
-
-type MeteredTool interface {
-    RunMetered(ctx context.Context, input json.RawMessage) (MeteredResult, error)
-}
-
-type MeteredResult struct {
-    Text  string
-    Usage llm.Usage
-}
-
-type ResultTool interface {
-    RunResult(ctx context.Context, input json.RawMessage) (RunResult, error)
-}
-
-type RunResult struct {
-    Text         string
-    OriginalText string
-    Usage        llm.Usage
-    Useless      bool
-    Metrics      map[string]int // diagnostics only; persisted with the result event
-}
-
-type Registry struct{ /* ordered map */ }
-func (r *Registry) Register(t Tool)
-func (r *Registry) Specs() []llm.ToolSchema
-func (r *Registry) Dispatch(ctx context.Context, call llm.ToolCall) llm.ToolResult
-func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall) (llm.ToolResult, <-chan struct{})
-```
+| Interface | Implement when | Effect |
+|---|---|---|
+| `RichTool` | the tool can return supplementary image content | dispatch prefers `RunRich` over every other execution path |
+| `ResultTool` | the tool proactively summarizes successful output | `RunResult` separates concise model text from the archivable original; preferred over `MeteredTool` and `Run` |
+| `MeteredTool` | `Run` consumes model tokens internally (e.g. delegate) | dispatch preserves `Usage` for prompt/session totals |
+| `RequiredInputModality` | the tool proactively requires a non-text input modality | capability declaration kept separate from `RichTool` for dynamically rich MCP tools |
+| `ProgressStarter` | `Run` may block behind a child run | surfaces live activity to the parent wait ticker |
+| `SequentialTool` | specific inputs are ordering-sensitive | opts those inputs out of default-parallel dispatch |
+| `FileMutationReporter` | mutated paths are knowable from the input | the agent orders overlapping mutations; optional before/after diffs |
+| `FileReadReporter` | read paths are knowable from the input | call-level read telemetry |
+| `InputTrimmer` | inputs embed whole file bodies (`write`, `edit`) | retention stores a compact receipt instead of the bulky input |
+| `BackgroundJobStarter` | the tool can hand work to the background job manager | detached execution with manager-owned ids, status, and notices |
+| `BackgroundJobDiagnosticIdentitySetter` | a background starter retains launch attribution | parent/delegate sinks record execution identity without importing the manager |
+| `SchemaDescriptionPreserver` | a first-party tool carries budgeted schema guidance | `Registry.Specs` keeps its descriptions instead of stripping them |
+| `SelfTimeouter` | the tool enforces its own per-call deadline | the dispatch ceiling only raises to that deadline, never lowers it |
 
 - **Top-level model-facing descriptions are a single 80-byte functional minimum**
   (suffix-inclusive via `Registry.Specs`). First-party tools also opt into concise
@@ -2190,39 +1985,31 @@ func (r *Registry) DispatchWithCompletion(ctx context.Context, call llm.ToolCall
 | `limit` | int | max lines, default 500 or `read_default_limit` |
 | `include_sha256` | bool | prepend the SHA-256 of the complete regular file; default false |
 
-If a supplied path is a directory, `read` returns a directories-first,
-non-recursive listing capped at 200 entries. This repairs an accidental
-file/directory mismatch in one tool call without requiring a second dispatch.
-
+- A directory path returns a directories-first, non-recursive listing capped at
+  200 entries, repairing an accidental file/directory mismatch in one call.
 - **Parameter aliases (accepted silently; intentionally *not* in the schema):**
   `path` also accepts `file`, `file_path`, `filePath`, `filename`, `filepath`,
-  `absolute_path`, and `target_file`. These match the names other harnesses give
-  the parameter (Claude Code and Gemini CLI use `file_path`, opencode `filePath`,
-  Cursor `target_file`), so a model that emits the other spelling still succeeds
-  on the first call instead of wasting a round trip. They are left out of the
-  advertised schema to keep the model-facing surface minimal and avoid nudging
-  models off `path`; the canonical `path` wins when both names are set.
-- Output is line-numbered (`cat -n` style: right-aligned number, tab, line). Line
-  numbers make `edit` targeting and grep cross-referencing far more reliable.
+  `absolute_path`, and `target_file` — the spellings other harnesses use — so a
+  model that emits another spelling succeeds on the first call. The canonical
+  `path` wins when both names are set.
+- Output is line-numbered (`cat -n` style: right-aligned number, tab, line) so
+  `edit` targeting and grep cross-referencing stay reliable. Files are streamed
+  line-by-line and stop after the requested/default window, so memory is bounded
+  by the window and longest line regardless of file size.
 - **Not-found suggestions:** an ENOENT failure appends
-  `similar existing paths: <up to 3>` from a bounded
-  same-directory name-similarity scan, plus a one-level parent scan when the
-  directory itself is missing (a mistyped directory component); no walking
-  (`similarExistingPaths`).
-- **Truncation notice:** when a read is cut off at its line window the result ends
-  with `[file truncated at line N; continue with offset=N+1]`, so the model knows
-  to page rather than assuming it saw the whole file.
-- Binary sniff: first 8 KB containing NUL → `error: <path> appears to be binary`.
-- Files are streamed line-by-line and stop after the requested/default line
-  window, so memory is bounded by the window and longest line regardless of file
-  size.
+  `similar existing paths: <up to 3>` from a bounded same-directory
+  name-similarity scan, plus a one-level parent scan when the directory itself
+  is missing; the wider fallback is operational detail covered in tools.md.
+- **Truncation notice:** a read cut off at its line window ends with
+  `[file truncated at line N; continue with offset=N+1]`, so the model knows to
+  page rather than assuming it saw the whole file. Binary sniff: first 8 KB
+  containing NUL → `error: <path> appears to be binary`. Offset past EOF →
+  error stating the file's line count. Empty file → `(empty file)`.
 - `include_sha256` makes one additional cancellable full-file pass and prepends
   `[sha256:<lowercase hex>]`. It is intentionally opt-in so a bounded read does
   not normally hash a multi-gigabyte file. Directory listings remain unhashed.
-- Offset past EOF → error stating the file's line count. Empty file → `(empty
-  file)`. Directory reads ignore file windows and return the bounded listing.
 
-### 9.1a `view_image`
+### 9.2 `view_image`
 
 > Attach a local PNG, JPEG, WebP, or GIF image to inspect.
 
@@ -2284,35 +2071,32 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   returns the typed `stale_file` error and writes nothing. For repeated path
   entries, every supplied digest applies to the same original on-disk base while
   the text replacements themselves continue to apply to the prior planned bytes.
-- A repeated `files[].path` is accepted and applied in order: the later entry
-  matches against the earlier entry's planned result, and all planning still
-  precedes any write, so a stale or redundant `oldText` fails loudly with the
-  ordinary not-found error and leaves every file untouched. Nothing is
-  silently double-applied.
-- **Model-visible retention receipt.** Once a later successful `edit` to the same
-  paths exists, the live transcript may replace this call's input with
-  `{"files":[{"path":P,"edits":N,"old_text_bytes":A,"new_text_bytes":B}],"_superseded":
-  "edit content omitted; later successful edit to this path exists; read the file
-  if needed"}`. The model should read the file when it needs the current bytes.
-- With `replaceAll`, every non-overlapping occurrence of `oldText` is replaced and
-  each counts toward the reported replacement count; the uniqueness check is skipped
-  but zero matches is still a not-found error. The overlap guard is relaxed only
-  between spans of the **same** `replaceAll` block — a `replaceAll` span overlapping
-  a different edit still raises the overlap error.
-- 0 occurrences → error naming the missing `oldText`: it quotes the first
-  non-empty `oldText` line, appends a nearest-region hint (up to 3 numbered
-  lines centered on the most similar content line, with the similarity score),
-  and tells the model to re-read the file and re-issue with exact `oldText` (or
-  use `write` when the intent is to create or replace the whole file).
-- N>1 occurrences → error asking for more context to make `oldText` unique.
+- A repeated `files[].path` is accepted and applied in order against the earlier
+  entry's planned result; all planning still precedes any write, so a stale or
+  redundant `oldText` fails loudly with the ordinary not-found error and leaves
+  every file untouched. Nothing is silently double-applied.
+- **Model-visible retention receipt** (shared with `write`, §9.5): once a later
+  successful `edit` to the same paths exists, the live transcript may replace
+  this call's input with `{"files":[{"path":P,"edits":N,"old_text_bytes":A,
+  "new_text_bytes":B}],"_superseded":"edit content omitted; later successful
+  edit to this path exists; read the file if needed"}`. The receipt is not an
+  instruction; the model reads the file when it needs the current bytes.
+- With `replaceAll`, every non-overlapping occurrence of `oldText` is replaced
+  and counted; the uniqueness check is skipped but zero matches is still a
+  not-found error. The overlap guard is relaxed only between spans of the same
+  `replaceAll` block — a `replaceAll` span overlapping a different edit still
+  raises the overlap error.
+- 0 occurrences → error quoting the first non-empty `oldText` line with a
+  nearest-region hint (up to 3 numbered lines centered on the most similar
+  content line, with the similarity score), telling the model to re-read the
+  file and re-issue with exact `oldText` (or use `write` for whole-file intent).
+  N>1 occurrences → error asking for more context. Overlapping replacements →
+  error asking the model to merge or retarget. Replacements producing content
+  identical to the original are rejected as a no-op
+  (`replacements produced identical content`).
 - Every block is preflighted before writing, so one response reports all
   missing/ambiguous blocks for the file. Ambiguous errors list up to five start
   lines, and close not-found candidates identify the first divergent line.
-- Overlapping replacements in one file → error asking the model to merge or
-  retarget the edits.
-- Replacements that produce content identical to the original file → error
-  (`replacements produced identical content`); a no-op edit is rejected rather than
-  rewriting the file unchanged.
 - The tool preserves an existing UTF-8 BOM and the file's first observed line
   ending style. If exact matching fails, it retries after normalizing trailing
   whitespace, smart quotes, Unicode dashes, and special spaces. The normalized
@@ -2343,11 +2127,12 @@ file/directory mismatch in one tool call without requiring a second dispatch.
   failure path (§8.2 malformed streamed args) tells the model to use a smaller
   `write`, then append additional content with `edit`.
 - Existing directory at path, or trailing `/` → error.
-- **Model-visible retention receipt.** Once a later successful `write` to the same
-  path exists, the live transcript may replace this call's input with
-  `{"path":P,"_superseded":"content omitted; later successful write to this path
-  exists; read the file if needed","original_bytes":N}`. The model should read the
-  file when it needs the current bytes; the receipt is not an instruction.
+- **Model-visible retention receipt** (shared with `edit`, §9.4): once a later
+  successful `write` to the same path exists, the live transcript may replace
+  this call's input with `{"path":P,"_superseded":"content omitted; later
+  successful write to this path exists; read the file if needed",
+  "original_bytes":N}`. The receipt is not an instruction; the model reads the
+  file when it needs the current bytes.
 
 ### 9.7 `shell`
 
@@ -2375,107 +2160,57 @@ file/directory mismatch in one tool call without requiring a second dispatch.
 | `background_lease.access` | string | `read_only` or `exclusive` (default) sharing mode |
 
 - Exactly one of top-level `argv`, top-level `command`, or `steps` is required.
-- Prefer `argv`; it is listed first in both the top-level and step schemas because
-  most commands need no shell quoting or expansion.
-- `command` is executed via a **non-login** `bash -c` (fallback `sh -c` if bash is
-  absent). Sourcing the full login-profile chain on every call added ~50-300ms
-  (nvm/rbenv/conda) and risked banner noise in results, so it was dropped. The PATH
-  enrichment a login shell would have added is recovered once per process: a single
-  `bash -lc` probe at first use resolves the login PATH, and those extra directories
-  are appended (current PATH keeps precedence) into the command environment.
-- When using `argv`, pass a JSON array of strings such as `["go","test","./..."]`,
-  not a shell command string or JSON-encoded array.
-- `argv` is executed with `exec.Command(argv[0], argv[1:]...)`: no shell, glob
-  expansion, redirection, `$VAR`, or `~` expansion. Each argument arrives
-  byte-for-byte.
-- **Combined stdout+stderr** — the model reads a terminal transcript the way a human
-  does; interleaving beats separation.
-- `[exit code: N]` always appended. **Non-zero exit is NOT an error result** — a failing
-  build is exactly the signal the model needs; only infrastructure failures (shell
-  couldn't start) set `is_error`.
-- Diagnostics metrics record success, exit code, timeout, cancellation,
-  wait-completion, and step aggregates. Session error analysis reports command
-  execution failures separately from tool-protocol
-  errors and also reports their effective combined total.
-- Top-level `output_mode:"auto"` keeps successful output through 8 KiB. Larger
-  success becomes a `PASS` receipt containing the normalized, 160-byte-capped
-  `name` or command identity, duration, status, output byte count, a tail capped
-  at 512 bytes/eight lines, and the exit-code trailer. When that tail clips the
-  output (or the wait did not finish, so the receipt drops the partial-reap
-  status line), the complete formatted result is carried as
-  `RunResult.OriginalText`, so dispatch archives it and appends the standard
-  targeted recovery hint. A fully represented small success needs no duplicate
-  artifact. `receipt` always selects this success path; `full` preserves the
-  prior bounded full output.
-- Non-success under `auto`/`receipt` becomes a `FAIL` receipt with at most 4 KiB
-  and 40 lines from the output tail. A clipped original is archived (likewise an
-  unclipped original whose wait did not finish); a fully represented small
-  failure needs no duplicate artifact. `full` preserves the previous full
-  failure result. Infrastructure failures remain tool errors.
-- With `steps`, `name` labels the batch. `auto` and `receipt` return the compact
-  per-step receipt and archive suppressed output; `full` returns the complete
-  combined transcript directly, subject to ordinary dispatch truncation.
-- Runs in its own process group/session with no controlling TTY under the turn
-  context; timeout or ^C kills the group (children included) and reports output
-  captured so far.
-- If the timeout/^C path cannot finish reaping promptly, the tool still returns a
-  snapshot of captured output and the status line notes that the wait did not finish.
-- Foreground calls finish when the direct shell/program exits, not when every
-  descendant closes inherited stdout/stderr; any remaining same-group descendants
-  are killed after that direct exit. Long-lived commands should use
-  `background:true`.
-- With `background:true`, a top-level command or ordered steps batch uses the same
-  process-group, step-control, output-formatting, original-transcript, and metrics
-  rules, but runs under the background job manager instead of blocking the current
-  tool call. Background jobs default to a 1200-second timeout
-  (20 minutes) unless `timeout_seconds` is set explicitly. It also defaults to an
-  exclusive lease on the canonical command cwd. Set
-  `background_lease.access:"read_only"` only for a command that cannot mutate
-  the coordinated resource; `background_lease.resource_key` may identify a
-  different coordination unit. This object affects scheduling only: it does
-  not constrain execution or turn an arbitrary command into a read-only one.
-  Legacy top-level `resource_key` and `access` fields remain accepted as hidden
-  compatibility aliases, and mixing them with `background_lease` is rejected.
-  When later work depends
-  on completion, use one `background_jobs` `wait` call rather than polling
-  `get`/`list`; otherwise completed output is delivered once as request-only
-  context. Use `/background` for interactive inspection or cancellation.
-  The background result carries compact text, original text, and diagnostics
-  metrics. Automatic completion uses the originating `shell` limits/artifact path;
-  explicit `background_jobs` get/wait results carry the full aggregate as their
-  own `OriginalText`, so choosing an explicit wait never discards recovery. When
-  completion is delivered, its metrics are persisted once in a diagnostics-only
-  `background_job_result` event; this lets session analysis count non-zero exits,
-  timeout/cancellation, and step aggregates without treating the launch receipt as
-  a second ordinary tool result. Diagnostics retain the launch agent/model
-  identity and are drained exactly once at request, prompt/idle, session-rotation,
-  or graceful-shutdown boundaries. Graceful teardown waits up to one second for
-  context-responsive runners to publish cancellation metrics; forced exit does
-  not wait.
+  Prefer `argv` — most commands need no shell quoting or expansion; pass a JSON
+  array of strings such as `["go","test","./..."]`, not a shell command string
+  or JSON-encoded array. `argv` runs via `exec.Command(argv[0], argv[1:]...)`:
+  no shell, glob expansion, redirection, `$VAR`, or `~` expansion.
+- `command` is executed via a **non-login** `bash -c` (fallback `sh -c`). The
+  login PATH a login shell would have added is resolved once per process by a
+  single `bash -lc` probe and appended (current PATH keeps precedence), so
+  build/test toolchains are found without paying the login-profile cost on
+  every call.
+- **Combined stdout+stderr** with `[exit code: N]` always appended. **Non-zero
+  exit is not a tool error** — a failing build is exactly the signal the model
+  needs; only infrastructure failures (shell couldn't start) set `is_error`.
+  Diagnostics metrics record outcome, exit code, timeout, cancellation, wait
+  completion, and step aggregates for session error analysis.
+- Process semantics (own process group/session, group kill on timeout/^C,
+  descendant cleanup, incomplete-reap snapshots) are shared with
+  `git`/`git_readonly`; see §9.8. Foreground calls finish when the direct
+  program exits; long-lived commands should use `background:true`.
+- Receipt policy: `output_mode:"auto"` preserves successful output through
+  8 KiB, then returns a compact `PASS` receipt and archives the complete
+  result; non-success becomes a `FAIL` receipt with a bounded output tail.
+  `receipt` always selects the compact success form; `full` keeps bounded full
+  output. Exact caps and artifact recovery are operational detail in
+  [tools.md](tools.md#command-execution).
+- `stdin`, when provided, is written verbatim to the command's standard input;
+  absent means `/dev/null` (immediate EOF, never a hang). Prefer it over
+  `echo`/heredocs — content travels with zero shell escaping.
+- `steps` runs related format/build/lint/test commands serially, foreground or
+  background. Top-level `cwd` and `timeout_seconds` are inherited defaults each
+  step may override; top-level stdin is rejected (use `steps[].stdin`). The
+  first non-zero, timed-out, cancelled, or unstartable step stops the batch
+  unless `stop_on_failure:false`; cancellation always stops it. Each
+  successful step returns only `PASS <name> (<duration>)`; suppressed success
+  output and clipped failure output are combined and archived via
+  `ResultTool.OriginalText`. A foreground steps call reports the sum of its
+  resolved per-step timeouts through `SelfTimeouter`, so the dispatch backstop
+  never cuts below it; background batches apply the 1200-second background
+  default to each step without an explicit timeout.
+- With `background:true`, the same process/step/formatting rules run under the
+  background job manager (§9.15): default 1200-second timeout, and a default
+  exclusive lease on the canonical command cwd. `background_lease` is
+  scheduling metadata only — it neither restricts execution nor makes a
+  command read-only; legacy top-level `resource_key`/`access` aliases remain
+  accepted, but mixing them with `background_lease` is rejected. Completion is
+  delivered once as request-only context; when later work depends on it, use
+  one `background_jobs` `wait` call rather than polling `get`/`list`.
+  Completion metrics are persisted once in a diagnostics-only
+  `background_job_result` event that retains the launch agent/model identity,
+  drained exactly once at request, prompt/idle, rotation, or shutdown
+  boundaries; graceful teardown waits briefly for context-responsive runners.
 - Environment inherited unmodified.
-- `stdin`, when provided, is written verbatim to the command's standard input; absent
-  means `/dev/null` (programs see immediate EOF, never hang on input). Prefer it over
-  `echo`/heredocs when feeding content to a command (`git commit -F -`, `python -`,
-  `tee file`) — content travels with zero shell escaping.
-- `steps` runs related format/build/lint/test commands serially in foreground or
-  background mode. Top-level `cwd` and `timeout_seconds` are defaults; each step
-  may override them. Top-level stdin is rejected; use `steps[].stdin`. By default
-  the first non-zero, timed-out, cancelled, or unstartable step stops execution and
-  reports the remaining skip count. `stop_on_failure:false` continues after an
-  ordinary failure, timeout, or start error, but cancellation always stops before
-  a later step starts.
-- Each successful step returns only `PASS <name> (<duration>)`. Failure receipts
-  include status and at most 4096 bytes of command output. Suppressed success
-  output and clipped failure output are combined under named command headers and
-  supplied as `ResultTool.OriginalText`, so the ordinary tool-result archiver
-  persists it and appends targeted recovery guidance. A timeout/cancellation whose
-  process-group wait does not finish also retains the full transcript even when
-  its visible excerpt was otherwise complete.
-- A foreground steps call reports the sum of its resolved per-step timeouts through
-  `SelfTimeouter`, preserving every step's no-maximum timeout contract under the
-  dispatch backstop. A background batch runs outside dispatch and applies the
-  background default (1200 seconds) independently to each step without an explicit
-  timeout.
 
 ### 9.8 Shared process execution (`runProcess`)
 
@@ -2512,36 +2247,30 @@ this subsection records the common runner those argv tools point at.
 | `message` | string | required for `commit`; conventional commit message |
 
 - `git` is registered only when `exec.LookPath("git")` succeeds at registry
-  construction time. If git is not installed, the model never sees the `git` tool name.
-- The advertised shape is `{"args":[...]}`. `args` must be a JSON array of
-  strings, not a string or JSON-encoded array. The decoder also accepts a bare
-  string array because earlier wording told models to provide that shape.
-- `exec.CommandContext(ctx, <resolved-git-path>, append([]string{"--no-pager"}, args...)...)`
-  passed through the shared process runner — no shell, so no quoting ambiguity.
-  `GIT_TERMINAL_PROMPT=0` prevents auth hangs.
-- **One argv tool, not narrow per-subcommand tools:** a single stable schema covers the
-  entire git surface (status, diff, log, blame, stash, rebase, commit) that the model
-  already knows from training; enumerating subcommands multiplies schemas and still
-  misses the long tail.
-- Combined output + exit code, same conventions as `shell`: no controlling
-  TTY, group kill on timeout/^C, default 120 s timeout, and non-zero exit is not
-  a tool error. Interactive flows (`rebase -i`) fail fast rather than hang.
-- `workspace_summary` is a read-only deterministic survey. It runs porcelain
+  construction time; without git the model never sees the tool name. The runner
+  prepends `--no-pager` and sets `GIT_TERMINAL_PROMPT=0` so interactive flows
+  fail fast rather than hang.
+- The advertised shape is `{"args":[...]}` — a JSON array of strings, not a
+  string or JSON-encoded array (a bare string array is also accepted for
+  compatibility). Process semantics and output conventions are shared with
+  `shell` (§9.7/§9.8).
+- **One argv tool, not narrow per-subcommand tools:** a single stable schema
+  covers the entire git surface the model already knows from training;
+  enumerating subcommands multiplies schemas and still misses the long tail.
+- `workspace_summary` is a read-only deterministic survey: porcelain
   branch/status, the latest oneline commit, staged and unstaged diff stats, and
-  staged and unstaged `diff --check`. The compact labeled result omits empty
-  diffstat/whitespace sections, reports `whitespace: clean` when applicable, and
-  handles an unborn repository explicitly. It does not include the full patch;
-  the model uses a subsequent raw `git diff` only when patch inspection is needed.
+  staged and unstaged `diff --check`, with empty sections omitted and an unborn
+  repository handled explicitly. It does not include the full patch; the model
+  uses a subsequent raw `git diff` when patch inspection is needed.
 - `commit` validates an explicit list of repository-relative files and
   directories (a directory stages and commits everything beneath it), rejects
   `.`, `..`, trailing slashes, globs, pathspec magic, duplicates, and absolute
-  paths, then runs `git add`,
-  staged `diff --check`, a staged-change check, and `git commit` scoped by `--`
-  to those paths. Unrelated staged changes remain staged. The compact receipt
-  reports the new short hash/subject, committed files, and remaining status.
-  A failed whitespace check rejects with a corrective sentence naming the
-  whitespace errors and telling the model to strip them and re-stage.
-  Failures leave the staging area recoverable.
+  paths, then runs `git add`, staged `diff --check`, a staged-change check, and
+  `git commit` scoped by `--` to those paths. Unrelated staged changes remain
+  staged. A failed whitespace check rejects with a corrective sentence naming
+  the offending lines; failures leave the staging area recoverable. The compact
+  receipt reports the new short hash/subject, committed files, and remaining
+  status.
 
 ### 9.10 `web_fetch`
 
@@ -2556,20 +2285,18 @@ this subsection records the common runner those argv tools point at.
 
 - Default 30 s timeout, configurable without a maximum; up to 5 redirects, each
   hop re-validated as http/https.
-- `text/html` → hand-rolled reduction that preserves links and block structure:
-  drop script/style/template/SVG and common nav/footer chrome; render
-  `<a href>` as `text (url)`; emit a newline
-  at block boundaries (`<br>` and the closing tags of `p`/`div`/`li`/`tr`/`h1`–`h6`);
-  strip remaining tags; `html.UnescapeString` (stdlib); collapse whitespace per line
-  while keeping the inserted line breaks. Explicitly "readable-ish text", not a
-  renderer — good enough for docs and articles. Other `text/*`,
-  `application/json`, `application/xml`, and any `+json`/`+xml` suffix type → raw; an
-  absent `Content-Type` is treated as text. Binary content types → error.
-- Output prefixed `# <final-url> (<status>, <content-type>)`. Non-2xx responses return
-  status + body as content (not `is_error` — the model may want the error page).
-  The reader consumes one byte beyond `max_bytes` to distinguish a capped
-  response and appends an explicit truncation marker. Model-visible output has a
-  32 KB/500-line default cap; the standard artifact path preserves omitted text.
+- `text/html` gets a hand-rolled reduction that preserves links and block
+  structure (drop script/style/chrome, render `<a href>` as `text (url)`,
+  newline at block boundaries, unescape entities); explicitly "readable-ish
+  text", not a renderer. Other `text/*`, `application/json`, `application/xml`,
+  and `+json`/`+xml` suffix types pass through raw; an absent `Content-Type` is
+  treated as text; binary content types fail with an error.
+- Output is prefixed `# <final-url> (<status>, <content-type>)`. Non-2xx
+  responses return status + body as ordinary content (not `is_error` — the
+  model may want the error page). The reader consumes one byte beyond
+  `max_bytes` to distinguish a capped response and appends an explicit
+  truncation marker. Model-visible output has a 32 KB/500-line default cap; the
+  standard artifact path preserves omitted text.
 
 ### 9.11 `git_readonly`
 
@@ -2580,25 +2307,20 @@ this subsection records the common runner those argv tools point at.
 | `args` | array of strings, required | argv after `git`, starting with the subcommand; must not be a string or JSON-encoded array |
 | `cwd` | string | default process cwd |
 
-- A restricted sibling of `git` (§9.9) used by restricted agents (§14). It is
+- A restricted sibling of `git` (§9.9) used by restricted agents (§14),
   registered only when git is installed. Its runner injects `--no-pager`,
   `--no-optional-locks`, and `-c core.fsmonitor=false`, plus
-  `GIT_TERMINAL_PROMPT=0` and `GIT_OPTIONAL_LOCKS=0`. Diff-capable commands
-  additionally disable external diff and text-conversion helpers.
-- The advertised shape is `{"args":[...]}`. `args` must be a JSON array of
-  strings, not a string or JSON-encoded array. The decoder also accepts a bare
-  string array because earlier wording told models to provide that shape.
-- **Audited allowlist by bare subcommand:** `blame`, `cat-file`, `check-attr`,
-  `check-ignore`, `check-mailmap`, `check-ref-format`, `cherry`,
-  `count-objects`, `describe`, `diff`, `diff-files`, `diff-index`, `diff-tree`,
-  `for-each-ref`, `grep`, `log`, `ls-files`, `ls-tree`, `merge-base`,
-  `name-rev`, `range-diff`, `rev-list`, `rev-parse`, `shortlog`, `show`,
-  `show-branch`, `show-ref`, and `status`. Mixed read/write verbs such as
-  `branch`, `config`, `remote`, `reflog`, `submodule`, `tag`, and `worktree`
-  stay excluded even when some invocations are observational. `bisect` is also
-  excluded because it mutates repository state.
-- `args[0]` must be a bare allowlisted subcommand and cannot start with `-`.
-  This blocks all global option injection. Subcommand flags that can write a
+  `GIT_TERMINAL_PROMPT=0` and `GIT_OPTIONAL_LOCKS=0`; diff-capable commands
+  additionally disable external diff and text-conversion helpers. Input shape
+  and argv decoding match `git`.
+- **Audited allowlist by bare subcommand:** only query-only verbs (`blame`,
+  `cat-file`, `diff*`, `grep`, `log`, `ls-*`, `rev-*`, `show*`, `status`, and
+  similar; the full list is maintained in [tools.md](tools.md#command-execution)).
+  Mixed read/write verbs such as `branch`, `config`, `remote`, `reflog`,
+  `submodule`, `tag`, and `worktree` stay excluded even when some invocations
+  are observational; `bisect` is excluded because it mutates repository state.
+- `args[0]` must be a bare allowlisted subcommand and cannot start with `-`,
+  which blocks all global option injection. Subcommand flags that can write a
   file or launch configured programs are rejected: output-file flags, pager
   flags (including clustered `grep -O`), external diff/textconv/filter flags,
   signature display, and `%G` pretty/format placeholders.
@@ -2630,22 +2352,18 @@ this subsection records the common runner those argv tools point at.
 
 - Whole-list replacement keeps the contract intentionally small: no IDs,
   dependencies, evidence, receipts, implicit plans, or lifecycle transitions.
-- Validation requires non-empty trimmed steps, known statuses, and at most one
+  Validation requires non-empty trimmed steps, known statuses, and at most one
   `in_progress` item. The store copies the list so callers cannot mutate it.
 - Status is advisory only. It never completes work, stops the loop, blocks a
   tool, advances a phase, or changes goal state.
 - The root store is persisted as `Session.Todos`, restored on resume, and
   cleared by `/clear`. A transcript rewrite or resume schedules one unresolved
-  list reminder as ephemeral `RequestContext`; it is acknowledged only when a
-  model request reaches the send boundary. A normal `update_todos` call clears
-  the recovery reminder because the tool call itself is already in the transcript.
-- Unresolved work without another successful update receives stale-list
-  reminders after 12, then 24, 48, and 96 conversational model rounds; the
-  interval remains capped at 96. A successful update or delivered recovery
-  reminder resets the schedule. Transport and provider-compatibility retries
-  reuse the attached context and do not advance the round count.
-- Every built-in agent exposes `update_todos`, including `plan`. Each delegate gets
-  a private store. Custom agent whitelists may omit it.
+  list reminder as ephemeral `RequestContext`; a normal `update_todos` call
+  clears it because the tool call itself is already in the transcript. The
+  stale-list reminder cadence is operational detail in
+  [tools.md](tools.md#built-in-tools).
+- Every built-in agent exposes `update_todos`, including `plan`. Each delegate
+  gets a private store. Custom agent whitelists may omit it.
 
 ### 9.14 `delegate`
 
@@ -2668,202 +2386,106 @@ this subsection records the common runner those argv tools point at.
 - The `agent` schema description appends a deterministic catalog with exact shape
   `Available:\n- <name>: <one-line description>`. The enum and catalog
   contain only candidates whose configured tools are a subset of the current
-  parent's live tools. Candidate descriptions are whitespace-normalized to one
-  line and individually capped at 160 bytes. Every enum value has one catalog
-  entry; incompatible names and descriptions are absent. `delegate` opts into
-  preserving schema descriptions in `tools.Registry.Specs`; other tools retain the
-  normal schema-description stripping behavior.
-- Child agents normally start with an empty transcript and use the requested
-  agent definition's prompt, configured tools, and optional model target. Delegate
-  calls cannot narrow or expand that tool set; callers select or define a different
-  agent when they need a different capability bundle. If no `agent` is provided,
-  the child uses exactly the current parent agent's active tools.
-
-The runner also owns one root-shared budget coordinator. It atomically enforces
-`delegate_max_active` and `delegate_max_descendants` across recursive and
-background launches without adding fields to the tool schema. A continuation
-reuses its logical descendant slot; all terminal paths release active capacity.
-  `prompts/delegate-child.txt` is appended after that resolved system
-  prompt only in `Runner.Run`; root prompts, including a configured custom static
-  prompt, never receive it. The suffix says the child reports to the parent, owns
-  only its delegated scope, does not ask the user questions, returns an
-  evidence-backed report, and avoids recursive delegation by default. A second
-  child-only block states the exact effective tool-enabled turn budget and
-  discloses the possible additional tools-disabled wind-down request.
+  parent's live tools — the capability-escalation guard; non-subset calls fail
+  before any child model request. Candidate descriptions are whitespace-normalized
+  to one line and capped at 160 bytes. `delegate` opts into preserving schema
+  descriptions in `Registry.Specs` (`SchemaDescriptionPreserver`).
+- **Prompt construction:** `prompts/delegate-child.txt` is appended after the
+  resolved system prompt only in `Runner.Run` — root prompts, including a
+  configured custom static prompt, never receive it. The suffix says the child
+  reports to the parent, owns only its delegated scope, does not ask the user
+  questions, returns an evidence-backed report, and avoids recursive delegation
+  by default. A second child-only block states the exact effective tool-enabled
+  turn budget and discloses the possible tools-disabled wind-down request.
 - `max_turns` has JSON Schema bound `minimum: 1`; its numeric `maximum` equals
-  the active `delegate_max_turns`. The runner validates the same bound even if a provider
-  emits invalid arguments despite the schema; it never silently clamps. The
-  foreground result receipt and background launch receipt state the effective
-  budget.
-- `mode` currently accepts only `implementation` and is validated by both the
-  decoder and runner. It adds a static child-only instruction identifying the
-  task as scoped mutating work and requiring implementation, verification, and
-  an exact handoff with changed paths, checks run, and any remaining work.
-  Child metadata, result receipts, and session stats preserve the mode.
-- Every child is instructed to stop once its delegated requirements and focused
-  verification are complete and to write a useful final Markdown handoff. If it
-  knows the semantic outcome, it may append exactly one terminal
-  `harness-completion` fenced JSON footer containing only `outcome` (`complete`
-  or `blocked`) and, for a blocked outcome, a bounded `blockers` string array.
-  Substantive findings, changed files, verification, evidence, unreviewed scope,
-  and remaining work stay in Markdown rather than being duplicated into status
-  metadata. The host still records `implementation`, `review`, or `general` as
-  provenance; it no longer changes the footer schema.
-- Completion parsing examines only the final assistant response after a
-  successful child run. A valid footer is removed from parent-facing prose;
-  missing, malformed, duplicate, invalid, or oversized footers preserve useful
-  prose and become `unknown` compatibility outcomes instead of failing the run.
-  Failures and cancellation receive host/unavailable provenance without parsing
-  model output. Receipts show a compact outcome or `unreported`, while terminal
-  `ChildMeta.Completion` stores only outcome, optional blockers, contract/source
-  provenance, and validation status beside—not in place of—lifecycle status,
-  workflow status, and `TerminationReason`. Each continuation writes an
-  independent report for its
-  fresh child ID. Receipts also report the root descendant budget, e.g.
-  `3 of 16 descendant slots remaining`. Non-positive settings select the default
-  4-active/16-total limits; descendant budgets are not unlimited.
+  the active `delegate_max_turns`. The runner validates the same bound even when
+  a provider emits invalid arguments despite the schema; it never silently
+  clamps. Receipts state the effective budget.
+- `mode` currently accepts only `implementation`, validated by both decoder and
+  runner. It adds a static child-only instruction identifying scoped mutating
+  work and requiring implementation, verification, and an exact handoff with
+  changed paths, checks run, and any remaining work.
+- **Completion contract:** the child may append exactly one terminal
+  `harness-completion` fenced JSON footer with `outcome` (`complete`|`blocked`)
+  and, for `blocked`, a bounded `blockers` array; substantive content stays in
+  the Markdown report. Parsing examines only the final assistant response; a
+  valid footer is stripped from parent-facing prose, while missing, malformed,
+  duplicate, invalid, or oversized footers preserve the prose and become
+  `unknown`/`unreported` outcomes rather than failing the run. Failures and
+  cancellation receive host/unavailable provenance. `ChildMeta.Completion`
+  stores outcome, optional blockers, contract/source provenance, and validation
+  status beside lifecycle status. Each continuation writes an independent
+  report. Receipts also report the root descendant budget (e.g. `3 of 16
+  descendant slots remaining`); non-positive settings select the default
+  4-active/16-total limits.
 - `continue_child_id` names an already-terminal child of the same immediate
-  parent. Continuation never appends to or overwrites that source directory:
-  the Runner creates a fresh child ID and seeds it with the source transcript,
-  private TODO list and latest plan, proxy session ID, cache-affinity ID, and provider response
-  anchor. The continuation user message identifies the source and warns the
-  child to re-check current repository state. Source usage is not charged again;
-  the new child's usage contains only its new physical model calls. Its turn
-  counter also starts at zero with a fresh allowance equal to the source's
-  effective budget.
-- A continuation inherits omitted `agent`, `mode`, and `max_turns` values and
-  rejects explicitly conflicting values. It also requires exact source metadata
-  identity, terminal status, the same immediate parent, a valid resumable
-  `state.json`, and non-empty persisted runtime identifiers. New child metadata
-  records `continued_from` and a SHA-256 `runtime_fingerprint`. The fingerprint
-  covers the effective provider implementation/name, model, resolved and
-  requested agent selection, mode and turn budget, depth policy, resolved
-  context/output settings, prompt/cost ceilings, reasoning, server tools,
-  stateful-Responses setting, final child system prompt, model-facing tool
-  schemas, and compaction policy. Preserving the
-  requested selection keeps an omitted agent on the parent's live tool subset
-  while an explicitly selected agent remains explicit. Current runtime and
-  source fingerprints must match.
-  Children created before fingerprints were introduced are deliberately not
-  resumable through this path.
-- Before the first continued request, the Runner estimates the retained
-  transcript, any TODO recovery context, and continuation prompt against the
-  current context window. At or below 60%, it restores the complete transcript
-  and compatible provider continuation anchor. Above 60%, it performs one
-  tool-less maintenance summary over the complete source transcript and
-  replaces the new child's active history with a single typed compaction
-  checkpoint. This all-history boundary is distinct from normal compaction's
-  recent-turn suffix: no work after an earlier checkpoint can be omitted. The
-  checkpoint preserves active prompt/steering instructions verbatim, stores
-  summary and file activity in `CompactionMetadata`, archives every removed
-  source message under the new child, and resets remote continuation state.
-- The Runner re-estimates the compact checkpoint plus the pending prompt and
-  continues only at or below 60%. A failed summary, blocked/no-op rewrite, or
-  still-oversized checkpoint is rejected; exact instructions are never
-  truncated to force acceptance. Maintenance usage is included in the new
-  child's prompt/session totals and replay log even when the post-checkpoint
-  pressure check rejects. Source usage and files remain unchanged.
-  `ChildMeta` records `continuation_mode` (`retained` or
-  `compact_checkpoint`) and the before/after/window estimates; the delegate
-  receipt and `session stats` expose the selected path. Foreground and
-  background paths apply the same contract. The latter resolves inherited
-  agent/mode/budget fields before scheduling so its launch receipt is truthful.
-- Background launches resolve their scope before scheduling. Built-in
-  `explore`/`plan`/`review` default to shared `read_only` access;
-  `auto`/`independent` default to `exclusive`, and `mode:"implementation"` is
-  always exclusive.
-  Custom agents set `workspace_access`. Mutating sibling delegates can declare
-  distinct `scope` paths to run concurrently. Lease conflicts fail before
-  child/session creation; normalized scope and access are persisted in metadata.
+  parent. Continuation never appends to or overwrites the source directory: the
+  Runner creates a fresh child seeded with the source transcript, private TODO
+  list and latest plan, proxy session ID, cache-affinity ID, and provider
+  response anchor, and the continuation prompt tells the child to re-check
+  repository state. Source usage is not charged again; the new child's turn
+  counter starts at zero with a fresh allowance equal to the source's effective
+  budget. Omitted `agent`/`mode`/`max_turns` inherit; explicitly conflicting
+  values are rejected. The source must carry terminal metadata, a resumable
+  `state.json`, and a `runtime_fingerprint` matching the current runtime
+  (provider, model, agent selection, mode, budgets, context/output settings,
+  reasoning, server tools, stateful setting, system prompt, tool schemas,
+  compaction policy). Pre-fingerprint children are not resumable this way.
+- **Continuation pressure rule:** before the first continued request the Runner
+  estimates the retained transcript plus continuation prompt against the current
+  context window. At or below 60% it restores the complete transcript and
+  compatible provider anchor; above 60% it makes one tool-less maintenance
+  summary and replaces the new child's active history with a single typed
+  compaction checkpoint (an all-history boundary, unlike normal compaction's
+  recent-turn suffix), preserving active prompt/steering instructions verbatim,
+  archiving removed messages under the new child, and resetting the remote
+  anchor. A failed summary, blocked/no-op rewrite, or still-oversized checkpoint
+  rejects the continuation instead of truncating exact instructions.
+  `ChildMeta` records `continuation_mode` (`retained`|`compact_checkpoint`) and
+  the before/after/window estimates. Foreground and background paths apply the
+  same contract.
+- The runner owns one root-shared budget coordinator that atomically enforces
+  `delegate_max_active` and `delegate_max_descendants` across recursive and
+  background launches; a continuation reuses its logical descendant slot and
+  all terminal paths release active capacity.
+- Background launches resolve scope before scheduling: built-in
+  `explore`/`plan`/`review` default to shared `read_only` access,
+  `auto`/`independent` to `exclusive`, `mode:"implementation"` is always
+  exclusive, and custom agents set `workspace_access`. Lease conflicts fail
+  before child/session creation; normalized scope and access are persisted in
+  child metadata.
 - Review groups deliberately compose ordinary background `delegate` calls with
-  one stable `background_jobs` `ids`/`until:"all"` join. The parent owns
-  synthesis; a coordinator child whose only role is launching and waiting adds
-  model turns and processed context without adding an independent verdict.
-  A dedicated `delegate_group` remains deferred until session telemetry shows
-  that launch-call overhead or a typed verdict/quorum contract—not coordinator
-  misuse—is the remaining bottleneck. Avoiding a second launch path also keeps
-  resource conflicts and exactly-once result/usage delivery centralized in the
-  background manager.
-- A named child agent may only run when its configured tools are a subset of the
-  current parent agent's active tools. Non-subset calls return a tool error before
-  any child model request is made. This exact subset check remains the
-  capability-escalation guard.
+  one `background_jobs` `ids`/`until:"all"` join; the parent owns synthesis. A
+  dedicated `delegate_group` remains deferred until telemetry shows launch-call
+  overhead or a typed verdict contract is the remaining bottleneck.
 - A child run that fails only with transient provider classes (rate limit,
-  overloaded, 5xx, or a provider-side timeout while the parent context is
-  intact) is rewritten at the tool boundary (`internal/delegate/errors.go`):
-  the error names the failure classes, tells the parent model to retry the
-  delegate call once and then report the blocker rather than retrying further,
+  overloaded, 5xx, provider-side timeout while the parent context is intact) is
+  rewritten at the tool boundary (`internal/delegate/errors.go`): the error
+  names the classes, tells the parent to retry once and then report the blocker,
   and stamps the diagnostics-only `rate_limited`/`provider_error` kind.
-  Permanent failures (unknown agent, subset rejection, non-retryable 4xx) pass
-  through verbatim.
-- Root depth is `0`. A launch is rejected before resolution/model I/O when the
-  current depth reaches `delegate_max_depth`; child runtimes increment depth, and
-  the deepest allowed child has `delegate` removed before its registry/specs are
-  built. If a child receives `delegate` at shallower depth, it is rebound to the
-  child's full runtime snapshot so recursive validation uses the immediate parent.
-- Root `max_prompt_tokens` and `max_prompt_cost_usd` are copied into every child
-  `agent.Options`. They remain per-prompt ceilings for each child, not a shared
-  hierarchy-wide budget. Provider/model output/context settings and recursive
-  runtime snapshots are preserved as before.
-- Child agents receive private TODO and plan stores; child coordination state
-  does not mutate the parent stores. `update_todos` and `record_plan` are local
-  coordination tools and do not require matching authority in the parent tool
-  subset. `handoff` is always removed from child agents. Foreground
-  delegates remain serialized because children share the checkout and may write.
-- The parent transcript records only the normal `delegate` tool call and compact result.
-  Child transcripts are saved under `children/<child-id>/` in the parent session
-  directory for forensics. Child token usage is reported through `MeteredTool` and
-  folded into the parent prompt/session usage totals.
-- A shared process-local `delegate.ActivityRegistry` tracks every running child,
-  including concurrent background work and recursively rebound nested delegates.
-  Registration starts only after child identity and running metadata setup, and
-  the Runner's exactly-once terminalization closure flushes pending display text,
-  persists final child metadata, publishes the terminal lifecycle event, and
-  removes the registry entry. Stable display labels (`d1`, `d2`, …) are
-  independent of durable child IDs; the registry is their sole allocator. The
-  greatest activity sequence selects the latest active child, with durable ID as
-  a deterministic tie-break.
-- Registry activity is bounded and ANSI/control-sanitized before retention. It
-  may contain turn/attempt, context and usage totals, retry state, a semantic
-  assistant reply state, and allowlisted path fields for local file tools. It
-  never retains model-authored reply text, reasoning, raw tool results, command
-  text, URLs/search patterns, unknown arguments, or generic serialized JSON.
-- In `delegate_output=lines`, the registry owns one optional `ActivityFeed`.
-  Publishers append structured, sanitized events only after the corresponding
-  replay event; they never call UI code or wait for a consumer. The feed assigns
-  one process-local sequence, retains at most 512 events / 256 KiB, returns
-  64-event / 64-KiB batches, and rotates a close-and-replace notification
-  channel. Start/terminal lifecycle records evict ordinary records first;
-  sequence reads synthesize a gap for each missing interval. The active registry,
-  not this lossy feed, remains authoritative for current status.
-- When `delegate_tmux` is on and harness runs inside tmux, the Runner also
-  opens one display-only tmux view per child through the `OpenChildView` seam,
-  right after the running `meta.json` exists and before the child agent runs.
-  The view runs `harness session replay --follow -- <child-dir>` from the same
-  binary; the follower tolerates the not-yet-streaming child directory and
-  exits on terminal metadata. The default
-  `delegate_tmux_layout=pane` splits a right-hand pane stack from the harness
-  pane (`split-window -h` for the first pane, `split-window -v` against the
-  most recent delegate pane for subsequent panes, and `select-layout -E` after
-  each open once two or more delegate panes exist); `window` preserves the
-  historical one-detached-window-per-child behavior. `internal/tmux` caps
-  simultaneous views (`delegate_tmux_max_windows`, default 4), closes the view
-  on every terminal child outcome (completed, failed, or canceled), and drains
-  every still-tracked view at process exit. `remain-on-exit` only bridges the
-  race between a fast follower exit and that explicit close; it does not retain
-  terminal views. Every step is best-effort: construction outside tmux degrades
-  to one stderr warning (suppressed by quiet), pane layout degrades to windows
-  when `TMUX_PANE` is missing, the Runner swallows open failures, and no tmux
-  failure ever
-  propagates into the delegate run. The path is independent of
-  `delegate_output`, which governs only the in-process status/lines display.
-- The child display coalescer preserves ordinary spaces, strips split CSI/OSC,
-  normalizes CRLF, drops invalid UTF-8, expands tabs, replaces controls, and
-  emits at most 2,048 UTF-8 bytes per assistant/reasoning chunk. Feed events are
-  capped at 4,096 bytes. Tool completion reuses the safe summary captured at
-  start; notice and model-request publication uses exact/numeric allowlists and
-  structured fields, never result/provider/error text. Reasoning requires an
-  already-resolved child summary mode of `auto`, `concise`, or `detailed`.
+  Permanent failures pass through verbatim.
+- Root depth is `0`; a launch is rejected when the current depth reaches
+  `delegate_max_depth`, and the deepest allowed child has `delegate` removed
+  before its registry/specs are built. Root `max_prompt_tokens` and
+  `max_prompt_cost_usd` are copied into every child as per-prompt ceilings, not
+  a hierarchy-wide budget. Children receive private TODO and plan stores;
+  `handoff` is always removed from child agents. Foreground delegates remain
+  serialized because children share the checkout and may write.
+- The parent transcript records only the normal `delegate` call and compact
+  result; child transcripts are saved under `children/<child-id>/` for
+  forensics, and child usage is reported through `MeteredTool` and folded into
+  parent totals exactly once.
+- A process-local `delegate.ActivityRegistry` tracks every running child;
+  the Runner's exactly-once terminalization closure flushes pending display
+  text, persists final metadata, publishes the terminal lifecycle event, and
+  removes the entry. Stable display labels (`d1`, `d2`, …) are allocated solely
+  by the registry. Retained activity is bounded and ANSI/control-sanitized:
+  turn/attempt, context/usage totals, retry state, reply state, and allowlisted
+  path fields only — never model text, reasoning, raw tool results, commands,
+  or URLs. The optional `ActivityFeed` behind `delegate_output=lines` retains
+  at most 512 events/256 KiB and is never authoritative over the registry.
+  The `delegate_tmux` views and inline-feed policy are operational behavior;
+  see [tools.md](tools.md#delegation).
 
 ### 9.15 background jobs
 
@@ -2871,11 +2493,10 @@ Tools that opt into the reusable background job contract hand the manager a job
 kind, description, optional canonical resource/access lease, and cancellable
 runner. The manager owns ids, status, list/get/wait/cancel, lease enforcement,
 exactly-once structured terminal-notice selection, and request-only context
-delivery. The UI formats each selected snapshot, renders it through the normal
-notice path, and records/mirrors that exact text.
-`shell`, `web_fetch`, and `delegate` support this path via `background:true`; background
-delegate jobs still use the same launch validation, child transcript, private coordination stores,
-and token-accounting behavior as synchronous delegate.
+delivery. `shell`, `web_fetch`, and `delegate` support this path via
+`background:true`; background delegates keep the same launch validation, child
+transcript, private coordination stores, and token accounting as synchronous
+delegates.
 
 `background_jobs` accepts:
 
@@ -2887,73 +2508,57 @@ and token-accounting behavior as synchronous delegate.
 | `until` | string | `first` (default) or `all` for `wait` |
 | `timeout_seconds` | integer | `wait` timeout; omit for ordinary dependency waits (default 120 seconds), rather than using a short timeout as a status probe |
 
-- Jobs live only in the current harness process. Running jobs are abandoned on process
-  exit and cleared on `/clear`.
+- Jobs live only in the current harness process. Running jobs are abandoned on
+  process exit and cleared on `/clear`.
 - Resource keys are absolute paths with symlinks resolved through the longest
-  existing prefix. Multiple `read_only` jobs may share an exact resource key.
-  `exclusive` conflicts with every unfinished lease for that key; the
-  deterministic error identifies the first active job in launch order. Different
-  resource keys do not conflict. Completion and failure release immediately.
-  Cancellation retains the lease until runner cleanup finishes. Abandonment
-  releases it immediately and late runner return cannot overwrite the abandoned
-  status. Snapshots, `get` output, completion context, launch receipts, and
-  delegate child metadata expose the normalized lease.
-- `wait` is event-driven rather than polling. `id` selects one job; `ids`
-  selects an explicit group; omitting both snapshots the jobs currently running.
-  `until:"first"` returns on the first selected completion, while
-  `until:"all"` joins every selected job. Selection is stable, so later launches
-  never extend an in-flight wait. If an untargeted wait finds no running jobs, it
-  returns the current list immediately. A timeout is a normal result containing
-  the latest selected status. Jobs returned as completed are marked as delivered
-  so the same result is not automatically injected again. Completion notices and
-  nested usage accounting remain one-shot and independent. An accepted user
-  steer broadcasts to currently blocked waits only (a wait started after that
-  steer is unaffected). Such a wait returns a detached acknowledgement, keeps
-  its stable selection and original timeout in a manager-owned observer, and
-  claims those jobs so ordinary completion delivery cannot race ahead. When the
-  observer reaches its selected completion or timeout, it publishes one detached
-  aggregate as request-only context. Clearing or shutting down a session aborts
-  stale observers; overlapping detached waits each retain their own aggregate.
-  Ready aggregates use a level-triggered manager signal and may be coalesced into
-  one request. Idle TTY and interactive-JSON schedulers subscribe before a result
-  exists, then give delivered user input/drafts, approvals, EOF/shutdown, and
-  interrupts priority before creating a normal prompt-origin continuation with
-  cause `detached_background_wait`. Ordinary fire-and-forget completion context
-  never signals that scheduler or starts an autonomous model call.
-- The system prompt and background-capable tool schemas route a strict completion
-  dependency to one `wait` call. `get` and `list` are for nonblocking inspection,
-  not repeated status polling.
-- Completed job summaries are delivered once as request-only context to the parent
-  agent, including the transcript path when one exists. They are not inserted into
-  the parent transcript. Background delegates are marked join-required: the parent
-  may perform one subsequent useful turn, but cannot complete the prompt until
-  all such delegates finish and a model request has received their reports for
-  synthesis. Ordinary background commands remain detached and may outlive the prompt.
-  Output uses the same per-tool truncation limits as foreground
-  dispatch; when truncated, the full result is archived under
-  `artifacts/tool-results/` and the request context includes the same absolute path and
-  targeted `read`/`shell` guidance as a foreground result.
-- A job may carry compact `Text` plus complete `OriginalText`. Automatic
-  completion uses `Registry.PrepareResultWithOriginal`; `background_jobs`
-  implements `ResultTool` so explicit get/wait output preserves the same
-  archive opportunity instead of consuming completion context and losing the
-  suppressed original.
+  existing prefix. Multiple `read_only` jobs may share an exact key;
+  `exclusive` conflicts with every unfinished lease for that key; different
+  keys do not conflict. Completion and failure release immediately;
+  cancellation retains the lease until runner cleanup finishes; abandonment
+  releases it immediately.
+- `wait` is event-driven rather than polling. `id` selects one job, `ids` an
+  explicit group, and omitting both snapshots the jobs currently running;
+  selection is stable, so later launches never extend an in-flight wait. An
+  untargeted wait with no running jobs returns the current list immediately; a
+  timeout is a normal result containing the latest selected status. Jobs
+  returned as completed are marked delivered so the same result is not
+  injected again. An accepted user steer broadcasts to currently blocked waits
+  only: such a wait returns a detached acknowledgement, keeps its stable
+  selection and original timeout in a manager-owned observer, and publishes
+  one detached aggregate as request-only context when the selection resolves.
+  The interactive scheduler then starts a continuation with cause
+  `detached_background_wait` only after delivered user input, drafts,
+  approvals, EOF/shutdown, and interrupts; ordinary fire-and-forget completion
+  context never starts an autonomous model call.
+- The system prompt and background-capable tool schemas route a strict
+  completion dependency to one `wait` call; `get` and `list` are for
+  nonblocking inspection, not repeated status polling.
+- Completed job summaries are delivered once as request-only context to the
+  parent agent — never inserted into the parent transcript — including the
+  transcript path when one exists. Background delegates are marked
+  join-required: the parent may perform one subsequent useful turn but cannot
+  complete the prompt until all such delegates finish and a model request has
+  received their reports for synthesis. Ordinary background commands remain
+  detached and may outlive the prompt. Truncated output is archived under
+  `artifacts/tool-results/` with the same targeted recovery guidance as a
+  foreground result.
+- A job may carry compact `Text` plus complete `OriginalText`: automatic
+  completion uses `Registry.PrepareResultWithOriginal`, and `background_jobs`
+  implements `ResultTool`, so explicit get/wait output preserves the same
+  archive opportunity.
 - `BackgroundJobResult` carries child model usage plus a separate successful
-  compaction count for model-backed job display and session diagnostics. Background
-  delegate results carry token/cost usage through the manager exactly once; the
-  agent folds it into the parent prompt and session totals before completion,
-  including failed or canceled child runs that returned partial usage. Child
-  compactions remain child-session metadata and do not increment the parent's
-  compaction count.
-- Terminal notice delivery, completion context, diagnostics, and nested usage drains
-  are independent exactly-once channels. The manager returns cloned structured
-  snapshots in launch order; the UI applies exit-summary formatting only to
-  delegates, with a `child session` label, then persists and mirrors the resulting
-  text. Interactive JSON receives the same text as a normal `notice` event. One-shot
-  mode does not poll these notices and retains its final aggregate session summary.
+  compaction count. Background delegate usage flows through the manager
+  exactly once and is folded into parent prompt/session totals before
+  completion, including partial usage from failed or canceled runs; child
+  compactions remain child-session metadata.
+- Terminal notice delivery, completion context, diagnostics, and usage drains
+  are independent exactly-once channels. The UI applies exit-summary
+  formatting only to delegates (with a `child session` label), then persists
+  and mirrors the text; interactive JSON receives it as a normal `notice`
+  event, and one-shot mode retains only its final aggregate session summary.
 - Background jobs run in the same cwd/tool policy as ordinary tools. Resource
-  leases coordinate opted-in local background work; they do not sandbox paths or
-  serialize foreground filesystem edits.
+  leases coordinate opted-in local background work; they do not sandbox paths
+  or serialize foreground filesystem edits.
 
 ### 9.16 MCP tools (`internal/mcptools`)
 
@@ -3025,40 +2630,27 @@ their concise operation descriptions without adding cross-tool search steering.
 
 ### 9.17 `record_plan` and `handoff`
 
-`record_plan` (`internal/plan`) accepts `{title, plan}` and requires both values
-after trimming. It renders `# <title>` followed by the self-contained Markdown
-body and writes `<session>/plans/NNNN-<slug>.plan.md` through a temporary file,
-`chmod(0644)`, close, and rename. The returned path is absolute. Each call
-creates a new immutable artifact; the synchronized store keeps only the latest
-`plan.Plan` pointer for persistence, display, and handoff.
+`record_plan` (`internal/plan`) accepts `{title, plan}`, both required after
+trimming, renders `# <title>` plus the self-contained Markdown body, and writes
+`<session>/plans/NNNN-<slug>.plan.md` via temp-file-then-rename (0644). Each
+call creates a new immutable artifact; the synchronized store keeps only the
+latest `plan.Plan` pointer for persistence, display, and handoff. It is part of
+the default coordination tool set (`auto`, `independent`, default-inheriting
+custom agents, and `plan`), requires a live session directory, and is private
+per delegate child.
 
-`record_plan` is part of the default coordination tool set: `auto`,
-`independent`, and default-inheriting custom agents receive it in addition to
-`update_todos`, and the `plan` agent receives it alongside `update_todos` as
-well.
-It requires a live session directory and is therefore unavailable where no session
-artifact can be written. Delegate children receive private plan stores and write
-under their own child session directories.
-
-`handoff` (`internal/tools` + `internal/handoff`) accepts the
-optional `{agent}` with guidance to omit it for the configured default
-implementation agent.
-It is enabled only for the interactive root `plan` agent.
-Description: `Handoff the recorded plan to an implementation agent.`.
-It rejects one-shot mode, an absent/latest plan without a body or
-path, and unknown explicit agents. Only exclusive agents populate the
-`agent` enum: `auto`, `independent`, and any custom agent with
-`workspace_access: exclusive` (custom defaults to exclusive); `explore`,
-`plan`, and `review` are excluded. An omitted `agent` defaults to `auto`
-(`HandoffAgent`). The tool records a synchronized pending `handoff.Request`; tools
-never prompt or switch agents themselves.
-
-At the interactive boundary, Harness rejects a stale pending path, renders the
-complete latest plan, and asks for approval. Approval
-switches the target agent/model, archives the planning transcript, resets the
-conversation tree to one user message containing the absolute plan path and
-complete plan body, appends optional user context from `/handoff`, clears the
-implementation agent's TODO list, and starts the implementation prompt.
+`handoff` (`internal/tools` + `internal/handoff`) accepts an optional `{agent}`
+and is enabled only for the interactive root `plan` agent. It rejects one-shot
+mode, a missing plan, and unknown explicit agents. Only exclusive agents
+populate the `agent` enum (`auto`, `independent`, custom agents with
+`workspace_access: exclusive`); an omitted `agent` defaults to `auto`. The tool
+records a synchronized pending `handoff.Request`; tools never prompt or switch
+agents themselves. At the interactive boundary, Harness renders the complete
+latest plan, asks for approval, and on approval switches agent/model, archives
+the planning transcript, resets the conversation tree to one user message
+containing the absolute plan path and body, appends optional `/handoff`
+context, clears the implementation agent's TODO list, and starts the
+implementation prompt.
 
 ## 10. CLI / REPL (`internal/ui`)
 
@@ -3597,191 +3189,26 @@ to `in_progress`; a remaining count is projected only for a single result,
 because independent evaluator counts have no generic aggregation rule. A block
 not represented by a rejecting semantic result suppresses this projection.
 
-### Host-owned trajectory projection, default nudge, and opt-in capsule (`internal/trajectory`)
-
-Harness derives a bounded, host-owned trajectory from facts it already
-observes. The projection itself is not general request context, is not rendered
-into a prompt, and does not add a model-facing tool. Only the default-on bounded
-stagnation policy described below consumes its active no-improvement streak,
-and only during an already blocking evaluator repair. The projection assigns
-its own evaluation and fallback candidate IDs; models do not manage revisions,
-evidence IDs, steps, or a lifecycle graph. An evaluator score remains
-observational unless that result supplies `score_direction`. "Best accepted"
-still means the latest distinct accepted candidate, not the numerically best
-score; ordered score comparison is confined to host-owned stagnation telemetry.
-
-The canonical transition stream is `raw.ndjson`, written through
-`internal/sessionrec`:
-
-- `evaluator_result` adds one bounded accepted/rejected evaluation;
-- `tool_mutation` records bounded paths reported by a successful
-  mutation-reporting tool, independently of whether diff display is enabled;
-- `tool_diff` confirms paths for which a non-empty rendered diff was observed
-  and backfills older logs;
-- `branch` resets active candidate, evaluation, and path details while retaining
-  cumulative counters in the same physical session; and
-- `trajectory_seed` makes an explicitly inherited delegate continuation
-  replayable in its fresh physical child session.
-
-The current projection in `state.json` retains at most 16 evaluations and 32
-paths. Candidate IDs are capped at 256 bytes, evidence references at 1024 bytes,
-and paths at 512 bytes. When an evaluator supplies an evidence reference,
-detailed compiler, test, benchmark, profiler, or delegate evidence stays in its
-artifact; the projection stores only the bounded reference. Session saves use
-the existing temp-file-then-rename path. On load,
-Harness streams the canonical raw events into the bounded projection without
-retaining the full log in memory. A malformed or unavailable shadow replay does
-not make a healthy session unloadable; the last atomically saved projection is
-the fallback.
-
-Projection schema v3 also maintains one conservative active evaluator lane and
-a no-improvement streak capped at 1,000,000. A new lane establishes a baseline.
-Acceptance, a better explicitly ordered score, or fewer remaining requirements
-resets the streak. A tied ordered score, a score worse than the best observed in
-that lane, an unchanged unordered score, or an exact repeated rejected
-candidate increments it. A new unscored candidate and a changed score without a
-direction are indeterminate and do not increment the streak. Handler or explicit
-direction changes reset the active lane; resets are counted because alternating
-independent evaluators cannot safely share a scalar comparison. These
-classifications are persisted/replayed as projection state. They do not change
-candidate selection or termination; the policy below consumes only the active
-streak to augment an existing evaluator repair turn.
-
-The default-on `stagnation_nudge` policy uses that host-owned state only during
-an already blocking Stop-hook continuation. At a no-improvement streak of two
-it first persists a payload-free `stagnation_nudge` event, then appends one
-generic strategy-reset instruction to the internal corrective turn. The
-instruction does not expose host-only score direction or copy handler,
-candidate, evidence, or hook output. A lane can receive at most one reset:
-improvement does not re-arm it, while a handler/direction lane change or branch
-reset does. Failed event persistence suppresses delivery so model-visible
-control flow cannot run ahead of replayable state. Root and delegate sessions
-use the same policy and canonical recorder. An explicit false flag, environment
-value, or config value disables the policy.
-
-Resume, active-turn recovery, compaction, and an in-session implementation
-handoff retain the projection. `/tree` navigation records a branch transition
-because the conversation changes while the working tree does not. `/clear`,
-`/fork`, `/clone`, and resume-to-a-distinct-session establish new trajectory
-ownership and start fresh; their source session is unchanged. New delegates
-also start fresh, while an explicit continuation inherits only its prior child
-state through `trajectory_seed`. Child state is never implicitly merged into
-the parent.
-
-The projection is always host-only. It is never rendered into request context,
-transcript history, tool results, or model-visible event text. The bounded
-stagnation nudge above is the only policy that consumes it to affect model
-control flow.
-
-Analyzer schema v12 reconstructs the projection per physical stream and reports
-only counts and sizes: encoded projection bytes, transitions, branch resets,
-evaluation outcomes, missing candidate/evidence fields, dropped bounded data,
-mutation-path observations, diff confirmations, unconfirmed paths, active and
-maximum no-improvement streaks, stagnation classifications, unordered scores,
-evaluator-lane resets, and delivered strategy resets. It never emits handler
-names, score values, score directions, candidates, or evidence. An unconfirmed
-path is an attribution-audit signal, not proof of a false
-mutation: it is expected when diff display is disabled or a successful write
-produces no rendered textual diff.
-
-### Explicit candidate lineage (`internal/lineage`)
-
-`-candidate-lineage` authorizes a specialized, root-only archive for an
-evaluator-driven Git session. "Root-only" refers to the root agent: delegate
-sessions never receive the archive observer. The option is intentionally an
-invocation flag, not a config or environment setting, so every new or resumed
-process opts in explicitly. Interactive and one-shot runs, primary checkouts,
-attached or detached linked worktrees, repository subdirectories, implicit
-session paths, and resume-clones are supported. The repository must have a
-commit, and its session directory must be outside the worktree so capture cannot
-recurse into its own archive.
-
-On first open, the host snapshots the Git-visible prepared workspace as a
-base tree and stores a binary `base.patch` against the initial `HEAD`. Capture
-uses an alternate temporary index and never changes the real index or refs.
-Ignored untracked files are not part of that tree. A semantic evaluator result is
-eligible only when it is accepted and supplies a finite score, explicit
-`maximize` or `minimize` direction, handler, candidate identifier, and evidence
-reference. The first eligible result establishes one handler/direction lane.
-Later results advance only on a strict ordered improvement in that same lane;
-rejections, ties, regressions, incomplete results, and other lanes remain in the
-canonical evaluator/trajectory log but do not replace the best entry.
-
-Each advance captures the current workspace in a temporary Git index seeded
-from the current commit, writes a binary patch from the prior accepted tree,
-and copies the referenced evidence file into the session archive. This keeps
-one continuous accepted lineage across user or agent commits and checkouts.
-Evidence must be a repository-root-relative regular worktree file whose
-resolved path stays inside the worktree. An entry patch is capped at 16 MiB,
-copied evidence at 1 MiB, and a lineage at 128 entries. The manifest, patches,
-and evidence use temp-file-then-rename installation under `<session>/lineage/`;
-reopening verifies artifact digests and reconstructs the recorded tree chain
-before continuing. `/clear`, `/fork`, and `/clone` bind the observer to a fresh
-archive for the new physical session, as does a startup resume-clone. Reopening
-the same archive requires its original physical worktree. A failed rebind
-disables observation so events can never leak into the prior session.
-
-The human-only `/lineage` command reads the manager directly and is absent from
-model context and tool schemas. Listing is read-only. Export reconstructs an
-entry through the verified patch chain and uses a newly created, non-overwriting
-directory outside the source worktree and session. Restore is the only lineage
-operation that changes worktree files. It rejects dirty state without explicit
-`--force`, first writes a reverse binary patch under
-`lineage/restore-backups/`, applies a checked tree-to-tree patch without
-`--index`, and verifies the resulting Git-visible tree. Restore patches retain
-the 16 MiB artifact bound and a session keeps at most 128. Neither export nor
-restore changes the real index, creates commits or refs, or changes history.
-
-Harness never automatically checks out, restores, commits, or promotes an
-accepted tree. The archive remains a recoverable record and promotion remains a
-separate user decision. The detailed manifest owns candidate IDs, scores, tree
-hashes, evidence references, and artifact digests. The canonical
-`lineage_advance` event contains only sequence/parent numbers and patch/evidence
-byte counts, follows the corresponding `evaluator_result`, and never enters
-model context or display text. Explicit export/restore notices use ordinary
-human-visible session notices. Analyzer schema v12 exposes only aggregate
-advance and artifact-size telemetry. A corrupt/incomplete archive, unsafe
-evidence path, oversize artifact, or recorder failure is visible immediately;
-one-shot mode still exits nonzero, while interactive mode keeps the conversation
-available for recovery.
-
-### Human-only evidence catalog (`internal/session`)
-
-The session evidence catalog is a read-only projection built on demand from one
-physical session's canonical `raw.ndjson` plus current filesystem metadata. It
-has no separately persisted index and therefore cannot drift from the event
-stream. Catalog version 1 assigns stable chronological `eval-NNNNNN` IDs to all
-typed evaluator results and `tool-NNNNNN` IDs according to every tool-result
-event, while returning records only for evaluator results, tool errors, and
-truncated tool outputs with expected archives. Filtering never renumbers IDs.
-Lists retain only the newest matching page in memory, return 20 records by
-default, and reject limits above 100.
-
-The projection contains bounded metadata only: source/outcome, prompt and turn,
-event time, evaluator score/direction/candidate/reference, or the canonical tool
-summary/error excerpt. It never reads artifact bodies. New truncated-tool events
-carry their deterministic session-relative `artifact_ref`; legacy events derive
-the same path from prompt, turn, and tool-call ID. Filesystem inspection uses
-`Lstat`, rejects symlink components and non-regular targets, never probes an
-evaluator reference outside the persisted startup working directory or session,
-and never permits a tool artifact outside the session. Missing, unreadable,
-unsafe, external, and unreferenced states remain visible. A regular artifact
-whose modification time is newer than its canonical event is marked stale;
-this is an explicit freshness warning, not a claim that unchanged timestamps
-prove immutable contents.
-
-`/evidence` and `/evidence show <id>` expose the projection in the interactive
-REPL without a model request. `harness session evidence` exposes the same data
-afterward in text or a versioned JSON page. Both inspect exactly one physical
-session stream; callers select a child session explicitly rather than silently
-merging root and delegate evidence. The catalog does not copy evaluator files,
-make evidence model-visible, mutate the worktree, or broaden the candidate
-lineage authorization boundary.
-
 `SessionStart` hooks are the supported path for dynamic prompt context, such as
 detecting whether GNU sed is available as `gsed` or reporting the active bash
 version. Static personal preferences belong in `~/.agents/AGENTS.md`; command
 output belongs in hook context.
+
+### Trajectory projection, stagnation nudge, lineage, and evidence
+
+Harness derives a bounded, host-owned trajectory projection
+(`internal/trajectory`) from facts already in the canonical event stream; it
+is never rendered into prompts, transcripts, tool results, or model-visible
+text. The only model-control consumer is the default-on `stagnation_nudge`
+policy: at a no-improvement streak of two during an already blocking Stop-hook
+continuation, it persists a payload-free event and appends one generic
+strategy-reset instruction to the internal corrective turn. The
+invocation-only `-candidate-lineage` flag authorizes a root-only archive of
+strictly improving evaluator-scored workspace trees (`internal/lineage`),
+inspected through the human-only `/lineage` commands. The session evidence
+catalog (`internal/session/evidence.go`) is a read-only, human-only projection
+over one physical session's events, exposed via `/evidence` and `harness
+session evidence`. Deep dive: [trajectory.md](trajectory.md).
 
 ### Interactive initial prompt (`-i`)
 
@@ -3870,609 +3297,51 @@ Two run modes share the stream:
 
 ## 11. Session persistence (`internal/session`)
 
-```go
-type Session struct {
-    Version       int                `json:"version"` // 7: independent plan and TODO state
-    ID            string             `json:"id"`
-    CWD           string             `json:"cwd,omitempty"`
-    ParentSession string             `json:"parent_session,omitempty"`
-    ParentEntryID string             `json:"parent_entry_id,omitempty"`
-    ActiveLeaf    string             `json:"active_leaf,omitempty"`
-    Provider      string             `json:"provider"`
-    Model         string             `json:"model"`
-    Created       time.Time          `json:"created"`
-    Updated       time.Time          `json:"updated"`
-    Build         BuildMetadata      `json:"build"`
-    Runtime       RuntimeProfile     `json:"runtime"`
-    System        string             `json:"system"`
-    Agent         string             `json:"agent,omitempty"`
-    Prompt        int                `json:"prompt,omitempty"`
-    ResponseState *llm.ResponseState `json:"response_state,omitempty"` // Responses stateful continuation anchor
-    ProxySessionID string `json:"proxy_session_id,omitempty"` // sticky-routing/WebSocket isolation key
-    CacheAffinityID string `json:"cache_affinity_id,omitempty"` // stable prompt-cache routing identity
-    Plan          *plan.Plan         `json:"plan,omitempty"`           // latest recorded plan
-    Todos         []todo.Item        `json:"todos,omitempty"`          // advisory TODO list
-    Goal          *goal.State        `json:"goal,omitempty"`           // autonomous session goal, reseeded on resume
-    Usage         UsageTotals        `json:"usage"`                    // session aggregate
-    UsageByModel  map[string]UsageTotals `json:"usage_by_model,omitempty"` // per model target cost
-}
+A session path is a directory: `tree.ndjson` is the canonical append-only
+conversation tree (first record a session header, later records immutable
+typed entries), `state.json` stores mutable runtime state and the active leaf,
+`active-turn.json` is a transient atomic recovery record for the current
+provider boundary, `raw.ndjson` is the chronological replay stream,
+`diagnostics.ndjson` stores JSON slog diagnostics, `compactions/` archives
+messages removed from active context, and `artifacts/tool-results/` stores
+full truncated tool output. All session writes use temp-file then rename. The
+`state.json` schema is versioned and intentionally breaking across versions.
 
-type Entry struct {
-    Type         EntryType // segment | compaction | branch | context_reset
-    ID           string
-    ParentID     string
-    Time         time.Time
-    Messages     []llm.Message // segment or context_reset snapshot
-    ContextDelta *ContextDelta // legacy context_reset, mutually exclusive with Messages
-    // Compaction checkpoint, kept-entry boundary, archive reference, and size.
-    // Branch source/common ancestor/optional summary and workspace warning.
-}
+`internal/sessionrec` is the one canonical `raw.ndjson` recorder, shared by
+the parent UI sink and delegate child sessions; a parity test pins identical
+output from both paths. Resume reconstructs active provider context by walking
+parents from the active leaf, with `active-turn.json` recovery applied when
+newer; branching never splits a tool_use/tool_result pair across segments, so
+the §4 invariant survives navigation.
 
-type ContextDelta struct {
-    BaseMessageCount   int
-    ResultMessageCount int
-    BaseDigest         string
-    ResultDigest       string
-    Splices            []ContextSplice // sorted, non-overlapping parent indices
-}
-
-type ContextSplice struct {
-    Start    int
-    Delete   int
-    Messages []llm.Message
-}
-
-type UsageTotals struct {
-    llm.Usage          // cumulative token counts
-    CostUSD    float64 `json:"cost_usd"` // 0 when the model has no price entry
-    Compactions int    `json:"compactions,omitempty"`
-}
-```
-
-- Schema v6 is intentionally breaking: loading or replaying an older
-  `state.json` returns a clear unsupported-version error; there are no aliases,
-  migrations, or legacy linear-session fallback.
-- A session path is a directory. `tree.ndjson` is canonical append-only
-  conversation data; its first record is a session header and later records are
-  immutable typed entries. `state.json` stores mutable runtime state and the
-  active leaf. `active-turn.json` is a transient atomic recovery record for the
-  current provider boundary. `raw.ndjson` remains chronological replay data,
-  `diagnostics.ndjson` stores JSON slog diagnostics, `compactions/` stores raw
-  messages removed from active context, and `artifacts/tool-results/` stores full
-  truncated tool output.
-- Segment entries are safe navigation boundaries. An assistant tool-use message
-  and its immediately following tool-result message share one segment so a
-  branch cannot split the provider transcript invariant.
-- Before each provider request and before dispatching emitted tool calls,
-  Harness atomically replaces `active-turn.json` with the complete resumable
-  runtime state: transcript, latest plan, TODO list, usage, cache/proxy IDs, and safe
-  Responses continuation anchor. An open tool-use is stored with synthetic
-  `interrupted` results. Recovery therefore never automatically re-executes a
-  tool whose process-local completion is unknown.
-- After every validated closed conversational turn, root and child sinks first
-  write the recovery record, then append/sync the tree and atomically replace
-  `state.json`. Only after that canonical save succeeds is `active-turn.json`
-  removed. Prompt-end/manual saves use the same consolidation order.
-- Saves append and `fsync` new tree entries before atomically replacing
-  `state.json` via temp-file plus rename. Context rewrites are recorded as complete
-  message snapshots. Previously written splice-delta reset entries remain
-  readable for compatibility; both forms can coexist without a schema migration.
-  A malformed final tree record is
-  treated as an interrupted append; malformed non-final records, missing
-  parents, duplicate IDs, and invalid segments are hard errors.
-- Active provider context is reconstructed by walking parents from
-  `ActiveLeaf`. A context-reset snapshot or compaction with a materialized kept
-  suffix can anchor replay; later segments, branches, compactions, and legacy
-  delta resets are then applied in path order. Legacy delta resets verify
-  parent/result message counts and provider-neutral transcript fingerprints before
-  use, validate the materialized transcript, and preserve message ownership
-  references outside changed splice runs.
-- Every saved message and append-only replay event carries a timestamp. Replay
-  events identify `prompt`, `turn`, and (for provider requests) `attempt` separately.
-  `turn_attempt_start` also snapshots agent/provider/model execution identity so
-  analysis can detect switches without trusting mutable final session metadata.
-  `turn_attempt_start`, `turn_attempt_abandoned`, and `turn_attempt_usage` describe
-  provider calls; `turn_complete` closes a conversational turn; `prompt_usage`
-  closes the top-level prompt and carries its successful compaction count. A
-  host `/continue` recovery receives a fresh prompt ID, so its notice, attempts,
-  checkpoints, turns, and one terminal `prompt_usage` record are independent of
-  the failed prompt. It deliberately emits no `EventUser` and contributes no new
-  transcript block; saving synchronizes only the recovered assistant/tool suffix
-  onto the existing active leaf. The eligibility and original request-only hook
-  context are process-local and are not reconstructed by resume.
-  `maintenance_usage` accounts for compaction,
-  prewarming and branch-summary calls without creating turns.
-  `model_request` records proxy/request lifecycle and every API issue with timing,
-  parsed error, and correlation metadata; these events are replay/analysis data
-  only and never become conversation-tree entries or model context. `checkpoint`
-  records the boundary kind, save duration, and message count; stats use
-  closed-turn records to expose save overhead and lag. `branch` records
-  navigation source/target IDs in chronological replay. Tool-result events may
-  carry diagnostics-only integer `result_metrics` supplied by the tool; those
-  values are never copied into transcript blocks. Failed tool-result events
-  additionally carry the structured `error_kind` and a bounded, rune-safe
-  `error_excerpt` (2 lines / 240 runes) consumed by the stats Errors section
-  and `harness session errors`; tool starts/results snapshot the active
-  `model_target`, `provider`, `api_type`, and `model` for stable attribution.
-  Legacy logs without those fields use the preceding `model_request`, then
-  session metadata. Legacy failures without a kind are text-classified from the
-  recorded display line. `skill_activation` records preserve the
-  legacy event type but new events carry only the explicit/injected source and
-  summary, not instruction contents; the `<skill>` body itself is ordinary user
-  transcript content.
-- Sessions store the CLI-owned previous response/interaction ID, anchored message
-  count, and transcript fingerprint in `state.json`. Resume restores it only
-  when continuation is enabled for the exact current target, saved/current
-  provider and model match, the index is in range, and the fingerprint matches
-  the materialized active prefix. `active-turn.json` enforces the same invariant;
-  invalid recovery state is discarded. `-responses-stateful=false` installs no
-  anchor and sends complete history on every request.
-- Gemini Interactions uses the same CLI-owned continuation contract.
-  `interactions_stateful` controls the target's catalog capability; sessions
-  retain signed thought and Google Search steps so a missing/rejected stored
-  interaction can be replayed from complete history through any proxy replica.
-- Image bytes are embedded in `tree.ndjson` as provider-neutral base64 blocks so
-  resume is self-contained; `raw.ndjson` records only image metadata for replay.
-- Auto-save to `~/.local/state/harness/sessions/<timestamp>`; the path is printed at
-  startup. `-session` chooses a directory; `-resume` loads `state.json` plus its
-  active tree path, or applies a newer `active-turn.json` recovery record before
-  continuing. Resume reports the recovered phase. Resume also prints a stderr
-  recap of the last durable exchange before the first prompt, classified from
-  the transcript alone (recovery marker, tail message role/phase/origin, and
-  synthetic `interrupted` tool results) as clean, recovered, interrupted
-  mid-reply, interrupted during tool execution, or an unanswered prompt. It also marks child metadata
-  left `running` by the prior process as `abandoned`; such children are terminal
-  and may be continued by child ID when their saved runtime contract still
-  matches. Distinct `-resume <source>` and `-session <destination>` clone the
-  active path with parent lineage and fresh usage. `/clear` rotates to a fresh
-  directory.
-- `/tree` renders a harness-native searchable/paged line picker over tree nodes.
-  The renderer keeps unary paths in one graph lane, adds lanes only for sibling
-  branches, labels checkpoint kinds, condenses repeated tools, and clips rows to
-  the live terminal width. Selecting a human prompt targets its parent and
-  returns its text/images as editable prompt prefill. Other entries are selected
-  directly. Before moving, the user chooses no summary (default), a model-written
-  summary, or a summary with custom focus; summary failure leaves the active leaf
-  untouched.
-- `/fork` uses the same compact graph projected onto human prompts, so hidden
-  assistant and tool entries do not affect indentation, then extracts the selected
-  pre-prompt path into a new session. `/clone` extracts the current path. Extracted
-  sessions receive a new session ID, `ParentSession`/`ParentEntryID`, prompt number
-  zero, fresh lifetime usage, and cleared Responses/proxy continuation anchors.
-  Model, provider, agent,
-  reasoning, latest plan, TODO list, hooks, and working directory stay global/current.
-- Conversation navigation does not alter filesystem or Git state. Every branch
-  adds a model-visible internal warning to inspect current files before assuming
-  their state. Optional branch summaries describe only the divergent old suffix.
-- Child-agent runs are stored below `children/<child-id>/` with their own
-  `state.json`, `raw.ndjson`, `meta.json`, and artifacts. Parent resume ignores these
-  child transcripts; they are forensic sidecars. `meta.json` is a `ChildMeta` index —
-  id, parent id, kind, agent, provider/model, status, task preview, transcript/replay
-  paths, error, usage, message count, mode, resolved/requested agent,
-  background resource/access lease,
-  continuation source/runtime fingerprint, requested/effective turn budgets,
-  physical turns used, and termination reason. The delegate Runner creates `running`
-  metadata, then owns one terminal transition to `completed`, `failed`, or
-  `canceled`; a later parent resume changes stale `running` metadata to
-  `abandoned`. State-save failure does not skip the terminal metadata attempt.
-  Terminal reasons are `model_completed`, `turn_limit`, `token_limit`,
-  `cost_limit`, `repeat_guard`, `error_guard`, `cancelled`, or `error`;
-  `turn_limit` does not imply semantic incompleteness, and `model_completed`
-  does not prove acceptance. `prompt_usage` remains the final normal child event
-  and carries the same reason plus its successful compaction count. Inline
-  delegate lines are
-  process-local display events only: they are not appended to either parent or
-  child persistence. Child `raw.ndjson` retains the complete replay content and
-  remains the full-fidelity source for `session replay --follow`. Parent and
-  child sessions are recorded through one canonical recorder
-  (`internal/sessionrec`): both sinks call the same recorder, which owns the
-  pending-tool map, turn/prompt duration math, unpriced-usage pricing hooks,
-  and the shared Display-line formatters (tool summaries, `[turn: …]` and
-  `[prompt: …]` lines, model API issue lines) that the live renderer also
-  uses. Child sessions therefore store the same tool-result summaries,
-  turn/prompt usage lines, model-request display lines, and `tool_diff`
-  events (when diffs are enabled) as the parent by construction; a parity
-  test drives one scripted run through both sink paths and pins identical
-  `raw.ndjson` output. Reliability telemetry schema v1 adds bounded structured
-  fields only: prompt closure trigger and workflow status; per-tool-turn activity,
-  first mutation/verification state, inspection/no-progress run, batching activity,
-  and optional steer reason; hook outcome/duration/timeout/circuit state;
-  bounded semantic evaluator result and evidence reference; host-derived
-  trajectory mutations, seeds, and branch resets; context arithmetic and
-  provider-count scope; and retention/reset decisions. A
-  `telemetry_version` capability marker makes an observed zero distinguishable
-  from a legacy unavailable signal. None of these fields contains prompt text,
-  assistant text, tool arguments/results, hook payloads, or environment values.
-  The recorder's `Mirror` hook (`sessionrec.Config.Mirror`
-  → `session.EventAppender.Mirror`) receives every event after it has been
-  durably written, post-coalescing; `-format json` run modes (§10) install it
-  to mirror the identical event stream to stdout, so the live JSON stream and
-  the replay log can never diverge.
-- `harness session analyze [--since D|--all] [--before RFC3339] [--format text|json] [--] [path]`
-  recursively analyzes one session or a corpus. With no path, `--since` limits
-  recent root discovery (default `24h`) and `--all` removes that lookback;
-  neither applies to an explicit path. It treats every physical root or
-  delegate log as a separate stream, recursively descends real `children/`
-  directories without following symlinks, hashes the immutable complete-record
-  prefix, and keeps missing/truncated/malformed/limit-exceeded sources explicit.
-  Raw parsing is streaming and bounded by snapshot bytes, line size, and record
-  count; retained analysis events discard transcript/body fields after hashing. Availability is
-  denominator-aware: schema-supported zeroes are available, while legacy fields
-  and absent streams are not inferred. A cutoff includes events at or before the
-  requested instant and disables untimestamped child-metadata fallback. Aggregate
-  execution completeness has a stable severity order (`incomplete` over
-  `unavailable` over `unknown` over `complete`). Analyzer schema v12 groups every
-  physical root plus descendants as one experimental hierarchy. Items retain
-  their own provider/model/agent/build/runtime identity, derive immutable
-  per-attempt identity availability/stability, and carry root ownership; cohort
-  distributions use a deterministic key from the root build (with modified and
-  clean builds distinct) and behavior-changing runtime profile.
-
-  Inclusive accounting sums only physical `turn_attempt_usage` and
-  `maintenance_usage` records, split across root/descendant and
-  conversational/maintenance slices. Every normalized token class is retained.
-  Calls without known pricing contribute tokens and increment unpriced coverage,
-  so known cost remains visible with `cost_complete:false`. Persisted root usage
-  is reconciliation-only and is consulted only for complete, non-cutoff
-  hierarchies; it is never added to child usage. Hierarchy and cohort summaries
-  carry sample counts with nearest-rank median/p90 token values and known-complete
-  cost. Child completion aggregation counts only outcomes, validation states,
-  and contract provenance. It never emits blocker text or child report prose,
-  and schema v12 has no contract-specific completion-field analytics. Completion
-  metadata is schema-local: current analysis rejects retired rich completion
-  records, and sessions created before 0.5.12 should be analyzed with the Harness
-  0.5.11 binary. Children without reports remain useful but contribute an explicit
-  `unknown`/missing coverage failure. Parent rework remains unavailable
-  unless a future host-owned signal can observe it. Semantic completion remains
-  independent of lifecycle termination.
-
-  Corpus/session discovery and storage analysis use chunked, capped
-  entry/depth walks; metadata reads are size-bounded and symlinks are not
-  followed. Storage reports files/directories/bytes for state/tree/raw logs,
-  compactions, and tool-result artifacts, plus context-reset
-  snapshot/legacy-delta counts and payload bytes. Raw storage bytes use the physical
-  snapshotted file size, not only the event prefix selected by a cutoff. Missing,
-  incomplete, malformed, symlinked, cutoff-incomplete, and limit-exceeded sources
-  remain explicit.
-  Transcript bodies, tool inputs, and artifact contents never enter output.
-  Context aggregation preserves provider count scope: payload and effective
-  maxima stay separate, incompatible scopes are not subtracted, negative public
-  values are clamped, and compatible-scope arithmetic violations remain counted.
-  `session stats` reuses analyzer-v3 usage/storage vocabulary for a single root
-  plus every physically nested delegate.
-- `harness session replay <session-dir>` prints `raw.ndjson` as the familiar
-  user-facing terminal view, filtering assistant/reasoning deltas from retry
-  attempts that were explicitly discarded before a later successful attempt.
-  Consecutive assistant stream fragments for one prompt/turn/attempt are
-  coalesced into bounded 4 KiB/250ms records before they reach disk; a non-delta
-  event flushes pending text first, so replay ordering and output are unchanged
-  while per-token append/open/encode overhead is avoided. Replay renders Markdown at
-  display time. On a color terminal, stored status Display lines are dimmed,
-  `turn_attempt_start` renders the dim `[turn: N waiting]` /
-  `[turn: N attempt M waiting]` markers the live non-status path prints, a dim
-  horizontal rule separates each prompt block, and `tool_diff` events are
-  colorized through the same highlighter as live diffs using the recorded
-  file path for language detection; diffs are content and are never dimmed.
-  Replay resolves `color_theme` at display time using the current flag >
-  environment > config-file > dark-default precedence, through a focused loader
-  that does not require model/provider configuration. Theme and ANSI choices are
-  never recorded in `raw.ndjson`, so the same session may be replayed under either
-  palette. `session replay --follow` keeps one stateful renderer with that palette
-  (including across split appended tokens) and consumes only newline-complete
-  append-only records with the ordinary 16 MiB
-  record limit. It filters discarded attempts in the initial batch; a later live
-  discard marker is printed rather than retracting visible output. Terminal child
-  metadata triggers one final drain and a child `prompt_usage` record is a fallback
-  completion marker. Root sessions have no terminal marker and follow until their
-  context is canceled. Log rotation is not supported.
-- `harness session timings <session-dir>` reads `raw.ndjson` timestamps and
-  prints prompt totals, turn-attempt durations, tool durations, largest event gaps,
-  context/payload estimates, and model API issue counts/provider time/scheduled
-  retry wait. A prompt without `prompt_usage` is labeled `in progress`, and its
-  elapsed time ends at the latest recorded event rather than being reported as
-  zero.
-- `harness session stats <session-dir>` reads the existing root and child
-  `state.json` and `raw.ndjson` files, `compactions/*.meta.json` plus their input
-  transcripts, and `children/*/meta.json`. It reports turns, direct tool and
-  command activity, lifetime parallel batches, compactions, tree
-  entries/branches/leaves/depth, navigation events, authoritative token/cost
-  totals, calls per tool-bearing turn, standalone TODO/single-inspection turns,
-  result truncation/byte/timing totals and per-tool volume, redacted aggregates
-  of repeated normalized calls, command-step shape, skill reads/activations,
-  active transcript composition, the latest request estimate,
-  and a hierarchical delegate
-  breakdown with the five highest direct-token children.
-  The session header includes build identity and the non-secret runtime profile
-  used for efficiency comparisons. A child without a completed
-  `state.json` checkpoint is reconstructed from its metadata and replay for
-  analysis and marked `checkpoint: unavailable`. Conversation statistics
-  distinguish prompts, turns, model calls, retries, and maintenance calls.
-  Sessions with closed-turn checkpoint events also report checkpoint count,
-  average/maximum save time, and lag in completed turns and seconds. Root usage already includes delegate and
-  maintenance spend and is never
-  summed with child usage; each child usage total likewise includes its nested
-  delegates. Direct tool activity is instead summed once from every replay log.
-  The non-overlapping direct model-activity total likewise sums physical
-  `turn_attempt_usage` and `maintenance_usage` records once from every root and
-  child replay and prints a root/delegate split. Normalized call reporting
-  hashes canonical JSON and emits counts only; it never prints tool arguments
-  or skill paths. Compaction metadata uses the writer's canonical field shape;
-  the stats reader accepts unknown additive fields while still rejecting
-  malformed JSON and trailing values.
-  `--format json` is versioned and additive: it emits the transcript-free
-  tool/error subset with calls, results, failures, rates, and partial
-  composite-operation metrics, plus build/runtime identity and analyzer-v3
-  usage/storage sections.
-- `harness session errors [dir]` lists classified failures — failed tool
-  results and failed model requests — for one session (root plus delegate
-  children), or scans recent sessions under the default sessions root when no
-  directory is given (`--since <dur>`, default `24h`; `--all` disables the
-  window). `--tool`, `--kind`, `--model`, and `--agent` filter rows, and
-  `--before <RFC3339>` applies an event-time cutoff. `--format json` emits
-  scope, per-session rows, aggregate summary data, and per-physical-stream
-  hashes/byte/event counts for the complete records analyzed. Each stream is
-  snapshotted at its starting byte length so concurrent appends cannot change
-  the scan. Multi-session scans report and skip unsupported/corrupt roots;
-  explicitly named invalid roots remain errors.
-  The summary additionally reports in-band `shell` execution failures,
-  cancellations, and an effective failure total without converting them into
-  tool-error rows. The stats report renders the same collector's aggregate as its Errors
-  section, including result denominators/rates and repeat loops calculated from
-  complete physical tool-result streams. A success or different failure ends
-  a streak, and root/child streams never join.
-- Transcripts are provider-neutral; resuming under a different provider/model works.
-  When flags disagree with the state, flags win with a warning. Tool-result messages
-  may include local-only `parallel_tool_batches` metadata; provider adapters ignore it.
-
-### REPL history
-
-Global REPL history persists across sessions, mirroring bash's familiar model:
-
-- **Location:** `<stateDir>/harness/history` (one entry per line, plain text), or the
-  path in `HARNESS_HISTFILE` / `-histfile` / config `histfile`.
-- **`HARNESS_HISTFILESIZE` / `-histfilesize` / `histfilesize`:** max entries stored
-  on disk (default `1000`, `0` disables persistence).
-- **`HARNESS_HISTSIZE` / `-histsize` / `histsize`:** max entries loaded into memory
-  at REPL start (default `1000`, `0` disables recall).
-- **Behavior:** entries are appended on each non-empty, non-multiline input submission.
-  On REPL start, the file is loaded, deduplicated (keeping the last occurrence), and
-  rewritten if it exceeds `HISTFILESIZE` (self-healing). At most `HISTSIZE` recent
-  entries are surfaced for up-arrow recall.
-- **Concurrency:** uses `O_APPEND`, so multiple parallel REPLs sharing one file stay
-  safe on POSIX systems.
-- **Scope:** REPL sessions only; one-shot (`-p`) does not load or save history.
+The storage layout, save/recovery ordering, replay event vocabulary, branching
+and extraction semantics, child-session metadata, the
+analyze/replay/timings/stats/errors inspection commands, and REPL history are
+documented in [session.md](session.md).
 
 ## 12. Compaction (`internal/agent/compact.go`)
 
-- **Provider-native foreground path.** When the selected proxy target advertises
-  native compaction, ordinary automatic compaction and an unfocused `/compact`
-  send the complete current provider-visible window plus `Request.System` to the
-  provider's standalone compaction endpoint. The request also carries the active
-  tool schemas, server tools, reasoning controls, cache key, and service tier so
-  the provider sees the same model contract as an ordinary turn. ChatGPT Codex
-  requests add stable installation/session/thread/window headers, and its
-  response may omit the public API's `object` discriminator as long as the output
-  still validates as a canonical compaction window. The input must already fit
-  the provider context window. Harness persists the complete returned item array
-  in a hidden domain-scoped checkpoint and never parses, prunes, or summarizes its
-  contents. Subsequent same-domain requests send that canonical window followed
-  by newer transcript messages. The semantic transcript remains intact, so a
-  model/provider switch simply omits the opaque checkpoint and replays normal
-  history. TODO, goal, hook, and background state remain request-only overlays
-  and are added fresh to every active model round; the system prompt remains on
-  `Request.System`.
-- Native compaction resets any stored-response continuation anchor and starts a
-  fresh stateless baseline. An endpoint failure disables the path for that
-  replay domain for the current process and falls through to textual compaction.
-  If a later request rejects a persisted checkpoint's encrypted
-  content, Harness disables that checkpoint and retries once from the preserved
-  semantic transcript. Focused manual compaction, continuation handoff,
-  all-history child compaction, and speculative idle work keep using textual
-  checkpoints because they need Harness-owned summary semantics or detached
-  application. Live retention is skipped while native compaction is available,
-  preserving the semantic history needed for cross-provider fallback.
-- **Trigger:** when `max(reported input tokens, estimated full-request footprint)`
-  reaches `compact_trigger_percent` (default **78%**) of the model's effective/learned
-  context window. Successful compaction targets `compact_target_percent` (default
-  **65%**) after fixed system/tool-schema overhead, providing hysteresis instead of
-  re-compacting after each small result. Reported input counts cache-read/cache-write tokens because cached context
-  still occupies the window. The trigger runs after a prompt and proactively between
-  turns, before the next request when tool results balloon the estimate. Also manual
-  `/compact`. The estimate side is the last **measured** input
-  tokens (`lastInput`) plus a bytes/4 estimate of only the messages appended since
-  that measurement (the append boundary), so the trigger tracks real usage instead of
-  re-estimating the whole transcript; the raw bytes/4 estimate is reserved for the
-  degradation ladder. `compact_auto_enabled: false` gates the proactive,
-  exact-count, and post-prompt checks only; explicit compaction and the single
-  provider-overflow recovery retry remain enabled. The terminal warning follows
-  the configured trigger and is suppressed with automatic compaction.
-- **Live-transcript retention pass.** Before each model request the agent runs a
-  pure-local retention pass (no model round-trip). The default `auto` policy and
-  explicit `pressure` policy use the larger of the full local estimate and the
-  last provider measurement plus appended-message delta. At 60% of the effective
-  window an armed pressure epoch trims every eligible result and aged image in
-  one pass, then disarms until context falls to 50% or below. Neither policy
-  rewrites history below pressure; compaction remains the safety net.
-- Any retention edit clears the CLI-owned `previous_response_id`
-  exactly once, while a below-pressure stateful request preserves it and sends
-  only the appended delta. Stateless providers get the same batched transcript
-  bounding without continuation reset semantics.
-- The `retention_policy` experiment control can force `age`, `pressure`,
-  or `disabled`. Auto and pressure share pressure-only epoch semantics, including
-  the optional absolute floor. Age mode trims eligible results older than
-  `retention_keep_turns` completed turns (default 4, decoupled from the
-  compaction suffix) and images two or more turns old before each request.
-  Disabling the local pass does not disable compaction or provider-overflow
-  recovery. Delegate continuation fingerprints include the selected policy.
-- **Eligibility.** A tool result is trimmable when it is read-only (re-derivable
-  on demand) and older than the retention boundary, or when its exact bytes are
-  durably archived and it is older than 2× that boundary. A mutating result with
-  no durable archive is never trimmed. A `write`/`edit` tool input is replaced
-  with a compact path receipt once a newer successful mutation to the same path
-  exists after the boundary; a failed later call never supersedes. Receipts stay
-  complete JSON objects and keep `MutatedPaths`/`ReadPaths` decodable so
-  compaction file indexing keeps working. Every trim still requires a
-  successful archive of the exact original, or the block is left untouched.
-- Both retention policies preserve the §4 transcript invariant and are
-  idempotent. Idempotency markers (`[older tool output trimmed` in result
-  bodies, `content omitted` in tool inputs) make repeated passes no-ops.
-  `raw.ndjson` `retention` events record policy/trigger, blocks and
-  bytes trimmed, estimated context before/after, whether Responses state was
-  reset, and whether the next request used stateful continuation or full
-  context. `session stats` summarizes those epochs and request shapes.
-- Before replacing an eligible result body, retention atomically archives the
-  exact original through the tool-result artifact path. The live transcript
-  keeps a typed receipt with tool name, success/error status, shown/original
-  byte counts, a bounded head, and the targeted recovery hint. The head is
-  `retention_result_head_bytes` (default 800 bytes, clamped to the 4096-byte
-  eligibility threshold); the compaction summary preview keeps its own 4096-byte
-  budget. If no session archiver is available, the receipt retains the generic
-  recovery guidance; if a configured archiver fails, retention leaves the
-  original body untouched.
-- The cache-stable prefix is computed against the same boundaries: it stops
-  before the first result a future epoch could trim, the first image it could
-  degrade, and the first superseded tool input it could replace, so a promised
-  prefix is never rewritten later.
-- **Turn boundary:** a completed turn begins at an assistant response and includes
-  its immediately following tool-result message when that response requested tools.
-  User prompts, steering messages, and synthetic context are inputs to a turn, not
-  boundaries that merge all round trips since one prompt.
-- **Mechanism:** keep the system prompt and select a raw whole-turn suffix newest
-  first until it reaches `compact_keep_tokens` or the `compact_keep_turns` cap
-  (default 8). When `compact_keep_tokens` is unset the budget is window-adaptive:
-  `clamp(window/5, 4000, 20000)`, so a small-window model does not keep 20k
-  verbatim while a 1M-window model still caps at 20k. Always retain at least the
-  newest completed turn. Under low-water pressure, move the oldest retained round behind the boundary,
-  regenerate the summary over the enlarged removed set, and repeat until the target
-  is met or only the newest turn remains. Send
-  everything older to the model with the summarization instruction in
-  `prompts/compaction-summary.txt`: preserve the task/goal and acceptance
-  criteria, still-constraining decisions, semantic state for meaningful file
-  changes, active workspace/blocker/verification state, key facts, and
-  unresolved intent; do not invent. The model does not enumerate read-only
-  inspected files or reproduce the separately injected TODO list. Summary output is
-  capped by `compact_summary_max_tokens` (default 2048).
-  Both summary prompts explicitly classify supplied history, tool output,
-  metadata, and the previous summary as untrusted data: embedded commands, role
-  changes, output-format requests, and claims of authority must be summarized as
-  evidence when relevant, never followed. The only permitted output is the
-  replacement summary.
-  A first compaction uses `prompts/compaction-summary.txt`. A repeated compaction
-  removes the structured prior checkpoint from ordinary summary history, passes its
-  exact prior summary once as data, and uses `prompts/compaction-update.txt` to
-  produce a complete replacement. Map/reduce phases summarize only newly aged chunks;
-  the prior summary appears only in the final update call. Replace the old messages
-  with one synthetic **user** checkpoint headed
-  `=== Compaction checkpoint ===`. It carries the active prompt and any steering
-  instructions verbatim, then the progress summary and raw archive reference. This
-  preserves current instructions explicitly without pretending the summary was a
-  conversational assistant turn. `/compact [focus]` adds one-shot emphasis to all
-  summary phases and records that focus only on the resulting checkpoint/archive.
-- **Typed compacted-history state:** the advisory TODO list is persisted
-  independently and re-injected once after a transcript rewrite when unresolved.
-  Compaction summaries therefore omit that list and retain only unresolved
-  intent or blockers not represented by it.
-- **Deterministic compacted-history files:** correlate each validated assistant
-  tool-use message with its immediate result message. Successful supported
-  `read`, `write`, and `edit` calls contribute normalized, sorted cumulative
-  read/modified paths; modified wins over read. Commands, Git, MCP, malformed
-  inputs, failed calls, and unsupported/custom tools are skipped. The read list
-  is capped at the 200 most recent first-touches (oldest dropped first) and the
-  checkpoint JSON reports the omitted count as `read_files_omitted`, so a
-  thousand-path exploration does not re-send tens of KB in every checkpoint and
-  every later summary request. Modified paths are never capped. The JSON index
-  is the authoritative recognized file-activity inventory in the active
-  checkpoint and summary request. The model records semantic state only for
-  meaningful changes and unfinished mutation intent; it does not duplicate
-  read-only inspected paths.
-- Before summarization, a successful tool result carrying the local
-  `ResultUseless` hint and its matching call input are replaced in the summary
-  request copy with small semantic-empty placeholders; rich result images are
-  dropped. The active transcript and provider-visible live result remain unchanged.
-  Large remaining old tool results and tool inputs are reduced to
-  previews (`compact_tool_result_max_bytes`, default 4096; a **negative** value disables
-  this reduction entirely), and old images are replaced with text placeholders. If older
-  history is too large for one summary request, it is summarized in chunks, then the
-  chunk summaries are summarized.
-- **Hooks.** A configured `PreCompact` hook runs before summarization; if it blocks,
-  compaction is skipped with a `[compact skipped: <reason>]` notice. A `PostCompact`
-  hook runs after the transcript is replaced; its `additionalContext` is added as
-  request-only context for the next model request, and a block surfaces a
-  `[post-compact hook blocked after compaction: <reason>]` notice. Both receive a
-  `trigger` field (`auto` or `manual`); a focused manual compaction also supplies
-  `focus` to both hooks.
-- **Speculative idle compaction:** the interactive REPL can opt in with
-  `compact_idle_after_seconds` (zero disables) and a lower
-  `compact_idle_trigger_percent`. At the timer boundary the owning goroutine
-  captures a deep transcript copy plus a SHA-256 fingerprint covering the
-  transcript and compaction-relevant runtime. A private Agent performs the
-  model work against that snapshot; it shares only the provider and cannot call
-  the live archiver or mutate session state. Submitted input cancels the worker
-  and marks any late result for discard, so prompt execution never waits for
-  speculative summarization. The owning goroutine applies a completed candidate
-  only when that fingerprint still matches, then runs the live archive callback,
-  installs the checkpoint, saves, and prewarms. Configured `PreCompact` or
-  `PostCompact` hooks make the idle path ineligible because their external side
-  effects cannot be rolled back.
-- Each started idle attempt emits an `idle_compaction` replay event with
-  outcome, wall time, threshold, message counts, and context before/after when
-  applied. Summary tokens returned by the worker are `maintenance_usage` under
-  purpose `idle_compaction`, including canceled or stale work. `session stats`
-  reports attempt outcomes, average/maximum wall time, and average applied
-  context reduction.
-- Before replacing active history, raw removed messages are archived under
-  `compactions/`; the active summary includes the archive reference.
-- **Summary call hardening (`summarizeOne`).** The summarization request runs with
-  reasoning disabled (`Reasoning: llm.ReasoningConfig{}`) regardless of the session's
-  effort, so compaction never spends a thinking budget. It retries transient
-  mid-stream errors with the shared `retry.Next` backoff (up to `streamRetries`) so a
-  429 at 78% does not abort compaction. If the summary itself is truncated
-  (`StopMaxTokens`) it doubles the token budget and retries once, then accepts the
-  result. The complete model-backed phase—including every chunk, retry, and final
-  reduction—shares one `compact_timeout_seconds` deadline (default **300 seconds**).
-  Hooks, local validation, and archive persistence use the caller context rather
-  than the summary deadline. The whole operation remains covered by one transient
-  `context: compacting` progress phase.
-- **Image-aware estimation.** `estimateTokens`/`estimateRequest` weight each
-  `BlockImage` at a flat `imageTokenEstimate` (1600 tokens) rather than counting its
-  base64 bytes at bytes/4, which wildly overstated images. Correspondingly,
-  `truncateLargestBlock` ranks an image by that token weight, so a large text result
-  is truncated before an image.
-- The summary call's tokens and cost are added to session totals as maintenance,
-  never as a turn. Replay records a `maintenance_usage` event. The visible notice
-  reports the full request estimate before and after:
-  `[compacted: 4 turns → checkpoint · ctx ~18.2k → ~12.7k]`.
-- **Tree/archive persistence:** archive the final enlarged removed set unchanged and
-  persist the exact summary, current focus, and cumulative file lists in additive
-  checkpoint/archive/tree metadata. `FirstKeptEntryID` remains an atomic original-tree
-  boundary when retained history can be linked directly. If degradation rewrites retained
-  content, or a valid boundary falls inside a wholesale context-reset entry, mark the
-  compaction entry and materialize the retained suffix as new atomic segment entries so
-  save/resume cannot resurrect or reject it. Old entries with omitted fields reconstruct
-  metadata from their canonical tree summary without a schema-version bump.
-- **Degradation:** once only the last turn remains, hard-truncate the largest tool
-  result/input/image blocks in place with markers.
-  When there is no older turn to summarize but the transcript is still over budget,
-  the same ladder degrades the **oversized single turn** in place. Each degrade pass
-  deep-copies before mutating (so a post-degrade `ValidateTranscript` failure rolls
-  back to the live transcript) and skips a rewrite that would not actually shrink
-  (`[compact: transcript over budget but nothing left to shrink]`). Automatic
-  current-turn fallback notices are throttled within a prompt so repeated no-op or
-  tiny-shrink attempts do not flood the UI. Never wedge.
-- **Failure and deterministic fallback:** foreground automatic, provider-overflow,
-  manual, and continuation compactions replace a failed or timed-out model summary
-  with a deliberately sparse deterministic checkpoint. It points the next model to
-  unresolved TODO state when present, preserved instructions, recognized file activity,
-  recent verbatim turns, and the raw archive; it never infers completed work. The
-  rewrite occurs only when an archive callback is available and exact removed
-  messages are persisted successfully. Missing/failed archiving keeps the full
-  transcript and returns the error. Explicit caller cancellation aborts without a
-  fallback or rewrite. Speculative idle compaction also never falls back: a timeout
-  or provider error discards that candidate so a later foreground path can decide.
-  Checkpoint, tree, and archive metadata record `summary_source` (`model` or
-  `deterministic`) and the bounded fallback reason (`timeout` or `provider_error`).
-- Compacted transcripts must still satisfy the §4 invariant (kept turns are whole turns,
-  so no tool_use/tool_result pair is ever split).
+Compaction runs when `max(reported input tokens, estimated full-request
+footprint)` reaches `compact_trigger_percent` (default 78%) of the effective
+context window — proactively between turns, after a prompt, or manually via
+`/compact`. A provider-native compaction endpoint is used when the selected
+target advertises it; otherwise removed history is summarized by the model,
+with a deterministic sparse checkpoint as the failure fallback.
+
+The model-facing contract: removed history is replaced by one synthetic
+**user** checkpoint message headed `=== Compaction checkpoint ===` carrying
+the active prompt and any steering instructions verbatim, then the progress
+summary, the recognized file-activity index, and the raw archive reference.
+Kept turns are whole turns, so the §4 tool_use/tool_result invariant is never
+split; the system prompt is never summarized because it lives on
+`Request.System`. Before any model summarization, a pure-local retention pass
+may trim eligible old tool results to archived receipts without a model
+round-trip.
+
+Trigger policy and hysteresis, retention eligibility and epochs, the
+summarization algorithm and its hardening, checkpoint/tree persistence,
+degradation, the deterministic fallback, and speculative idle compaction are
+documented in [compaction.md](compaction.md).
 
 ## 13. Testing strategy
 
@@ -4497,16 +3366,10 @@ Cross-cutting: `ValidateTranscript` is asserted after every transcript mutation 
 test that touches one.
 
 Beyond the unit tables, `//go:build integration` suites build the real binaries and drive
-them as subprocesses against hermetic local mock servers (no API keys, no network):
-`cmd/harness` exercises tool round-trip, `^C` mid-stream (exit 130 + valid resumable
-transcript), resume-of-interrupted-session, isolated real-tmux delegate views, and
-the LSP shim end to end. The tmux legs use a private temporary server socket and
-skip when `tmux` is unavailable. Run the fast unit tests with `make test`
-(`go test ./...`) and the integration legs with `make test-integration`
-(`go test -tags=integration ./cmd/harness`).
-Opt-in upstream model checks, including separate ChatGPT-subscription and
-first-party OpenAI Responses legs, use the `livemodel` tag via
-`make test-live-models`; see `docs/smoke.md` for setup and expectations.
+them as subprocesses against hermetic local mock servers (no API keys, no network);
+they live in `cmd/harness` and run with `make test-integration`. Opt-in upstream
+model checks use the `livemodel` tag via `make test-live-models`. The smoke-test
+matrix and its pass criteria are documented in [smoke.md](smoke.md).
 
 ## 14. Agent definitions (`internal/agentdef`)
 
@@ -4518,31 +3381,18 @@ reviewer, or a general-purpose agent without separate binaries.
 - **Selection** follows the standard precedence (§7): `-agent` flag >
   `HARNESS_AGENT` > `agent` in the config file > the built-in default `auto`. An
   empty value means "unspecified", so a resumed session's saved agent (§11) can
-  supply it before the `auto` fallback. Root interactive startup and explicit
-  `/agent <name>` switches require `interactive_selectable:true`; `/agent` and
-  Shift-Tab expose only those agents. The field defaults to true when omitted,
-  but the built-ins explicitly enable only `auto` and `plan`. It does not gate
-  one-shot runs, delegation, child continuation, or plan handoff targets.
-  `harness --agents` lists the full resolved set and its selection metadata.
-  `/mode` is a REPL alias only. Shift-Tab cycling invokes this same full runtime
-  selection path—not a display-name or model-only swap—so it recomposes the agent
-  prompt, tools, model/reasoning selection, and response continuation state.
-- **Built-ins:** `auto` and `plan` are interactive-selectable; `explore`,
-  `review`, and `independent` are not. `auto` is the default. `auto` and
-  `independent` expose the
-  ordinary built-in surface,
-  discovered MCP tools, `update_todos`, `record_plan`, `delegate`, and background
-  jobs. `explore` and `review` expose the shared read-only inspection surface plus
-  `update_todos`. `plan` exposes the inspection surface, `write_tmp_file`,
-  `update_todos`, `record_plan`, `delegate`, and background jobs; interactive
-  root plan sessions additionally expose
-  `handoff`. Delegated and one-shot plan agents do not.
-  `explore`, `plan`, and `review` have no first-class file-mutation tools and
-  use read-only MCP exposure. `auto` and `independent` advertise `git` rather
-  than the redundant `git_readonly`; delegation treats `git` as satisfying a
-  child's `git_readonly` requirement. Child-local `update_todos` and
-  `record_plan` are exempt from parent capability-subset matching.
-
+  supply it before the `auto` fallback. `interactive_selectable` gates only root
+  interactive startup and explicit switches — not one-shot runs, delegation,
+  child continuation, or plan handoff targets — and Shift-Tab cycling invokes
+  the same full runtime selection path as `/agent`, recomposing prompt, tools,
+  model/reasoning selection, and continuation state. The operational guide,
+  including the built-in agent table, is [usage.md "Agents"](usage.md#agents).
+- **Built-in contract details:** `auto` and `independent` advertise `git`
+  rather than the redundant `git_readonly`; delegation treats `git` as
+  satisfying a child's `git_readonly` requirement. Child-local `update_todos`
+  and `record_plan` are exempt from parent capability-subset matching.
+  Interactive root `plan` sessions additionally expose `handoff`; delegated and
+  one-shot plan agents do not.
 - **Descriptions are required selection metadata:** after resolution, every agent
   must have a nonblank trimmed `description` stating when a parent should use it.
   A new custom name without one is a fail-fast startup/`--agents`/`harness config
@@ -4567,10 +3417,9 @@ reviewer, or a general-purpose agent without separate binaries.
   defaults to `all`, while an explicit `allowed_tools` whitelist defaults to
   `disabled` unless `mcp_tools` opts it back in. Explicit `mcp__...` names in
   `allowed_tools` remain strict whitelist entries.
-- **Model:** an agent without `model` uses the current session target. An agent
-  with `model` replaces it with that complete `<provider>:<model>` catalog target
-  ID. `/agent <name>` prints the model target and warns when a switch changes it
-  because prompt cache may start cold and increase token usage or cost.
+- **Model:** an agent without `model` uses the current session target; setting
+  `model` pins a complete `<provider>:<model>` catalog target ID. `/agent <name>`
+  warns when a switch changes it because prompt cache may start cold.
 - **Per-agent reasoning:** an agent's optional `reasoning` field pins its thinking
   effort. It overrides the session base effort whenever that agent is selected
   (startup, `/agent`, delegate, or a handoff target) and is then made
@@ -4608,275 +3457,76 @@ reviewer, or a general-purpose agent without separate binaries.
 Remote MCP support is opt-in (`mcp.enable`, §7) and lives behind a **second
 binary**, `harness-mcp-proxy`. Harness does not talk to remote downstream MCP
 servers directly in that path: the proxy owns them and presents their merged
-tools to harness as a single MCP server over streamable HTTP. Harness and the
-proxy therefore speak MCP to each other — JSON-RPC 2.0, protocol revision
-`2025-06-18` (`internal/mcp`, `internal/mcp/jsonrpc`). Separately,
-`mcp.local` is an explicit local-stdio-MCP slot where harness itself can spawn
-one configured command and register its tools.
+tools to harness as a single MCP server over streamable HTTP (JSON-RPC 2.0,
+protocol revision `2025-06-18`; `internal/mcp`, `internal/mcp/jsonrpc`).
+Separately, `mcp.local` is an explicit local-stdio slot where harness itself
+spawns one configured command and registers its tools.
 
 **Why a separate process.** The remote daemon decouples downstream-server
-lifetime from any one harness session: stdio children configured in the proxy are
-spawned once and shared across every concurrent harness session, surviving REPL
-restarts, instead of being re-spawned per process. The harness side still depends
-on the thin `internal/mcptools` adapter for tool dispatch (§9.16).
+lifetime from any one harness session: stdio children are spawned once and
+shared across every concurrent harness session, surviving REPL restarts. The
+harness side depends on the thin `internal/mcptools` adapter for tool dispatch
+(§9.16).
 
-- **Proxy config** (`internal/mcpproxy`) is Claude Code-compatible:
-  `{"mcpServers": {name: {command,args,env} | {type:"http"|"streamable-http",url,headers,auth}}, "proxy":
-  {listen,logFile,logLevel,logFormat,metrics:{enabled,listen}}}`, at
-  `$XDG_CONFIG_HOME/harness-mcp-proxy/config.json`
-  (else `~/.config/...`). `${NAME}` and `${NAME:-default}` references are expanded
-  strictly (literal `$`, `$5`, `$$`, or unterminated `${` is preserved verbatim;
-  an unset strict var warns and expands to empty). Invalid servers are skipped
-  with a warning, never fatal. `proxy.listen` defaults to `127.0.0.1:8766`;
-  `proxy.logFormat` defaults to built-in slog JSON and also accepts `text`.
-  Library code returns warnings; the CLI logs them.
-- **Downstream supervision.** Each server gets a `Supervisor`. A **stdio** child is
-  spawned in its own process group, initialized + `tools/list`ed under a 30 s
-  timeout, its stderr drained to the proxy log; a crash restarts with backoff,
-  and 5 consecutive failed (re)starts disables it permanently. A **streamable-HTTP**
-  server is connected lazily with the user's headers plus optional dynamic auth
-  headers; there is no restart loop (the process is not ours), and a server-side
-  session expiry (HTTP 404) triggers one transparent re-initialize-and-retry. A
-  not-ready server returns an `isError`
-  result whose text is `mcp server <name> is unavailable (<state>)` (the
-  parenthesized `<state>` is the supervisor's lifecycle state, e.g. `starting`,
-  `restarting`, or `failed`), not a JSON-RPC error, so the failure reaches the
-  model as a normal tool failure.
-- **Aggregation** (`Registry`). Tools merge under `mcp__<server>__<tool>`, sorted by
-  name, with a reverse route map (so a server name may itself contain `__`). The check
-  is applied to the **entire** qualified string — the `mcp__` prefix, server, `__`
-  separator, and tool together must match `[a-zA-Z0-9_-]{1,64}`, so the 64-character
-  budget is shared across all of them. A name that is not provider-safe is **dropped
-  with a warning**, never truncated (truncation could collide and misroute).
-  `tools/list` is cursor-paginated.
-- **Lifecycle / manual start.** Harness **never starts the remote HTTP proxy**; the
-  operator runs `harness-mcp-proxy serve` themselves (from a shell, a launchd
-  agent, or a systemd user unit) and the daemon outlives harness, shared across
-  sessions. A second `serve` on the same HTTP address fails with the normal bind
-  error, matching `harness-model-proxy`. One-shot runs connect directly to the
-  proxy and register tools under a 5 s timeout; on failure they emit exactly one
-  warning (`mcp: cannot connect to proxy at <url>: <err>; MCP tools unavailable`)
-  and continue with no MCP tools. Interactive REPL runs start remote registration
-  in the background; the first failure warns with `retrying in background`, later
-  attempts continue with backoff, and a successful discovery is applied at a
-  prompt boundary. **Any** failure warns and continues — MCP never fails harness
-  startup. There is no remote proxy spawn/auto-start budget.
-- **HTTP server.** The proxy serves its merged surface over **streamable HTTP** on
-  `proxy.listen` (or `serve -listen`). It is **plain HTTP** — TLS and any
-  stronger auth belong to a reverse proxy in front. The handler (`internal/mcp`
-  `NewHTTPHandler`, spec revision `2025-06-18`) is tools-only and JSON-only:
-  responses are always `application/json` (never `text/event-stream`), a `GET` is
-  `405` (no server-push stream), `DELETE` ends a session (`204`), and sessions are
-  created on `initialize`, carried by the `Mcp-Session-Id` header, and purged
-  lazily after a 30-minute idle TTL. This 30-minute MCP **session** TTL is distinct
-  from the HTTP server's 120-second connection `IdleTimeout`, which only closes idle
-  keep-alive TCP connections, not MCP sessions. Because there is no server-push channel,
-  `ListChanged` is reported **false** and clients re-list rather than being
-  notified. A bind failure is fatal and the server is shut down gracefully on
-  SIGINT/SIGTERM. Harness reaches the proxy by setting `mcp.proxy` to the URL
-  plus an optional config-file-only `mcp.headers` map (sent on every request, for a
-  reverse proxy's auth). Header values expand `${NAME}` and `${NAME:-default}`;
-  unset strict refs are config errors. The `tools` subcommand debugs one with
-  `tools -proxy <url>` or the configured/default URL.
-- **Prometheus metrics.** HTTP mode enables a separate, unauthenticated
-  `GET /metrics` listener at `127.0.0.1:9091` by default. `proxy.metrics` stores
-  `enabled`/`listen`; `serve -no-metrics` and `serve -metrics-listen` override it.
-  Explicit config/flag addresses make bind failure fatal, while an implicit-default
-  collision warns and lets the MCP listener continue. `-no-metrics` passes a nil
-  registry into routing, disabling collection as well as exposition. The counters
-  `mcp_proxy_requests_total`, `mcp_proxy_errors_total`,
-  `mcp_proxy_request_bytes_total`, `mcp_proxy_response_bytes_total`, and
-  `mcp_proxy_request_duration_seconds_total` use only `mcp` (downstream server),
-  `tool` (bare name), and `key` (stored authorizing key name or `anonymous`).
-  Unknown qualified tools omit `mcp`/`tool` rather than parsing the name.
-  `mcp_proxy_build_info` is a gauge labeled only by `version`. Request bytes are
-  raw arguments and response bytes are marshaled `mcp.CallToolResult`; the outer
-  HTTP/JSON-RPC envelope is excluded. Unknown/downstream errors and `IsError`
-  results increment errors, except caller cancellation, which still contributes
-  requests/bytes/duration. Pre-routing malformed/session/method/auth failures are
-  not tool-call metrics. `serve -stdio` neither creates an endpoint nor collects,
-  even if metrics config or flags are present.
-- **Request logging.** The MCP proxy logs one structured record per routed
-  `tools/call` with requester/clientInfo, downstream MCP server name, bare and
-  qualified tool name, request/response bytes, duration, `is_error`, and any
-  protocol error. Unknown tools are warning records. When a valid W3C
-  `traceparent` is present, the log appends `trace_id`, `span_id`,
-  `parent_span_id`, and `trace_sampled` (plus `tracestate` when present). The
-  proxy carries inbound trace metadata in `context.Context`; downstream HTTP MCP
-  servers receive a child `traceparent` with the same trace id, while stdio
-  downstream servers have no header channel and are correlated only by proxy logs.
-- **Refresh semantics.** One-shot runs use the tool list discovered before the
-  model request. Interactive REPL runs may gain remote HTTP MCP tools after the
-  background registration succeeds; the prompt-boundary refresh hook applies that
-  first successful discovery and can also consume a dirty flag when the underlying
-  connection receives a list-changed notification on transports that support one.
-  The HTTP proxy transport itself has no server-push channel, and a downstream
-  streamable-HTTP server behind the proxy likewise refreshes only on
-  session-expiry reconnect.
-- **Harness-side exposure caps (restrict-only, config-file-only).** Where harness
-  assembles the auto-exposed remote MCP tool names (`cmd/harness/mcp.go`), two
-  optional `mcp` keys narrow the surface: `mcp.max_tools` caps how many discovered
-  remote tools are auto-exposed (`0` = unlimited; negative rejected; overflow is
-  truncated in discovery order with a warning), and `mcp.disabled_servers` drops
-  named servers (the segment between `mcp__` and the next `__`) from auto-exposure.
-  Neither counts local-MCP or LSP tools, and both affect **automatic** exposure only —
-  an explicit `mcp__…` entry in an agent's `allowed_tools` still resolves against the
-  full catalog.
-- **Shutdown.** SIGINT/SIGTERM cancel the daemon: HTTP sessions close with the
-  server, and each stdio child is reaped gracefully (close stdin → SIGTERM → SIGKILL
-  on the process group, bounded by per-stage timeouts).
-- **Auth and security.** The proxy's HTTP listener supports optional API-key
-  auth: keys are generated with
-  `harness-mcp-proxy generate-api-key [-api-keys-file path] [-ttl 720h] <name>`,
-  stored in the dedicated accepted-key file as `{name, hash, added, expires_at?}`
-  entries under `api_keys`, and required on every request once any key exists.
-  The config may set `proxy.api_keys_file` (relative to the config dir); otherwise
-  HTTP mode defaults to `api_keys.json` next to the config/default config dir, and
-  `serve -api-keys-file` overrides both. Running HTTP proxies poll only this key
-  file and keep the previous good snapshot on reload errors. Inline
-  `proxy.api_keys` is rejected with a migration error. Stdio mode remains
-  unauthenticated and does not require/read accepted-key files. Clients send
-  `Authorization: Bearer <key>`; the proxy verifies it with SHA-256 and
-  constant-time comparison. Harness supplies the key via `-mcp-proxy-api-key`,
-  `HARNESS_MCP_PROXY_API_KEY`, or the config-file `mcp.api_key` field, with flag >
-  env > file precedence; this outgoing client key is loaded at process start and
-  is not hot-reloaded. The `harness-mcp-proxy tools` debug command supplies the
-  key via `tools -api-key` or `HARNESS_MCP_PROXY_API_KEY`. HTTP downstream servers
-  may also set static `headers` and/or `auth`. Static headers are applied first,
-  dynamic auth headers next, then MCP
-  protocol headers override both. `token_command` delegates login/refresh to an
-  external command and caches returned bearer tokens in memory. `oauth2` supports
-  explicit `harness-mcp-proxy auth login|logout|status <server>` for browser PKCE
-  or device-code flow, storing refreshable tokens under the proxy config dir. The
-  proxy listener is a TCP endpoint with no transport security
-  of its own, so it relies on the assumed local/front-proxy trust boundary (bind it
-  to loopback and front it with a proxy for TLS/auth). The proxy loads its own
-  config from the user's config dir; harness only learns the proxy URL. **Stdio
-  servers inherit the proxy's full environment** — whatever
-  environment the `serve` process was started with — plus the per-server `env`
-  overrides, so do not configure untrusted stdio servers when secrets live in the
-  environment.
+Architecture rules:
 
-The harness-side adapter contract (naming, description, schema, result and error
-mapping, the reconnecting `Conn`) is §9.16. The CLI wrapper has four subcommands —
-`serve` (the daemon), `tools` (connect to a running HTTP proxy and print the
-aggregated table), `auth`, and `version` — with serve flags
-`-config`/`-listen`/`-stdio`/`-no-metrics`/`-metrics-listen`/`-log`/
-`-log-level`/`-log-format`.
+- Harness **never starts the remote proxy** and MCP never fails harness
+  startup: one-shot runs register under a 5 s timeout with one warning;
+  interactive runs register in the background and apply at a prompt boundary.
+- Each downstream server gets a supervisor: stdio children run in their own
+  process group with a 30 s initialize/`tools/list` timeout, restart with
+  backoff, and are permanently disabled after 5 consecutive failed (re)starts;
+  streamable-HTTP servers connect lazily (no restart loop — the process is not
+  ours) and get one transparent re-initialize on session expiry (HTTP 404). A
+  not-ready server yields an `isError` tool result, not a JSON-RPC error, so
+  the failure reaches the model as a normal tool failure.
+- Tools merge under `mcp__<server>__<tool>` with a reverse route map; the
+  provider-safe charset check applies to the entire qualified string, and a
+  failing name is dropped with a warning, never truncated (truncation could
+  collide and misroute).
+- The proxy's HTTP handler is tools-only and JSON-only (never
+  `text/event-stream`); sessions are carried by `Mcp-Session-Id` with a
+  30-minute idle TTL (distinct from the HTTP server's 120 s connection
+  IdleTimeout), `DELETE` ends a session, and with no server-push channel
+  `ListChanged` is reported false.
+
+Configuration, serving and lifecycle operations, metrics, authentication,
+request logging, and exposure caps are documented in [mcp.md](mcp.md).
 
 ## 15a. LSP code intelligence (optional)
 
 The **LSP manager** (`internal/lspproxy`) launches already-installed language
-servers on demand and exposes 21 native LSP tools. Navigation covers declaration,
-definition, type definition, implementation, references, hover, signature help,
-completion, and document highlights. Structural inspection covers document/workspace
-symbols, call/type hierarchies, inlay hints, and diagnostics. Change workflows expose
-read-only action listings and format/rename plans plus mutating text-edit application for code
-actions, formatting, and rename. The normal path is first-class, not generic MCP:
-`lsp.enable=true` registers short `lsp_*` tools directly through
-`internal/lsptools`, while `internal/lspproxy` still owns the language-server
-supervisors. This is distinct from the secrets-isolated remote
-`harness-mcp-proxy`, because a language server needs local
-filesystem/workspace access.
+servers on demand and exposes 21 native LSP tools: navigation, structural
+inspection, diagnostics, and change workflows (read-only action/format/rename
+plans plus mutating text-edit application). The normal path is first-class,
+not generic MCP: `lsp.enable=true` registers short `lsp_*` tools directly
+through `internal/lsptools` (§9.16a) while `internal/lspproxy` owns the
+language-server supervisors. This is distinct from the secrets-isolated remote
+`harness-mcp-proxy`, because a language server needs local filesystem access.
 
-**Chain.** `harness → internal LSP manager → N language servers (LSP over
-Content-Length stdio)`. LSP config is top-level `lsp` with `enable` plus inline
-`servers` and an optional `tools` allowlist; a same-name server entry replaces the
-entire embedded default entry, so overrides must include all required fields. The
-built-in path uses `lspproxy.NewManager(..., namespace="")` and adapts the manager's
-bare tools to short `lsp_*` names. `lsp.tools` (config-file-only, bare names with or
-without the `lsp_` prefix) registers only the listed subset of native tools; an
-empty or unset list registers the core set (`lspproxy.CoreTools`), `["all"]`
-registers the full surface, and unknown entries warn and are ignored. Tool
-annotations drive scheduling and agent exposure: read-only LSP tools join the
-read-only gate, while `lsp_code_action`, `lsp_format_document`, and `lsp_rename`
-are mutating. `internal/lsptools.Tool` preserves its schema field descriptions in
-the model-facing spec (§9.16a), so the position and range conventions are not
-lost to normal schema-prose compaction.
+- Tool annotations drive scheduling and agent exposure: read-only LSP tools
+  join the read-only gate, while `lsp_code_action`, `lsp_format_document`, and
+  `lsp_rename` are mutating.
+- `/lsp enable|disable` is a process-local runtime override that re-derives
+  every agent's allowed tools, updates registry and system prompt together,
+  and resets provider continuation state.
+- After a successful built-in `edit`/`write`, the CLI synchronizes up to eight
+  changed files through the manager's ordinary didOpen/didChange path and
+  appends fresh diagnostics to the tool result (supplemental, never failing
+  the mutation).
+- Serena support is independent of native LSP: `lsp.serena.enable=true` starts
+  a local stdio MCP child registered as `mcp__serena__<tool>`.
+- `harness lsp serve` is a compatibility stdio MCP shim over the same manager
+  for proxy-hosted setups.
+- `internal/lspproxy` is stdlib-only and hand-rolls the LSP client:
+  Content-Length JSON-RPC over stdio, per-`(server, workspace-root)`
+  supervisors with backoff and cooldown-revive, full-text sync, and async
+  publishDiagnostics. Language-server commands are never executed;
+  WorkspaceEdit file operations are rejected; mutating paths validate every
+  text range before any write.
 
-Interactive startup prepares this static surface even when `lsp.enable=false`,
-without launching a server. `/lsp enable` re-derives every agent's allowed tools,
-updates the active registry and system prompt together, and resets provider
-continuation state before the next request. `/lsp disable` removes the exposure,
-shuts down every loaded server, and removes the runtime hint. This override is
-process-local. The same re-derivation runs after a dynamic MCP refresh so the
-remote refresh cannot accidentally re-enable disabled LSP tools. `/lsp status`
-re-probes PATH and reports configured servers, available languages, and the
-distinct set of languages with a live initialized process plus loaded roots.
-
-The CLI also wraps the built-in `edit` and `write` tools without changing their
-schemas or capability interfaces. After a successful mutation while native LSP
-is enabled, it de-duplicates and caps the reported paths at eight, synchronizes
-each supported file from disk through the manager's ordinary `didOpen`/
-`didChange` path, and waits concurrently for a fresh `publishDiagnostics` event
-for up to three seconds per file. Results are appended in mutation-path order.
-Unsupported paths and unavailable servers are silent; an applicable diagnostics
-error is supplemental result text and does not roll back or fail the write. A
-failed mutation never starts diagnostics.
-
-Serena support is independent of native LSP. `lsp.serena.enable=true` starts a
-local stdio MCP child (default `serena start-mcp-server --context=ide
---project-from-cwd --open-web-dashboard False`) and registers its bare downstream tools as
-`mcp__serena__<tool>` via `mcptools.RegisterWithOptions(..., Namespace:"serena")`.
-Harness trusts Serena `readOnlyHint` annotations; unannotated Serena tools are
-treated as mutating. Serena does not require `lsp.enable=true`, `mcp.enable`, or
-`mcp.local`, and successful registration adds only a short system-prompt hint,
-not Serena hooks.
-
-Harness still has a generic local-stdio-MCP capability (`mcp.local`,
-`internal/mcpchild` + `setupLocalMCP`): when explicitly enabled with
-`mcp.local.enable=true`, it spawns the configured command, connects over the
-child's stdio via `mcptools.Conn`'s `Dial` seam, and registers `mcp__`-prefixed
-tools using their `readOnlyHint:true` annotations. Because a service can register
-tools asynchronously, `setupLocalMCP` polls registration until they appear
-(bounded by the 5 s budget). Logs go to stderr (never stdout, the MCP channel)
-and drain up the chain into harness's log.
-
-**Advanced — proxy hosting.** `harness lsp serve` is a compatibility stdio MCP
-shim over the same `internal/lspproxy` manager. Its default namespace exposes
-`mcp__lsp__<tool>` names. `harness-mcp-proxy serve -stdio` (`Daemon.RunStdio`,
-enabled by `jsonrpc.NewPeerWithCodec` reusing `mcp.Serve`) can host
-`harness lsp serve -namespace ""` and aggregate it with other local services,
-doing the `mcp__<server>__` namespacing itself. Pointed at via
-`mcp.local.command` with `mcp.local.enable=true`.
-
-**Shim internals.** `internal/lspproxy` is stdlib-only and hand-rolls the LSP
-client: a Content-Length JSON-RPC codec (the MCP newline codec rejects header
-framing) reusing `jsonrpc.Message`/`Peer`; a per-`(server, workspace-root)`
-supervisor (lazy launch, exponential backoff, `StateFailed` cap with
-cooldown-revive-on-next-call, graceful `shutdown`+`exit` then SIGTERM/SIGKILL);
-extension→language selection with nearest-marker root detection; on-demand
-`didOpen`/`didChange` (full-text sync) with mtime tracking; and async
-`publishDiagnostics` synchronization. Position tools require file + 1-based line;
-optional symbol text is converted to UTF-16 columns by the shim, optional
-1-based `column` overrides symbol lookup, and line-only positions use column 0.
-`lsp_workspace_symbols` requires `path` to select the target workspace unless exactly
-one server is **configured** (the count is of configured servers, not running ones).
-Because the embedded defaults ship five servers (Go/Rust/Python/TS-JS/C-C++), `path` is
-effectively always required unless the config narrows the set to one. Per-tool optional
-params beyond the shared position shape: `lsp_diagnostics` takes `timeout_ms` (default
-3000); bounded result operations use `max_results` (default 100); hierarchy tools
-require a direction; inlay-hint/action/formatting ranges use optional 1-based
-inclusive `start_line`/`end_line`; code actions may wait `timeout_ms` for fresh
-pushed diagnostics; and `lsp_rename_plan`/`lsp_rename` additionally
-require `new_name`. Action apply selects an exact offered title and may resolve a
-data-backed action before applying. Language-server commands are never executed.
-Rename and action apply reject unsupported WorkspaceEdit file operations; all
-mutating paths validate every text range before any write.
-Built-in config uses top-level
-`{"lsp":{"servers":{...}}}`; the compatibility `harness lsp serve -config` path
-still accepts the legacy `{"version":1,"servers":{...}}` file shape. Both paths
-replace embedded defaults (Go/Rust/Python/TS-JS/C-C++) by server name rather than
-field-merging them. Per-tool descriptions stay operation-specific and are capped
-at 512 bytes; one system-prompt runtime hint lists languages whose configured
-server binary is on `PATH`, or reports that none are available. The actual tool
-schemas independently disclose every enabled operation.
-
-**Deliberate limits:** WorkspaceEdit file operations and server command execution;
-full-text sync (no incremental); one root per language-server process, with
-separate processes for other roots; push diagnostics only; and editor-rendering
-features without useful agent semantics (semantic tokens, folding/selection
-ranges, colors, linked editing, inline values, and code lenses).
+Setup, prewarming, the tool table and parameter conventions, server
+configuration, and hosting topologies are documented in [lsp.md](lsp.md).
 
 ## 16. Future work
 
@@ -4889,8 +3539,7 @@ ranges, colors, linked editing, inline values, and code lenses).
   2024 GET-stream MCP transport — distinct from the already-implemented streamable-HTTP
   transport in `internal/mcp`), and OAuth discovery/dynamic client registration for
   remote servers.
-- Smarter prompt-cache breakpoint placement: all four breakpoints are now used (§5.4 v2),
-  but placement is still static. Splitting the volatile env block (date/git) out of the
-  cached system prefix would improve cross-session/agent-switch reuse (within a session the
-  system prompt is frozen per process, so it already cache-reads); content-aware anchoring
-  could further help compaction-heavy sessions.
+- Smarter prompt-cache breakpoint placement: placement is static today. Splitting the
+  volatile env block (date/git) out of the cached system prefix would improve
+  cross-session reuse; content-aware anchoring could further help compaction-heavy
+  sessions.

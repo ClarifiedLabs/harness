@@ -154,10 +154,11 @@ completion.
 
 For an ordinary top-level command, `output_mode:"auto"` preserves successful
 output through 8 KiB. Above that threshold it returns a compact `PASS` receipt
-with the command label, duration, exit status, output byte count, and a bounded
-tail; the complete result is archived through the normal tool-result artifact
-path. Failures return a `FAIL` receipt with bounded diagnostics in `auto`; a
-clipped original is archived. `receipt` always uses the compact successful
+with the command label (capped at 160 bytes), duration, exit status, output
+byte count, and a tail capped at 4 KiB/40 lines; the complete result is
+archived through the normal tool-result artifact path. Failures return a
+`FAIL` receipt carrying at most 4 KiB/40 lines from the output tail in `auto`;
+a clipped original is archived. `receipt` always uses the compact successful
 form, while `full` keeps the prior bounded full-output behavior. Every form
 retains the `[exit code: N]` trailer. The same policy and artifact recovery
 apply to background command completion and explicit `background_jobs` get/wait
@@ -165,7 +166,8 @@ results.
 
 Steps stop on the first failure by default (`stop_on_failure:false` continues).
 Successful output is replaced with one `PASS <name> (<duration>)` receipt per
-step. Failures include a bounded output excerpt and skip count. Any suppressed
+step. Failures include status plus an output excerpt capped at 4 KiB, and the
+remaining-step skip count. Any suppressed
 successful output or clipped failure output is archived through the normal
 session artifact path, so the model can inspect it without carrying it in every
 later request. Background steps preserve the same receipts, original transcript,

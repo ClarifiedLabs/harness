@@ -43,7 +43,7 @@ The package-by-package map lives in `docs/design.md` §3; update it when ownersh
 ## Documentation
 
 - `README.md` is the onboarding and value-proposition surface. Preserve its Design Invariants and Basic Architecture sections and the `release-artifacts` marker block (release automation owns its versioned links). Change the README only when the value proposition or new-user journey materially changes.
-- Reference detail lives under `docs/`: usage/flags/config/REPL in `usage.md`, operational tool behavior in `tools.md`, model-facing contracts and architecture in `design.md`, and MCP/LSP/smoke/release/benchmarks in their own docs. Keep flag and command references synchronized with `cmd/harness/main.go`.
+- Reference detail lives under `docs/`: usage/flags/config/REPL in `usage.md`, model-proxy operations in `proxy.md`, operational tool behavior in `tools.md`, model-facing contracts and architecture in `design.md`, session/compaction/trajectory internals in `session.md`/`compaction.md`/`trajectory.md`, and MCP/LSP/smoke/release/benchmarks in their own docs. Keep flag and command references synchronized with `cmd/harness/main.go`.
 - Update the canonical document for every user-visible feature change; do not duplicate reference prose in the README.
 
 ## Adding Things

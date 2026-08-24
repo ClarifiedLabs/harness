@@ -145,6 +145,8 @@ User guides:
 
 - [Usage reference](docs/usage.md): flags, config, provider selection, one-shot
   mode, REPL commands, agents, sessions, compaction, interrupts, and hooks.
+- [Model-proxy operations](docs/proxy.md): serving, probes, rolling updates,
+  authentication, metrics, retries, tracing, and diagnostics.
 - [Tools](docs/tools.md): built-in tools, rich image results, delegation,
   background jobs, truncation, and tool artifacts.
 - [MCP](docs/mcp.md): configuring and running `harness-mcp-proxy`.
@@ -153,7 +155,13 @@ User guides:
 Engineering references:
 
 - [Design](docs/design.md): architecture and implementation details.
+- [Session internals](docs/session.md): storage layout, event stream,
+  branching, recovery, and session analysis commands.
+- [Compaction internals](docs/compaction.md): triggers, retention, and the
+  checkpoint algorithm.
+- [Trajectory, lineage, and evidence](docs/trajectory.md): the host-owned
+  projection, stagnation nudge, candidate archive, and evidence catalog.
 - [Release](docs/release.md): release artifacts, tagging, and required secrets.
 - [Smoke tests](docs/smoke.md): end-to-end verification matrix.
-- [Deterministic-flow benchmark](docs/flowbench.md): historic session patterns,
-  paired live-model protocol, results, and promotion decisions.
+- [Deterministic-flow benchmark](docs/flowbench.md): paired live-model
+  protocol, cases, acceptance gates, and retention/reliability benchmarks.
