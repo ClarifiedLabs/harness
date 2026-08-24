@@ -102,14 +102,14 @@ There are three outcomes:
    usage errors: stdout is empty and guidance is printed on stderr.
 2. After valid one-shot or piped-interactive JSON mode selection, a startup
    failure before `run_start` emits exactly one stdout line:
-   `{"type":"startup_error","v":3,"mode":"oneshot"|"interactive","exit_code":…,"error":…,"time":…}`.
+   `{"type":"startup_error","v":4,"mode":"oneshot"|"interactive","exit_code":…,"error":…,"time":…}`.
    Consumers must accept it as the complete stream. Stderr is silent.
 3. Once startup succeeds, stdout begins with `run_start` and continues through
    best-effort `run_end`; physical stderr stays silent. `-q`, `-v`, and
    `-tool-stream` cannot re-enable human output.
 
 - For a successfully started run, line 1 is a `run_start` envelope
-  (`{"type":"run_start","v":3,"mode":"oneshot","session_id":…,"agent":…,
+  (`{"type":"run_start","v":4,"mode":"oneshot","session_id":…,"agent":…,
   "provider":…,"model":…,"images":N}`); the last line is a best-effort
   `run_end` envelope (`exit_code` mirroring the process exit code, plus
   `termination_reason`/`error` on failures).
@@ -267,6 +267,8 @@ reference below.
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable);
                   diffs are syntax-highlighted with full-width tinted added/removed line backgrounds when color is on
                   (via background color erase; the tint covers only the text on terminals without BCE)
+-stagnation-nudge   issue one strategy-reset instruction after two same-lane evaluator non-improvements (default true; use -stagnation-nudge=false to disable)
+-candidate-lineage   preserve strictly improving accepted candidates for this Git session
 -q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
                   still prints one per-prompt usage/cost line at an interactive terminal (suppressed only
                   when output is also non-TTY/piped), and one-shot runs always print the session summary
@@ -602,10 +604,11 @@ environment variables, JSON paths, types, and defaults. The concise
 | `retention_result_head_bytes` | `integer` | - | - | `HARNESS_RETENTION_RESULT_HEAD_BYTES` | `retention_result_head_bytes` | 800 (clamped to the 4096-byte retention threshold) | no | Harness retention result head bytes setting. |
 | `no_steer` | `boolean` | `true`, `false` | `-no-steer` | `HARNESS_NO_STEER` | `no_steer` | false | no | Harness no steer setting. |
 | `agent` | `string` | - | `-agent` | `HARNESS_AGENT` | `agent` | derived: runtime default agent | no | Harness agent setting. |
-| `handoff_agent` | `string` | - | `-handoff-agent` | `HARNESS_HANDOFF_AGENT` | `handoff_agent` | "auto" | no | Harness handoff agent setting. |
+| `handoff_agent` | `string` | - | `-handoff-agent` | `HARNESS_HANDOFF_AGENT` | `handoff_agent` | derived: runtime default implementation agent | no | Harness handoff agent setting. |
 | `verbose` | `boolean` | `true`, `false` | `-v` | `HARNESS_VERBOSE` | `verbose` | false | no | Harness verbose setting. |
 | `tool_stream` | `boolean` | `true`, `false` | `-tool-stream` | `HARNESS_TOOL_STREAM` | `tool_stream` | false | no | Harness tool stream setting. |
 | `show_diffs` | `boolean` | `true`, `false` | `-show-diffs` | `HARNESS_SHOW_DIFFS` | `show_diffs` | true | no | Harness show diffs setting. |
+| `stagnation_nudge` | `boolean` | `true`, `false` | `-stagnation-nudge` | `HARNESS_STAGNATION_NUDGE` | `stagnation_nudge` | true | no | Harness stagnation nudge setting. |
 | `log_level` | `string` | `debug`, `info`, `warn`, `error` | `-log-level` | `HARNESS_LOG_LEVEL` | `log_level` | "info" | no | Harness log level setting. |
 | `no_color` | `boolean` | `true`, `false` | `-no-color` | `HARNESS_NO_COLOR`, `NO_COLOR` | `no_color` | false (NO_COLOR is a presence-based override) | no | Harness no color setting. |
 | `color_theme` | `string` | `dark`, `light` | `-color-theme` | `HARNESS_COLOR_THEME` | `color_theme` | "dark" | no | Harness color theme setting. |
@@ -1545,6 +1548,12 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/context <file>` | save the current provider-neutral model context as JSON |
 | `/prompt` | show the full system prompt currently sent to the model, including environment, AGENTS.md, skills, runtime capability hints, and active-agent instructions |
 | `/usage` | cumulative input, cached input, output, reasoning tokens, cost, and successful compactions |
+| `/evidence` | list the newest bounded session evidence metadata without contacting the model or reading artifact bodies |
+| `/evidence list [--kind evaluator\|tool] [--status STATUS] [--prompt N] [--limit N]` | filter evaluator results, archived/truncated tool outputs, and tool errors by metadata |
+| `/evidence show <id>` | inspect one catalog record, including its current local artifact status and resolved path when safe |
+| `/lineage` | list accepted candidate checkpoints when the session was started with `-candidate-lineage` |
+| `/lineage export <entry\|best> <new-directory>` | materialize one accepted checkpoint outside the source worktree and session; the destination must not exist |
+| `/lineage restore <entry\|best> [--force]` | explicitly restore Git-visible worktree files from a checkpoint without changing the real index or refs; a dirty worktree requires `--force`, and every change writes a recovery patch first |
 | `/max-turns` | show the current per-prompt turn limit |
 | `/max-turns <n>` | change the turn limit for subsequent prompts in this REPL session; `n <= 0` means unlimited |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
@@ -1715,12 +1724,13 @@ prewarm would be wasted. Standalone `/compact` keeps immediate prewarming;
 submitting a real prompt cancels any pending delayed warmup. Harness does not
 issue speculative generated completions to prewarm other providers.
 
-Five agents are built in. Only `auto` and `plan` are interactive-selectable by
-default; the other built-ins remain available for one-shot runs and delegation.
+Five agents are built in. `auto` is the default. `auto` and `plan`
+are interactive-selectable by default; the other built-ins remain available
+for one-shot runs and delegation.
 
 | agent | interactive | tools | behavior |
 |---|---|---|---|
-| `auto` | yes | `read`, `view_image`, `edit`, `write`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `record_plan`, `delegate`, and background job tools | the default; the model decides what to do |
+| `auto` | yes | `read`, `view_image`, `edit`, `write`, `shell`, `web_fetch`, discovered MCP tools, `update_todos`, `record_plan`, `delegate`, and background job tools | the default general-purpose behavior; the model decides what to do |
 | `explore` | no | `read`, `view_image`, `shell`, `web_fetch`, `update_todos`, and read-only MCP tools; no mutation, background, handoff, or delegate tools | broad search, architecture/dependency tracing, root-cause investigation, and questions spanning many files; not a known-file lookup |
 | `plan` | yes | `read`, `view_image`, `shell`, `web_fetch`, read-only MCP tools, `write_tmp_file`, `update_todos`, `record_plan`, `delegate`, and `background_jobs`; interactive root sessions also expose `handoff` | collaborate on a self-contained implementation plan without modifying the project |
 | `review` | no | the same read-only local and MCP surface as `explore` | findings-first review of a concrete change; if no range is supplied, inspect the working-tree diff and untracked files |
@@ -1872,6 +1882,7 @@ harness session resume [root-options] [--] [session-dir]
 harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 harness session stats [--format text|json] ~/.local/state/harness/sessions/20260611T123456Z
+harness session evidence [--kind evaluator|tool] [--status STATUS] [--prompt N] [--limit N] [--format text|json] <session-dir> [record-id]
 harness session analyze [--since D|--all] [--before RFC3339] [--format text|json] [--] [dir]
 harness session errors [--tool T] [--kind K] [--model M] [--agent A] [--since D|--all] [--before RFC3339] [--format text|json] [dir]
 ```
@@ -1911,6 +1922,35 @@ accepted before the optional source path; Go flag parsing stops at the first
 positional argument, so use `--` for a source path beginning with `-`. A distinct
 forwarded `-session <destination>` retains the existing clone behavior: resume the
 selected source branch into the destination with fresh usage accounting.
+
+`session evidence` derives a read-only metadata catalog from one session's
+canonical `raw.ndjson` and current local artifact metadata. The equivalent
+interactive commands are `/evidence`, `/evidence list ...`, and
+`/evidence show <id>`; none contacts the model. Catalog version 1 includes every
+typed evaluator result, every tool error, and every truncated tool result that
+declares a full-output artifact. Ordinary successful inline-only tool results
+are omitted. Stable chronological IDs use `eval-NNNNNN` and `tool-NNNNNN`;
+lists are newest first, return 20 records by default, and cap `--limit` at 100.
+Use `--kind`, `--status`, and `--prompt` together to narrow a list. Supplying a
+record ID prints that record in text mode; JSON always emits the versioned page
+envelope.
+
+The catalog never reads or prints artifact bodies. It reports canonical source,
+outcome, prompt/turn, bounded error metadata, evaluator score/candidate metadata,
+reference, safe resolved path, byte size, and modification time when available.
+`available` means a regular local file has not been modified after its event;
+`stale` means its modification time is newer, so the reference may no longer
+describe the evaluated bytes. `missing`, `unreadable`, and `unsafe` distinguish
+absence, filesystem errors, and symlink/non-regular or tool-path-escape hazards.
+`external` evaluator references are outside the permitted roots and are not
+probed, `unreferenced` evaluator results supplied
+no reference, and `recorded` tool errors have bounded canonical metadata but no
+separate artifact. Relative evaluator references resolve only beneath the
+session's persisted startup working directory; absolute references are probed
+only beneath that directory or the session directory. Tool artifacts must stay
+beneath the session directory. Run the command against a child session path to
+inspect that child's stream; the first catalog version does not merge root and
+delegate streams.
 
 `session replay --follow` first renders the existing complete `raw.ndjson`
 records, then renders complete records as they are appended. It uses the same
@@ -1976,7 +2016,7 @@ failing at least three times consecutively).
 calls/results/errors/error rates, the structured error summary, build/runtime
 identity, and reliability telemetry reconstructed from the root and all
 physically nested delegate streams. Its `usage` and `storage` sections use the
-same analyzer-v4 vocabulary described below: physical root/child and
+same analyzer vocabulary described below: physical root/child and
 conversational/maintenance usage are split without folding child spend twice,
 and bounded file/reset metadata is reported without transcript bodies.
 
@@ -1994,7 +2034,7 @@ dropped. A stream is capped at a 256 MiB snapshot prefix, 16 MiB per record, and
 hierarchy from promotion distributions.
 `--before` applies an inclusive event-time cutoff and suppresses child-metadata
 fallbacks that could have been written after that cutoff. `--format json` is the
-stable analyzer-v4 input for corpus comparisons. Each item identifies its owning
+stable analyzer-v12 input for corpus comparisons. Each item identifies its owning
 root and root-derived cohort while retaining its own provider, model, build, and
 runtime metadata. Cohort keys include the root build (including modified state)
 and behavior-changing runtime profile.
@@ -2007,13 +2047,41 @@ tool-bearing turns (pending cutoff cases are not failures). Hook diagnostics,
 closure triggers, workflow-status supply, context-accounting/provider-count
 scope, retention/reset totals, and arithmetic invariant violations are bounded
 counters only: prompt text, tool inputs/results, assistant text, and hook
-payloads are never copied into the report. Usage comes only from physical
+payloads are never copied into the report.
+
+The `trajectory` telemetry section is reconstructed from canonical evaluator,
+successful mutation, diff, branch, and continuation-seed events. It reports
+encoded projection bytes, transition/evaluation churn,
+branch resets, missing candidate/evidence fields, bounded-data drops, path
+observation/confirmation counts, and unconfirmed paths. Schema v12 also reports
+the active and maximum conservative
+no-improvement streak plus baseline, improvement, plateau, regression,
+indeterminate, unordered-score, evaluator-lane-reset, and delivered
+strategy-reset counts. The classifications remain host-only telemetry; only the
+bounded default-on nudge policy below changes model-visible control flow.
+`unconfirmed_mutation_paths` is an audit proxy, not a false-positive
+verdict: it is normally higher when `-show-diffs` is disabled. Candidate IDs,
+evidence references and filesystem paths are not included in analyzer output.
+The trajectory projection is always model-invisible. Harness defaults
+`stagnation_nudge` on to issue one host-authored
+strategy-reset instruction after two consecutive non-improvements in one
+evaluator lane. Set `-stagnation-nudge=false`, config
+`"stagnation_nudge": false`, or `HARNESS_STAGNATION_NUDGE=false` to disable it.
+The instruction is delivered only on an already blocking Stop-hook
+continuation, at most once for that lane, and asks the model to re-read evidence
+and test a materially different hypothesis without bypassing the evaluator.
+Improvement does not re-arm it; a handler/direction lane change or branch reset
+does. The canonical `stagnation_nudge` event is persisted before delivery and
+contains only the public threshold and observed streak—never hook output,
+handler, score, candidate, evidence reference, or instruction text.
+
+Usage comes only from physical
 `turn_attempt_usage` and `maintenance_usage` events. It exposes every normalized
 token class, root/descendant splits, priced/unpriced call coverage, known partial
 cost, hierarchy/cohort median and nearest-rank p90 values, and reconciliation
 against authoritative root state only for complete non-cutoff hierarchies.
 Storage analysis is bounded, never follows symlinks, counts physical snapshotted
-raw-file bytes, and marks missing, incomplete, malformed, symlinked,
+raw-file and candidate-lineage bytes, and marks missing, incomplete, malformed, symlinked,
 limit-exceeded, or cutoff-incomplete sources explicitly. Context maxima
 keep payload and effective scopes separate; public maxima clamp negatives while
 invariant counters preserve compatible-scope arithmetic errors. Execution
@@ -2021,7 +2089,7 @@ completion means a terminal `prompt_usage` record exists; termination reasons
 describe loop control, not task correctness. Delegate semantic completion is a
 separate bounded record. New optional footers declare only `complete` or
 `blocked`; a missing or unusable footer produces the host compatibility outcome
-`unknown`. Analyzer schema v6 exposes only aggregate outcome, validation, and
+`unknown`. Analyzer schema v12 exposes only aggregate outcome, validation, and
 contract-provenance counters—never blocker text or report prose. Completion
 metadata is schema-local: use the Harness 0.5.11 binary to analyze sessions
 created before 0.5.12. Missing, invalid, host-failed, and canceled children remain
@@ -2062,9 +2130,12 @@ retention epochs. Retention records include the trigger, reclaimed blocks/bytes,
 context estimates, continuation reset, and next-request shape; they never enter
 model context. Tool-result records may carry aggregate integer `result_metrics`,
 and failed results carry a structured `error_kind` plus a bounded, rune-safe
-`error_excerpt` (2 lines / 240 runes) for error analysis; new skill activation
-records carry only the `explicit` source and `injected` summary. The activation
-record itself includes no skill body and adds no model-visible content; the
+`error_excerpt` (2 lines / 240 runes) for error analysis. Truncated tool results
+additionally carry their deterministic session-relative `artifact_ref`; the
+reference is expected metadata, while `session evidence` verifies whether the
+file is currently available. New skill activation records carry only the
+`explicit` source and `injected` summary. The activation record itself includes
+no skill body and adds no model-visible content; the
 Codex-style `<skill>` block is already part of the persisted user event.
 New tool start/result records also snapshot `model_target`, `provider`,
 `api_type`, and `model`, making attribution stable if a resumed session later
@@ -2248,6 +2319,59 @@ or `*` matches all. Hook commands may block with exit code `2` or JSON stdout
 such as `{"decision":"block","reason":"..."}` / `{"continue":false}`. Plain
 stdout is added as hook context only when the command exits `0`.
 
+A `Stop` hook may additionally emit a typed semantic evaluator result:
+
+```json
+{
+  "accepted": false,
+  "score": 0.873,
+  "score_direction": "maximize",
+  "candidate": "sha256:abc123",
+  "remaining_requirements": 2,
+  "evidence_ref": "artifacts/verify.log",
+  "reason": "Two acceptance checks still fail."
+}
+```
+
+`accepted` is required whenever any evaluator field is present. `false` is a
+blocking result, subject to the same `can_block` budget check and one-turn Stop
+recursion guard as `decision:block`; its bounded fields and optional `reason`
+are included in corrective context. `true` records acceptance without forcing
+another turn and, when supplied, requires `remaining_requirements:0`. The
+optional scalar `score` is observational by default: Harness preserves it
+(including a numeric zero) but does not assume that higher or lower is better.
+Optional `score_direction` may be `maximize` or `minimize`, requires `score`,
+and gives only the host-owned stagnation projection an ordering rule. It is not
+added to corrective model context. `candidate`
+and `evidence_ref` are optional, non-empty single-line identifiers capped at
+256 and 1024 bytes respectively; `remaining_requirements` is optional and must
+be between 0 and 1,000,000.
+
+Semantic evaluator fields are accepted only from `Stop` hooks that exit 0 or 2.
+Invalid semantic fields are ignored; an otherwise successful exit-0 command is
+recorded with a `parse_failed` hook diagnostic, while exit 2 retains its normal
+`exit_nonzero` process outcome. Legacy `decision`, `continue`, exit-code, and
+textual-reason behavior from the same output is still honored. Each valid result is recorded as a displayless
+`evaluator_result` event in `raw.ndjson`, containing only the bounded semantic
+fields and handler identity—not free-form reason, stdout, or stderr. In the
+absence of an explicit orchestrator workflow status, all accepted evaluator
+results project to `complete` and any rejection projects to `in_progress`.
+`remaining_requirements` is projected when exactly one evaluator supplied it;
+independent handlers have no generic count-aggregation rule. A separate legacy
+hook block that has no rejecting semantic result leaves workflow status
+unavailable rather than reporting a false completion.
+
+These events also feed Harness's host-owned shadow trajectory in `state.json`.
+The projection is diagnostics-only and model-invisible; `session stats` and
+`session analyze` report aggregate completeness, churn, attribution, and
+size counters without emitting candidate IDs or evidence paths.
+
+By default, a rejecting Stop continuation receives one generic strategy-reset
+instruction when the active evaluator lane reaches two consecutive
+non-improvements. The reset is one-shot for that lane and is not re-armed by a
+later improvement. Disable it with `-stagnation-nudge=false`, config
+`"stagnation_nudge": false`, or `HARNESS_STAGNATION_NUDGE=false`.
+
 Every handler has an independent deadline: `timeout_seconds` defaults to 120
 seconds and is capped at 600. A timeout records a bounded diagnostic, terminates
 that command, and continues to later matching handlers instead of hanging the
@@ -2271,3 +2395,130 @@ concurrent use; `Config` must not be mutated after `Runner` creation.
 event map, and relative `hook_configs` paths resolve against the config-file
 directory. Static preferences belong in `~/.agents/AGENTS.md`; command-derived
 facts belong in hook output, which the model receives as `[hook context]`.
+
+### Stop-hook evaluator recipe
+
+`auto` is the built-in default agent. Harness does not invent a universal
+verifier command: build, test, lint, and evaluation contracts are
+repository-specific, and the default hook set remains empty. A rejecting Stop
+hook still supplies bounded evidence to the existing one-turn corrective path.
+
+`examples/harness/stop-evaluator/` enables a concrete Stop-hook evaluator for
+this Go repository. From the Harness repository root, run it explicitly with:
+
+```sh
+harness -config examples/harness/stop-evaluator/config.json \
+  -p 'Implement the requested change and verify it.'
+```
+
+The recipe combines the built-in `auto` agent with a `Stop` hook. Its supplied
+`verify.sh` runs `go build ./...`, `go vet ./...`, and `go test ./...`; exit 0
+accepts the result, while exit 2 returns the bounded failure log to the model
+and requests one corrective turn. That rejection output tells the corrective
+turn to fix the candidate and invoke the verifier directly before finishing:
+
+```sh
+./examples/harness/stop-evaluator/verify.sh
+```
+
+The one-turn bound is the existing Stop-hook recursion guard, not an unbounded
+self-improvement loop. The script also reads `can_block` from hook stdin and
+skips expensive work for cancellation, provider failure, and exhausted-budget
+notifications. Hard turn, token, and cost limits still take precedence.
+
+To add the external gate in another project, copy the recipe, update the hook command
+path, and replace `verify.sh` with that project's objective checks. Keep the
+contract deterministic: print actionable failure evidence and exit 2 to reject
+a candidate, or stay quiet and exit 0 to accept it. The recipe never rewrites
+its own verifier, creates commits, or changes git history; candidate promotion
+remains an explicit user action.
+
+### Opt-in candidate lineage
+
+`-candidate-lineage` preserves a single strictly improving chain from typed
+Stop-evaluator results without changing Git history or replacing the current
+workspace during observation. It works in ordinary interactive sessions as well
+as one-shot automation. The invocation flag is the authorization boundary; it
+has no config key or environment variable and must be supplied again on resume.
+The default session location is already outside the worktree, so an interactive
+run in a normal branch checkout can start directly:
+
+```sh
+harness -config /path/to/evaluator-config.json \
+  -candidate-lineage
+
+# At the interactive prompt after accepted evaluator results:
+/lineage
+/lineage export best /tmp/harness-accepted-candidate
+/lineage restore best --force
+```
+
+Automation can use the same archive across explicitly authorized one-shot
+processes:
+
+```sh
+harness -config /path/to/evaluator-config.json \
+  -candidate-lineage -session /tmp/harness-lineage-session \
+  -p 'Produce and verify the first candidate.'
+
+harness -config /path/to/evaluator-config.json \
+  -candidate-lineage -resume /tmp/harness-lineage-session \
+  -p 'Try to improve the accepted candidate.'
+```
+
+Primary checkouts, branch-attached or detached linked worktrees, repository
+subdirectories, implicit session paths, and resume-clones are supported. The
+repository must already have a commit, and the session directory must remain
+outside the worktree so the archive cannot capture itself. Commits and
+checkouts during the session do not invalidate the chain: each accepted entry
+is a complete Git-visible tree delta from the preceding accepted entry.
+`/clear`, `/fork`, and `/clone` rotate to a fresh lineage archive with the new
+session; a startup `-resume old -session new` clone does the same. Reopening the
+same session continues its chain and requires the same physical worktree.
+Root evaluator results drive the archive; delegate results never do.
+
+An advance requires `accepted:true`, a finite `score`, `score_direction` of
+`maximize` or `minimize`, and non-empty `candidate` and `evidence_ref` fields.
+The first eligible result establishes the evaluator handler/direction lane;
+only a strict score improvement in that lane advances it. Rejected, tied,
+regressed, unordered, or incomplete results stay visible in normal evaluator
+and trajectory records but are not promoted. `evidence_ref` must name a
+repository-root-relative regular file inside the worktree after symlink
+resolution.
+
+The session contains:
+
+```text
+lineage/state.json
+lineage/base.patch
+lineage/patches/0001.patch
+lineage/evidence/0001.evidence
+lineage/restore-backups/0001.patch
+...
+```
+
+`base.patch` records the initially prepared Git-visible workspace against the
+initial base commit. Each numbered binary patch advances from the preceding
+accepted tree, and its numbered evidence file is an immutable copy. Patches are
+capped at 16 MiB, evidence files at 1 MiB, and the chain at 128 entries. The
+manifest records hashes, byte counts, scores, candidate IDs, and tree IDs; a
+resume verifies and reconstructs the chain before contacting a model.
+
+`/lineage` lists accepted checkpoints without contacting the model.
+`/lineage export <entry|best> <new-directory>` reconstructs a checkpoint into a
+new directory outside both the source worktree and session; it refuses to
+overwrite any existing path. Ignored files are not part of the Git-visible
+snapshot. `/lineage restore <entry|best>` changes worktree files only. It never
+changes the real index, commits, refs, or history, refuses a dirty worktree
+unless `--force` is explicit, and writes a bounded reverse patch under
+`lineage/restore-backups/` before every non-no-op restore. Restore backups share
+the 16 MiB patch bound and are capped at 128 per session. Immediately after a
+restore, applying the reported patch from the repository root recovers the
+pre-restore Git-visible state, for example
+`git apply /path/to/session/lineage/restore-backups/0001.patch`.
+
+Candidate capture and promotion remain separate: Harness never automatically
+checks out, restores, commits, or promotes an entry. Interactive archive errors
+are shown at the prompt without ending the conversation; one-shot archive or
+recorder errors still make the process exit nonzero instead of silently
+claiming preservation.

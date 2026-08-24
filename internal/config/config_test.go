@@ -291,8 +291,9 @@ func TestReadLimitsPrecedence(t *testing.T) {
 	}
 }
 
-func TestRemovedToolResultParametersAreUnavailable(t *testing.T) {
+func TestRemovedParametersAreUnavailable(t *testing.T) {
 	oldKeys := []string{
+		"trajectory_context",
 		"read_file_default_limit",
 		"read_file_result_max_bytes",
 		"read_file_result_max_lines",
@@ -501,14 +502,14 @@ func TestExplicitEmptySourceSemantics(t *testing.T) {
 
 func TestRuntimeDefaultsAreDerived(t *testing.T) {
 	result := load(t, nil, nil, "")
-	checks := map[string]string{"model_proxy_url": "http://model", "mcp.proxy": "http://mcp", "histfile": "/state/history", "agent": "auto"}
+	checks := map[string]string{"model_proxy_url": "http://model", "mcp.proxy": "http://mcp", "histfile": "/state/history", "agent": "auto", "handoff_agent": "auto"}
 	for key, want := range checks {
 		if result.Sources[key].Kind != configmeta.SourceDerived {
 			t.Errorf("%s source=%+v", key, result.Sources[key])
 		}
 		_ = want
 	}
-	if result.Config.ModelProxyURL != "http://model" || result.Config.MCP.Proxy != "http://mcp" || result.Config.HistFile != "/state/history" || result.Config.Agent != "auto" {
+	if result.Config.ModelProxyURL != "http://model" || result.Config.MCP.Proxy != "http://mcp" || result.Config.HistFile != "/state/history" || result.Config.Agent != "auto" || result.Config.HandoffAgent != "auto" {
 		t.Fatalf("defaults=%+v", result.Config)
 	}
 	result, err := Load(LoadOptions{LookupEnv: lookup(nil), Defaults: RuntimeDefaults{TmuxActive: true}})
@@ -582,9 +583,52 @@ func TestRelativeAtFileReferences(t *testing.T) {
 	}
 }
 
+func TestRelativeConfigPathAbsolutizesNestedReferencesOnce(t *testing.T) {
+	dir := t.TempDir()
+	configDir := filepath.Join(dir, "nested")
+	if err := os.Mkdir(configDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"prompt.md":  "verify first\n",
+		"hooks.json": `{"Stop":[{"hooks":[{"command":"true"}]}]}`,
+		"config.json": `{
+			"agents":{"verified":{"description":"Use for verified work.","prompt":"@prompt.md"}},
+			"hook_configs":["hooks.json"]
+		}`,
+	} {
+		if err := os.WriteFile(filepath.Join(configDir, name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeConfigPath, err := filepath.Rel(workingDir, filepath.Join(configDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	absConfigPath, err := filepath.Abs(relativeConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: relativeConfigPath})
+	if err != nil {
+		t.Fatalf("load relative config: %v", err)
+	}
+	wantPrompt := "@" + filepath.Join(filepath.Dir(absConfigPath), "prompt.md")
+	wantHooks := filepath.Join(filepath.Dir(absConfigPath), "hooks.json")
+	if result.Config.Agents["verified"].Prompt != wantPrompt ||
+		len(result.Config.HookConfigs) != 1 || result.Config.HookConfigs[0] != wantHooks ||
+		result.Config.Hooks.Empty() {
+		t.Fatalf("resolved nested references: prompt=%q hooks=%v empty=%t", result.Config.Agents["verified"].Prompt, result.Config.HookConfigs, result.Config.Hooks.Empty())
+	}
+}
+
 func TestRunOptionsAreSeparateAndRepeatable(t *testing.T) {
-	result := load(t, []string{"-p", "hi", "--image", "low:a.png", "--image", "b.png", "--format", "json", "-q"}, nil, "")
-	if !result.Run.PromptSet || result.Run.Prompt != "hi" || !result.Run.Quiet || result.Run.OutputFormat != "json" || len(result.Run.Images) != 2 || result.Run.Images[0].Detail != "low" || result.Run.Images[1].Detail != "auto" {
+	result := load(t, []string{"-p", "hi", "--image", "low:a.png", "--image", "b.png", "--format", "json", "-q", "--candidate-lineage"}, nil, "")
+	if !result.Run.PromptSet || result.Run.Prompt != "hi" || !result.Run.Quiet || result.Run.OutputFormat != "json" || !result.Run.CandidateLineage || len(result.Run.Images) != 2 || result.Run.Images[0].Detail != "low" || result.Run.Images[1].Detail != "auto" {
 		t.Fatalf("Run=%+v", result.Run)
 	}
 	if _, err := Load(LoadOptions{Args: []string{"-p", "x", "-i", "y"}, LookupEnv: lookup(nil)}); err == nil {
@@ -835,5 +879,28 @@ func TestRetentionSettingsPrecedenceAndDefaults(t *testing.T) {
 	badPath := writeConfig(t, `{"retention_keep_turns":-1}`)
 	if _, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: badPath}); err == nil {
 		t.Fatal("negative retention_keep_turns accepted")
+	}
+}
+
+func TestStagnationNudgeDefaultsOnAndCanBeDisabled(t *testing.T) {
+	result := load(t, nil, nil, "")
+	if !result.Config.StagnationNudge || result.Sources["stagnation_nudge"].Kind != configmeta.SourceDefault {
+		t.Fatalf("default stagnation nudge = %t source=%+v, want enabled default", result.Config.StagnationNudge, result.Sources["stagnation_nudge"])
+	}
+
+	path := writeConfig(t, `{"stagnation_nudge":false}`)
+	result = load(t, nil, nil, path)
+	if result.Config.StagnationNudge || result.Sources["stagnation_nudge"].Kind != configmeta.SourceFile {
+		t.Fatalf("config stagnation nudge = %t source=%+v, want disabled global config", result.Config.StagnationNudge, result.Sources["stagnation_nudge"])
+	}
+
+	result = load(t, nil, map[string]string{"HARNESS_STAGNATION_NUDGE": "true"}, path)
+	if !result.Config.StagnationNudge || result.Sources["stagnation_nudge"].Kind != configmeta.SourceEnvironment {
+		t.Fatalf("environment stagnation nudge = %t source=%+v, want enabled environment", result.Config.StagnationNudge, result.Sources["stagnation_nudge"])
+	}
+
+	result = load(t, []string{"-stagnation-nudge=false"}, map[string]string{"HARNESS_STAGNATION_NUDGE": "true"}, path)
+	if result.Config.StagnationNudge || result.Sources["stagnation_nudge"].Kind != configmeta.SourceFlag {
+		t.Fatalf("flag stagnation nudge = %t source=%+v, want disabled flag", result.Config.StagnationNudge, result.Sources["stagnation_nudge"])
 	}
 }

@@ -30,10 +30,12 @@ import (
 	"harness/internal/plan"
 	"harness/internal/term/highlight"
 	"harness/internal/todo"
+	"harness/internal/trajectory"
 )
 
 // Version is the on-disk schema version. v7 stores independent latest-plan and
-// advisory-TODO projections. There is intentionally no v6 migration reader.
+// advisory-TODO projections plus an additive optional shadow trajectory. There
+// is intentionally no v6 migration reader.
 const Version = 7
 
 // ReliabilityTelemetryVersion marks raw events and child metadata written with
@@ -82,6 +84,7 @@ type Session struct {
 	Plan          *plan.Plan         `json:"plan,omitempty"`
 	Todos         []todo.Item        `json:"todos,omitempty"`
 	Goal          *goal.State        `json:"goal,omitempty"`
+	Trajectory    *trajectory.State  `json:"trajectory,omitempty"`
 	Usage         UsageTotals        `json:"usage"`
 	// UsageByModel breaks usage and cost down per "provider/model" so a session
 	// that switches models still reports accurate per-model cost. Usage remains
@@ -119,6 +122,8 @@ type RuntimeProfile struct {
 	DelegateMaxDescendants    int    `json:"delegate_max_descendants,omitempty"`
 	Prewarm                   bool   `json:"prewarm,omitempty"`
 	SearchBackend             string `json:"search_backend,omitempty"`
+	StagnationNudge           bool   `json:"stagnation_nudge,omitempty"`
+	CandidateLineage          bool   `json:"candidate_lineage,omitempty"`
 }
 
 // RecoveryInfo describes an active-turn checkpoint applied by Load.
@@ -231,6 +236,10 @@ func (s Session) Save(dir string) error {
 		return fmt.Errorf("session: create dir: %w", err)
 	}
 	s.Version = Version
+	if s.Trajectory != nil {
+		normalized := trajectory.Normalize(s.Trajectory)
+		s.Trajectory = &normalized
+	}
 	s.Messages = stampMissingMessageTimes(s.Messages, sessionTimestamp(s.Updated, s.Created))
 	// A save may happen after an interrupt while tool calls are still open. Store
 	// the same synthetic interrupted results Load historically supplied so every
@@ -575,6 +584,7 @@ func Load(dir string) (Session, error) {
 	recovered.ParentSession = recovered.Tree.Header.ParentSession
 	recovered.ParentEntryID = recovered.Tree.Header.ParentEntryID
 	recovered.ActiveLeaf = recovered.Tree.ActiveLeaf
+	reconcileTrajectory(dir, &recovered)
 	recovered.Recovery = &RecoveryInfo{
 		Phase:   checkpoint.Phase,
 		Prompt:  checkpoint.Prompt,
@@ -617,6 +627,7 @@ func loadSavedSession(dir string) (Session, error) {
 		return Session{}, err
 	}
 	s.Messages = repair(s.Messages)
+	reconcileTrajectory(dir, &s)
 	return s, nil
 }
 
@@ -668,41 +679,50 @@ type Event struct {
 	Model       string `json:"model,omitempty"`
 	// Path is the mutated file for tool_diff events. Replay uses it to detect
 	// the language for diff colorizing.
-	Path                string                  `json:"path,omitempty"`
-	Input               json.RawMessage         `json:"input,omitempty"`
-	Images              []ImageInfo             `json:"images,omitempty"`
-	Usage               *llm.Usage              `json:"usage,omitempty"`
-	Compactions         int                     `json:"compactions,omitempty"`
-	Purpose             string                  `json:"purpose,omitempty"`
-	FromEntryID         string                  `json:"from_entry_id,omitempty"`
-	ToEntryID           string                  `json:"to_entry_id,omitempty"`
-	Summary             string                  `json:"summary,omitempty"`
-	Context             *ContextSnapshot        `json:"context,omitempty"`
-	Retention           *RetentionSnapshot      `json:"retention,omitempty"`
-	IdleCompaction      *IdleCompactionSnapshot `json:"idle_compaction,omitempty"`
-	ModelRequest        *llm.ModelRequestEvent  `json:"model_request,omitempty"`
-	HookDiagnostic      *HookDiagnosticSnapshot `json:"hook_diagnostic,omitempty"`
-	TurnProgress        *TurnProgressSnapshot   `json:"turn_progress,omitempty"`
-	TerminationReason   string                  `json:"termination_reason,omitempty"`
-	ClosureTrigger      string                  `json:"closure_trigger,omitempty"`
-	ClosureTurn         int                     `json:"closure_turn,omitempty"`
-	TurnBudgetExhausted bool                    `json:"turn_budget_exhausted,omitempty"`
-	WorkflowStatus      *WorkflowStatusSnapshot `json:"workflow_status,omitempty"`
-	TelemetryVersion    int                     `json:"telemetry_version,omitempty"`
-	DurationMS          int64                   `json:"duration_ms,omitempty"`
-	MessageCount        int                     `json:"message_count,omitempty"`
-	ResultError         bool                    `json:"result_error,omitempty"`
+	Path                string                   `json:"path,omitempty"`
+	Input               json.RawMessage          `json:"input,omitempty"`
+	Images              []ImageInfo              `json:"images,omitempty"`
+	Usage               *llm.Usage               `json:"usage,omitempty"`
+	Compactions         int                      `json:"compactions,omitempty"`
+	Purpose             string                   `json:"purpose,omitempty"`
+	FromEntryID         string                   `json:"from_entry_id,omitempty"`
+	ToEntryID           string                   `json:"to_entry_id,omitempty"`
+	Summary             string                   `json:"summary,omitempty"`
+	Context             *ContextSnapshot         `json:"context,omitempty"`
+	Retention           *RetentionSnapshot       `json:"retention,omitempty"`
+	IdleCompaction      *IdleCompactionSnapshot  `json:"idle_compaction,omitempty"`
+	ModelRequest        *llm.ModelRequestEvent   `json:"model_request,omitempty"`
+	HookDiagnostic      *HookDiagnosticSnapshot  `json:"hook_diagnostic,omitempty"`
+	EvaluatorResult     *EvaluatorResultSnapshot `json:"evaluator_result,omitempty"`
+	StagnationNudge     *StagnationNudgeSnapshot `json:"stagnation_nudge,omitempty"`
+	LineageAdvance      *LineageAdvanceSnapshot  `json:"lineage_advance,omitempty"`
+	ToolMutation        *ToolMutationSnapshot    `json:"tool_mutation,omitempty"`
+	Trajectory          *trajectory.State        `json:"trajectory,omitempty"`
+	TurnProgress        *TurnProgressSnapshot    `json:"turn_progress,omitempty"`
+	TerminationReason   string                   `json:"termination_reason,omitempty"`
+	ClosureTrigger      string                   `json:"closure_trigger,omitempty"`
+	ClosureTurn         int                      `json:"closure_turn,omitempty"`
+	TurnBudgetExhausted bool                     `json:"turn_budget_exhausted,omitempty"`
+	WorkflowStatus      *WorkflowStatusSnapshot  `json:"workflow_status,omitempty"`
+	TelemetryVersion    int                      `json:"telemetry_version,omitempty"`
+	DurationMS          int64                    `json:"duration_ms,omitempty"`
+	MessageCount        int                      `json:"message_count,omitempty"`
+	ResultError         bool                     `json:"result_error,omitempty"`
 	// ErrorKind is the structured diagnostics-only class of a failed tool
 	// result (llm.ToolErrorKind). It is empty on legacy logs, where the
 	// analysis layer text-classifies instead.
 	ErrorKind string `json:"error_kind,omitempty"`
 	// ErrorExcerpt is the bounded, rune-safe excerpt of the failed result
 	// text (see ErrorExcerpt); stored so analysis never needs tree.ndjson.
-	ErrorExcerpt        string         `json:"error_excerpt,omitempty"`
-	ResultTruncated     bool           `json:"result_truncated,omitempty"`
-	ResultOriginalBytes int            `json:"result_original_bytes,omitempty"`
-	ResultShownBytes    int            `json:"result_shown_bytes,omitempty"`
-	ResultMetrics       map[string]int `json:"result_metrics,omitempty"`
+	ErrorExcerpt        string `json:"error_excerpt,omitempty"`
+	ResultTruncated     bool   `json:"result_truncated,omitempty"`
+	ResultOriginalBytes int    `json:"result_original_bytes,omitempty"`
+	ResultShownBytes    int    `json:"result_shown_bytes,omitempty"`
+	// ArtifactRef is the deterministic session-relative expected full-output
+	// path for a truncated tool result. Its presence does not claim the write
+	// succeeded; readers must verify the artifact independently.
+	ArtifactRef   string         `json:"artifact_ref,omitempty"`
+	ResultMetrics map[string]int `json:"result_metrics,omitempty"`
 }
 
 const (
@@ -766,6 +786,44 @@ type HookDiagnosticSnapshot struct {
 	Outcome             string     `json:"outcome"`
 	CircuitOpen         bool       `json:"circuit_open,omitempty"`
 	CircuitOpenUntil    *time.Time `json:"circuit_open_until,omitempty"`
+}
+
+// EvaluatorResultSnapshot contains bounded semantic candidate fitness emitted
+// by a Stop hook. It deliberately excludes the hook's free-form reason and all
+// stdout/stderr content; EvidenceRef points to detailed evidence instead.
+// ScoreDirection is optional host-only ordering metadata.
+type EvaluatorResultSnapshot struct {
+	Handler               string   `json:"handler"`
+	Accepted              bool     `json:"accepted"`
+	Score                 *float64 `json:"score,omitempty"`
+	ScoreDirection        string   `json:"score_direction,omitempty"`
+	Candidate             string   `json:"candidate,omitempty"`
+	RemainingRequirements *int     `json:"remaining_requirements,omitempty"`
+	EvidenceRef           string   `json:"evidence_ref,omitempty"`
+}
+
+// StagnationNudgeSnapshot records only the public policy threshold and observed
+// streak. Evaluator handlers, scores, candidates, evidence, and prompt text are
+// intentionally absent.
+type StagnationNudgeSnapshot struct {
+	Threshold int `json:"threshold"`
+	Streak    int `json:"streak"`
+}
+
+// LineageAdvanceSnapshot records only bounded artifact sizes and the linear
+// sequence relationship. Candidate identifiers, scores, trees, evidence
+// references, and patch bodies remain in the explicit lineage artifact.
+type LineageAdvanceSnapshot struct {
+	Sequence       int   `json:"sequence"`
+	ParentSequence int   `json:"parent_sequence,omitempty"`
+	PatchBytes     int64 `json:"patch_bytes,omitempty"`
+	EvidenceBytes  int64 `json:"evidence_bytes,omitempty"`
+}
+
+// ToolMutationSnapshot is the bounded host-derived set of paths a successful
+// mutation-reporting tool may have changed.
+type ToolMutationSnapshot struct {
+	Paths []string `json:"paths"`
 }
 
 // TurnProgressSnapshot is the replay-safe, diagnostics-only summary of one
@@ -879,6 +937,11 @@ const (
 	EventBranch               = "branch"
 	EventModelRequest         = "model_request"
 	EventHookDiagnostic       = "hook_diagnostic"
+	EventEvaluatorResult      = "evaluator_result"
+	EventStagnationNudge      = "stagnation_nudge"
+	EventLineageAdvance       = "lineage_advance"
+	EventToolMutation         = "tool_mutation"
+	EventTrajectorySeed       = "trajectory_seed"
 )
 
 // AppendEvent appends ev as one JSON line to raw.ndjson under dir. A close
@@ -1156,7 +1219,7 @@ func (r *replayRenderer) Render(ev Event) {
 		if !r.opts.Quiet {
 			fmt.Fprintln(r.w, r.dimStatus(turnWaitingLine(ev)))
 		}
-	case EventToolResult, EventNotice, EventBranch, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage, EventModelRequest:
+	case EventToolResult, EventNotice, EventBranch, EventStagnationNudge, EventTurnAttemptAbandoned, EventTurnAttemptUsage, EventTurnComplete, EventPromptUsage, EventModelRequest:
 		r.assistant.Finish()
 		if ev.Display != "" && !r.opts.Quiet {
 			fmt.Fprintln(r.w, r.dimStatus(ev.Display))
@@ -1967,7 +2030,7 @@ func SaveToolResultArtifact(dir string, prompt, turn int, result llm.ToolResult)
 	if dir == "" || !result.Truncated || result.OriginalText == "" {
 		return "", nil
 	}
-	rel := filepath.Join("artifacts", "tool-results", fmt.Sprintf("%04d-%04d-%s.txt", prompt, turn, safeName(result.ForID)))
+	rel := ToolResultArtifactReference(prompt, turn, result.ForID)
 	path := filepath.Join(dir, rel)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", fmt.Errorf("session: create artifact dir: %w", err)
@@ -1976,6 +2039,14 @@ func SaveToolResultArtifact(dir string, prompt, turn int, result llm.ToolResult)
 		return "", fmt.Errorf("session: write tool artifact: %w", err)
 	}
 	return rel, nil
+}
+
+// ToolResultArtifactReference returns the deterministic session-relative path
+// used for a truncated tool result's full textual output. It does not inspect
+// the filesystem; callers must treat the reference as expected metadata until
+// the artifact is verified independently.
+func ToolResultArtifactReference(prompt, turn int, resultID string) string {
+	return filepath.Join("artifacts", "tool-results", fmt.Sprintf("%04d-%04d-%s.txt", prompt, turn, safeName(resultID)))
 }
 
 func writeJSONAtomic(path string, v any) error {

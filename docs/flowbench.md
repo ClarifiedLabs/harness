@@ -91,7 +91,7 @@ The implementations were:
   targeted or any-job waiting, normal timeout results, and one-shot delivery.
 - `scripts/flowbench`: immutable worktrees/binaries, fixture digests, session
   validation, AB/BA ordering, resumable/importable records, scoring, cost
-  reports, and isolated Go caches.
+  reports, isolated Go caches, and optional round-based model parallelism.
 
 ## Live protocol
 
@@ -108,8 +108,8 @@ The default matrix uses:
 - `openrouter:z-ai/glm-5.2`
 - `openrouter:anthropic/claude-sonnet-5`
 
-Each run uses medium reasoning, the independent agent, no web/MCP/LSP/Serena
-augmentation, an immutable target at
+Standard cases use medium reasoning, the independent agent, an empty explicit
+config, no web/MCP/LSP/Serena augmentation, and an immutable target at
 `8f76b0b0fb7751a8f7b067fa7f88e4df564f9560`, and these intentionally high
 limits:
 
@@ -118,7 +118,7 @@ limits:
 - a 45-minute per-run deadline;
 - five repetitions per model.
 
-Acceptance requires:
+Efficiency-case acceptance requires:
 
 - at least 8/9 candidate correctness and no correctness loss versus baseline;
 - at least 2/3 adoption for every model;
@@ -144,12 +144,170 @@ go run ./scripts/flowbench \
 ```
 
 Available cases are `search_context`, `command_steps`, `todo_coissue`,
-`git_workspace_summary`, `background_wait`, `edit_precision`,
-`edit_drift_recovery`, `known_path_batching`, `unknown_path_discovery`, and the
+`git_workspace_summary`, `background_wait`, `stagnation_detection`,
+`stagnation_recovery`, `candidate_lineage`, `default_stack_marathon`,
+`edit_precision`, `edit_drift_recovery`,
+`known_path_batching`, `unknown_path_discovery`, and the
 `read_scale_002`, `read_scale_008`, `read_scale_018`, `read_scale_036`, and
 `read_scale_072` ladder. Use `-dry-run` to inspect ordering, `-resume` for
 validated completed records, and
 `-import-baseline-runs <runs.json>` to reuse a matching immutable baseline.
+Use `-parallel-models` to run one instance of every selected model concurrently.
+Flowbench waits for the whole arm before starting the next AB/BA arm, never
+runs two instances of the same model at once, serializes Git worktree lifecycle
+operations, and remains the sole writer of resumable result records.
+
+All cases accept `-reasoning <profile>` to pin the same Harness reasoning
+profile for every baseline and candidate run; the default remains `medium`.
+The selected profile is persisted in each run record, and resume/import rejects
+records produced with a different profile.
+
+`stagnation_detection` is the deterministic shadow-telemetry oracle. It compares
+a revision from before ordered-score support with the candidate revision while
+holding the independent agent, isolated config, hidden helper, and all model
+prompts constant:
+
+```sh
+go run ./scripts/flowbench \
+  -case stagnation_detection \
+  -baseline ec6dd98 \
+  -candidate HEAD \
+  -reasoning medium \
+  -results /tmp/harness-stagnation-flowbench
+```
+
+Twelve fresh Harness processes resume one session and require only a tool-free
+`READY` response. The hidden Stop evaluator derives its phase from the host
+`prompt_id` and emits exactly one typed result per process across two handler
+lanes. The fixed trace covers an ordered maximize tie and regression, a real
+score improvement, an intentional remaining-requirement expansion, a new
+unscored candidate followed by an exact repeat, a handler change into a
+minimize lane, another regression and improvement, and final acceptance. It
+does not inject a stagnation redirect or otherwise alter model behavior.
+
+The directed candidate oracle is active/max streak `0/2`, classification counts
+`3/3/2/3/1` for baseline/improvement/plateau/regression/indeterminate, zero
+unordered scores, and one lane reset. Replaying the same raw lifecycle from a
+pre-direction baseline must instead yield `3/1/2/1/5`, eight unordered scores,
+and one lane reset. Both arms must record 11 rejections followed by one
+acceptance, make no model tool calls, and preserve the helper fixture. The gate
+requires every baseline and candidate run to match its respective projection
+oracle and requires no correctness loss per model. Token and turn deltas are
+reported but are not detector-correctness gates because the experiment is
+shadow-only and all model-visible inputs are intentionally equivalent.
+
+`stagnation_recovery` is the paired behavioral follow-up. Baseline and
+candidate use the same Harness revision, independent agent, four-process resume
+sequence, opaque Stop evaluator, and prompts. Their isolated configs differ
+only in `stagnation_nudge:false` versus `true`:
+
+```sh
+go run ./scripts/flowbench \
+  -case stagnation_recovery \
+  -baseline HEAD \
+  -candidate HEAD \
+  -reasoning medium \
+  -parallel-models \
+  -results /tmp/harness-stagnation-recovery-flowbench
+```
+
+The first three phases deliberately repeat one rejected, ordered candidate.
+The third rejection reaches no-improvement streak two. The candidate must first
+persist exactly one payload-free strategy-reset event, then use the referenced
+evidence to make one exact fixture repair; the fourth process validates and
+accepts it. The disabled baseline is instructed to remain tool-free, but any
+spontaneous exact recovery still counts as a baseline pass. Exact correctness
+is kept separate from mechanism adoption: a candidate may reach the right state
+while still failing reset-driven coverage if it used tools before the reset.
+Scoring rejects modified evidence and extra workspace changes. The promotion
+gate separately requires exact-recovery improvement, exactly one reset in every
+candidate run, post-reset acceptance and clean reset-driven recovery in at least
+8/9 candidate runs, 2/3 clean adoption per model, and zero baseline reset
+events. A candidate run that starts repair before the reset still counts toward
+exact correctness but not mechanism adoption.
+
+`candidate_lineage` is the deterministic archive/adoption oracle. Both arms use
+the same Harness revision, `auto` agent, isolated config, typed Stop evaluator,
+three resumed one-shot prompts, evidence, and workspace transitions. Their only
+treatment difference is the candidate variant's invocation-only
+`-candidate-lineage` argument:
+
+```sh
+go run ./scripts/flowbench \
+  -case candidate_lineage \
+  -baseline HEAD \
+  -candidate HEAD \
+  -reasoning medium \
+  -parallel-models \
+  -results /tmp/harness-candidate-lineage-flowbench
+```
+
+The three accepted evaluator scores are `10`, `5`, and `20` in one maximize
+lane. The exact candidate archive must preserve score 10 as entry 1, decline to
+advance for accepted-but-worse score 5, then preserve score 20 as entry 2 with
+parent 1. Flowbench reopens the archive through the production validator,
+reconstructs both recorded Git trees, checks immutable phase-1/phase-3 evidence
+copies, verifies manifest/artifact hashes and byte telemetry, and requires the
+lower-scoring phase-2 candidate to be absent from the accepted chain. Baseline
+runs must create neither an archive nor a `lineage_advance` event.
+
+Final-file correctness, immutable source evidence, exact evaluator lifecycle,
+and workspace scope are scored independently from mechanism adoption. The gate
+requires no aggregate or per-model correctness loss, two candidate-only strict
+advances in every candidate run, zero baseline advances, at least 2/3 adoption
+per model, and the normal bounded token/turn regression caps. Because the flag
+does not enter model context, a live smoke is an equivalence check plus archive
+coverage, not evidence that the model itself improved.
+
+`default_stack_marathon` is the end-to-end long-horizon comparison of the
+bounded stagnation nudge on the default `auto` agent. Both arms
+use the same Harness revision, models, medium reasoning, tools, 32,768-token
+accounting window, deterministic compaction settings, prompts, public source,
+opaque Stop-hook evaluator, and hidden tests. Both select the built-in `auto`
+agent; the baseline sets `stagnation_nudge:false` and the candidate sets
+`stagnation_nudge:true`. The host-owned trajectory projection remains
+model-invisible and candidate lineage is disabled, so the nudge is the only
+treatment.
+
+One session implements six incremental releases across three independent
+multi-file Go packages: a concurrent TTL/LRU store with atomic batches and
+durable snapshots, a dependency planner with graph transactions and snapshots,
+and a checksummed streaming codec with an atomic multi-stream log. Each
+milestone gets three fresh resumed processes, the last of which must satisfy
+hidden behavioral tests before the host advances. Five explicit compactions
+create real memory boundaries. The 18-result evaluator progression is monotonic
+and must end at exact score 100 without hidden-asset access, milestone-control
+tampering, or changes outside the fixture. `MILESTONE.md` is the host-owned,
+read-only phase contract; the host derives the phase from its exact contents,
+and Flowbench audits model-originated mutation events for both that file and
+the retired numeric `milestone.txt` control path.
+
+The case has a four-hour per-arm timeout and a protocol floor of 1,000,000
+reported cumulative tokens for every individual run. Falling below the floor
+does not turn an otherwise correct candidate into an incorrect implementation;
+it rejects the experiment as insufficiently long-horizon. This prevents a
+large aggregate matrix from disguising short individual sessions.
+
+Calibrate task length with one pair before spending a broad matrix:
+
+```sh
+go run ./scripts/flowbench \
+  -case default_stack_marathon \
+  -baseline HEAD \
+  -candidate HEAD \
+  -models alibaba-token-plan:qwen3.8-max \
+  -repetitions 1 \
+  -reasoning medium \
+  -results /tmp/harness-default-stack-calibration
+```
+
+If both calibration arms are valid and exceed the floor, run one synchronized
+AB/BA breadth pair across the ten default model targets with
+`-parallel-models`. Expand to five pairs per model only after the breadth round
+shows no aggregate or per-model correctness loss and no infrastructure or
+oracle defect. Report exact correctness, evaluator turns to score 100,
+nudges, compactions, tokens, cost, turns, and wall time; retain every valid
+failure rather than retrying it.
 
 The tool-accuracy suite runs its four synthetic, evidence-backed cases together:
 
@@ -207,13 +365,21 @@ are not accepted as aliases, and legacy typed-search result telemetry is not
 used for new scores. A pre-break baseline that does not expose this surface is
 not a valid comparison baseline; rebuild or rerun it with the v11 callable
 contract. Run records hash prompts, fixtures, binaries, and raw events and
-version their scoring oracle. Resume and baseline import reject stale record,
-prompt, oracle, or event-stream versions/hashes rather than reusing an
-unverified prior score.
+version their scoring oracle. The current envelope is run-record schema v5 and
+oracle contract v33; restart-backed cases bind their phase sequence and helper
+exposure into the prompt contract. Resume and baseline import reject
+stale record, prompt, oracle, or event-stream versions/hashes rather than
+reusing an unverified prior score.
+Summaries retain each arm's primary-metric median and the resulting reduction
+of medians for historical comparison, and separately report the median of the
+pairwise primary-metric reductions.
 They retain invalid infrastructure samples as immutable evidence, leave their
 matrix keys incomplete, and append a replacement on `-resume` rather than
-scoring or deleting the invalid sample. Child runs use an empty explicit Harness
-config and are rejected when recorded telemetry names a model target other than the requested target,
+scoring or deleting the invalid sample. Runs use an empty explicit Harness
+config except for `stagnation_detection`, `stagnation_recovery`,
+`candidate_lineage`, and `default_stack_marathon`, which
+declare a hashed per-variant config. Runs are rejected when recorded telemetry
+names a model target other than the requested target,
 preventing local agent model pins from silently contaminating the matrix. Live
 provider receipts must keep direct Anthropic
 `anthropic:claude-haiku-4-5-20251001` distinct from OpenRouter
@@ -248,6 +414,9 @@ not satisfy the corresponding lane.
 | Simplified `update_work` Flash diagnostic (`830fa50`) | Baseline 1/1, candidate 1/1; candidate adopted | Turns 22→13; `update_work` calls/errors 11/10→1/0 | +65.9% (739,287→252,061 tokens) | One-pair issue confirmation; formal case gate still rejects because its legacy work-only-turn metric was 0→0 |
 | Simplified `update_work` ten-model matrix (`eed0f68`) | Baseline 30/30, candidate 24/30; adoption 13/30 | Correctness fell on V4 Pro, Qwen, Kimi K2.7, and all Xiaomi candidates | Aggregate paired-median −6.5%; only Flash and Kimi K3 cleared the per-model correctness, adoption, token, and turn gates | Rejected; retain the simpler progress contract but redesign the remaining plan/receipt flow before promotion |
 | Flat-plan focused smoke (`d6bb9a8`) | Baseline 2/4, candidate 2/4; adoption 3/4 | Turns totaled 45→42; `update_work` errors fell 4→1 | Paired-median −16.7%; Qwen +20.8%, Mimo +14.1%, V4 Pro −95.2%, Kimi K2.7 −47.5% | Rejected at smoke; plan-validation loops disappeared, but efficiency did not clear the focused gate |
+| Stagnation detector v18 smoke (`1308f62`) | Baseline 1/1 legacy oracle, candidate 1/1 directed oracle; both 12/12 evaluator events and zero tool calls | Baseline classifications `3/1/2/1/5`; candidate `3/3/2/3/1`; both active/max streak `0/2` | 113,230→114,812 tokens (−1.4%); turns 23→23 | Accepted: validates the shadow detector and supports streak 2 as the minimum currently evidenced nudge threshold |
+| Candidate-lineage v26 two-model smoke (`5f06e97`) | Baseline 2/2, candidate 2/2; both candidate archives passed exact reopen/reconstruction and evidence checks | Each candidate archived improving scores 10 and 20, skipped regressing score 5; four advances, 1,290 patch bytes, 420 evidence bytes; zero baseline archives | Qwen 99,383→60,447 tokens; Terra 50,631→46,348 | Accepted as opt-in infrastructure validation; one pair per model makes no efficiency or default-on claim |
+| Historical default-stack marathon v31 (`04508df`) | Strict passes fell 7/10→3/10; exact score-100 completions fell 8/10→5/10; four candidates received a nudge | 81,463,450 cumulative state-reported tokens across 20 arms; 19/20 exceeded 1M, while GLM stopped at 745,077 on an early correctness failure | Strict comparable pairs: Flash +17.7%, Terra −18.7%, Kimi K3 −21.7%; paired median −18.7% | Rejected and stopped before repetitions; the shipped `evolve` agent was removed, and v33 now isolates the retained nudge on `auto` |
 
 The 2026-08-03 tool-accuracy smoke compared baseline `446e00c` with product
 candidate `013255c` over five configured provider routes, one alternating pair
@@ -255,6 +424,76 @@ per route and case (40 valid runs). Because edit precision failed its per-model
 no-regression gates, the package did not advance to the three-pair promotion
 matrix against `0594353`. An interrupted OpenRouter pair exposed and received a regression fix for resume
 filtering; the final smoke contains no invalid records.
+
+The oracle-v18 stagnation smoke compared pre-direction baseline `ec6dd98` with
+candidate `1308f62` on one medium-effort Qwen 3.8 pair. Both arms completed the
+same 12-prompt, 23-turn lifecycle with 11 rejections, one final acceptance, and
+zero model tool calls. Replaying the baseline produced the exact unordered
+`3/1/2/1/5` classification oracle with eight unordered scores; the candidate
+produced the exact directed `3/3/2/3/1` oracle with none. Both peaked at
+no-improvement streak two and ended at zero. Tokens differed by 1.4%, while
+turns were identical. Combined with the earlier real-session audit, where all
+24 successful trajectory runs peaked at one, this is sufficient protocol
+evidence to test one bounded nudge at streak two without running a detector-only
+promotion matrix. The canonical receipt is
+`/tmp/harness-stagnation-v18-results.71buNb/stagnation_detection-summary.md`.
+
+The oracle-v26 candidate-lineage smoke compared the same `5f06e97` Harness
+binary in both arms, with only the candidate receiving `-candidate-lineage`.
+One medium-effort pair ran on Qwen 3.8 Max and GPT-5.6 Terra. All four arms
+completed the exact three-phase `10→5→20` maximize lifecycle. Each candidate
+archive preserved scores 10 and 20 as a two-patch lineage with immutable
+evidence, skipped the score-5 regression, and reopened through the production
+archive path to reconstruct the exact final accepted tree. Both baselines had
+zero archives and zero lineage-advance events. The candidate arms emitted four
+advances totaling 1,290 patch bytes and 420 evidence bytes. The observed token
+deltas are diagnostic only: the feature is model-invisible, and one pair per
+model is insufficient for an efficiency claim. This validates the explicit
+opt-in archive boundary, not default activation or automatic promotion. The
+canonical receipt is
+`/tmp/harness-candidate-lineage-v26-smoke.TPRwns/candidate_lineage-summary.md`.
+
+The oracle-v31 default-stack marathon compared the same `04508df` binary in
+both arms at medium effort. Baselines used `auto` with
+`stagnation_nudge:false`; candidates used the then-current `evolve` plus
+`stagnation_nudge:true` defaults. Each model received one pair spanning six
+incremental releases, three resumed processes per release, five explicit
+compactions, and three independent multi-file Go packages. Baseline rounds and
+candidate rounds each ran one instance of all ten models in parallel.
+
+The 20 launched arms used 81,463,450 cumulative state-reported tokens:
+37,458,283 baseline and 44,005,167 candidate. Nineteen arms exceeded one
+million tokens. The GLM candidate stopped on a definitive milestone-two
+correctness failure at 745,077, so it was retained rather than padded or
+retried. Thirteen completed reportable records all cleared the one-million-token
+floor. Across all scheduled arms, strict correctness fell from 7/10 to 3/10,
+and exact score-100 completion before protocol checks fell from 8/10 to 5/10.
+Both DeepSeek V4 Pro arms were four-hour deadline censored at score 50.
+
+Only Flash, Terra, and Kimi K3 produced strict passes in both arms and therefore
+support paired efficiency comparisons. Candidate token savings were +17.7%,
+−18.7%, and −21.7%, respectively, for a −18.7% paired median; turns changed
+by −50, +20, and +20. Their aggregate token count happened to improve 2.9%
+because Flash was the largest pair, but that unpaired weighting does not
+override the median or correctness gate. Grok's candidate reached score 100 but
+explicitly accessed reference assets; Xiaomi's baseline also reached score 100
+with two hidden-asset searches. Claude's candidate reached score 100 only after
+10,290,300 tokens and 551 turns, recorded six hidden-asset searches, and emitted
+17 of the required 18 evaluator results.
+
+Nudges fired in only four candidate arms. Qwen, Xiaomi, and GLM still failed
+their active milestone after the nudge. Kimi K2.7 was the only arm with
+meaningful post-nudge progress: its baseline failed milestone two after
+2,462,367 tokens, while the candidate advanced to the final milestone and score
+83 before its four-hour deadline after 9,921,492 tokens. The other candidate
+regressions and protocol failures occurred without a nudge, so this matrix
+rejects the combined default stack but does not identify the nudge as the sole
+cause. Per the predeclared stopping rule, it does not advance to five pairs.
+The failed prompt was subsequently removed. Oracle v33 keeps this task but now
+compares `auto` with nudge false versus true and removes the rejected
+model-visible memory, conditional delegation, and automatic restore benchmark
+surfaces. The canonical historical receipt is
+`/tmp/harness-default-stack-breadth-v33.gI0uUV/default_stack_marathon-summary.md`.
 
 The follow-up edit-guidance candidate `9e5cabf` restored recently-read,
 non-overlapping batch guidance while keeping the default catalog under its

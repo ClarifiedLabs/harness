@@ -123,6 +123,10 @@ the default target as `model` in `~/.config/harness/config.json` or with
 
 ## Highlights
 
+- Start implementation work with the general-purpose `auto` agent by default;
+  the bounded stagnation nudge remains enabled, and deterministic
+  [Stop hooks](docs/usage.md#stop-hook-evaluator-recipe) can reject a candidate
+  and return repair evidence before completion.
 - Set prompt budgets, turn limits, and tool timeouts to
   [control runaway work](docs/usage.md#prompt-limits-and-lifecycle).
 - Redirect work without canceling by

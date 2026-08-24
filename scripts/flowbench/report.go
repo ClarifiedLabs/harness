@@ -10,23 +10,37 @@ import (
 )
 
 type aggregate struct {
-	Case                   string              `json:"case"`
-	Runs                   int                 `json:"runs"`
-	BaselinePasses         int                 `json:"baseline_passes"`
-	CandidatePasses        int                 `json:"candidate_passes"`
-	Adoptions              int                 `json:"adoptions"`
-	AdoptionsByModel       map[string]int      `json:"adoptions_by_model"`
-	BaselineMedianTokens   float64             `json:"baseline_median_tokens"`
-	CandidateMedianTokens  float64             `json:"candidate_median_tokens"`
-	TokenSavingPct         float64             `json:"token_saving_pct"`
-	PrimaryBaselineMedian  float64             `json:"primary_baseline_median"`
-	PrimaryCandidateMedian float64             `json:"primary_candidate_median"`
-	PrimaryReductionPct    float64             `json:"primary_reduction_pct"`
-	DeepSeekCostUSD        float64             `json:"deepseek_cost_usd"`
-	SubscriptionCosts      string              `json:"subscription_costs"`
-	Accepted               bool                `json:"accepted"`
-	Failures               []string            `json:"failures,omitempty"`
-	Models                 map[string]modelAgg `json:"models"`
+	Case                             string              `json:"case"`
+	Runs                             int                 `json:"runs"`
+	BaselinePasses                   int                 `json:"baseline_passes"`
+	CandidatePasses                  int                 `json:"candidate_passes"`
+	Adoptions                        int                 `json:"adoptions"`
+	AdoptionsByModel                 map[string]int      `json:"adoptions_by_model"`
+	BaselineLegacyStagnationRuns     int                 `json:"baseline_legacy_stagnation_runs,omitempty"`
+	CandidateStagnationDetections    int                 `json:"candidate_stagnation_detections,omitempty"`
+	BaselineUnexpectedRecoveryNudges int                 `json:"baseline_unexpected_recovery_nudges,omitempty"`
+	CandidateRecoveryNudgeRuns       int                 `json:"candidate_recovery_nudge_runs,omitempty"`
+	CandidateRecoveriesAfterNudge    int                 `json:"candidate_recoveries_after_nudge,omitempty"`
+	CandidateResetDrivenRecoveries   int                 `json:"candidate_reset_driven_recoveries,omitempty"`
+	BaselineUnexpectedLineageRuns    int                 `json:"baseline_unexpected_lineage_runs,omitempty"`
+	CandidateLineageRuns             int                 `json:"candidate_lineage_runs,omitempty"`
+	CandidateLineageAdvances         int                 `json:"candidate_lineage_advances,omitempty"`
+	CandidateLineagePatchBytes       int64               `json:"candidate_lineage_patch_bytes,omitempty"`
+	CandidateLineageEvidenceBytes    int64               `json:"candidate_lineage_evidence_bytes,omitempty"`
+	BaselineMedianTokens             float64             `json:"baseline_median_tokens"`
+	CandidateMedianTokens            float64             `json:"candidate_median_tokens"`
+	TokenSavingPct                   float64             `json:"token_saving_pct"`
+	PrimaryBaselineMedian            float64             `json:"primary_baseline_median"`
+	PrimaryCandidateMedian           float64             `json:"primary_candidate_median"`
+	PrimaryReductionPct              float64             `json:"primary_reduction_pct"`
+	PrimaryPairedReductionPct        float64             `json:"primary_paired_reduction_pct"`
+	DeepSeekCostUSD                  float64             `json:"deepseek_cost_usd"`
+	SubscriptionCosts                string              `json:"subscription_costs"`
+	Accepted                         bool                `json:"accepted"`
+	Failures                         []string            `json:"failures,omitempty"`
+	Models                           map[string]modelAgg `json:"models"`
+	MinimumRunTokens                 int                 `json:"minimum_run_tokens,omitempty"`
+	RunsMeetingTokenFloor            int                 `json:"runs_meeting_token_floor,omitempty"`
 }
 
 type modelAgg struct {
@@ -92,11 +106,25 @@ func writeSummary(results string, c benchmarkCase, records []runRecord) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Flow benchmark: %s\n\n", c.Name)
 	fmt.Fprintf(&b, "- Runs: %d\n", agg.Runs)
+	if agg.MinimumRunTokens > 0 {
+		fmt.Fprintf(&b, "- Long-horizon token floor: %d/%d runs used at least %d reported tokens\n", agg.RunsMeetingTokenFloor, agg.Runs, agg.MinimumRunTokens)
+	}
 	fmt.Fprintf(&b, "- Correctness: baseline %d, candidate %d\n", agg.BaselinePasses, agg.CandidatePasses)
 	fmt.Fprintf(&b, "- Adoption: %d candidate runs\n", agg.Adoptions)
+	if c.Acceptance == acceptanceStagnation {
+		fmt.Fprintf(&b, "- Detector oracle: %d legacy baseline runs, %d directed candidate detections\n", agg.BaselineLegacyStagnationRuns, agg.CandidateStagnationDetections)
+		b.WriteString("- Candidate trace: active/max streak 0/2; baseline/improvement/plateau/regression/indeterminate 3/3/2/3/1; unordered scores/lane resets 0/1\n")
+	}
+	if c.Acceptance == acceptanceStagnationRecovery {
+		fmt.Fprintf(&b, "- Strategy-reset recovery: %d candidate one-shot triggers, %d post-trigger acceptances, %d clean reset-driven recoveries; %d unexpected baseline triggers\n", agg.CandidateRecoveryNudgeRuns, agg.CandidateRecoveriesAfterNudge, agg.CandidateResetDrivenRecoveries, agg.BaselineUnexpectedRecoveryNudges)
+	}
+	if c.Acceptance == acceptanceLineage {
+		fmt.Fprintf(&b, "- Candidate lineage: %d candidate archives, %d strict advances, %d patch bytes, %d evidence bytes; %d unexpected baseline archives\n", agg.CandidateLineageRuns, agg.CandidateLineageAdvances, agg.CandidateLineagePatchBytes, agg.CandidateLineageEvidenceBytes, agg.BaselineUnexpectedLineageRuns)
+	}
 	fmt.Fprintf(&b, "- Unpaired median tokens: baseline %.0f, candidate %.0f\n", agg.BaselineMedianTokens, agg.CandidateMedianTokens)
 	fmt.Fprintf(&b, "- Paired-median token saving: %.1f%%\n", agg.TokenSavingPct)
-	fmt.Fprintf(&b, "- Median %s: baseline %.1f, candidate %.1f (%.1f%% reduction)\n", c.PrimaryMetric, agg.PrimaryBaselineMedian, agg.PrimaryCandidateMedian, agg.PrimaryReductionPct)
+	fmt.Fprintf(&b, "- Median %s: baseline %.1f, candidate %.1f (%.1f%% reduction of medians)\n", c.PrimaryMetric, agg.PrimaryBaselineMedian, agg.PrimaryCandidateMedian, agg.PrimaryReductionPct)
+	fmt.Fprintf(&b, "- Paired-median %s reduction: %.1f%%\n", c.PrimaryMetric, agg.PrimaryPairedReductionPct)
 	fmt.Fprintf(&b, "- DeepSeek reported cost: $%.6f\n", agg.DeepSeekCostUSD)
 	fmt.Fprintf(&b, "- Subscription provider cost: %s\n", agg.SubscriptionCosts)
 	fmt.Fprintf(&b, "- Accepted: %t\n", agg.Accepted)
@@ -134,6 +162,7 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		AdoptionsByModel:  map[string]int{},
 		Models:            map[string]modelAgg{},
 		SubscriptionCosts: "N/A (alibaba-token-plan and openai-codex)",
+		MinimumRunTokens:  c.MinimumRunTokens,
 	}
 	var baselineTokens, candidateTokens, baselinePrimary, candidatePrimary []float64
 	byModel := map[string][]runRecord{}
@@ -142,6 +171,9 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 			continue
 		}
 		agg.Runs++
+		if c.MinimumRunTokens > 0 && record.Metrics.TotalTokens >= c.MinimumRunTokens {
+			agg.RunsMeetingTokenFloor++
+		}
 		byModel[record.Model] = append(byModel[record.Model], record)
 		primary := float64(primaryValue(c, record.Metrics))
 		if strings.HasPrefix(record.Model, "deepseek:") {
@@ -153,12 +185,43 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 			}
 			baselineTokens = append(baselineTokens, float64(record.Metrics.TotalTokens))
 			baselinePrimary = append(baselinePrimary, primary)
+			if c.Acceptance == acceptanceStagnation && legacyStagnationTrace(record.Metrics) {
+				agg.BaselineLegacyStagnationRuns++
+			}
+			if c.Acceptance == acceptanceStagnationRecovery && record.Metrics.StagnationNudgeEvents > 0 {
+				agg.BaselineUnexpectedRecoveryNudges++
+			}
+			if c.Acceptance == acceptanceLineage && record.Metrics.LineageAdvances > 0 {
+				agg.BaselineUnexpectedLineageRuns++
+			}
 		} else {
 			if record.Score.Pass {
 				agg.CandidatePasses++
 			}
 			candidateTokens = append(candidateTokens, float64(record.Metrics.TotalTokens))
 			candidatePrimary = append(candidatePrimary, primary)
+			if c.Acceptance == acceptanceStagnation && candidateStagnationTrace(record.Metrics) {
+				agg.CandidateStagnationDetections++
+			}
+			if c.Acceptance == acceptanceStagnationRecovery {
+				if record.Metrics.StagnationNudgeEvents == 1 {
+					agg.CandidateRecoveryNudgeRuns++
+				}
+				if record.Metrics.RecoveryAcceptedAfterNudge {
+					agg.CandidateRecoveriesAfterNudge++
+				}
+				if resetDrivenStagnationRecovery(record.Metrics) {
+					agg.CandidateResetDrivenRecoveries++
+				}
+			}
+			if c.Acceptance == acceptanceLineage {
+				if record.Metrics.LineageAdvances == 2 {
+					agg.CandidateLineageRuns++
+				}
+				agg.CandidateLineageAdvances += record.Metrics.LineageAdvances
+				agg.CandidateLineagePatchBytes += record.Metrics.LineagePatchBytes
+				agg.CandidateLineageEvidenceBytes += record.Metrics.LineageEvidenceBytes
+			}
 			if adopted(c.Name, record.Metrics) {
 				agg.Adoptions++
 				agg.AdoptionsByModel[record.Model]++
@@ -173,6 +236,9 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 	agg.PrimaryBaselineMedian = median(baselinePrimary)
 	agg.PrimaryCandidateMedian = median(candidatePrimary)
 	agg.PrimaryReductionPct = reductionPct(agg.PrimaryBaselineMedian, agg.PrimaryCandidateMedian)
+	agg.PrimaryPairedReductionPct = medianPairedReduction(records, func(record runRecord) float64 {
+		return float64(primaryValue(c, record.Metrics))
+	})
 
 	modelNames := make([]string, 0, len(byModel))
 	for model := range byModel {
@@ -235,6 +301,20 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 	if agg.CandidatePasses < agg.BaselinePasses {
 		agg.Failures = append(agg.Failures, "candidate correctness is below baseline")
 	}
+	if c.MinimumRunTokens > 0 && agg.RunsMeetingTokenFloor != agg.Runs {
+		agg.Failures = append(agg.Failures, fmt.Sprintf(
+			"long-horizon token floor coverage %d/%d is incomplete; every run must use at least %d reported tokens",
+			agg.RunsMeetingTokenFloor, agg.Runs, c.MinimumRunTokens,
+		))
+	}
+	maxTokenRegression := 10.0
+	maxTurnRegression := 10.0
+	if c.MaxTokenRegression > 0 {
+		maxTokenRegression = c.MaxTokenRegression
+	}
+	if c.MaxTurnRegression > 0 {
+		maxTurnRegression = c.MaxTurnRegression
+	}
 	for _, model := range modelNames {
 		ma := agg.Models[model]
 		candidateForModel := 0
@@ -247,26 +327,83 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		if ma.Adoptions < requiredAdoptions {
 			agg.Failures = append(agg.Failures, fmt.Sprintf("%s adoption %d/%d is below the 2/3 gate", model, ma.Adoptions, candidateForModel))
 		}
-		if ma.TokenSavingPct < -10 {
-			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median tokens regressed %.1f%%", model, -ma.TokenSavingPct))
+		if c.Acceptance != acceptanceStagnation && ma.TokenSavingPct < -maxTokenRegression {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median tokens regressed %.1f%% beyond the %.1f%% cap", model, -ma.TokenSavingPct, maxTokenRegression))
 		}
-		if ma.BaselineMedianTurns > 0 && ma.CandidateMedianTurns > ma.BaselineMedianTurns*1.10 {
-			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median turns regressed beyond 10%%", model))
+		if c.Acceptance != acceptanceStagnation && ma.BaselineMedianTurns > 0 && ma.CandidateMedianTurns > ma.BaselineMedianTurns*(1+maxTurnRegression/100) {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median turns regressed beyond the %.1f%% cap", model, maxTurnRegression))
+		}
+		if (c.Acceptance == acceptanceStagnation || c.Acceptance == acceptanceStagnationRecovery || c.Acceptance == acceptanceLineage) && ma.CandidatePasses < ma.BaselinePasses {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%s candidate correctness is below baseline", model))
 		}
 		if isToolAccuracyCase(c.Name) && ma.CandidateMedianPrimary > ma.BaselineMedianPrimary {
 			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median tool errors increased", model))
 		}
 	}
-	toolAccuracy := isToolAccuracyCase(c.Name)
-	minimumPrimaryReduction := c.MinimumReductionPct
-	if toolAccuracy && agg.PrimaryBaselineMedian > 0 {
-		minimumPrimaryReduction = 50
-	}
-	if agg.PrimaryReductionPct < minimumPrimaryReduction {
-		agg.Failures = append(agg.Failures, fmt.Sprintf("primary metric reduction %.1f%% is below %.1f%%", agg.PrimaryReductionPct, minimumPrimaryReduction))
-	}
-	if agg.TokenSavingPct <= 0 {
-		agg.Failures = append(agg.Failures, "aggregate paired-median tokens did not decrease")
+	switch c.Acceptance {
+	case acceptanceStagnation:
+		baselineRuns := len(baselineTokens)
+		if baselineRuns == 0 || baselineRuns != candidateRuns {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("detector matrix is incomplete: baseline %d, candidate %d", baselineRuns, candidateRuns))
+		}
+		if agg.BaselineLegacyStagnationRuns != baselineRuns {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("legacy baseline projection coverage %d/%d is incomplete", agg.BaselineLegacyStagnationRuns, baselineRuns))
+		}
+		if agg.CandidateStagnationDetections != candidateRuns {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("directed candidate detection coverage %d/%d is incomplete", agg.CandidateStagnationDetections, candidateRuns))
+		}
+	case acceptanceStagnationRecovery:
+		baselineRuns := len(baselineTokens)
+		if baselineRuns == 0 || baselineRuns != candidateRuns {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("recovery matrix is incomplete: baseline %d, candidate %d", baselineRuns, candidateRuns))
+		}
+		if agg.BaselineUnexpectedRecoveryNudges != 0 {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%d baseline runs unexpectedly recorded a strategy reset", agg.BaselineUnexpectedRecoveryNudges))
+		}
+		if agg.CandidateRecoveryNudgeRuns != candidateRuns {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("candidate one-shot strategy-reset coverage %d/%d is incomplete", agg.CandidateRecoveryNudgeRuns, candidateRuns))
+		}
+		if agg.CandidateRecoveriesAfterNudge < requiredPasses {
+			agg.Failures = append(agg.Failures, fmt.Sprintf(
+				"candidate post-reset evaluator recovery %d/%d is below the 8/9 gate (%d required)",
+				agg.CandidateRecoveriesAfterNudge, candidateRuns, requiredPasses,
+			))
+		}
+		if agg.CandidateResetDrivenRecoveries < requiredPasses {
+			agg.Failures = append(agg.Failures, fmt.Sprintf(
+				"candidate clean reset-driven recovery coverage %d/%d is below the 8/9 gate (%d required)",
+				agg.CandidateResetDrivenRecoveries, candidateRuns, requiredPasses,
+			))
+		}
+		if agg.CandidatePasses <= agg.BaselinePasses {
+			agg.Failures = append(agg.Failures, "candidate exact recovery did not improve over baseline")
+		}
+	case acceptanceLineage:
+		baselineRuns := len(baselineTokens)
+		if baselineRuns == 0 || baselineRuns != candidateRuns {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("candidate-lineage matrix is incomplete: baseline %d, candidate %d", baselineRuns, candidateRuns))
+		}
+		if agg.BaselineUnexpectedLineageRuns != 0 {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("%d baseline runs unexpectedly recorded a candidate lineage", agg.BaselineUnexpectedLineageRuns))
+		}
+		if agg.CandidateLineageRuns != candidateRuns || agg.CandidateLineageAdvances != 2*candidateRuns {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("candidate lineage coverage is incomplete: %d/%d archives and %d/%d strict advances", agg.CandidateLineageRuns, candidateRuns, agg.CandidateLineageAdvances, 2*candidateRuns))
+		}
+		if agg.CandidatePasses < agg.BaselinePasses {
+			agg.Failures = append(agg.Failures, "candidate lineage reduced exact correctness")
+		}
+	default:
+		toolAccuracy := isToolAccuracyCase(c.Name)
+		minimumPrimaryReduction := c.MinimumReductionPct
+		if toolAccuracy && agg.PrimaryBaselineMedian > 0 {
+			minimumPrimaryReduction = 50
+		}
+		if agg.PrimaryReductionPct < minimumPrimaryReduction {
+			agg.Failures = append(agg.Failures, fmt.Sprintf("primary metric reduction %.1f%% is below %.1f%%", agg.PrimaryReductionPct, minimumPrimaryReduction))
+		}
+		if agg.TokenSavingPct <= 0 {
+			agg.Failures = append(agg.Failures, "aggregate paired-median tokens did not decrease")
+		}
 	}
 	agg.Accepted = len(agg.Failures) == 0
 	return agg
@@ -296,6 +433,12 @@ func primaryValue(c benchmarkCase, m metrics) int {
 			return m.EffectiveToolErrors
 		}
 		return m.ToolErrors + m.NestedToolErrors
+	case "evaluator_turns_to_best":
+		return m.EvaluatorTurnsToBest
+	case "trajectory_max_no_improvement_streak":
+		return m.MaxNoImprovementStreak
+	case "stagnation_recovery_failures":
+		return m.RecoveryFailures
 	default:
 		return 0
 	}
@@ -318,6 +461,15 @@ func adopted(name string, m metrics) bool {
 		return m.UsedWorkspaceSummary
 	case "background_wait":
 		return m.BackgroundWaits > 0 && m.BackgroundPolls == 0
+	case "stagnation_detection":
+		return candidateStagnationTrace(m)
+	case "stagnation_recovery":
+		return resetDrivenStagnationRecovery(m)
+	case "candidate_lineage":
+		return m.LineageAdvances == 2
+	case "default_stack_marathon":
+		return m.DefaultStackEvaluatorResults == defaultStackPhaseCount &&
+			m.EvaluatorBestScoreAvailable && m.EvaluatorBestScore == 100
 	case "edit_precision":
 		return m.ToolCalls["edit"] > 0
 	case "edit_drift_recovery":
@@ -340,6 +492,13 @@ func adopted(name string, m metrics) bool {
 	default:
 		return false
 	}
+}
+
+func resetDrivenStagnationRecovery(m metrics) bool {
+	return m.StagnationNudgeEvents == 1 &&
+		m.RecoveryAcceptedAfterNudge &&
+		m.RecoveryToolCallsBeforeNudge == 0 &&
+		m.RecoveryToolCallsAfterNudge > 0
 }
 
 func adoptedReadScale(m metrics, count int) bool {

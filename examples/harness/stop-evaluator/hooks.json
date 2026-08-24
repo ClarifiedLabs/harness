@@ -1,0 +1,15 @@
+{
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "name": "harness-verifier",
+          "command": "./examples/harness/stop-evaluator/verify.sh",
+          "timeout_seconds": 600,
+          "status_message": "Running repository verifier"
+        }
+      ]
+    }
+  ]
+}

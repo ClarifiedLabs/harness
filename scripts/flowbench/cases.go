@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const targetSHA = "8f76b0b0fb7751a8f7b067fa7f88e4df564f9560"
@@ -15,20 +16,84 @@ const todoBugOld = "if active > 1 {"
 const todoBugNew = "if active < 1 {"
 
 type benchmarkCase struct {
-	Name                 string
-	Prompt               string
-	Setup                func(string) error
-	Score                func(scoreInput) score
-	PrimaryMetric        string
-	MinimumReductionPct  float64
-	TargetTokenSavingPct float64
-	SecondPrompt         string
-	BetweenPrompts       func(string) error
+	Name                  string
+	Prompt                string
+	Setup                 func(string) error
+	Score                 func(scoreInput) score
+	PrimaryMetric         string
+	MinimumReductionPct   float64
+	TargetTokenSavingPct  float64
+	SecondPrompt          string
+	BetweenPrompts        func(string) error
+	RestartBetweenPrompts bool
+	RestartPhases         []benchmarkPhase
+	Baseline              benchmarkVariant
+	Candidate             benchmarkVariant
+	HelperCommand         string
+	Acceptance            acceptanceMode
+	MaxTokenRegression    float64
+	MaxTurnRegression     float64
+	MinimumRunTokens      int
+	RunTimeout            time.Duration
+}
+
+// benchmarkPhase is one prompt process in a restart-backed benchmark sequence.
+// CompactAfter runs a prompt-free compaction control process before After and
+// before the next prompt process resumes the same session.
+type benchmarkPhase struct {
+	Prompt       string
+	CompactAfter bool
+	After        func(string) error
+}
+
+type benchmarkVariant struct {
+	Agent  string
+	Config string
+	Helper bool
+	Args   []string
+}
+
+type acceptanceMode string
+
+const (
+	acceptanceEfficiency         acceptanceMode = ""
+	acceptanceStagnation         acceptanceMode = "stagnation"
+	acceptanceStagnationRecovery acceptanceMode = "stagnation_recovery"
+	acceptanceLineage            acceptanceMode = "candidate_lineage"
+)
+
+const defaultBenchmarkConfig = "{}\n"
+
+func (c benchmarkCase) variant(name string) benchmarkVariant {
+	var variant benchmarkVariant
+	switch name {
+	case "baseline":
+		variant = c.Baseline
+	case "candidate":
+		variant = c.Candidate
+	}
+	if strings.TrimSpace(variant.Agent) == "" {
+		variant.Agent = "independent"
+	}
+	if strings.TrimSpace(variant.Config) == "" {
+		variant.Config = defaultBenchmarkConfig
+	} else if !strings.HasSuffix(variant.Config, "\n") {
+		variant.Config += "\n"
+	}
+	return variant
+}
+
+func (c benchmarkCase) hasCustomVariants() bool {
+	return c.Baseline.Agent != "" || c.Baseline.Config != "" || c.Baseline.Helper ||
+		len(c.Baseline.Args) > 0 || c.Candidate.Agent != "" || c.Candidate.Config != "" ||
+		c.Candidate.Helper || len(c.Candidate.Args) > 0
 }
 
 type scoreInput struct {
+	Variant       string
 	Stdout        string
 	Worktree      string
+	SessionDir    string
 	GoCache       string
 	FixtureBefore string
 	FixtureAfter  string
@@ -46,6 +111,12 @@ func evaluateCase(c benchmarkCase, in scoreInput) (metrics, score) {
 }
 
 func evaluateArchivedCase(c benchmarkCase, in scoreInput, recorded score) (metrics, score) {
+	if c.Name == "stagnation_detection" || c.Name == "stagnation_recovery" {
+		return classifyEffectiveToolErrors(c.Name, in.Metrics, recorded), recorded
+	}
+	if c.Name == "candidate_lineage" {
+		return classifyEffectiveToolErrors(c.Name, in.Metrics, recorded), recorded
+	}
 	if strings.HasPrefix(c.Name, "edit_") {
 		return classifyEffectiveToolErrors(c.Name, in.Metrics, recorded), recorded
 	}
@@ -114,6 +185,10 @@ func allCases() map[string]benchmarkCase {
 			MinimumReductionPct:  50,
 			TargetTokenSavingPct: 8,
 		},
+		stagnationDetectionCase(),
+		stagnationRecoveryCase(),
+		candidateLineageCase(),
+		defaultStackMarathonCase(),
 		{
 			Name: "edit_precision",
 			Prompt: "Work directly; do not delegate or commit. Use the edit tool to make exactly the five requested replacements in .flowbench-tool-accuracy/edit-precision.txt: " +

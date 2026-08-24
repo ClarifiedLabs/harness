@@ -184,6 +184,41 @@ func TestReadAnalysisEventsUsesBoundedSnapshotAndDropsBodies(t *testing.T) {
 	}
 }
 
+func TestAnalyzeStorageCountsCandidateLineageWithoutReadingContents(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		filepath.Join("lineage", "state.json"):                `{"candidate":"TOP SECRET"}`,
+		filepath.Join("lineage", "base.patch"):                "base patch\n",
+		filepath.Join("lineage", "patches", "0001.patch"):     "entry patch\n",
+		filepath.Join("lineage", "evidence", "0001.evidence"): "private evidence\n",
+	}
+	var wantBytes int64
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		wantBytes += int64(len(content))
+	}
+	storage, err := analyzeStorage(dir, AnalysisSource{Status: "missing"}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storage.Lineage.Status != "complete" || storage.Lineage.Files != len(files) || storage.Lineage.Bytes != wantBytes || storage.TotalBytes != wantBytes {
+		t.Fatalf("lineage storage = %+v; total=%d", storage.Lineage, storage.TotalBytes)
+	}
+	encoded, err := json.Marshal(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(encoded, []byte("TOP SECRET")) || bytes.Contains(encoded, []byte("private evidence")) {
+		t.Fatalf("storage analysis exposed content: %s", encoded)
+	}
+}
+
 func TestDeriveTelemetryAvailabilityAndMetrics(t *testing.T) {
 	legacy := deriveTelemetry([]Event{{Type: EventToolResult}, {Type: EventPromptUsage, Prompt: 1}}, nil)
 	if legacy.Progress.Available || legacy.Hooks.Available || legacy.Closure.Available || legacy.Workflow.Available {
@@ -204,6 +239,8 @@ func TestDeriveTelemetryAvailabilityAndMetrics(t *testing.T) {
 		{Type: EventHookDiagnostic, HookDiagnostic: &HookDiagnosticSnapshot{Outcome: "circuit_open"}},
 		{Type: EventModelRequest, Context: &ContextSnapshot{Total: -1}},
 		{Type: EventRetention, Retention: &RetentionSnapshot{BytesBefore: 10, BytesAfter: 12, LocalEstimateTokensBefore: 10, LocalEstimateTokensAfter: 8}},
+		{Type: EventLineageAdvance, LineageAdvance: &LineageAdvanceSnapshot{Sequence: 1, PatchBytes: 320, EvidenceBytes: 45}},
+		{Type: EventLineageAdvance, LineageAdvance: &LineageAdvanceSnapshot{Sequence: 2, ParentSequence: 1, PatchBytes: 180, EvidenceBytes: 55}},
 	}
 	got := deriveTelemetry(events, nil)
 	if got.Closure.Triggers["turn_budget"] != 1 || got.Closure.TurnBudgetExhausted != 1 {
@@ -223,6 +260,73 @@ func TestDeriveTelemetryAvailabilityAndMetrics(t *testing.T) {
 	}
 	if got.Invariants.NegativeContextViolations != 1 || got.Invariants.InconsistentRetentionViolations != 1 {
 		t.Fatalf("invariants = %+v", got.Invariants)
+	}
+	if !got.Lineage.Available || got.Lineage.Advances != 2 || got.Lineage.PatchBytes != 500 || got.Lineage.MaxPatchBytes != 320 || got.Lineage.EvidenceBytes != 100 || got.Lineage.MaxEvidenceBytes != 55 {
+		t.Fatalf("lineage = %+v", got.Lineage)
+	}
+}
+
+func TestDeriveTrajectoryMeasuresBoundedShadowState(t *testing.T) {
+	events := []Event{
+		{Type: EventToolMutation, ToolMutation: &ToolMutationSnapshot{Paths: []string{"a.go", "b.go"}}},
+		{Type: EventToolDiff, Path: "a.go"},
+		{Type: EventEvaluatorResult, Prompt: 1, Turn: 1, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify"}},
+		{Type: EventBranch},
+		{Type: EventToolMutation, ToolMutation: &ToolMutationSnapshot{Paths: []string{"c.go"}}},
+		{Type: EventEvaluatorResult, Prompt: 2, Turn: 1, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Accepted: true, Candidate: "candidate:two", EvidenceRef: "evidence/two"}},
+	}
+	got := deriveTrajectory(events)
+	if !got.Available || got.Streams != 1 || got.Schema == 0 || got.Transitions != 6 || got.BranchResets != 1 || got.Evaluations != 2 || got.AcceptedEvaluations != 1 || got.RejectedEvaluations != 1 {
+		t.Fatalf("trajectory churn = %+v", got)
+	}
+	if got.ActiveEvaluations != 1 || got.ActiveModifiedPaths != 1 || got.ActiveConfirmedPaths != 0 || got.MutationPathObservations != 3 || got.DiffPathConfirmations != 1 || got.UnconfirmedMutationPaths != 1 {
+		t.Fatalf("trajectory attribution = %+v", got)
+	}
+	if got.StagnationBaselines != 1 || got.StagnationImprovements != 1 || got.ActiveNoImprovementStreak != 0 || got.MaxNoImprovementStreak != 0 {
+		t.Fatalf("trajectory stagnation = %+v", got)
+	}
+	if got.MissingCandidateIDs != 1 || got.MissingEvidenceRefs != 1 || got.ProjectionBytes == 0 || got.MaxProjectionBytes != got.ProjectionBytes {
+		t.Fatalf("trajectory completeness/size = %+v", got)
+	}
+	var aggregate TrajectoryAnalysis
+	aggregate.add(got)
+	aggregate.add(got)
+	if aggregate.Streams != 2 || aggregate.Evaluations != 4 || aggregate.ProjectionBytes != 2*got.ProjectionBytes || aggregate.MaxProjectionBytes != got.ProjectionBytes {
+		t.Fatalf("trajectory aggregate = %+v", aggregate)
+	}
+}
+
+func TestDeriveTrajectoryReportsConservativeStagnationTelemetry(t *testing.T) {
+	score0, scoreMinus1, score1, unordered := 0.0, -1.0, 1.0, 2.0
+	remaining := 2
+	events := []Event{
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &score0, ScoreDirection: "maximize", Candidate: "a"}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &score0, ScoreDirection: "maximize", Candidate: "b"}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &scoreMinus1, ScoreDirection: "maximize", Candidate: "c"}},
+		{Type: EventStagnationNudge, StagnationNudge: &StagnationNudgeSnapshot{Threshold: 2, Streak: 2}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &score1, ScoreDirection: "maximize", Candidate: "d"}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &unordered, Candidate: "e"}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &unordered, Candidate: "f"}},
+		{Type: EventBranch},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "requirements", RemainingRequirements: &remaining, Candidate: "g"}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "requirements", RemainingRequirements: &remaining, Candidate: "h"}},
+	}
+	got := deriveTrajectory(events)
+	if got.Evaluations != 8 || got.ActiveNoImprovementStreak != 1 || got.MaxNoImprovementStreak != 2 {
+		t.Fatalf("stagnation streaks = %+v", got)
+	}
+	if got.StagnationBaselines != 2 || got.StagnationImprovements != 1 || got.StagnationPlateaus != 3 || got.StagnationRegressions != 1 || got.StagnationIndeterminate != 1 {
+		t.Fatalf("stagnation classifications = %+v", got)
+	}
+	if got.UnorderedScoreEvaluations != 2 || got.StagnationLaneResets != 0 || got.StagnationNudges != 1 {
+		t.Fatalf("stagnation comparability = %+v", got)
+	}
+
+	var aggregate TrajectoryAnalysis
+	aggregate.add(got)
+	aggregate.add(TrajectoryAnalysis{Available: true, Streams: 1, ActiveNoImprovementStreak: 3, MaxNoImprovementStreak: 4, StagnationPlateaus: 3, StagnationNudges: 2})
+	if aggregate.ActiveNoImprovementStreak != 4 || aggregate.MaxNoImprovementStreak != 4 || aggregate.StagnationPlateaus != 6 || aggregate.StagnationNudges != 3 {
+		t.Fatalf("stagnation aggregate = %+v", aggregate)
 	}
 }
 
@@ -359,6 +463,10 @@ func TestAnalysisJSONDeterministicVersionedAndTranscriptFree(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "session")
 	mustAppendAnalysisEvent(t, dir, Event{Type: EventUser, Text: "TOP SECRET TRANSCRIPT"})
 	mustAppendAnalysisEvent(t, dir, Event{Type: EventToolStart, Tool: "shell", Input: json.RawMessage(`{"command":"TOP SECRET INPUT"}`)})
+	mustAppendAnalysisEvent(t, dir, Event{Type: EventToolMutation, ToolMutation: &ToolMutationSnapshot{Paths: []string{"TOP SECRET PATH"}}})
+	score := 1.0
+	mustAppendAnalysisEvent(t, dir, Event{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Score: &score, ScoreDirection: "maximize", Candidate: "TOP SECRET CANDIDATE", EvidenceRef: "TOP SECRET EVIDENCE"}})
+	mustAppendAnalysisEvent(t, dir, Event{Type: EventStagnationNudge, StagnationNudge: &StagnationNudgeSnapshot{Threshold: 2, Streak: 2}})
 	report, err := AnalyzeCorpus(dir, AnalyzeOptions{})
 	if err != nil {
 		t.Fatal(err)
@@ -373,7 +481,7 @@ func TestAnalysisJSONDeterministicVersionedAndTranscriptFree(t *testing.T) {
 	if first.String() != second.String() {
 		t.Fatalf("JSON is nondeterministic:\n%s\n%s", first.String(), second.String())
 	}
-	if strings.Contains(first.String(), "TOP SECRET") || !strings.Contains(first.String(), `"version": 6`) {
+	if strings.Contains(first.String(), "TOP SECRET") || strings.Contains(first.String(), "maximize") || !strings.Contains(first.String(), `"version": 12`) || !report.Telemetry.Trajectory.Available || report.Telemetry.Trajectory.StagnationNudges != 1 {
 		t.Fatalf("JSON leaked transcript or omitted version:\n%s", first.String())
 	}
 }
@@ -399,11 +507,12 @@ func TestStatsIncludesOperationalTelemetryTextAndJSON(t *testing.T) {
 	}
 	mustAppendAnalysisEvent(t, dir, Event{Type: EventTurnProgress, Prompt: 1, Turn: 1, TurnProgress: &TurnProgressSnapshot{SuccessfulMutation: true}})
 	mustAppendAnalysisEvent(t, dir, Event{Type: EventPromptUsage, Prompt: 1, TurnBudgetExhausted: true, TelemetryVersion: ReliabilityTelemetryVersion})
+	mustAppendAnalysisEvent(t, dir, Event{Type: EventToolMutation, Prompt: 1, Turn: 1, ToolMutation: &ToolMutationSnapshot{Paths: []string{"changed.go"}}})
 	var text bytes.Buffer
 	if err := Stats(dir, &text); err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
-	for _, want := range []string{"Operational telemetry", "progress telemetry: available", "turn budgets exhausted: 1"} {
+	for _, want := range []string{"Operational telemetry", "progress telemetry: available", "turn budgets exhausted: 1", "trajectory streams/transitions/evaluations/branch resets: 1 / 1 / 0 / 0"} {
 		if !strings.Contains(text.String(), want) {
 			t.Fatalf("Stats missing %q:\n%s", want, text.String())
 		}
@@ -418,7 +527,7 @@ func TestStatsIncludesOperationalTelemetryTextAndJSON(t *testing.T) {
 	if err := json.Unmarshal(encoded.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if !payload.Telemetry.Progress.Available || payload.Telemetry.Closure.TurnBudgetExhausted != 1 {
+	if !payload.Telemetry.Progress.Available || payload.Telemetry.Closure.TurnBudgetExhausted != 1 || !payload.Telemetry.Trajectory.Available || payload.Telemetry.Trajectory.ActiveModifiedPaths != 1 {
 		t.Fatalf("StatsJSON telemetry = %+v", payload.Telemetry)
 	}
 }

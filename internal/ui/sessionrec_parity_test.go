@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
+	"harness/internal/trajectory"
 )
 
 // readRawEvents decodes a session raw.ndjson log for parity comparison.
@@ -78,6 +80,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 	parent := newAccumulatingSink(app.Renderer, app, 1)
 
 	childRegistry := llm.NewRegistryWithQualified(nil, models)
+	childTrajectory := trajectory.NewTracker(nil)
 	child := sessionrec.New(sessionrec.Config{
 		Dir:                childDir,
 		Prompt:             1,
@@ -88,6 +91,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 		Clock:              now,
 		ReasoningSummaries: true,
 		CWD:                parentDir,
+		Trajectory:         childTrajectory,
 		PriceTurnUsage: func(u llm.Usage) (float64, bool) {
 			return childRegistry.Cost("anthropic:claude-opus-4-8", u)
 		},
@@ -132,6 +136,8 @@ func TestChildParentRawEventParity(t *testing.T) {
 	result := llm.ToolResult{ForID: "call-1", Text: "package a\n\nfunc A() {}\n"}
 	parent.ToolResult(result)
 	child.ToolResult(result)
+	parent.ToolMutation(call, []string{"a.go"})
+	child.ToolMutation(call, []string{"a.go"})
 
 	diff := "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
 	parent.ToolDiff(call, "a.go", diff)
@@ -153,6 +159,15 @@ func TestChildParentRawEventParity(t *testing.T) {
 	turn := agent.TurnUsage{Turn: 1, Context: ctx, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}}
 	parent.TurnComplete(turn)
 	child.TurnComplete(turn)
+
+	score := 0.0
+	remaining := 1
+	evaluation := hooks.EvaluatorResult{
+		Handler: "verify", Score: &score, ScoreDirection: hooks.ScoreDirectionMaximize, Candidate: "sha256:abc",
+		RemainingRequirements: &remaining, EvidenceRef: "artifacts/verify.log",
+	}
+	parent.EvaluatorResult(evaluation)
+	child.EvaluatorResult(evaluation)
 
 	// Provider-priced prompt usage: both sides keep the streamed cost.
 	prompt := agent.PromptUsage{
@@ -181,5 +196,8 @@ func TestChildParentRawEventParity(t *testing.T) {
 	}
 	if got := parentEvents[len(parentEvents)-1].Display; got == "" {
 		t.Fatal("prompt_usage display missing from parent-fidelity recording")
+	}
+	if parentTrajectory := app.Trajectory.Snapshot(); !reflect.DeepEqual(parentTrajectory, childTrajectory.Snapshot()) {
+		t.Fatalf("trajectory projections differ: parent=%+v child=%+v", parentTrajectory, childTrajectory.Snapshot())
 	}
 }

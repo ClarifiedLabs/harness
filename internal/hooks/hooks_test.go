@@ -2,6 +2,7 @@ package hooks
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,113 @@ func TestRunnerExitCodeTwoBlocksPlainOutput(t *testing.T) {
 	res := (&Runner{Config: cfg}).Run(context.Background(), UserPromptSubmit, "", nil)
 	if !res.Block || res.Reason() != "blocked" {
 		t.Fatalf("result = %+v, want block from exit code 2", res)
+	}
+}
+
+func TestRunnerParsesTypedStopEvaluatorResult(t *testing.T) {
+	cfg, err := DecodeEventMap([]byte(`{"Stop":[{"hooks":[{"name":"verify","command":"ignored"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &Runner{Config: cfg, execute: func(context.Context, Handler, string, []byte) commandResult {
+		return commandResult{Stdout: `{"accepted":false,"score":0,"score_direction":"maximize","candidate":"sha256:abc","remaining_requirements":2,"evidence_ref":"artifacts/verify.log","reason":"fix the failing test"}`}
+	}}
+
+	res := runner.Run(context.Background(), Stop, "", nil)
+	if !res.Block || len(res.EvaluatorResults) != 1 {
+		t.Fatalf("result = %+v, want one rejecting evaluator result", res)
+	}
+	got := res.EvaluatorResults[0]
+	if got.Handler != "verify" || got.Accepted || got.Score == nil || *got.Score != 0 || got.ScoreDirection != ScoreDirectionMaximize || got.Candidate != "sha256:abc" ||
+		got.RemainingRequirements == nil || *got.RemainingRequirements != 2 || got.EvidenceRef != "artifacts/verify.log" {
+		t.Fatalf("evaluator result = %+v", got)
+	}
+	for _, want := range []string{`Evaluator "verify" rejected the candidate`, "score=0", "remaining_requirements=2", "fix the failing test"} {
+		if !strings.Contains(res.Reason(), want) {
+			t.Fatalf("reason %q missing %q", res.Reason(), want)
+		}
+	}
+	if strings.Contains(res.Reason(), "score_direction") {
+		t.Fatalf("shadow score direction entered corrective context: %q", res.Reason())
+	}
+	if len(res.Diagnostics) != 1 || res.Diagnostics[0].Outcome != OutcomeSuccess {
+		t.Fatalf("diagnostics = %+v, want successful hook process", res.Diagnostics)
+	}
+}
+
+func TestRunnerPreservesZeroScoreOnAcceptedEvaluatorResult(t *testing.T) {
+	cfg, err := DecodeEventMap([]byte(`{"Stop":[{"hooks":[{"command":"ignored"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &Runner{Config: cfg, execute: func(context.Context, Handler, string, []byte) commandResult {
+		return commandResult{Stdout: `{"accepted":true,"score":0,"remaining_requirements":0}`}
+	}}
+
+	res := runner.Run(context.Background(), Stop, "", nil)
+	if res.Block || len(res.EvaluatorResults) != 1 || res.EvaluatorResults[0].Score == nil || *res.EvaluatorResults[0].Score != 0 || res.EvaluatorResults[0].ScoreDirection != "" {
+		t.Fatalf("result = %+v, want accepted evaluator result with score zero", res)
+	}
+	if res.EvaluatorResults[0].RemainingRequirements == nil || *res.EvaluatorResults[0].RemainingRequirements != 0 {
+		t.Fatalf("remaining requirements = %+v, want explicit zero", res.EvaluatorResults[0].RemainingRequirements)
+	}
+}
+
+func TestRunnerAcceptsRejectingEvaluatorResultWithExitCodeTwo(t *testing.T) {
+	cfg, err := DecodeEventMap([]byte(`{"Stop":[{"hooks":[{"name":"verify","command":"ignored"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &Runner{Config: cfg, execute: func(context.Context, Handler, string, []byte) commandResult {
+		return commandResult{Code: 2, Stdout: `{"accepted":false,"candidate":"candidate-2","reason":"still failing"}`}
+	}}
+
+	res := runner.Run(context.Background(), Stop, "", nil)
+	if !res.Block || len(res.EvaluatorResults) != 1 || res.EvaluatorResults[0].Candidate != "candidate-2" || !strings.Contains(res.Reason(), "still failing") {
+		t.Fatalf("result = %+v, want typed rejection", res)
+	}
+	if len(res.Diagnostics) != 1 || res.Diagnostics[0].Outcome != OutcomeExitNonzero {
+		t.Fatalf("diagnostics = %+v, want legacy exit_nonzero outcome", res.Diagnostics)
+	}
+}
+
+func TestRunnerRejectsInvalidEvaluatorFieldsWithoutChangingLegacyControl(t *testing.T) {
+	tests := []struct {
+		name      string
+		event     Event
+		stdout    string
+		wantBlock bool
+	}{
+		{name: "non Stop event", event: PreToolUse, stdout: `{"accepted":false}`},
+		{name: "missing accepted", event: Stop, stdout: `{"score":1}`},
+		{name: "accepted with remaining work", event: Stop, stdout: `{"accepted":true,"remaining_requirements":1}`},
+		{name: "direction without score", event: Stop, stdout: `{"accepted":false,"score_direction":"maximize"}`},
+		{name: "invalid score direction", event: Stop, stdout: `{"accepted":false,"score":1,"score_direction":"sideways"}`},
+		{name: "accepted conflicts with legacy block", event: Stop, stdout: `{"decision":"block","accepted":true}`, wantBlock: true},
+		{name: "candidate too long", event: Stop, stdout: fmt.Sprintf(`{"accepted":false,"candidate":%q}`, strings.Repeat("x", maxEvaluatorIdentifierLen+1))},
+		{name: "multiline evidence reference", event: Stop, stdout: `{"accepted":false,"evidence_ref":"artifacts/a\nsecond line"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := DecodeEventMap([]byte(fmt.Sprintf(`{"%s":[{"hooks":[{"command":"ignored"}]}]}`, tt.event)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner := &Runner{Config: cfg, execute: func(context.Context, Handler, string, []byte) commandResult {
+				return commandResult{Stdout: tt.stdout}
+			}}
+
+			res := runner.Run(context.Background(), tt.event, "shell", nil)
+			if res.Block != tt.wantBlock || len(res.EvaluatorResults) != 0 {
+				t.Fatalf("result = %+v, want block=%t and no evaluator result", res, tt.wantBlock)
+			}
+			if len(res.Diagnostics) != 1 || res.Diagnostics[0].Outcome != OutcomeParseFailed {
+				t.Fatalf("diagnostics = %+v, want parse_failed", res.Diagnostics)
+			}
+			if len(res.Notices) == 0 || !strings.Contains(res.Notices[0], "invalid evaluator result") {
+				t.Fatalf("notices = %v", res.Notices)
+			}
+		})
 	}
 }
 

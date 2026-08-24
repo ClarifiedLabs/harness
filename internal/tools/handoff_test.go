@@ -47,7 +47,7 @@ func TestHandoffRecordsLatestPlan(t *testing.T) {
 	if !ok || req.Agent != "auto" || req.PlanPath != "/session/plans/0001-implementation.plan.md" {
 		t.Fatalf("request = %+v, present=%v", req, ok)
 	}
-	// omitted agent defaults to auto via REPL; handoff accepts empty
+	// The REPL resolves an omitted agent to its configured default; the tool accepts empty.
 	pending2 := handoff.NewPending()
 	tool2 := NewHandoff(pending2, recordedPlan(), true, []string{"auto", "independent"})
 	if _, err := runHandoff(t, tool2, map[string]any{}); err != nil {
@@ -118,7 +118,7 @@ func TestHandoffSchemaKeepsSmallSurface(t *testing.T) {
 	if agent["type"] != "string" {
 		t.Fatalf("agent type = %v, want string", agent["type"])
 	}
-	if desc, _ := agent["description"].(string); !strings.Contains(desc, "Omit") || !strings.Contains(desc, "auto agent") {
+	if desc, _ := agent["description"].(string); !strings.Contains(desc, "Omit") || !strings.Contains(desc, "default implementation agent") {
 		t.Fatalf("agent description = %q, want guidance to omit the field for the default agent", agent["description"])
 	}
 	values, ok := agent["enum"].([]any)
@@ -183,7 +183,7 @@ func TestHandoffFiltersToExclusiveAgents(t *testing.T) {
 	if !slices.Contains(got, "my-impl") || !slices.Contains(got, "auto") || !slices.Contains(got, "independent") {
 		t.Fatalf("exclusive enum missing expected: %v", got)
 	}
-	if desc, _ := agent["description"].(string); !strings.Contains(desc, "Omit") || !strings.Contains(desc, "auto agent") {
+	if desc, _ := agent["description"].(string); !strings.Contains(desc, "Omit") || !strings.Contains(desc, "default implementation agent") {
 		t.Fatalf("description missing in filtered schema: %v", agent["description"])
 	}
 	// Run should reject non-exclusive

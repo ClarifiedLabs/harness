@@ -49,6 +49,7 @@ type RuntimeDefaults struct {
 	MCPProxyURL   string
 	HistoryPath   string
 	Agent         string
+	HandoffAgent  string
 	TmuxActive    bool
 }
 
@@ -152,15 +153,16 @@ type Config struct {
 	Agents       map[string]FileAgentConfig `json:"agents,omitempty"`
 	HandoffAgent string                     `json:"handoff_agent"`
 
-	Verbose       bool   `json:"verbose"`
-	ToolStream    bool   `json:"tool_stream"`
-	ShowDiffs     bool   `json:"show_diffs"`
-	LogLevel      string `json:"log_level"`
-	NoColor       bool   `json:"no_color"`
-	ColorTheme    string `json:"color_theme"`
-	TimestampMode string `json:"timestamps"`
-	ReplPrompt    string `json:"repl_prompt"`
-	ReplEditMode  string `json:"repl_edit_mode"`
+	Verbose         bool   `json:"verbose"`
+	ToolStream      bool   `json:"tool_stream"`
+	ShowDiffs       bool   `json:"show_diffs"`
+	StagnationNudge bool   `json:"stagnation_nudge"`
+	LogLevel        string `json:"log_level"`
+	NoColor         bool   `json:"no_color"`
+	ColorTheme      string `json:"color_theme"`
+	TimestampMode   string `json:"timestamps"`
+	ReplPrompt      string `json:"repl_prompt"`
+	ReplEditMode    string `json:"repl_edit_mode"`
 
 	Hooks       hooks.Config `json:"hooks,omitempty"`
 	HookConfigs []string     `json:"hook_configs,omitempty"`
@@ -186,6 +188,7 @@ type RunOptions struct {
 	ShowAgents       bool
 	ShowModels       bool
 	CheckModelProxy  bool
+	CandidateLineage bool
 }
 
 type MCPConfig struct {

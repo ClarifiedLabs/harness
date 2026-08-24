@@ -20,11 +20,13 @@ import (
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/agentdef"
 	"harness/internal/background"
 	"harness/internal/goal"
 	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
+	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/otel"
 	"harness/internal/plan"
@@ -37,6 +39,7 @@ import (
 	"harness/internal/term"
 	"harness/internal/todo"
 	"harness/internal/tools"
+	"harness/internal/trajectory"
 )
 
 const (
@@ -221,6 +224,17 @@ type App struct {
 	// reset on /clear. nil disables persistence and the autonomous continuation
 	// loop.
 	Goal *goal.Store
+	// Trajectory is a host-owned, model-invisible projection of evaluator and
+	// mutation events. It resets on /clear and new-session branch extraction.
+	Trajectory *trajectory.Tracker
+	// CandidateLineage is the explicitly authorized root-only accepted-candidate
+	// archive observer. It is nil unless the invocation opts in and remains nil
+	// for all delegate child sessions.
+	CandidateLineage LineageObserver
+	// CandidateLineageControl exposes human-only inspection and explicit
+	// export/restore operations for the same root archive. It never enters model
+	// context or the tool catalog.
+	CandidateLineageControl LineageController
 	// GoalMaxContinuations is the safety cap for autonomous continuations per
 	// goal; 0 means unlimited. Reaching the cap auto-pauses the goal.
 	GoalMaxContinuations int
@@ -350,6 +364,22 @@ type App struct {
 	pendingAPIContinuation *apiContinuationState
 }
 
+// LineageObserver is the root-session seam for the explicitly authorized
+// candidate archive. Keeping it narrow lets UI tests prove event ordering and
+// error propagation without constructing a Git worktree.
+type LineageObserver interface {
+	Observe(lineage.Input) (*lineage.Advance, error)
+}
+
+// LineageController is the human-facing control seam for /lineage. Keeping it
+// separate from LineageObserver lets recorder tests inject observation without
+// granting worktree mutation operations.
+type LineageController interface {
+	Status() (lineage.State, error)
+	Export(sequence int, destination string) (lineage.Export, error)
+	Restore(sequence int, force bool) (lineage.Restore, error)
+}
+
 type apiContinuationState struct {
 	requestContext []string
 }
@@ -378,6 +408,8 @@ const helpText = `commands:
   /context [file]  dump current model context, or save it as JSON
   /prompt          show the full system prompt, including runtime hints
   /usage           cumulative session tokens and cost
+  /evidence        list or inspect bounded session evidence metadata
+  /lineage         list accepted candidate checkpoints; export or explicitly restore one
   /max-turns [n]   show or set turns per prompt for this session (<=0 is unlimited)
   /tools [--raw]   list available tools, or dump model-facing definitions as JSON
   /lsp [status|enable|disable]
@@ -2648,6 +2680,10 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		fmt.Fprintln(app.Errw, app.System)
 	case "/usage":
 		fmt.Fprintln(app.Errw, app.usageSummary())
+	case "/evidence":
+		app.evidenceCommand(arg)
+	case "/lineage":
+		app.lineageCommand(arg)
 	case "/max-turns":
 		app.maxTurnsCommand(arg)
 	case "/image":
@@ -2720,6 +2756,106 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		}
 	}
 	return replCommandResult{}
+}
+
+const lineageCommandUsage = "/lineage [list | export <entry|best> <new-directory> | restore <entry|best> [--force]]"
+
+func (app *App) lineageCommand(arg string) {
+	if app.CandidateLineageControl == nil {
+		fmt.Fprintln(app.Errw, "[candidate lineage unavailable; start Harness with -candidate-lineage]")
+		return
+	}
+	state, err := app.CandidateLineageControl.Status()
+	if err != nil {
+		fmt.Fprintf(app.Errw, "[candidate lineage unavailable: %v]\n", err)
+		return
+	}
+	action, rest := splitHandoffCommandToken(arg)
+	switch strings.ToLower(action) {
+	case "", "list":
+		if strings.TrimSpace(rest) != "" {
+			fmt.Fprintf(app.Errw, "[lineage: usage: %s]\n", lineageCommandUsage)
+			return
+		}
+		fmt.Fprintln(app.Errw, lineageSummary(state))
+	case "export":
+		selector, destination := splitHandoffCommandToken(rest)
+		if selector == "" || strings.TrimSpace(destination) == "" {
+			fmt.Fprintf(app.Errw, "[lineage export: usage: %s]\n", lineageCommandUsage)
+			return
+		}
+		sequence, err := lineageSequence(state, selector)
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[lineage export failed: %v]\n", err)
+			return
+		}
+		result, err := app.CandidateLineageControl.Export(sequence, strings.TrimSpace(destination))
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[lineage export failed: %v]\n", err)
+			return
+		}
+		notice := fmt.Sprintf("[lineage exported #%d to %s]", result.Sequence, result.Path)
+		fmt.Fprintln(app.Errw, notice)
+		app.recordEvent(session.Event{Type: session.EventNotice, Text: notice, Display: notice})
+	case "restore":
+		fields := strings.Fields(rest)
+		if len(fields) < 1 || len(fields) > 2 || len(fields) == 2 && fields[1] != "--force" {
+			fmt.Fprintf(app.Errw, "[lineage restore: usage: %s]\n", lineageCommandUsage)
+			return
+		}
+		sequence, err := lineageSequence(state, fields[0])
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[lineage restore failed: %v]\n", err)
+			return
+		}
+		result, err := app.CandidateLineageControl.Restore(sequence, len(fields) == 2)
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[lineage restore failed: %v]\n", err)
+			return
+		}
+		var notice string
+		if !result.Changed {
+			notice = fmt.Sprintf("[lineage #%d is already the current Git-visible workspace]", result.Sequence)
+		} else {
+			notice = fmt.Sprintf("[lineage restored #%d; recovery patch %s (%d bytes)]", result.Sequence, result.RecoveryPatch, result.RecoveryPatchBytes)
+		}
+		fmt.Fprintln(app.Errw, notice)
+		app.recordEvent(session.Event{Type: session.EventNotice, Text: notice, Display: notice})
+		app.saveOrWarn(app.SessionPath)
+	default:
+		fmt.Fprintf(app.Errw, "[lineage: unknown action %q; usage: %s]\n", action, lineageCommandUsage)
+	}
+}
+
+func lineageSequence(state lineage.State, selector string) (int, error) {
+	selector = strings.ToLower(strings.TrimSpace(selector))
+	if selector == "best" {
+		if len(state.Entries) == 0 {
+			return 0, errors.New("candidate lineage has no accepted checkpoints")
+		}
+		return len(state.Entries), nil
+	}
+	sequence, err := strconv.Atoi(selector)
+	if err != nil || sequence < 1 || sequence > len(state.Entries) {
+		return 0, fmt.Errorf("candidate lineage entry %q does not exist (choose 1-%d or best)", selector, len(state.Entries))
+	}
+	return sequence, nil
+}
+
+func lineageSummary(state lineage.State) string {
+	if len(state.Entries) == 0 {
+		return "candidate lineage: no accepted checkpoints"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "candidate lineage: %d accepted checkpoint", len(state.Entries))
+	if len(state.Entries) != 1 {
+		b.WriteByte('s')
+	}
+	fmt.Fprintf(&b, " · %s %s · best #%d score %g", state.Handler, state.ScoreDirection, len(state.Entries), state.Entries[len(state.Entries)-1].Score)
+	for _, entry := range state.Entries {
+		fmt.Fprintf(&b, "\n  #%d score %g · candidate %s · evidence %s · patch %d bytes", entry.Sequence, entry.Score, entry.Candidate, entry.EvidenceRef, entry.PatchBytes)
+	}
+	return b.String()
 }
 
 // goalCommand handles /goal show/clear/pause/resume/set.
@@ -2867,7 +3003,7 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
 	"/help", "/exit", "/quit", "/clear", "/continue", "/compact", "/tree", "/fork", "/clone", "/context", "/prompt", "/usage",
-	"/max-turns", "/tools", "/lsp", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
+	"/evidence", "/lineage", "/max-turns", "/tools", "/lsp", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
 }
 
@@ -3969,7 +4105,7 @@ func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 		target = app.HandoffAgent
 	}
 	if target == "" {
-		target = "auto"
+		target = agentdef.Default
 	}
 	req.Agent = target
 	return req, true
@@ -4140,6 +4276,7 @@ func (app *App) clear() {
 	if app.Goal != nil {
 		app.Goal.Clear()
 	}
+	app.Trajectory = trajectory.NewTracker(nil)
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
 	app.Created = created
@@ -4305,6 +4442,7 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
 		app.finishPromptRun(err, requestContext)
 		sink.FlushEvents()
+		app.reportCandidateLineageError(sink)
 		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
@@ -4349,6 +4487,7 @@ func (app *App) prepareDetachedWaitContinuation() (func(), bool) {
 		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
 		app.finishPromptRun(err, requestContext)
 		sink.FlushEvents()
+		app.reportCandidateLineageError(sink)
 		// Deliberately do not call goalOnPromptEnd or alter its interruption state:
 		// this host-created turn must not consume, pause, or otherwise mutate a goal.
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
@@ -4397,6 +4536,7 @@ func (app *App) prepareAPIContinuation() (func(), bool) {
 		err := app.Agent.ContinuePromptWithContext(ctx, requestContext, promptID, sink)
 		app.finishPromptRun(err, requestContext)
 		sink.FlushEvents()
+		app.reportCandidateLineageError(sink)
 		// A host recovery attempt never admits, advances, or pauses a goal.
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
@@ -4520,6 +4660,7 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
 		app.finishPromptRun(err, requestContext)
 		sink.FlushEvents()
+		app.reportCandidateLineageError(sink)
 		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
 			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
@@ -4786,6 +4927,7 @@ func (app *App) sessionSnapshot(current *agent.PromptUsage) (session.Session, er
 		Plan:            app.planSnapshot(),
 		Todos:           app.todoSnapshot(),
 		Goal:            app.goalSnapshot(),
+		Trajectory:      app.ensureTrajectory().SnapshotPtr(),
 		Usage:           usage,
 		UsageByModel:    usageByModel,
 	}, nil
@@ -4842,6 +4984,13 @@ func (app *App) goalSnapshot() *goal.State {
 		return nil
 	}
 	return app.Goal.Snapshot()
+}
+
+func (app *App) ensureTrajectory() *trajectory.Tracker {
+	if app.Trajectory == nil {
+		app.Trajectory = trajectory.NewTracker(nil)
+	}
+	return app.Trajectory
 }
 
 // goalRequestContext returns the active-goal reminder for inclusion in model
@@ -5623,6 +5772,7 @@ type accumulatingSink struct {
 	inMaintenance               bool
 	promptStart                 time.Time
 	terminalModelErrorDisplayed bool
+	lineageErr                  error
 	attemptText                 strings.Builder
 	finalText                   string
 }
@@ -5806,6 +5956,7 @@ func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 			OnError: func(err error) {
 				fmt.Fprintf(app.Errw, "[session event log failed: %v]\n", err)
 			},
+			Trajectory: app.ensureTrajectory(),
 		})
 	}
 	return s
@@ -6042,6 +6193,10 @@ func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
 	s.rec.ToolDiff(call, path, text)
 }
 
+func (s *accumulatingSink) ToolMutation(call llm.ToolCall, paths []string) {
+	s.rec.ToolMutation(call, paths)
+}
+
 func (s *accumulatingSink) BackgroundJobDiagnostic(diagnostic background.CompletedDiagnostic) error {
 	if s == nil || s.rec == nil {
 		return nil
@@ -6231,6 +6386,59 @@ func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
 
 func (s *accumulatingSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
 	s.rec.HookDiagnostic(diagnostic)
+}
+
+func (s *accumulatingSink) EvaluatorResult(result hooks.EvaluatorResult) {
+	s.rec.EvaluatorResult(result)
+	if s == nil || s.app == nil || s.app.CandidateLineage == nil || s.lineageErr != nil {
+		return
+	}
+	advance, err := s.app.CandidateLineage.Observe(lineage.Input{
+		Handler:        result.Handler,
+		Accepted:       result.Accepted,
+		Score:          result.Score,
+		ScoreDirection: result.ScoreDirection,
+		Candidate:      result.Candidate,
+		EvidenceRef:    result.EvidenceRef,
+		Prompt:         s.prompt,
+		Turn:           s.turn,
+	})
+	if err != nil {
+		s.lineageErr = fmt.Errorf("candidate lineage: %w", err)
+		return
+	}
+	if advance == nil {
+		return
+	}
+	if err := s.rec.LineageAdvance(session.LineageAdvanceSnapshot{
+		Sequence:       advance.Sequence,
+		ParentSequence: advance.ParentSequence,
+		PatchBytes:     advance.PatchBytes,
+		EvidenceBytes:  advance.EvidenceBytes,
+	}); err != nil {
+		s.lineageErr = fmt.Errorf("candidate lineage record advancement: %w", err)
+	}
+}
+
+func (s *accumulatingSink) candidateLineageError() error {
+	if s == nil {
+		return nil
+	}
+	return s.lineageErr
+}
+
+func (app *App) reportCandidateLineageError(sink *accumulatingSink) {
+	if err := sink.candidateLineageError(); err != nil {
+		fmt.Fprintf(app.Errw, "[%v]\n", err)
+	}
+}
+
+func (s *accumulatingSink) TryStagnationNudge(threshold int) bool {
+	if s == nil || s.rec == nil || !s.rec.TryStagnationNudge(threshold) {
+		return false
+	}
+	s.r.Notice(sessionrec.StagnationNudgeDisplay(threshold))
+	return true
 }
 
 func (s *accumulatingSink) WorkflowStatus() agent.WorkflowStatus {

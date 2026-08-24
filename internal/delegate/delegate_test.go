@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -492,6 +493,17 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	if err != nil {
 		t.Fatalf("source Run: %v", err)
 	}
+	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
+	trajectoryScore := 0.5
+	if err := session.AppendEvent(sourceDir, session.Event{
+		Type: session.EventEvaluatorResult, Prompt: 1, Turn: 2,
+		EvaluatorResult: &session.EvaluatorResultSnapshot{
+			Handler: "verify", Accepted: true, Score: &trajectoryScore,
+			Candidate: "candidate:source", EvidenceRef: "evidence/source",
+		},
+	}); err != nil {
+		t.Fatalf("append source trajectory fixture: %v", err)
+	}
 	continued, err := fixture.runner.Run(context.Background(), RunRequest{
 		Task:            "finish and verify it",
 		ContinueChildID: "source",
@@ -516,11 +528,10 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 	if len(request.Messages) != 1 || !strings.Contains(request.Messages[0].Content[0].Text, "[delegate continuation from source]") {
 		t.Fatalf("continuation delta messages = %+v", request.Messages)
 	}
-	if len(request.RequestContext) != 0 {
-		t.Fatalf("continuation should reuse its transcript without a repeated TODO reminder: %+v", request.RequestContext)
+	if strings.Contains(strings.Join(request.RequestContext, "\n"), "candidate:source") {
+		t.Fatalf("continuation exposed host trajectory context = %+v", request.RequestContext)
 	}
 
-	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
 	continuedDir := session.ChildSessionDir(fixture.sessionPath, "continued")
 	sourceState, err := session.Load(sourceDir)
 	if err != nil {
@@ -538,6 +549,12 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 			sourceState.ProxySessionID,
 			sourceState.CacheAffinityID,
 		)
+	}
+	if sourceState.Trajectory == nil || sourceState.Trajectory.CurrentCandidateID != "candidate:source" || sourceState.Trajectory.TotalEvaluations != 1 {
+		t.Fatalf("source trajectory = %+v", sourceState.Trajectory)
+	}
+	if continuedState.Trajectory == nil || !reflect.DeepEqual(*continuedState.Trajectory, *sourceState.Trajectory) {
+		t.Fatalf("continued trajectory = %+v, want inherited %+v", continuedState.Trajectory, sourceState.Trajectory)
 	}
 	if continuedState.ResponseState == nil ||
 		continuedState.ResponseState.PreviousResponseID != "resp-continued" ||
@@ -823,6 +840,28 @@ func TestDelegateContinuationRejectsRetentionPolicyChange(t *testing.T) {
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "provider, model, prompt, tools, or runtime policy changed") {
 		t.Fatalf("retention-policy mismatch error = %v", err)
+	}
+	if len(fixture.provider.Requests) != 1 {
+		t.Fatalf("rejected continuation made %d model requests, want source request only", len(fixture.provider.Requests))
+	}
+}
+
+func TestDelegateContinuationRejectsStagnationNudgePolicyChange(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "source", ChildID: "source"}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	fixture.runner.opts.StagnationNudge = true
+	_, err := fixture.runner.Run(context.Background(), RunRequest{
+		Task:            "continue",
+		ContinueChildID: "source",
+		ChildID:         "target",
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "provider, model, prompt, tools, or runtime policy changed") {
+		t.Fatalf("stagnation-nudge runtime mismatch error = %v", err)
 	}
 	if len(fixture.provider.Requests) != 1 {
 		t.Fatalf("rejected continuation made %d model requests, want source request only", len(fixture.provider.Requests))

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/internal/trajectory"
 )
 
 func readEvents(t *testing.T, dir string) []session.Event {
@@ -148,6 +150,34 @@ func TestRecorderToolResultErrorFields(t *testing.T) {
 	}
 	if !strings.Contains(string(raw), `"error_excerpt":"line1\nline2…"`) {
 		t.Errorf("raw.ndjson missing error_excerpt field:\n%s", raw)
+	}
+}
+
+func TestRecorderToolResultRecordsExpectedArtifactReference(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 7})
+	rec.TurnAttemptStart(3, 1, agent.ContextEstimate{})
+	rec.ToolStart(llm.ToolCall{ID: "call/large", Name: "shell"})
+	rec.ToolResult(llm.ToolResult{
+		ForID: "call/large", Text: "summary", Truncated: true,
+		OriginalBytes: 1000, ShownBytes: len("summary"),
+	})
+	rec.Flush()
+
+	events := readEvents(t, dir)
+	var result *session.Event
+	for i := range events {
+		if events[i].Type == session.EventToolResult {
+			result = &events[i]
+			break
+		}
+	}
+	if result == nil {
+		t.Fatal("missing tool result")
+	}
+	want := session.ToolResultArtifactReference(7, 3, "call/large")
+	if result.ArtifactRef != want {
+		t.Fatalf("artifact ref = %q, want %q", result.ArtifactRef, want)
 	}
 }
 
@@ -349,6 +379,27 @@ func TestRecorderToolDiffRecordsPathAndTrimsDisplay(t *testing.T) {
 	}
 }
 
+func TestRecorderBranchRecordsCanonicalTransition(t *testing.T) {
+	dir := t.TempDir()
+	tracker := trajectory.NewTracker(nil)
+	tracker.ObserveEvaluation(trajectory.EvaluationInput{Candidate: "candidate:before"})
+	rec := New(Config{Dir: dir, Prompt: 4, Trajectory: tracker})
+	if err := rec.Branch("from-entry-long", "to-entry-long", "try another path", "tree"); err != nil {
+		t.Fatalf("Branch: %v", err)
+	}
+	events := readEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Type != session.EventBranch || event.Prompt != 4 || event.FromEntryID != "from-entry-long" || event.ToEntryID != "to-entry-long" || event.Purpose != "tree" || event.Summary != "try another path" || event.Display != "[tree: from-ent → to-entry; working directory unchanged]" {
+		t.Fatalf("branch event = %+v", event)
+	}
+	if state := tracker.Snapshot(); state.BranchResets != 1 || state.TotalEvaluations != 1 || len(state.Evaluations) != 0 {
+		t.Fatalf("branch trajectory = %+v", state)
+	}
+}
+
 func TestRecorderHookDiagnosticIsStructuredAndDisplayless(t *testing.T) {
 	dir := t.TempDir()
 	rec := New(Config{Dir: dir, Prompt: 2})
@@ -369,6 +420,187 @@ func TestRecorderHookDiagnosticIsStructuredAndDisplayless(t *testing.T) {
 	diagnostic := event.HookDiagnostic
 	if diagnostic.Event != "PreToolUse" || diagnostic.Handler != "policy" || diagnostic.Target != "edit" || diagnostic.ToolID != "tool-1" || diagnostic.ElapsedMS != 1500 || diagnostic.Outcome != "timeout" || !diagnostic.CircuitOpen || diagnostic.CircuitOpenUntil == nil || !diagnostic.CircuitOpenUntil.Equal(openUntil) {
 		t.Fatalf("hook diagnostic snapshot = %+v", diagnostic)
+	}
+}
+
+func TestRecorderEvaluatorResultIsStructuredAndDisplayless(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 2})
+	score := 0.0
+	remaining := 2
+	rec.EvaluatorResult(hooks.EvaluatorResult{
+		Handler: "verify", Accepted: false, Score: &score, ScoreDirection: hooks.ScoreDirectionMaximize, Candidate: "sha256:abc",
+		RemainingRequirements: &remaining, EvidenceRef: "artifacts/verify.log",
+	})
+	events := readEvents(t, dir)
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.Type != session.EventEvaluatorResult || event.Prompt != 2 || event.Display != "" || event.EvaluatorResult == nil {
+		t.Fatalf("evaluator result event = %+v", event)
+	}
+	result := event.EvaluatorResult
+	if result.Handler != "verify" || result.Accepted || result.Score == nil || *result.Score != 0 || result.ScoreDirection != hooks.ScoreDirectionMaximize || result.Candidate != "sha256:abc" ||
+		result.RemainingRequirements == nil || *result.RemainingRequirements != 2 || result.EvidenceRef != "artifacts/verify.log" {
+		t.Fatalf("evaluator result snapshot = %+v", result)
+	}
+}
+
+func TestRecorderLineageAdvanceIsContentFreeAndDisplayless(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 4})
+	rec.TurnAttemptStart(3, 1, agent.ContextEstimate{})
+	err := rec.LineageAdvance(session.LineageAdvanceSnapshot{
+		Sequence: 2, ParentSequence: 1, PatchBytes: 321, EvidenceBytes: 45,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := readEvents(t, dir)
+	event := events[len(events)-1]
+	if event.Type != session.EventLineageAdvance || event.Prompt != 4 || event.Turn != 3 || event.Display != "" || event.LineageAdvance == nil {
+		t.Fatalf("lineage advance event = %+v", event)
+	}
+	got := event.LineageAdvance
+	if got.Sequence != 2 || got.ParentSequence != 1 || got.PatchBytes != 321 || got.EvidenceBytes != 45 {
+		t.Fatalf("lineage advance snapshot = %+v", got)
+	}
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"candidate-secret", "score-secret", "evidence-secret", "tree-secret"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("lineage advance exposed %q: %s", secret, encoded)
+		}
+	}
+}
+
+func TestRecorderStagnationNudgePersistsPayloadFreeTriggerAndReplay(t *testing.T) {
+	dir := t.TempDir()
+	tracker := trajectory.NewTracker(nil)
+	rec := New(Config{Dir: dir, Prompt: 3, Trajectory: tracker})
+	score := 0.0
+	for _, candidate := range []string{"candidate:a", "candidate:b", "candidate:c"} {
+		rec.EvaluatorResult(hooks.EvaluatorResult{
+			Handler: "verify-secret", Score: &score, ScoreDirection: hooks.ScoreDirectionMaximize,
+			Candidate: candidate, EvidenceRef: "secret/evidence.log",
+		})
+	}
+	rec.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+	if !rec.TryStagnationNudge(2) || rec.TryStagnationNudge(2) {
+		t.Fatalf("nudge trigger did not remain one-shot: %+v", tracker.Snapshot())
+	}
+	events := readEvents(t, dir)
+	var nudge *session.Event
+	for i := range events {
+		if events[i].Type == session.EventStagnationNudge {
+			nudge = &events[i]
+			break
+		}
+	}
+	if nudge == nil || nudge.Prompt != 3 || nudge.Turn != 2 || nudge.StagnationNudge == nil || nudge.StagnationNudge.Threshold != 2 || nudge.StagnationNudge.Streak != 2 || nudge.Display != StagnationNudgeDisplay(2) {
+		t.Fatalf("stagnation nudge event = %+v", nudge)
+	}
+	encoded, err := json.Marshal(nudge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"verify-secret", "candidate:a", "secret/evidence.log", "maximize"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Fatalf("nudge event exposed %q: %s", secret, encoded)
+		}
+	}
+	live := tracker.Snapshot()
+	live = trajectory.Normalize(&live)
+	if replayed := session.ReconstructTrajectory(events); !reflect.DeepEqual(live, replayed) {
+		t.Fatalf("nudge replay mismatch:\nlive:   %+v\nreplay: %+v", live, replayed)
+	}
+}
+
+func TestRecorderTrajectoryMatchesCanonicalReplay(t *testing.T) {
+	initial := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
+		Handler: "inherited", Accepted: true, Candidate: "candidate:inherited", EvidenceRef: "evidence/inherited",
+	})
+	tracker := trajectory.NewTracker(&initial)
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 2, Trajectory: tracker})
+	rec.SeedTrajectory(&initial, "delegate_continuation")
+	rec.TurnAttemptStart(3, 1, agent.ContextEstimate{})
+	rec.ToolMutation(llm.ToolCall{ID: "edit-1", Name: "edit"}, []string{"a.go", "b.go", "a.go"})
+	rec.ToolDiff(llm.ToolCall{ID: "edit-1", Name: "edit"}, "a.go", "--- a.go\n+++ a.go\n")
+	score := 0.75
+	remaining := 1
+	rec.EvaluatorResult(hooks.EvaluatorResult{
+		Handler: "verify", Accepted: false, Score: &score, ScoreDirection: hooks.ScoreDirectionMaximize, Candidate: "candidate:next",
+		RemainingRequirements: &remaining, EvidenceRef: "evidence/verify.log",
+	})
+	rec.Flush()
+	if err := rec.Err(); err != nil {
+		t.Fatalf("Err = %v, want nil", err)
+	}
+
+	events := readEvents(t, dir)
+	if events[0].Type != session.EventTrajectorySeed || events[0].Purpose != "delegate_continuation" || events[0].Trajectory == nil {
+		t.Fatalf("trajectory seed = %+v", events[0])
+	}
+	var mutation *session.Event
+	for i := range events {
+		if events[i].Type == session.EventToolMutation {
+			mutation = &events[i]
+			break
+		}
+	}
+	if mutation == nil || mutation.Display != "" || mutation.ToolMutation == nil || !reflect.DeepEqual(mutation.ToolMutation.Paths, []string{"a.go", "b.go"}) {
+		t.Fatalf("tool mutation event = %+v", mutation)
+	}
+	live := tracker.Snapshot()
+	replayed := session.ReconstructTrajectory(events)
+	if !reflect.DeepEqual(live, replayed) {
+		t.Fatalf("live trajectory diverged from replay:\nlive:   %+v\nreplay: %+v", live, replayed)
+	}
+	if live.TotalEvaluations != 2 || live.UnconfirmedMutationPaths != 1 || live.DiffPathConfirmations != 1 {
+		t.Fatalf("trajectory metrics = %+v", live)
+	}
+}
+
+func TestRecorderTrajectoryDoesNotAdvanceAfterAppendFailure(t *testing.T) {
+	blockingPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockingPath, []byte("file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tracker := trajectory.NewTracker(nil)
+	rec := New(Config{Dir: blockingPath, Prompt: 1, Trajectory: tracker})
+	rec.ToolMutation(llm.ToolCall{ID: "edit-1", Name: "edit"}, []string{"a.go"})
+	rec.EvaluatorResult(hooks.EvaluatorResult{Handler: "verify", Accepted: true, Candidate: "candidate:one"})
+	if rec.Err() == nil {
+		t.Fatal("Err = nil, want append failure")
+	}
+	if got := tracker.Snapshot(); got.Transitions != 0 || got.TotalEvaluations != 0 || len(got.ModifiedPaths) != 0 {
+		t.Fatalf("trajectory advanced after append failure: %+v", got)
+	}
+}
+
+func TestRecorderStagnationNudgeDoesNotAdvanceAfterAppendFailure(t *testing.T) {
+	blockingPath := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(blockingPath, []byte("file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	score := 0.0
+	state := trajectory.State{}
+	for _, candidate := range []string{"a", "b", "c"} {
+		state = trajectory.ApplyEvaluation(state, trajectory.EvaluationInput{
+			Handler: "verify", Score: &score, ScoreDirection: trajectory.ScoreDirectionMaximize, Candidate: candidate,
+		})
+	}
+	tracker := trajectory.NewTracker(&state)
+	rec := New(Config{Dir: blockingPath, Prompt: 1, Trajectory: tracker})
+	if rec.TryStagnationNudge(2) {
+		t.Fatal("append failure reported a delivered nudge")
+	}
+	if got := tracker.Snapshot(); got.StagnationNudgeIssued || got.StagnationNudges != 0 {
+		t.Fatalf("trajectory advanced after nudge append failure: %+v", got)
 	}
 }
 

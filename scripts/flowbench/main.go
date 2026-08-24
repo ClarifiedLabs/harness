@@ -10,6 +10,17 @@ import (
 )
 
 func main() {
+	switch filepath.Base(os.Args[0]) {
+	case defaultStackVerifierCommand:
+		os.Exit(runDefaultStackVerifier(".", os.Stdin, os.Stdout))
+	case stagnationEvaluatorCommand:
+		os.Exit(runStagnationEvaluator(".", os.Args[1:], os.Stdin, os.Stdout))
+	case stagnationRecoveryCommand:
+		os.Exit(runStagnationRecoveryEvaluator(".", os.Stdin, os.Stdout))
+	case lineageEvaluatorCommand:
+		os.Exit(runLineageEvaluator(".", os.Stdin, os.Stdout))
+	}
+
 	var (
 		caseName     = flag.String("case", "", "benchmark case name")
 		suiteName    = flag.String("suite", "", "benchmark suite name (tool_accuracy)")
@@ -20,6 +31,8 @@ func main() {
 		results      = flag.String("results", "", "result directory outside the repository")
 		models       = flag.String("models", strings.Join(defaultModels, ","), "comma-separated model target ids")
 		repetitions  = flag.Int("repetitions", 5, "baseline/candidate pairs per model")
+		reasoning    = flag.String("reasoning", "medium", "reasoning profile for every run")
+		parallel     = flag.Bool("parallel-models", false, "run one instance of each model concurrently per AB/BA round")
 		dryRun       = flag.Bool("dry-run", false, "print the resolved run matrix without building or calling models")
 		resume       = flag.Bool("resume", false, "reuse valid completed records and rerun interrupted unrecorded runs")
 		importRuns   = flag.String("import-baseline-runs", "", "reuse validated baseline records from another case runs JSON file")
@@ -87,11 +100,13 @@ func main() {
 			Repo: absRepo, Results: resultDir, Case: c,
 			BaselineSHA: *baselineSHA, CandidateSHA: *candidateSHA,
 			Models: selectedModels, Repetitions: *repetitions,
-			DryRun: *dryRun, Resume: *resume, ImportRuns: *importRuns, Profile: *profile,
+			Reasoning:      *reasoning,
+			ParallelModels: *parallel,
+			DryRun:         *dryRun, Resume: *resume, ImportRuns: *importRuns, Profile: *profile,
 		})
 		if *dryRun {
 			for _, record := range records {
-				fmt.Printf("%s\t%02d\t%s\t%d\t%s\t%s\n", c.Name, record.Order, record.Model, record.Repetition, record.Variant, record.HarnessSHA)
+				fmt.Printf("%s\t%02d\t%s\t%d\t%s\t%s\t%s\n", c.Name, record.Order, record.Model, record.Repetition, record.Variant, record.HarnessSHA, record.Agent)
 			}
 		}
 		if runErr != nil {

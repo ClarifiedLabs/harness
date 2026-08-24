@@ -29,8 +29,10 @@ func TestBuiltinAgentPrompt(t *testing.T) {
 			t.Fatalf("BuiltinAgentPrompt(%q) not found", name)
 		}
 	}
-	if got, ok := BuiltinAgentPrompt("unknown"); ok || got != "" {
-		t.Fatalf("unknown prompt = %q, %v; want empty, false", got, ok)
+	for _, name := range []string{"evolve", "unknown"} {
+		if got, ok := BuiltinAgentPrompt(name); ok || got != "" {
+			t.Fatalf("removed or unknown prompt %q = %q, %v; want empty, false", name, got, ok)
+		}
 	}
 }
 

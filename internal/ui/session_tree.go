@@ -11,6 +11,8 @@ import (
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/internal/sessionrec"
+	"harness/internal/trajectory"
 )
 
 type treeChoice struct {
@@ -194,6 +196,7 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 	app.PromptNumber = 0
 	app.SetUsage(session.UsageTotals{})
 	app.usageByModel = nil
+	app.Trajectory = trajectory.NewTracker(nil)
 	app.Agent.SetTranscript(messages)
 	app.Agent.ResetSessionIDs()
 	app.ArmTodoContext()
@@ -600,16 +603,26 @@ func validateRestoredTreeImages(pending, restored []inputimage.Loaded) error {
 }
 
 func (app *App) recordBranchEvent(from, to, summary, source string) {
-	app.recordEvent(session.Event{
-		Time:        app.clock()(),
-		Type:        session.EventBranch,
-		Prompt:      app.PromptNumber,
-		Display:     fmt.Sprintf("[%s: %s → %s; working directory unchanged]", source, shortTreeID(from), shortTreeID(to)),
-		FromEntryID: from,
-		ToEntryID:   to,
-		Purpose:     source,
-		Summary:     summary,
-	})
+	cfg := sessionrec.Config{
+		Dir:        app.SessionPath,
+		Prompt:     app.PromptNumber,
+		Clock:      app.clock(),
+		Trajectory: app.ensureTrajectory(),
+		OnError: func(err error) {
+			fmt.Fprintf(app.Errw, "[session event log failed: %v]\n", err)
+		},
+	}
+	if app.RunStream != nil {
+		cfg.Mirror = app.RunStream.Mirror
+	}
+	recorder := sessionrec.New(cfg)
+	_ = recorder.Branch(from, to, summary, source)
+}
+
+// RecordBranchEvent records an externally initiated clone branch through the
+// same lifecycle path as interactive /tree, /fork, and /clone.
+func (app *App) RecordBranchEvent(from, to, summary, source string) {
+	app.recordBranchEvent(from, to, summary, source)
 }
 
 func shortTreeID(id string) string {

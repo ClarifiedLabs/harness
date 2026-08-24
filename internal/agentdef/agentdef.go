@@ -289,8 +289,9 @@ func InteractiveNames(agents map[string]Definition) []string {
 }
 
 // ImplementationAgentNames returns sorted names of agents whose WorkspaceAccess is exclusive.
-// Used for handoff targets: auto, independent and custom exclusive agents. Read-only builtins
-// (explore, plan, review) are excluded. If none (defensive), caller falls back to ["auto"].
+// Used for handoff targets: auto, independent and custom exclusive agents. Read-only
+// builtins (explore, plan, review) are excluded. If none (defensive), callers
+// fall back to Default.
 func ImplementationAgentNames(agents map[string]Definition) []string {
 	var out []string
 	for name, def := range agents {

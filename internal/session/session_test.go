@@ -18,6 +18,7 @@ import (
 	"harness/internal/plan"
 	"harness/internal/term/highlight"
 	"harness/internal/todo"
+	"harness/internal/trajectory"
 )
 
 const sessionOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
@@ -559,6 +560,86 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	s.Tree = got.Tree
 	if !reflect.DeepEqual(s, got) {
 		t.Fatalf("round-trip mismatch:\n want %+v\n  got %+v", s, got)
+	}
+}
+
+func TestLoadReconstructsTrajectoryFromCanonicalRawEvents(t *testing.T) {
+	s := sampleSession()
+	stale := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
+		Handler: "stale", Accepted: true, Candidate: "candidate:stale", EvidenceRef: "evidence/stale",
+	})
+	s.Trajectory = &stale
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	events := []Event{
+		{Type: EventToolMutation, Prompt: 1, Turn: 1, ToolMutation: &ToolMutationSnapshot{Paths: []string{"before.go"}}},
+		{Type: EventEvaluatorResult, Prompt: 1, Turn: 1, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Candidate: "candidate:before", EvidenceRef: "evidence/before"}},
+		{Type: EventBranch, Prompt: 1},
+		{Type: EventToolMutation, Prompt: 2, Turn: 1, ToolMutation: &ToolMutationSnapshot{Paths: []string{"after.go"}}},
+		{Type: EventEvaluatorResult, Prompt: 2, Turn: 1, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Accepted: true, Candidate: "candidate:after", EvidenceRef: "evidence/after"}},
+	}
+	for _, event := range events {
+		if err := AppendEvent(dir, event); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := ReconstructTrajectory(events)
+	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, want) {
+		t.Fatalf("reconstructed trajectory = %+v, want %+v", loaded.Trajectory, want)
+	}
+	if loaded.Trajectory.TotalEvaluations != 2 || loaded.Trajectory.BranchResets != 1 || loaded.Trajectory.CurrentCandidateID != "candidate:after" || !reflect.DeepEqual(loaded.Trajectory.ModifiedPaths, []string{"after.go"}) {
+		t.Fatalf("reconstructed lifecycle = %+v", loaded.Trajectory)
+	}
+}
+
+func TestLoadKeepsSavedTrajectoryWhenShadowReplayIsMalformed(t *testing.T) {
+	s := sampleSession()
+	saved := trajectory.ApplyModifiedPaths(trajectory.State{}, []string{"saved.go"})
+	s.Trajectory = &saved
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, eventLog), []byte("{malformed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load should fail open for shadow replay: %v", err)
+	}
+	want := trajectory.Normalize(&saved)
+	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, want) {
+		t.Fatalf("fallback trajectory = %+v, want %+v", loaded.Trajectory, want)
+	}
+}
+
+func TestLoadKeepsSavedTrajectoryWhenRawHasNoTrajectoryTransitions(t *testing.T) {
+	s := sampleSession()
+	saved := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
+		Handler: "verify", Accepted: true, Candidate: "candidate:saved", EvidenceRef: "evidence/saved",
+	})
+	s.Trajectory = &saved
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(dir); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if err := AppendEvent(dir, Event{Type: EventUser, Prompt: 2, Text: "continue"}); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := trajectory.Normalize(&saved)
+	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, want) {
+		t.Fatalf("trajectory without new transitions = %+v, want %+v", loaded.Trajectory, want)
 	}
 }
 

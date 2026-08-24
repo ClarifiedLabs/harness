@@ -37,6 +37,7 @@ import (
 	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
+	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/logging"
 	"harness/internal/markdown"
@@ -56,6 +57,7 @@ import (
 	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
+	"harness/internal/trajectory"
 	"harness/internal/ui"
 )
 
@@ -141,6 +143,7 @@ func harnessLoadOptions(env environment, args []string) config.LoadOptions {
 			MCPProxyURL:   resolveMCPProxy(""),
 			HistoryPath:   session.HistoryPath(stateDir(getenv)),
 			Agent:         agentdef.Default,
+			HandoffAgent:  agentdef.Default,
 			TmuxActive:    getenv("TMUX") != "",
 		},
 	}
@@ -536,6 +539,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		resumed.ResponseState = nil
 		resumed.Usage = session.UsageTotals{}
 		resumed.UsageByModel = nil
+		resumed.Trajectory = nil
 		created = cloneCreated
 		resumeCloned = true
 	}
@@ -708,6 +712,14 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// path reasoning. An os.Getwd failure leaves Dir empty (the "." fallback), the
 	// best we can do.
 	wd, _ := os.Getwd()
+	var candidateLineage *lineage.Manager
+	if runOptions.CandidateLineage {
+		candidateLineage, err = lineage.Open(wd, sessionPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "harness: -candidate-lineage: %v\n", err)
+			return ui.ExitRuntime
+		}
+	}
 	// AGENTS.md auto-discovery: include user-level instructions from
 	// ~/.agents/AGENTS.md and project-specific instructions from the directory
 	// harness was launched from. Missing files are silently ignored; a read error
@@ -815,6 +827,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		DelegateMaxDescendants:    cfg.DelegateMaxDescendants,
 		Prewarm:                   env.prewarmCache && !env.stdinPiped && prewarmForProvider(catalog, cfg.Provider),
 		SearchBackend:             searchBackend(),
+		StagnationNudge:           cfg.StagnationNudge,
+		CandidateLineage:          runOptions.CandidateLineage,
 	}
 	delegateState := delegate.NewState(delegate.Runtime{
 		ProviderName:          cfg.Provider,
@@ -884,6 +898,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		RetentionResultHeadBytes:  cfg.RetentionResultHeadBytes,
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
 		ShowDiffs:                 cfg.ShowDiffs,
+		StagnationNudge:           cfg.StagnationNudge,
 		Now:                       now,
 		AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate {
 			return delegateAgentCandidates(agents)
@@ -1270,6 +1285,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		CompactTimeout:            time.Duration(cfg.CompactTimeoutSeconds) * time.Second,
 		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
 		Hooks:                     hookRunner,
+		StagnationNudge:           cfg.StagnationNudge,
 		ShowDiffs:                 cfg.ShowDiffs,
 		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
 		NativeCompaction:          nativeCompactionForProvider(catalog, cfg.Provider),
@@ -1351,6 +1367,10 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// same registry after the runtime is seeded.
 	ag.SetTools(toolRegistry)
 	ag.SetResponseState(resumeResponseState)
+	var trajectoryState *trajectory.State
+	if resumed != nil {
+		trajectoryState = resumed.Trajectory
+	}
 
 	if runOptions.DebugRequest {
 		includePrompt, prompt, images, err := debugRequestPrompt(runOptions, stdin, env.stdinPiped, modelRegistry.SupportsInputModality(registryModel, "image"))
@@ -1361,7 +1381,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if len(runOptions.Images) > 0 && len(images) == 0 {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
 		}
-		out := buildDebugRequestOutput(ag, cfg, registryModel, agentName, includePrompt, prompt, images)
+		out := buildDebugRequestOutput(ag, cfg, registryModel, agentName, includePrompt, prompt, images, nil)
 		if err := writeInformationalJSON(stdout, out); err != nil {
 			fmt.Fprintf(stderr, "harness: debug request: %v\n", err)
 			return ui.ExitRuntime
@@ -1452,6 +1472,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Todos:                        todoStore,
 		Plans:                        planStore,
 		Goal:                         goalStore,
+		Trajectory:                   trajectory.NewTracker(trajectoryState),
+		CandidateLineage:             candidateLineage,
+		CandidateLineageControl:      candidateLineage,
 		GoalMaxContinuations:         cfg.GoalMaxContinuations,
 		GoalAutoContinue:             interactiveSession,
 		Handoff:                      handoffPending,
@@ -1473,6 +1496,11 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		BeforeSessionPathChange: prepareSessionLockChange,
 		OnSessionPathChanged: func(path string) {
 			defer commitSessionLockChange()
+			if candidateLineage != nil {
+				if err := candidateLineage.SwitchSession(path); err != nil {
+					fmt.Fprintf(stderr, "[candidate lineage disabled for new session: %v]\n", err)
+				}
+			}
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
 			snap.CacheAffinityID = ag.CacheAffinityID()
@@ -1611,16 +1639,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	app.SetUsage(totals)
 	app.SetUsageByModel(resumedUsageByModel)
 	if resumeCloned {
-		if err := session.AppendEvent(app.SessionPath, session.Event{
-			Time:        now(),
-			Type:        session.EventBranch,
-			Display:     fmt.Sprintf("[clone: %s → %s; working directory unchanged]", resumeCloneFrom, resumeCloneTo),
-			FromEntryID: resumeCloneFrom,
-			ToEntryID:   resumeCloneTo,
-			Purpose:     "clone",
-		}); err != nil {
-			fmt.Fprintf(stderr, "[session event log failed: %v]\n", err)
-		}
+		app.RecordBranchEvent(resumeCloneFrom, resumeCloneTo, "", "clone")
 	}
 	if hookRunner != nil {
 		source := "startup"
@@ -1897,8 +1916,8 @@ func loadedImageBlocks(images []inputimage.Loaded) []llm.ContentBlock {
 	return blocks
 }
 
-func buildDebugRequestOutput(ag *agent.Agent, cfg config.Config, registryModel, agentName string, includePrompt bool, prompt string, images []llm.ContentBlock) debugRequestOutput {
-	snap := ag.DebugRequest(includePrompt, prompt, images, nil)
+func buildDebugRequestOutput(ag *agent.Agent, cfg config.Config, registryModel, agentName string, includePrompt bool, prompt string, images []llm.ContentBlock, requestContext []string) debugRequestOutput {
+	snap := ag.DebugRequest(includePrompt, prompt, images, requestContext)
 	toolNames := ag.ToolNames()
 	return debugRequestOutput{
 		Version:              1,

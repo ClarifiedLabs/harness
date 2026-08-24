@@ -105,6 +105,27 @@ type HookDiagnosticSink interface {
 	HookDiagnostic(hooks.Diagnostic)
 }
 
+// EvaluatorResultSink optionally receives bounded semantic outcomes from Stop
+// hooks. These are diagnostics-only events; repair context is added separately
+// by the agent when a rejecting result is allowed to continue the prompt.
+type EvaluatorResultSink interface {
+	EvaluatorResult(hooks.EvaluatorResult)
+}
+
+// StagnationNudgeSink owns the replayable trajectory decision. It returns true
+// only after a lane-scoped trigger has been durably recorded.
+type StagnationNudgeSink interface {
+	TryStagnationNudge(threshold int) bool
+}
+
+// StagnationNudgeThreshold is the validated trigger: real
+// successful evaluator trajectories peaked at one, while the synthetic
+// plateau/cycle oracle reaches two.
+const StagnationNudgeThreshold = 2
+
+const stagnationNudgeContext = `[host strategy reset]
+The evaluator has rejected or failed to improve two consecutive candidates in the same evaluation lane. Before changing anything else, stop repeating the current approach. Re-read the latest evaluator evidence and relevant current state, form a materially different hypothesis, and test that strategy. Preserve verified progress, stay within the task, and do not bypass the evaluator.`
+
 // CompactionProgressSink is implemented by sinks that want transient progress
 // while compaction inspects or summarizes old context. The callbacks are
 // balanced around every invoked compaction, including local degradation.
@@ -123,6 +144,13 @@ type ToolResultArchiver = toolresult.Archiver
 // after a mutating tool result. Diffs are not transcript/tool-result content.
 type ToolDiffSink interface {
 	ToolDiff(call llm.ToolCall, path, text string)
+}
+
+// ToolMutationSink receives host-derived paths after a mutation-reporting tool
+// completes successfully. It is diagnostics-only and never changes the tool
+// result or model transcript.
+type ToolMutationSink interface {
+	ToolMutation(call llm.ToolCall, paths []string)
 }
 
 // DelegateProgressSnapshot is a best-effort, lock-protected snapshot of one
@@ -533,6 +561,9 @@ type Options struct {
 	CompactToolResultMaxBytes int
 	// Hooks runs configured lifecycle hooks. Nil disables hooks.
 	Hooks *hooks.Runner
+	// StagnationNudge enables one visible strategy-reset instruction per
+	// evaluator lane after StagnationNudgeThreshold consecutive non-improvements.
+	StagnationNudge bool
 	// ShowDiffs emits per-tool-call file diffs for built-in file mutation tools.
 	ShowDiffs bool
 	// ResponsesStateful enables Responses API previous_response_id chaining.
@@ -608,6 +639,7 @@ type Agent struct {
 	compactions               int
 	archiveCompaction         CompactionArchiver
 	hooks                     *hooks.Runner
+	stagnationNudge           bool
 	showDiffs                 bool
 	// failGuard is the per-prompt repeated-identical-failure guard (design
 	// §8.1). It is non-nil only while RunAdmittedPromptWithContext executes.
@@ -697,6 +729,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		compactTimeout:            opts.CompactTimeout,
 		compactToolResultMaxBytes: opts.CompactToolResultMaxBytes,
 		hooks:                     opts.Hooks,
+		stagnationNudge:           opts.StagnationNudge,
 		showDiffs:                 opts.ShowDiffs,
 		responsesStateful:         opts.ResponsesStateful,
 		nativeCompaction:          opts.NativeCompaction,
@@ -1837,13 +1870,30 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	var closureTurn int
 	var turnBudgetExhausted bool
 	var workflowStatus WorkflowStatus
+	var evaluatorResults []hooks.EvaluatorResult
+	var evaluatorUnrepresentedBlock bool
+	trackEvaluatorResults := func(result hooks.Result) {
+		evaluatorResults = append(evaluatorResults, result.EvaluatorResults...)
+		if !result.Block {
+			return
+		}
+		for _, evaluation := range result.EvaluatorResults {
+			if !evaluation.Accepted {
+				return
+			}
+		}
+		evaluatorUnrepresentedBlock = true
+	}
+	currentWorkflowStatus := func() WorkflowStatus {
+		return sampleWorkflowStatusWithEvaluations(sink, evaluatorResults, evaluatorUnrepresentedBlock)
+	}
 	startClosure := func(trigger ClosureTrigger, turn int) {
 		if closureTrigger != "" {
 			return
 		}
 		closureTrigger = trigger
 		closureTurn = turn
-		workflowStatus = sampleWorkflowStatus(sink)
+		workflowStatus = currentWorkflowStatus()
 		reportClosure(sink, ClosureEvent{Trigger: trigger, Turn: turn, WorkflowStatus: workflowStatus})
 	}
 	completeTurn := func() {
@@ -1885,7 +1935,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			reason = TerminationModelCompleted
 		}
 		terminationReason = reason
-		workflowStatus = sampleWorkflowStatus(sink)
+		workflowStatus = currentWorkflowStatus()
 		sink.PromptComplete(promptUsage())
 	}()
 	// Stop notifies session coordinators on every prompt exit. The normal
@@ -1901,12 +1951,13 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// notification so cancellation cannot suppress it or make it unbounded.
 		hookCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		a.runStopHook(hookCtx, sink, hooks.Payload{
+		hookResult := a.runStopHook(hookCtx, sink, hooks.Payload{
 			"prompt_id":        promptID,
 			"turn_id":          turns,
 			"stop_hook_active": false,
 			"can_block":        false,
 		})
+		trackEvaluatorResults(hookResult)
 	}()
 
 	for unlimited || turns < a.maxTurns || forcePromptWorkSynthesis {
@@ -2233,6 +2284,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 					"last_assistant_message": res.text,
 					"can_block":              canBlock,
 				})
+				trackEvaluatorResults(hookRes)
 				// A cancellation before Runner dispatched any handler gets one
 				// detached terminal attempt from the defer. Once a handler started,
 				// its diagnostic proves the event was dispatched and prevents a
@@ -2245,6 +2297,11 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 					reason := hookRes.Reason()
 					if reason == "" {
 						reason = "Stop hook requested continuation"
+					}
+					if a.stagnationNudge && hasRejectedEvaluatorResult(hookRes.EvaluatorResults) {
+						if nudgeSink, ok := sink.(StagnationNudgeSink); ok && nudgeSink.TryStagnationNudge(StagnationNudgeThreshold) {
+							reason += "\n\n" + stagnationNudgeContext
+						}
 					}
 					message := a.textMessage(llm.RoleUser, "[hook Stop requested continuation]\n"+reason)
 					message.Origin = llm.MessageOriginInternal
@@ -2526,10 +2583,20 @@ func reportTurnProgress(sink EventSink, progress TurnProgress) {
 func (a *Agent) runStopHook(ctx context.Context, sink EventSink, payload hooks.Payload) hooks.Result {
 	result := a.hooks.Run(ctx, hooks.Stop, "", payload)
 	reportHookDiagnostics(sink, result.Diagnostics)
+	reportEvaluatorResults(sink, result.EvaluatorResults)
 	for _, notice := range result.Notices {
 		sink.Notice(notice)
 	}
 	return result
+}
+
+func hasRejectedEvaluatorResult(results []hooks.EvaluatorResult) bool {
+	for _, result := range results {
+		if !result.Accepted {
+			return true
+		}
+	}
+	return false
 }
 
 func reportHookDiagnostics(sink EventSink, diagnostics []hooks.Diagnostic) {
@@ -2539,6 +2606,16 @@ func reportHookDiagnostics(sink EventSink, diagnostics []hooks.Diagnostic) {
 	}
 	for _, diagnostic := range diagnostics {
 		diagnosticSink.HookDiagnostic(diagnostic)
+	}
+}
+
+func reportEvaluatorResults(sink EventSink, results []hooks.EvaluatorResult) {
+	evaluatorSink, ok := sink.(EvaluatorResultSink)
+	if !ok {
+		return
+	}
+	for _, result := range results {
+		evaluatorSink.EvaluatorResult(result)
 	}
 }
 
@@ -2569,6 +2646,31 @@ func sampleWorkflowStatus(sink EventSink) WorkflowStatus {
 			remaining := *status.RemainingRequirements
 			status.RemainingRequirements = &remaining
 		}
+	}
+	return status
+}
+
+func sampleWorkflowStatusWithEvaluations(sink EventSink, results []hooks.EvaluatorResult, unrepresentedBlock bool) WorkflowStatus {
+	if status := sampleWorkflowStatus(sink); status.Available {
+		return status
+	}
+	if len(results) == 0 || unrepresentedBlock {
+		return WorkflowStatus{}
+	}
+	status := WorkflowStatus{Available: true, Outcome: WorkflowOutcomeComplete}
+	for _, result := range results {
+		if !result.Accepted {
+			status.Outcome = WorkflowOutcomeInProgress
+			break
+		}
+	}
+	// A remaining-requirements count has no generic aggregation rule across
+	// independent evaluator handlers. Project it only when one result makes the
+	// meaning unambiguous; every individual value remains available in the
+	// evaluator_result session events.
+	if len(results) == 1 && results[0].RemainingRequirements != nil {
+		remaining := *results[0].RemainingRequirements
+		status.RemainingRequirements = &remaining
 	}
 	return status
 }
@@ -2967,6 +3069,7 @@ func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, p
 	r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
 	block, usage := a.finishToolResult(r, call.Name, sink)
 	clearToolProgress(call, sink)
+	reportToolMutation(a.tools, call, r, sink)
 	emitToolDiff(call, diffEvents, sink)
 	return block, usage, completion
 }
@@ -3039,6 +3142,7 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 		block, usage := a.finishToolResult(r, calls[i].Name, sink)
 		blocks[i] = block
 		clearToolProgress(calls[i], sink)
+		reportToolMutation(a.tools, calls[i], r, sink)
 		emitToolDiff(calls[i], scheduled.diffEvents, sink)
 		total = add(total, usage)
 	}
@@ -3235,6 +3339,21 @@ func emitToolDiff(call llm.ToolCall, events []toolDiffEvent, sink EventSink) {
 			ds.ToolDiff(call, event.path, event.text)
 		}
 	}
+}
+
+func reportToolMutation(registry *tools.Registry, call llm.ToolCall, result llm.ToolResult, sink EventSink) {
+	if result.IsError || registry == nil {
+		return
+	}
+	paths, ok := registry.MutatedPaths(call)
+	if !ok {
+		return
+	}
+	mutationSink, ok := sink.(ToolMutationSink)
+	if !ok {
+		return
+	}
+	mutationSink.ToolMutation(call, append([]string(nil), paths...))
 }
 
 func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) (llm.ToolResult, <-chan struct{}) {

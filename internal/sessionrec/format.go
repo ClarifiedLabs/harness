@@ -20,6 +20,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/tools"
+	"harness/internal/trajectory"
 )
 
 // pathArgKeys names tool-argument keys whose string values are treated as
@@ -532,6 +533,38 @@ func HookDiagnosticSnapshot(diagnostic hooks.Diagnostic) *session.HookDiagnostic
 		CircuitOpen:         diagnostic.CircuitOpen,
 		CircuitOpenUntil:    openUntil,
 	}
+}
+
+// EvaluatorResultSnapshot projects the already-validated semantic fields from
+// a Stop hook. Pointer values are copied so callers cannot mutate a queued
+// session event through the source result.
+func EvaluatorResultSnapshot(result hooks.EvaluatorResult) *session.EvaluatorResultSnapshot {
+	snapshot := &session.EvaluatorResultSnapshot{
+		Handler:        result.Handler,
+		Accepted:       result.Accepted,
+		ScoreDirection: result.ScoreDirection,
+		Candidate:      result.Candidate,
+		EvidenceRef:    result.EvidenceRef,
+	}
+	if result.Score != nil {
+		score := *result.Score
+		snapshot.Score = &score
+	}
+	if result.RemainingRequirements != nil {
+		remaining := *result.RemainingRequirements
+		snapshot.RemainingRequirements = &remaining
+	}
+	return snapshot
+}
+
+// ToolMutationSnapshot bounds and deduplicates host-derived mutation paths
+// using the same normalization as the shadow trajectory projection.
+func ToolMutationSnapshot(paths []string) *session.ToolMutationSnapshot {
+	state := trajectory.ApplyModifiedPaths(trajectory.State{}, paths)
+	if len(state.ModifiedPaths) == 0 {
+		return nil
+	}
+	return &session.ToolMutationSnapshot{Paths: append([]string(nil), state.ModifiedPaths...)}
 }
 
 // TurnProgressSnapshot projects diagnostics-only progress without result bodies

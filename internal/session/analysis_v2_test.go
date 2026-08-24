@@ -550,6 +550,10 @@ func TestCohortIdentitySeparatesModifiedBuilds(t *testing.T) {
 	if clean.Key == modified.Key || clean.Key == "" || modified.Key == "" {
 		t.Fatalf("cohort keys clean=%q modified=%q", clean.Key, modified.Key)
 	}
+	withNudge := cohortIdentity(BuildMetadata{Version: "dev", Commit: "abc"}, RuntimeProfile{RetentionPolicy: "pressure", StagnationNudge: true}, true)
+	if withNudge.Key == clean.Key {
+		t.Fatalf("stagnation-nudge experiment did not get a distinct cohort: clean=%q nudge=%q", clean.Key, withNudge.Key)
+	}
 	if cohortIdentity(BuildMetadata{}, RuntimeProfile{}, false).Key != "unavailable" {
 		t.Fatal("legacy metadata was not kept in an unavailable cohort")
 	}

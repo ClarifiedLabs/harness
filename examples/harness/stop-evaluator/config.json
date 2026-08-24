@@ -1,0 +1,4 @@
+{
+  "agent": "auto",
+  "hook_configs": ["hooks.json"]
+}

@@ -86,7 +86,7 @@ func (t *handoffTool) Run(ctx context.Context, input json.RawMessage) (string, e
 // agent names are known, agent is constrained by an enum so the model cannot
 // invent a target. An omitted agent leaves target selection to the REPL.
 func handoffSchema(agentNames []string) json.RawMessage {
-	agent := map[string]any{"type": "string", "description": "Omit for default auto agent."}
+	agent := map[string]any{"type": "string", "description": "Omit to use the configured default implementation agent."}
 	if len(agentNames) > 0 {
 		agent["enum"] = slices.Clone(agentNames)
 	}

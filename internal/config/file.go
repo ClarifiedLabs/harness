@@ -90,6 +90,7 @@ type fileConfig struct {
 	Verbose                       optional[bool]                       `json:"verbose"`
 	ToolStream                    optional[bool]                       `json:"tool_stream"`
 	ShowDiffs                     optional[bool]                       `json:"show_diffs"`
+	StagnationNudge               optional[bool]                       `json:"stagnation_nudge"`
 	LogLevel                      optional[string]                     `json:"log_level"`
 	NoColor                       optional[bool]                       `json:"no_color"`
 	ColorTheme                    optional[string]                     `json:"color_theme"`
@@ -173,7 +174,11 @@ func decodeConfigFile(path string) (fileConfig, error) {
 	if err := requireJSONEOF(decoder); err != nil {
 		return fileConfig{}, fmt.Errorf("decode config %q: %w", path, err)
 	}
-	normalizeConfigAtFileRefs(&fc, filepath.Dir(path))
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return fileConfig{}, fmt.Errorf("resolve config %q: %w", path, err)
+	}
+	normalizeConfigAtFileRefs(&fc, filepath.Dir(absPath))
 	return fc, nil
 }
 

@@ -27,30 +27,37 @@ const agentOnePixelPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQV
 // recordSink captures every sink callback so tests can assert what the UI would
 // have been told.
 type recordSink struct {
-	text            strings.Builder
-	attemptStarts   []turnAttemptEvent
-	contexts        []ContextEstimate
-	attemptUsage    []TurnAttemptUsage
-	reasoning       []string
-	phases          []string
-	toolUses        []llm.ToolCall
-	argDeltas       []string
-	starts          []llm.ToolCall
-	results         []llm.ToolResult
-	abandoned       []turnAttemptEvent
-	notices         []string
-	promptUsage     []PromptUsage
-	completedTurns  []TurnUsage
-	turnCounts      []int
-	maintenance     []MaintenanceUsage
-	retention       []RetentionEvent
-	progress        []TurnProgress
-	hookDiagnostics []hooks.Diagnostic
+	text             strings.Builder
+	attemptStarts    []turnAttemptEvent
+	contexts         []ContextEstimate
+	attemptUsage     []TurnAttemptUsage
+	reasoning        []string
+	phases           []string
+	toolUses         []llm.ToolCall
+	argDeltas        []string
+	starts           []llm.ToolCall
+	results          []llm.ToolResult
+	abandoned        []turnAttemptEvent
+	notices          []string
+	promptUsage      []PromptUsage
+	completedTurns   []TurnUsage
+	turnCounts       []int
+	maintenance      []MaintenanceUsage
+	retention        []RetentionEvent
+	progress         []TurnProgress
+	hookDiagnostics  []hooks.Diagnostic
+	evaluatorResults []hooks.EvaluatorResult
+	toolMutations    []toolMutationEvent
 }
 
 type turnAttemptEvent struct {
 	turn    int
 	attempt int
+}
+
+type toolMutationEvent struct {
+	call  llm.ToolCall
+	paths []string
 }
 
 type diagnosticRecordSink struct {
@@ -67,6 +74,17 @@ type workflowRecordSink struct {
 	recordSink
 	status   WorkflowStatus
 	closures []ClosureEvent
+}
+
+type stagnationNudgeRecordSink struct {
+	recordSink
+	deliver  bool
+	triggers []int
+}
+
+func (s *stagnationNudgeRecordSink) TryStagnationNudge(threshold int) bool {
+	s.triggers = append(s.triggers, threshold)
+	return s.deliver
 }
 
 func (s *workflowRecordSink) WorkflowStatus() WorkflowStatus { return s.status }
@@ -121,6 +139,12 @@ func (s *recordSink) TurnProgress(progress TurnProgress) {
 }
 func (s *recordSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
 	s.hookDiagnostics = append(s.hookDiagnostics, diagnostic)
+}
+func (s *recordSink) EvaluatorResult(result hooks.EvaluatorResult) {
+	s.evaluatorResults = append(s.evaluatorResults, result)
+}
+func (s *recordSink) ToolMutation(call llm.ToolCall, paths []string) {
+	s.toolMutations = append(s.toolMutations, toolMutationEvent{call: call, paths: append([]string(nil), paths...)})
 }
 func (s *recordSink) MaintenanceComplete(u MaintenanceUsage) {
 	s.maintenance = append(s.maintenance, u)
@@ -3719,6 +3743,136 @@ func TestHardBudgetMakesNormalStopHookNonBlockable(t *testing.T) {
 	}
 }
 
+func TestRejectingEvaluatorResultRequestsRepairAndSetsWorkflowStatus(t *testing.T) {
+	runner := testHookRunner(t, `{"Stop":[{"hooks":[{"name":"verify","type":"command","command":"printf '{\"accepted\":false,\"score\":0.5,\"candidate\":\"sha256:abc\",\"remaining_requirements\":2,\"evidence_ref\":\"artifacts/verify.log\",\"reason\":\"fix the failing test\"}'"}]}]}`)
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("candidate")}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("repaired")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{Hooks: runner})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "implement it", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want one evaluator-driven repair", len(fp.Requests))
+	}
+	if len(sink.evaluatorResults) != 1 || sink.evaluatorResults[0].Accepted {
+		t.Fatalf("evaluator results = %+v", sink.evaluatorResults)
+	}
+	var feedback string
+	for _, message := range fp.Requests[1].Messages {
+		if message.Origin != llm.MessageOriginInternal {
+			continue
+		}
+		for _, block := range message.Content {
+			feedback += block.Text
+		}
+	}
+	for _, want := range []string{"[hook Stop requested continuation]", "score=0.5", "remaining_requirements=2", "artifacts/verify.log", "fix the failing test"} {
+		if !strings.Contains(feedback, want) {
+			t.Fatalf("repair feedback %q missing %q", feedback, want)
+		}
+	}
+	status := sink.promptUsage[0].WorkflowStatus
+	if !status.Available || status.Outcome != WorkflowOutcomeInProgress || status.RemainingRequirements == nil || *status.RemainingRequirements != 2 {
+		t.Fatalf("workflow status = %+v, want in_progress with two remaining", status)
+	}
+	mustValid(t, a.Transcript())
+}
+
+func TestStagnationNudgeAugmentsOnlyDurablyTriggeredEvaluatorRepair(t *testing.T) {
+	runner := testHookRunner(t, `{"Stop":[{"hooks":[{"name":"verify","type":"command","command":"printf '{\"accepted\":false,\"score\":0,\"score_direction\":\"maximize\",\"candidate\":\"secret-candidate\",\"reason\":\"ordinary rejection\"}'"}]}]}`)
+	for _, tt := range []struct {
+		name    string
+		enabled bool
+		deliver bool
+		want    bool
+	}{
+		{name: "disabled", deliver: true},
+		{name: "not persisted", enabled: true},
+		{name: "delivered", enabled: true, deliver: true, want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fp := llmtest.New("fake",
+				llmtest.Step{Events: []llm.StreamEvent{textDelta("candidate")}, Stop: llm.StopEndTurn},
+				llmtest.Step{Events: []llm.StreamEvent{textDelta("continued")}, Stop: llm.StopEndTurn},
+			)
+			a := newAgent(fp, tools.Default(), Options{Hooks: runner, StagnationNudge: tt.enabled})
+			sink := &stagnationNudgeRecordSink{deliver: tt.deliver}
+			if err := a.RunPrompt(context.Background(), "implement it", sink); err != nil {
+				t.Fatal(err)
+			}
+			if len(fp.Requests) != 2 {
+				t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+			}
+			var feedback strings.Builder
+			for _, message := range fp.Requests[1].Messages {
+				for _, block := range message.Content {
+					feedback.WriteString(block.Text)
+					feedback.WriteByte('\n')
+				}
+			}
+			feedbackText := feedback.String()
+			if got := strings.Contains(feedbackText, "[host strategy reset]"); got != tt.want {
+				t.Fatalf("strategy reset present = %t, want %t in %q", got, tt.want, feedbackText)
+			}
+			if tt.enabled && (len(sink.triggers) != 1 || sink.triggers[0] != StagnationNudgeThreshold) {
+				t.Fatalf("nudge thresholds = %v", sink.triggers)
+			}
+			if !tt.enabled && len(sink.triggers) != 0 {
+				t.Fatalf("disabled nudge consulted sink: %v", sink.triggers)
+			}
+			if strings.Contains(feedbackText, "score_direction") || strings.Contains(feedbackText, "maximize") {
+				t.Fatalf("host-only score direction leaked into feedback: %q", feedbackText)
+			}
+		})
+	}
+}
+
+func TestAcceptedEvaluatorResultCompletesWorkflowWithoutExtraTurn(t *testing.T) {
+	runner := testHookRunner(t, `{"Stop":[{"hooks":[{"name":"verify","type":"command","command":"printf '{\"accepted\":true,\"score\":0,\"remaining_requirements\":0}'"}]}]}`)
+	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn})
+	a := newAgent(fp, tools.Default(), Options{Hooks: runner})
+	sink := &recordSink{}
+
+	if err := a.RunPrompt(context.Background(), "implement it", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(fp.Requests) != 1 || len(sink.evaluatorResults) != 1 || !sink.evaluatorResults[0].Accepted || sink.evaluatorResults[0].Score == nil || *sink.evaluatorResults[0].Score != 0 {
+		t.Fatalf("requests=%d evaluator results=%+v", len(fp.Requests), sink.evaluatorResults)
+	}
+	status := sink.promptUsage[0].WorkflowStatus
+	if !status.Available || status.Outcome != WorkflowOutcomeComplete || status.RemainingRequirements == nil || *status.RemainingRequirements != 0 {
+		t.Fatalf("workflow status = %+v, want complete with zero remaining", status)
+	}
+}
+
+func TestExternalWorkflowStatusTakesPrecedenceOverEvaluatorProjection(t *testing.T) {
+	remaining := 3
+	sink := &workflowRecordSink{status: WorkflowStatus{
+		Available:             true,
+		Outcome:               WorkflowOutcomeWaiting,
+		RemainingRequirements: &remaining,
+		ExpectedWait:          true,
+	}}
+	evaluatorRemaining := 0
+	got := sampleWorkflowStatusWithEvaluations(sink, []hooks.EvaluatorResult{{
+		Accepted: true, RemainingRequirements: &evaluatorRemaining,
+	}}, false)
+	if got.Outcome != WorkflowOutcomeWaiting || got.RemainingRequirements == nil || *got.RemainingRequirements != 3 || !got.ExpectedWait {
+		t.Fatalf("workflow status = %+v, want external status", got)
+	}
+}
+
+func TestEvaluatorWorkflowProjectionDoesNotOverrideLegacyBlock(t *testing.T) {
+	got := sampleWorkflowStatusWithEvaluations(&recordSink{}, []hooks.EvaluatorResult{{Accepted: true}}, true)
+	if got.Available {
+		t.Fatalf("workflow status = %+v, want unavailable for an unrepresented legacy block", got)
+	}
+}
+
 func TestRateLimitedStreamNotRetried(t *testing.T) {
 	// A connect-exhausted rate-limit error (HTTP 429/529, status code set) must not
 	// be re-run by the agent: the provider's connect loop already spent its full
@@ -4962,6 +5116,59 @@ func TestShowDiffsDisabledEmitsNoDiff(t *testing.T) {
 	if len(sink.diffs) != 0 {
 		t.Fatalf("diff events = %d, want 0: %v", len(sink.diffs), sink.diffs)
 	}
+}
+
+func TestToolMutationTelemetryIsSuccessOnlyAndModelInvisible(t *testing.T) {
+	const shadowOnlyPath = "shadow-only.go"
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				toolDone(0, "ok", "mutate_ok", `{}`),
+				toolDone(1, "failed", "mutate_failed", `{}`),
+			},
+			Stop: llm.StopToolUse,
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	reg := &tools.Registry{}
+	reg.Register(&mutationRecordTool{
+		recordTool: &recordTool{name: "mutate_ok", run: func(context.Context, json.RawMessage) (string, error) {
+			return "ok", nil
+		}},
+		paths: func(json.RawMessage) ([]string, error) { return []string{shadowOnlyPath}, nil },
+	})
+	reg.Register(&mutationRecordTool{
+		recordTool: &recordTool{name: "mutate_failed", run: func(context.Context, json.RawMessage) (string, error) {
+			return "", errors.New("failed")
+		}},
+		paths: func(json.RawMessage) ([]string, error) { return []string{"must-not-record.go"}, nil },
+	})
+	a := newAgent(fp, reg, Options{ShowDiffs: false})
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "mutate", sink); err != nil {
+		t.Fatalf("RunPrompt: %v", err)
+	}
+	if len(sink.toolMutations) != 1 || sink.toolMutations[0].call.ID != "ok" || !slices.Equal(sink.toolMutations[0].paths, []string{shadowOnlyPath}) {
+		t.Fatalf("mutation telemetry = %+v, want successful call only", sink.toolMutations)
+	}
+	transcript, err := json.Marshal(a.Transcript())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(transcript), shadowOnlyPath) {
+		t.Fatalf("mutation telemetry leaked into transcript: %s", transcript)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	nextRequest, err := json.Marshal(fp.Requests[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(nextRequest), shadowOnlyPath) {
+		t.Fatalf("mutation telemetry leaked into next provider request: %s", nextRequest)
+	}
+	mustValid(t, a.Transcript())
 }
 
 func TestShowDiffsIncrementalSameFileToolCalls(t *testing.T) {

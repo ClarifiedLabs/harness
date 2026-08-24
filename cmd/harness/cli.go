@@ -7,25 +7,27 @@ import (
 	"harness/internal/cli"
 	"harness/internal/config"
 	"harness/internal/lspproxy"
+	"harness/internal/session"
 	"harness/internal/ui"
 )
 
 type commandHandler func(environment, cli.Invocation) int
 
 var commandHandlers = map[string]commandHandler{
-	"root":            runRoot,
-	"config.list":     runConfigList,
-	"config.show":     runConfigShow,
-	"config.check":    runConfigCheck,
-	"session.ls":      runSessionList,
-	"session.resume":  runSessionResume,
-	"session.replay":  runSessionReplay,
-	"session.timings": runSessionTimings,
-	"session.stats":   runSessionStats,
-	"session.errors":  runSessionErrors,
-	"session.analyze": runSessionAnalyze,
-	"lsp.serve":       runLSPServe,
-	"lsp.version":     runLSPVersion,
+	"root":             runRoot,
+	"config.list":      runConfigList,
+	"config.show":      runConfigShow,
+	"config.check":     runConfigCheck,
+	"session.ls":       runSessionList,
+	"session.resume":   runSessionResume,
+	"session.replay":   runSessionReplay,
+	"session.timings":  runSessionTimings,
+	"session.stats":    runSessionStats,
+	"session.errors":   runSessionErrors,
+	"session.evidence": runSessionEvidence,
+	"session.analyze":  runSessionAnalyze,
+	"lsp.serve":        runLSPServe,
+	"lsp.version":      runLSPVersion,
 }
 
 func commandCatalog(env environment) cli.Catalog {
@@ -72,6 +74,7 @@ func commandCatalog(env environment) cli.Catalog {
 					{ID: "session.timings", Name: "timings", Summary: "Show session timing details.", Runnable: true, Args: exactArgs(1, "<session-dir>")},
 					{ID: "session.stats", Name: "stats", Summary: "Show session statistics.", Runnable: true, Args: exactArgs(1, "<session-dir>"), Flags: []cli.Flag{valueCLIFlag("format", []string{"format"}, "format", "output format: text or json", "text")}},
 					{ID: "session.errors", Name: "errors", Summary: "Show classified tool and model failures.", Runnable: true, Args: optionalDirArgs(), Flags: sessionErrorCLIFlags()},
+					{ID: "session.evidence", Name: "evidence", Summary: "List or inspect bounded session evidence metadata.", Runnable: true, Args: cli.Args{Usage: "<session-dir> [record-id]", Min: 1, Max: 2, Check: true}, Flags: sessionEvidenceCLIFlags()},
 					{ID: "session.analyze", Name: "analyze", Summary: "Analyze one session or recent session history.", Runnable: true, Args: optionalDirArgs(), Flags: []cli.Flag{
 						valueCLIFlag("since", []string{"since"}, "duration", "when scanning, include sessions created within this duration", "24h"),
 						boolCLIFlag("all", []string{"all"}, "scan all sessions, ignoring --since"),
@@ -178,6 +181,16 @@ func sessionErrorCLIFlags() []cli.Flag {
 		valueCLIFlag("since", []string{"since"}, "duration", "when scanning, include sessions created within this duration", "24h"),
 		boolCLIFlag("all", []string{"all"}, "scan all sessions, ignoring --since"),
 		valueCLIFlag("before", []string{"before"}, "RFC3339", "include only events at or before this timestamp", ""),
+		valueCLIFlag("format", []string{"format"}, "format", "output format: text or json", "text"),
+	}
+}
+
+func sessionEvidenceCLIFlags() []cli.Flag {
+	return []cli.Flag{
+		valueCLIFlag("kind", []string{"kind"}, "kind", "only evaluator or tool records", ""),
+		valueCLIFlag("status", []string{"status"}, "status", "only records with one artifact status (available, stale, missing, external, unsafe, unreadable, unreferenced, recorded)", ""),
+		valueCLIFlag("prompt", []string{"prompt"}, "number", "only records from this prompt", "0"),
+		valueCLIFlag("limit", []string{"limit"}, "number", "maximum records to return", strconv.Itoa(session.DefaultEvidenceLimit)),
 		valueCLIFlag("format", []string{"format"}, "format", "output format: text or json", "text"),
 	}
 }

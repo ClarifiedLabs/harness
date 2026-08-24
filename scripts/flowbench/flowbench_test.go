@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,24 +13,59 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/config"
+	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/tools"
 )
 
+func initFlowbenchTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	run("init", "-q")
+	run("config", "user.email", "flowbench@example.test")
+	run("config", "user.name", "Flowbench Test")
+	if err := os.WriteFile(filepath.Join(dir, "seed"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "seed")
+	run("commit", "-qm", "test: seed")
+	return dir
+}
+
 func TestBenchmarkArgsPinConfigModelAndReasoning(t *testing.T) {
-	args := benchmarkArgs("provider:model", "/sessions/run", "/isolated/config.json")
+	args := benchmarkArgs("provider:model", "/sessions/run", "/isolated/config.json", "auto", "xhigh")
 	joined := " " + strings.Join(args, " ") + " "
 	for _, want := range []string{
 		" -config /isolated/config.json ",
 		" -model provider:model ",
-		" -reasoning medium ",
-		" -agent independent ",
+		" -reasoning xhigh ",
+		" -agent auto ",
 		" -session /sessions/run ",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("benchmark args %q missing %q", joined, want)
 		}
+	}
+}
+
+func TestNormalizeBenchmarkReasoning(t *testing.T) {
+	for input, want := range map[string]string{"": "medium", "medium": "medium", "XHIGH": "xhigh", "default": "default"} {
+		got, err := normalizeBenchmarkReasoning(input)
+		if err != nil || got != want {
+			t.Errorf("normalizeBenchmarkReasoning(%q) = %q, %v; want %q", input, got, err, want)
+		}
+	}
+	if _, err := normalizeBenchmarkReasoning("impossible"); err == nil {
+		t.Fatal("invalid benchmark reasoning was accepted")
 	}
 }
 
@@ -38,6 +75,131 @@ func TestValidateMetricsModelRejectsAgentOverride(t *testing.T) {
 	}
 	if err := validateMetricsModel("requested:model", metrics{ModelTarget: "requested:model"}); err != nil {
 		t.Fatalf("validateMetricsModel matching target: %v", err)
+	}
+}
+
+func TestCollectMetricsCountsCandidateLineageWithoutContent(t *testing.T) {
+	dir := t.TempDir()
+	state := session.Session{Messages: []llm.Message{{
+		Role: llm.RoleAssistant, Phase: llm.AssistantPhaseFinal,
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "done"}},
+	}}}
+	if err := state.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	score10, score20 := 10.0, 20.0
+	for _, event := range []session.Event{
+		{Type: session.EventEvaluatorResult, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: lineageEvaluatorHandler, Accepted: true, Score: &score10}},
+		{Type: session.EventLineageAdvance, LineageAdvance: &session.LineageAdvanceSnapshot{Sequence: 1, PatchBytes: 320, EvidenceBytes: 40}},
+		{Type: session.EventEvaluatorResult, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: lineageEvaluatorHandler}},
+		{Type: session.EventEvaluatorResult, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: lineageEvaluatorHandler, Accepted: true, Score: &score20}},
+		{Type: session.EventLineageAdvance, LineageAdvance: &session.LineageAdvanceSnapshot{Sequence: 2, ParentSequence: 1, PatchBytes: 180, EvidenceBytes: 60}},
+	} {
+		if err := session.AppendEvent(dir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := collectMetrics(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.LineageEvaluatorResults != 3 || m.LineageEvaluatorAccepts != 2 || m.LineageEvaluatorRejections != 1 || !reflect.DeepEqual(m.LineageScoreProgression, []float64{10, 20}) || m.LineageAdvances != 2 || m.LineagePatchBytes != 500 || m.LineageEvidenceBytes != 100 {
+		t.Fatalf("candidate lineage metrics = %+v", m)
+	}
+}
+
+func TestCollectMetricsReconstructsDirectedAndLegacyStagnationTraces(t *testing.T) {
+	for _, directed := range []bool{false, true} {
+		name := "legacy"
+		if directed {
+			name = "directed"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			state := session.Session{Messages: []llm.Message{{
+				Role: llm.RoleAssistant, Phase: llm.AssistantPhaseFinal,
+				Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "READY"}},
+			}}}
+			if err := state.Save(dir); err != nil {
+				t.Fatal(err)
+			}
+			for i, step := range stagnationSteps {
+				handler := stagnationScoreHandler
+				if step.lane == "latency" {
+					handler = stagnationLatencyHandler
+				}
+				direction := ""
+				if directed {
+					direction = step.scoreDirection
+				}
+				if err := session.AppendEvent(dir, session.Event{
+					Type: session.EventEvaluatorResult, Prompt: i + 1, Turn: 1,
+					EvaluatorResult: &session.EvaluatorResultSnapshot{
+						Handler: handler, Accepted: step.accepted, Score: step.score,
+						ScoreDirection: direction, Candidate: step.candidate,
+						RemainingRequirements: step.remainingRequirements,
+					},
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			m, err := collectMetrics(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if m.StagnationEvaluatorResults != 12 || m.StagnationEvaluatorRejections != 11 || m.StagnationEvaluatorAccepts != 1 {
+				t.Fatalf("evaluator lifecycle = %+v", m)
+			}
+			if directed && !candidateStagnationTrace(m) {
+				t.Fatalf("directed trace = %+v", m)
+			}
+			if !directed && !legacyStagnationTrace(m) {
+				t.Fatalf("legacy trace = %+v", m)
+			}
+		})
+	}
+}
+
+func TestCollectMetricsMeasuresStagnationRecoveryAfterDurableNudge(t *testing.T) {
+	dir := t.TempDir()
+	state := session.Session{Messages: []llm.Message{{
+		Role: llm.RoleAssistant, Phase: llm.AssistantPhaseFinal,
+		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "done"}},
+	}}}
+	if err := state.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	score0, score1 := 0.0, 1.0
+	remaining1, remaining0 := 1, 0
+	evidence := filepath.ToSlash(filepath.Join(stagnationRecoveryFixture, stagnationRecoveryEvidenceDir, stagnationRecoveryEvidenceFile))
+	events := []session.Event{
+		{Type: session.EventEvaluatorResult, Prompt: 1, Turn: 1, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: stagnationRecoveryHandler, Score: &score0, ScoreDirection: "maximize", Candidate: "strategy-repeat", RemainingRequirements: &remaining1, EvidenceRef: evidence}},
+		{Type: session.EventEvaluatorResult, Prompt: 2, Turn: 1, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: stagnationRecoveryHandler, Score: &score0, ScoreDirection: "maximize", Candidate: "strategy-repeat", RemainingRequirements: &remaining1, EvidenceRef: evidence}},
+		{Type: session.EventEvaluatorResult, Prompt: 3, Turn: 1, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: stagnationRecoveryHandler, Score: &score0, ScoreDirection: "maximize", Candidate: "strategy-repeat", RemainingRequirements: &remaining1, EvidenceRef: evidence}},
+		{Type: session.EventStagnationNudge, Prompt: 3, Turn: 1, StagnationNudge: &session.StagnationNudgeSnapshot{Threshold: 2, Streak: 2}},
+		{Type: session.EventToolStart, Prompt: 3, Turn: 2, ToolID: "read", Tool: "read", Input: json.RawMessage(fmt.Sprintf(`{"path":%q}`, evidence))},
+		{Type: session.EventToolResult, Prompt: 3, Turn: 2, ToolID: "read", Tool: "read"},
+		{Type: session.EventToolStart, Prompt: 3, Turn: 3, ToolID: "edit", Tool: "edit", Input: json.RawMessage(`{"path":".flowbench-stagnation-recovery/candidate.txt"}`)},
+		{Type: session.EventToolResult, Prompt: 3, Turn: 3, ToolID: "edit", Tool: "edit"},
+		{Type: session.EventEvaluatorResult, Prompt: 4, Turn: 1, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: stagnationRecoveryHandler, Accepted: true, Score: &score1, ScoreDirection: "maximize", Candidate: "strategy-alternate-17", RemainingRequirements: &remaining0}},
+	}
+	for _, event := range events {
+		if err := session.AppendEvent(dir, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m, err := collectMetrics(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.StagnationNudgeEvents != 1 || m.RecoveryEvaluatorResults != 4 || m.RecoveryEvaluatorRejections != 3 || m.RecoveryEvaluatorAccepts != 1 {
+		t.Fatalf("recovery lifecycle metrics = %+v", m)
+	}
+	if m.RecoveryToolCallsBeforeNudge != 0 || m.RecoveryToolCallsAfterNudge != 2 || !m.RecoveryAccepted || !m.RecoveryAcceptedAfterNudge || m.RecoveryFailures != 0 {
+		t.Fatalf("recovery ordering metrics = %+v", m)
+	}
+	if m.MaxNoImprovementStreak != 2 {
+		t.Fatalf("recovery projection metrics = %+v", m)
 	}
 }
 
@@ -63,6 +225,16 @@ func TestBenchmarkEnvDisablesIntegrations(t *testing.T) {
 		if got := envValue(env, key); got != "false" {
 			t.Fatalf("%s = %q, want \"false\"", key, got)
 		}
+	}
+}
+
+func TestBenchmarkEnvPrependsOpaqueEvaluatorCommand(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin")
+	helper := filepath.Join(t.TempDir(), "bin")
+	env := benchmarkEnv("", helper)
+	want := helper + string(os.PathListSeparator) + "/usr/bin"
+	if got := envValue(env, "PATH"); got != want {
+		t.Fatalf("PATH = %q, want %q", got, want)
 	}
 }
 
@@ -100,6 +272,30 @@ func TestDryRunAlternatesPairs(t *testing.T) {
 	}
 }
 
+func TestParallelDryRunShowsRoundOrder(t *testing.T) {
+	records := dryRunRecords(runConfig{
+		Case:           allCases()["search_context"],
+		BaselineSHA:    "before",
+		CandidateSHA:   "after",
+		Models:         []string{"model-a", "model-b"},
+		Repetitions:    2,
+		ParallelModels: true,
+	})
+	var got []string
+	for _, record := range records {
+		got = append(got, fmt.Sprintf("%s:%d:%s", record.Model, record.Repetition, record.Variant))
+	}
+	want := []string{
+		"model-a:1:baseline", "model-b:1:baseline",
+		"model-a:1:candidate", "model-b:1:candidate",
+		"model-a:2:candidate", "model-b:2:candidate",
+		"model-a:2:baseline", "model-b:2:baseline",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parallel dry-run order = %v, want %v", got, want)
+	}
+}
+
 func TestToolAccuracyCasesRegistered(t *testing.T) {
 	cases := allCases()
 	for _, name := range []string{"edit_precision", "edit_drift_recovery", "known_path_batching", "unknown_path_discovery"} {
@@ -122,6 +318,514 @@ func TestToolAccuracyCasesRegistered(t *testing.T) {
 		if !ok || c.Setup == nil || c.Score == nil || !strings.Contains(c.Prompt, fmt.Sprintf("item-%03d.txt", count)) {
 			t.Fatalf("scale case %q = %+v", name, c)
 		}
+	}
+}
+
+func TestRetiredExperimentalCasesAreNotRegistered(t *testing.T) {
+	cases := allCases()
+	for _, name := range []string{"trajectory_memory", "conditional_supervisor", "lineage_recovery", "kv_lineage_recovery"} {
+		if _, ok := cases[name]; ok {
+			t.Errorf("retired case %q remains registered", name)
+		}
+	}
+}
+
+func TestStagnationDetectionCaseUsesIdenticalToolFreeVariants(t *testing.T) {
+	c := allCases()["stagnation_detection"]
+	if c.Setup == nil || c.Score == nil || c.Acceptance != acceptanceStagnation || !c.RestartBetweenPrompts || c.HelperCommand != stagnationEvaluatorCommand || len(c.RestartPhases) != stagnationPhaseCount {
+		t.Fatalf("stagnation case = %+v", c)
+	}
+	for i, phase := range c.RestartPhases {
+		if phase.Prompt != stagnationPrompt(i+1) || !strings.Contains(phase.Prompt, "READY") || !strings.Contains(phase.Prompt, "without calling any tool") {
+			t.Fatalf("phase %d = %+v", i+1, phase)
+		}
+	}
+	baseline, candidate := c.variant("baseline"), c.variant("candidate")
+	if baseline.Agent != "independent" || candidate.Agent != "independent" || !baseline.Helper || !candidate.Helper || baseline.Config != candidate.Config {
+		t.Fatalf("stagnation variants = baseline %+v candidate %+v", baseline, candidate)
+	}
+	if variantPromptDigest(c, "baseline") != variantPromptDigest(c, "candidate") {
+		t.Fatal("identical stagnation variants have different prompt contracts")
+	}
+	for _, want := range []string{stagnationScoreHandler, stagnationLatencyHandler, stagnationEvaluatorCommand + " score", stagnationEvaluatorCommand + " latency"} {
+		if !strings.Contains(candidate.Config, want) {
+			t.Fatalf("stagnation config lacks %q: %s", want, candidate.Config)
+		}
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(candidate.Config), &decoded); err != nil {
+		t.Fatalf("stagnation config is invalid JSON: %v", err)
+	}
+}
+
+func TestRunStagnationEvaluatorEmitsOneDeterministicResultPerPhase(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, stagnationFixture)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, stagnationStateFile), []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for phase, want := range stagnationSteps {
+		var outputs []stagnationEvaluatorOutput
+		for _, lane := range []string{"score", "latency"} {
+			payload := fmt.Sprintf(`{"prompt_id":%d,"can_block":true}`, phase+1)
+			var stdout bytes.Buffer
+			if code := runStagnationEvaluator(dir, []string{lane}, strings.NewReader(payload), &stdout); code != 0 {
+				t.Fatalf("phase %d lane %s exit = %d", phase+1, lane, code)
+			}
+			if strings.TrimSpace(stdout.String()) == "" {
+				continue
+			}
+			var got stagnationEvaluatorOutput
+			if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+				t.Fatalf("phase %d lane %s output: %v", phase+1, lane, err)
+			}
+			outputs = append(outputs, got)
+		}
+		if len(outputs) != 1 {
+			t.Fatalf("phase %d outputs = %+v", phase+1, outputs)
+		}
+		got := outputs[0]
+		if got.Accepted != want.accepted || !reflect.DeepEqual(got.Score, want.score) || got.ScoreDirection != want.scoreDirection || got.Candidate != want.candidate || !reflect.DeepEqual(got.RemainingRequirements, want.remainingRequirements) {
+			t.Fatalf("phase %d output = %+v, want %+v", phase+1, got, want)
+		}
+		if (got.Reason == "") != got.Accepted {
+			t.Fatalf("phase %d accepted=%t reason=%q", phase+1, got.Accepted, got.Reason)
+		}
+	}
+	state, err := os.ReadFile(filepath.Join(dir, stagnationFixture, stagnationStateFile))
+	if err != nil || string(state) != "12\n" {
+		t.Fatalf("final helper state = %q, %v", state, err)
+	}
+	var stdout bytes.Buffer
+	if code := runStagnationEvaluator(dir, []string{"latency"}, strings.NewReader(`{"prompt_id":12,"can_block":false}`), &stdout); code != 0 || stdout.Len() != 0 {
+		t.Fatalf("non-blockable evaluator = exit %d output %q", code, stdout.String())
+	}
+}
+
+func TestStagnationRecoveryCaseDiffersOnlyByOptInSwitch(t *testing.T) {
+	c := allCases()["stagnation_recovery"]
+	if c.Setup == nil || c.Score == nil || c.Acceptance != acceptanceStagnationRecovery || !c.RestartBetweenPrompts || c.HelperCommand != stagnationRecoveryCommand || len(c.RestartPhases) != stagnationRecoveryPhaseCount {
+		t.Fatalf("stagnation recovery case = %+v", c)
+	}
+	for i, phase := range c.RestartPhases {
+		if phase.Prompt != stagnationRecoveryPrompt(i+1) || !strings.Contains(phase.Prompt, "READY") || !strings.Contains(phase.Prompt, "[host strategy reset]") {
+			t.Fatalf("phase %d = %+v", i+1, phase)
+		}
+	}
+	baseline, candidate := c.variant("baseline"), c.variant("candidate")
+	if baseline.Agent != "independent" || candidate.Agent != "independent" || !baseline.Helper || !candidate.Helper {
+		t.Fatalf("recovery variants = baseline %+v candidate %+v", baseline, candidate)
+	}
+	var baselineConfig, candidateConfig map[string]any
+	if err := json.Unmarshal([]byte(baseline.Config), &baselineConfig); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(candidate.Config), &candidateConfig); err != nil {
+		t.Fatal(err)
+	}
+	if baselineConfig["stagnation_nudge"] != false || candidateConfig["stagnation_nudge"] != true {
+		t.Fatalf("recovery switches = baseline %v candidate %v", baselineConfig["stagnation_nudge"], candidateConfig["stagnation_nudge"])
+	}
+	delete(baselineConfig, "stagnation_nudge")
+	delete(candidateConfig, "stagnation_nudge")
+	if !reflect.DeepEqual(baselineConfig, candidateConfig) {
+		t.Fatalf("recovery configs differ beyond stagnation_nudge:\nbaseline=%v\ncandidate=%v", baselineConfig, candidateConfig)
+	}
+	if variantPromptDigest(c, "baseline") == variantPromptDigest(c, "candidate") {
+		t.Fatal("recovery variants have the same contract digest")
+	}
+	for name, variant := range map[string]benchmarkVariant{"baseline": baseline, "candidate": candidate} {
+		path := filepath.Join(t.TempDir(), "config.json")
+		if err := os.WriteFile(path, []byte(variant.Config), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		resolved, err := config.Load(config.LoadOptions{
+			Args: []string{"-config", path}, WorkingDir: t.TempDir(),
+			LookupEnv: func(string) (string, bool) { return "", false },
+		})
+		if err != nil {
+			t.Fatalf("load %s recovery config: %v", name, err)
+		}
+		if resolved.Config.StagnationNudge != (name == "candidate") {
+			t.Fatalf("resolved %s config = %+v", name, resolved.Config)
+		}
+	}
+}
+
+func TestRunStagnationRecoveryEvaluatorRequiresFourthPhaseRepair(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, stagnationRecoveryFixture)
+	if err := os.MkdirAll(filepath.Join(root, stagnationRecoveryEvidenceDir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		stagnationRecoveryCandidateFile: stagnationRecoveryInitial,
+		stagnationRecoveryStateFile:     "0\n",
+		filepath.Join(stagnationRecoveryEvidenceDir, stagnationRecoveryEvidenceFile): stagnationRecoveryEvidence,
+	} {
+		if err := os.WriteFile(filepath.Join(root, path), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for phase := 1; phase <= stagnationRecoveryPhaseCount; phase++ {
+		if phase == stagnationRecoveryPhaseCount {
+			if err := os.WriteFile(filepath.Join(root, stagnationRecoveryCandidateFile), []byte(stagnationRecoveryFinal), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		payload := fmt.Sprintf(`{"prompt_id":%d,"can_block":true}`, phase)
+		var stdout bytes.Buffer
+		if code := runStagnationRecoveryEvaluator(dir, strings.NewReader(payload), &stdout); code != 0 {
+			t.Fatalf("phase %d exit = %d", phase, code)
+		}
+		var got stagnationRecoveryOutput
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("phase %d output: %v", phase, err)
+		}
+		wantAccepted := phase == stagnationRecoveryPhaseCount
+		wantScore := 0.0
+		if wantAccepted {
+			wantScore = 1
+		}
+		wantRemaining := 0
+		if !wantAccepted {
+			wantRemaining = 1
+		}
+		if got.Accepted != wantAccepted || (got.Reason == "") != wantAccepted || got.Score != wantScore || got.RemainingRequirements != wantRemaining {
+			t.Fatalf("phase %d output = %+v", phase, got)
+		}
+	}
+	state, err := os.ReadFile(filepath.Join(root, stagnationRecoveryStateFile))
+	if err != nil || string(state) != "4\n" {
+		t.Fatalf("final helper state = %q, %v", state, err)
+	}
+	var stdout bytes.Buffer
+	if code := runStagnationRecoveryEvaluator(dir, strings.NewReader(`{"prompt_id":4,"can_block":false}`), &stdout); code != 0 || stdout.Len() != 0 {
+		t.Fatalf("non-blockable recovery evaluator = exit %d output %q", code, stdout.String())
+	}
+}
+
+func TestScoreStagnationRecoveryRequiresExactPostNudgeRepair(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := setupStagnationRecovery(dir); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(dir, stagnationRecoveryFixture)
+	if err := os.WriteFile(filepath.Join(root, stagnationRecoveryCandidateFile), []byte(stagnationRecoveryFinal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, stagnationRecoveryStateFile), []byte("4\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	valid := scoreInput{Worktree: dir, Metrics: metrics{
+		StagnationNudgeEvents:    1,
+		RecoveryEvaluatorResults: 4, RecoveryEvaluatorRejections: 3, RecoveryEvaluatorAccepts: 1,
+		RecoveryToolCallsAfterNudge: 2, RecoveryAcceptedAfterNudge: true,
+	}}
+	if got := scoreStagnationRecovery(valid); !got.Pass {
+		t.Fatalf("valid recovery score = %+v", got)
+	}
+	early := valid
+	early.Metrics.RecoveryToolCallsBeforeNudge = 3
+	if got := scoreStagnationRecovery(early); !got.Pass {
+		t.Fatalf("exact but pre-reset recovery correctness score = %+v", got)
+	}
+	spontaneous := valid
+	spontaneous.Metrics = metrics{
+		RecoveryEvaluatorResults: 4, RecoveryEvaluatorRejections: 3, RecoveryEvaluatorAccepts: 1,
+		RecoveryToolCallsBeforeNudge: 5, RecoveryAccepted: true,
+	}
+	if got := scoreStagnationRecovery(spontaneous); !got.Pass {
+		t.Fatalf("exact no-nudge baseline recovery score = %+v", got)
+	}
+	if err := os.WriteFile(filepath.Join(root, stagnationRecoveryEvidenceDir, stagnationRecoveryEvidenceFile), []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := scoreStagnationRecovery(valid); got.Pass || !containsAnyFold(strings.Join(got.Reasons, "\n"), "evidence was modified") {
+		t.Fatalf("tampered evidence score = %+v", got)
+	}
+}
+
+func TestCandidateLineageCaseChangesOnlyInvocationAuthorization(t *testing.T) {
+	c := allCases()["candidate_lineage"]
+	if c.Setup == nil || c.Score == nil || c.Acceptance != acceptanceLineage || !c.RestartBetweenPrompts || len(c.RestartPhases) != lineagePhaseCount || c.HelperCommand != lineageEvaluatorCommand {
+		t.Fatalf("candidate lineage case = %+v", c)
+	}
+	baseline, candidate := c.variant("baseline"), c.variant("candidate")
+	if baseline.Agent != candidate.Agent || baseline.Config != candidate.Config || baseline.Helper != candidate.Helper {
+		t.Fatalf("model-facing variants differ: baseline=%+v candidate=%+v", baseline, candidate)
+	}
+	if len(baseline.Args) != 0 || !reflect.DeepEqual(candidate.Args, []string{"-candidate-lineage"}) {
+		t.Fatalf("variant args: baseline=%v candidate=%v", baseline.Args, candidate.Args)
+	}
+	if variantPromptDigest(c, "baseline") == variantPromptDigest(c, "candidate") {
+		t.Fatal("variant prompt contracts did not bind the invocation-only treatment")
+	}
+}
+
+func TestLineageEvaluatorEmitsAcceptedScoresAndRepairEvidence(t *testing.T) {
+	dir := t.TempDir()
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v: %s", err, out)
+	}
+	if err := setupCandidateLineage(dir); err != nil {
+		t.Fatal(err)
+	}
+	candidatePath := filepath.Join(dir, lineageFixture, lineageCandidateFile)
+	var rejected bytes.Buffer
+	if code := runLineageEvaluator(dir, strings.NewReader(`{"prompt_id":1,"can_block":true}`), &rejected); code != 0 {
+		t.Fatalf("rejected helper exit = %d", code)
+	}
+	var rejectedResult lineageEvaluatorOutput
+	if err := json.Unmarshal(rejected.Bytes(), &rejectedResult); err != nil {
+		t.Fatal(err)
+	}
+	if rejectedResult.Accepted || rejectedResult.Score != nil || rejectedResult.EvidenceRef != lineageEvidenceRef(1) || rejectedResult.Reason == "" {
+		t.Fatalf("rejected evaluator result = %+v", rejectedResult)
+	}
+	for phase := 1; phase <= lineagePhaseCount; phase++ {
+		if err := os.WriteFile(candidatePath, []byte(lineageAcceptedCandidates[phase-1]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		var stdout bytes.Buffer
+		payload := fmt.Sprintf(`{"prompt_id":%d,"can_block":true}`, phase)
+		if code := runLineageEvaluator(dir, strings.NewReader(payload), &stdout); code != 0 {
+			t.Fatalf("phase %d helper exit = %d", phase, code)
+		}
+		var got lineageEvaluatorOutput
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if !got.Accepted || got.Score == nil || *got.Score != lineageScores[phase-1] || got.ScoreDirection != lineage.ScoreDirectionMaximize || got.Candidate != candidateID(lineageAcceptedCandidates[phase-1]) || got.EvidenceRef != lineageEvidenceRef(phase) {
+			t.Fatalf("phase %d evaluator result = %+v", phase, got)
+		}
+	}
+}
+
+func TestScoreCandidateLineageRequiresStrictRecoverableArchive(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git unavailable")
+	}
+	repo := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit(repo, "init", "-q")
+	runGit(repo, "config", "user.email", "flowbench@example.test")
+	runGit(repo, "config", "user.name", "Flowbench Test")
+	if err := os.WriteFile(filepath.Join(repo, "seed"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit(repo, "add", "seed")
+	runGit(repo, "commit", "-qm", "test: seed")
+	worktree := filepath.Join(t.TempDir(), "worktree")
+	runGit(repo, "worktree", "add", "--detach", worktree, "HEAD")
+	if err := setupCandidateLineage(worktree); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(t.TempDir(), "session")
+	manager, err := lineage.Open(worktree, sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	candidatePath := filepath.Join(worktree, lineageFixture, lineageCandidateFile)
+	metric := metrics{
+		LineageEvaluatorResults: lineagePhaseCount,
+		LineageEvaluatorAccepts: lineagePhaseCount,
+		LineageScoreProgression: append([]float64(nil), lineageScores...),
+	}
+	for phase := 1; phase <= lineagePhaseCount; phase++ {
+		if phase > 1 {
+			if err := lineageTransition(phase)(worktree); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(candidatePath, []byte(lineageAcceptedCandidates[phase-1]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		scoreValue := lineageScores[phase-1]
+		advance, err := manager.Observe(lineage.Input{
+			Handler: lineageEvaluatorHandler, Accepted: true, Score: &scoreValue, ScoreDirection: lineage.ScoreDirectionMaximize,
+			Candidate: candidateID(lineageAcceptedCandidates[phase-1]), EvidenceRef: lineageEvidenceRef(phase), Prompt: phase, Turn: 1,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if phase == 2 {
+			if advance != nil {
+				t.Fatalf("lower-scoring phase advanced: %+v", advance)
+			}
+			continue
+		}
+		if advance == nil {
+			t.Fatalf("phase %d did not advance", phase)
+		}
+		metric.LineageAdvances++
+		metric.LineagePatchBytes += advance.PatchBytes
+		metric.LineageEvidenceBytes += advance.EvidenceBytes
+	}
+	valid := scoreInput{Worktree: worktree, SessionDir: sessionDir, Metrics: metric}
+	if got := scoreCandidateLineage(valid); !got.Pass {
+		t.Fatalf("valid lineage score = %+v", got)
+	}
+	baseline := valid
+	baseline.SessionDir = filepath.Join(t.TempDir(), "baseline-session")
+	baseline.Metrics.LineageAdvances = 0
+	baseline.Metrics.LineagePatchBytes = 0
+	baseline.Metrics.LineageEvidenceBytes = 0
+	if got := scoreCandidateLineage(baseline); !got.Pass {
+		t.Fatalf("model-equivalent baseline score = %+v", got)
+	}
+	invalid := valid
+	invalid.Metrics.LineageAdvances = 1
+	if got := scoreCandidateLineage(invalid); got.Pass || !containsAnyFold(strings.Join(got.Reasons, "\n"), "telemetry") {
+		t.Fatalf("incomplete lineage score = %+v", got)
+	}
+}
+
+func TestCandidateLineageAcceptanceRequiresCandidateOnlyArchive(t *testing.T) {
+	c := candidateLineageCase()
+	records := []runRecord{
+		{Model: "provider:model", Repetition: 1, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 1000, Turns: 3, LineageEvaluatorResults: 3, LineageEvaluatorAccepts: 3, LineageScoreProgression: append([]float64(nil), lineageScores...)}},
+		{Model: "provider:model", Repetition: 1, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 1000, Turns: 3, LineageEvaluatorResults: 3, LineageEvaluatorAccepts: 3, LineageScoreProgression: append([]float64(nil), lineageScores...), LineageAdvances: 2, LineagePatchBytes: 400, LineageEvidenceBytes: 200}},
+	}
+	agg := summarize(c, records)
+	if !agg.Accepted || agg.Adoptions != 1 || agg.CandidateLineageRuns != 1 || agg.CandidateLineageAdvances != 2 || agg.BaselineUnexpectedLineageRuns != 0 {
+		t.Fatalf("valid lineage aggregate = %+v", agg)
+	}
+	records[0].Metrics.LineageAdvances = 1
+	if got := summarize(c, records); got.Accepted || !containsAnyFold(strings.Join(got.Failures, "\n"), "baseline") {
+		t.Fatalf("baseline lineage aggregate = %+v", got)
+	}
+}
+
+func TestRunRestartBenchmarkUsesSameSessionAcrossProcesses(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-harness")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\nprintf 'ran %s\\n' \"$*\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "calls.txt")
+	env := append(os.Environ(), "CALLS="+calls)
+	firstArgs := append(benchmarkArgs("provider:model", filepath.Join(dir, "session"), filepath.Join(dir, "config.json"), "auto", "medium"), "-p", "phase one")
+	between := 0
+	c := benchmarkCase{SecondPrompt: "phase two", BetweenPrompts: func(string) error { between++; return nil }}
+	stdout, _, err := runRestartBenchmark(context.Background(), script, firstArgs, env, c, dir, filepath.Join(dir, "session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if between != 1 || len(lines) != 2 || !strings.Contains(lines[0], "-session "+filepath.Join(dir, "session")) || !strings.Contains(lines[0], "-p phase one") || !strings.Contains(lines[1], "-resume "+filepath.Join(dir, "session")) || !strings.Contains(lines[1], "-p phase two") {
+		t.Fatalf("restart calls=%q between=%d", lines, between)
+	}
+	if strings.Count(string(stdout), "ran ") != 2 {
+		t.Fatalf("restart stdout = %q", stdout)
+	}
+}
+
+func TestRunRestartBenchmarkRunsExplicitPhaseSequence(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-harness")
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\ncase \" $* \" in *\" -p \"*) ;; *) mkdir -p \"$COMPACTIONS\"; : > \"$COMPACTIONS/0001.meta.json\" ;; esac\nprintf 'ran %s\\n' \"$*\"\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	calls := filepath.Join(dir, "calls.txt")
+	env := append(os.Environ(), "CALLS="+calls, "COMPACTIONS="+filepath.Join(dir, "session", "compactions"))
+	phases := []benchmarkPhase{
+		{Prompt: "repair checkpoint"},
+		{Prompt: "validate checkpoint", CompactAfter: true, After: func(string) error { return os.WriteFile(filepath.Join(dir, "drifted"), []byte("yes\n"), 0o600) }},
+		{Prompt: "repair final"},
+		{Prompt: "validate final"},
+	}
+	firstArgs := append(benchmarkArgs("provider:model", filepath.Join(dir, "session"), filepath.Join(dir, "config.json"), "auto", "medium"), "-p", phases[0].Prompt)
+	stdout, _, err := runRestartBenchmark(context.Background(), script, firstArgs, env, benchmarkCase{RestartPhases: phases}, dir, filepath.Join(dir, "session"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(calls)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != len(phases)+1 {
+		t.Fatalf("restart calls = %q", lines)
+	}
+	line := 0
+	for i, phase := range phases {
+		mode := "-resume " + filepath.Join(dir, "session")
+		if i == 0 {
+			mode = "-session " + filepath.Join(dir, "session")
+		}
+		if !strings.Contains(lines[line], mode) || !strings.Contains(lines[line], "-p "+phase.Prompt) {
+			t.Fatalf("phase %d call = %q, want %q and prompt %q", i+1, lines[line], mode, phase.Prompt)
+		}
+		line++
+		if phase.CompactAfter {
+			if !strings.Contains(lines[line], "-resume "+filepath.Join(dir, "session")) || strings.Contains(lines[line], " -p ") {
+				t.Fatalf("compaction control call = %q", lines[line])
+			}
+			line++
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "drifted")); err != nil {
+		t.Fatalf("phase boundary did not run: %v", err)
+	}
+	if strings.Count(string(stdout), "ran ") != len(phases)+1 {
+		t.Fatalf("restart stdout = %q", stdout)
+	}
+}
+
+func TestRunRestartBenchmarkRejectsMissingCompactionRecord(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-harness")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	prompt := "checkpoint"
+	firstArgs := append(benchmarkArgs("provider:model", filepath.Join(dir, "session"), filepath.Join(dir, "config.json"), "auto", "medium"), "-p", prompt)
+	_, _, err := runRestartBenchmark(context.Background(), script, firstArgs, os.Environ(), benchmarkCase{RestartPhases: []benchmarkPhase{{Prompt: prompt, CompactAfter: true}}}, dir, filepath.Join(dir, "session"))
+	if err == nil || !strings.Contains(err.Error(), "did not create a compaction record") {
+		t.Fatalf("missing compaction record error = %v", err)
+	}
+}
+
+func TestRunRestartBenchmarkAcceptsAutomaticPhaseCompaction(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "fake-harness")
+	body := "#!/bin/sh\ncase \" $* \" in *\" -p \"*) mkdir -p \"$COMPACTIONS\"; : > \"$COMPACTIONS/0001.meta.json\" ;; esac\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sessionDir := filepath.Join(dir, "session")
+	prompt := "checkpoint"
+	firstArgs := append(benchmarkArgs("provider:model", sessionDir, filepath.Join(dir, "config.json"), "auto", "medium"), "-p", prompt)
+	env := append(os.Environ(), "COMPACTIONS="+filepath.Join(sessionDir, "compactions"))
+	_, _, err := runRestartBenchmark(context.Background(), script, firstArgs, env, benchmarkCase{RestartPhases: []benchmarkPhase{{Prompt: prompt, CompactAfter: true}}}, dir, sessionDir)
+	if err != nil {
+		t.Fatalf("automatic phase compaction: %v", err)
 	}
 }
 
@@ -403,25 +1107,60 @@ func TestValidateArchivedRecordChecksContractAndEvents(t *testing.T) {
 	}
 	record := runRecord{
 		Version: runRecordVersion, Completed: true, SessionDir: dir,
+		Reasoning:    "medium",
 		PromptSHA256: promptDigest(c), OracleVersion: oracleContractVersion,
 		EventsSHA256: digestString(string(raw)), Score: score{Pass: true},
 	}
-	if err := validateArchivedRecord(record, c); err != nil {
+	if err := validateArchivedRecord(record, c, "medium"); err != nil {
 		t.Fatalf("valid archived record: %v", err)
 	}
 	for name, mutate := range map[string]func(*runRecord){
-		"version": func(r *runRecord) { r.Version-- },
-		"prompt":  func(r *runRecord) { r.PromptSHA256 = "stale" },
-		"oracle":  func(r *runRecord) { r.OracleVersion = "stale" },
-		"events":  func(r *runRecord) { r.EventsSHA256 = "stale" },
+		"version":   func(r *runRecord) { r.Version-- },
+		"prompt":    func(r *runRecord) { r.PromptSHA256 = "stale" },
+		"oracle":    func(r *runRecord) { r.OracleVersion = "stale" },
+		"events":    func(r *runRecord) { r.EventsSHA256 = "stale" },
+		"reasoning": func(r *runRecord) { r.Reasoning = "xhigh" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			bad := record
 			mutate(&bad)
-			if err := validateArchivedRecord(bad, c); err == nil {
+			if err := validateArchivedRecord(bad, c, "medium"); err == nil {
 				t.Fatal("invalid archived record was accepted")
 			}
 		})
+	}
+}
+
+func TestValidateArchivedRecordChecksVariantAgentAndConfig(t *testing.T) {
+	c := allCases()["candidate_lineage"]
+	dir := t.TempDir()
+	raw := []byte("events\n")
+	if err := os.WriteFile(filepath.Join(dir, "raw.ndjson"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	variant := c.variant("candidate")
+	record := runRecord{
+		Version: runRecordVersion, Completed: true, Variant: "candidate", SessionDir: dir,
+		Reasoning: "medium",
+		Agent:     variant.Agent, ConfigSHA256: digestString(variant.Config),
+		PromptSHA256: variantPromptDigest(c, "candidate"), OracleVersion: oracleContractVersion,
+		EventsSHA256: digestString(string(raw)), Score: score{Pass: true},
+	}
+	if err := validateArchivedRecord(record, c, "medium"); err != nil {
+		t.Fatalf("valid custom-variant record: %v", err)
+	}
+	if _, got := evaluateArchivedCase(c, scoreInput{}, record.Score); !got.Pass {
+		t.Fatalf("archived exact-oracle score was recomputed without its removed worktree: %+v", got)
+	}
+	badAgent := record
+	badAgent.Agent = "independent"
+	if err := validateArchivedRecord(badAgent, c, "medium"); err == nil || !strings.Contains(err.Error(), "agent") {
+		t.Fatalf("agent mismatch error = %v", err)
+	}
+	badConfig := record
+	badConfig.ConfigSHA256 = "stale"
+	if err := validateArchivedRecord(badConfig, c, "medium"); err == nil || !strings.Contains(err.Error(), "config hash") {
+		t.Fatalf("config mismatch error = %v", err)
 	}
 }
 
@@ -495,6 +1234,154 @@ func TestSummarizeAcceptance(t *testing.T) {
 	agg := summarize(c, records)
 	if !agg.Accepted {
 		t.Fatalf("aggregate rejected: %v", agg.Failures)
+	}
+}
+
+func TestStagnationAcceptanceRequiresBothProjectionOracles(t *testing.T) {
+	c := allCases()["stagnation_detection"]
+	legacy := metrics{
+		TotalTokens: 100, Turns: 23,
+		MaxNoImprovementStreak: 2,
+		StagnationBaselines:    3, StagnationImprovements: 1,
+		StagnationPlateaus: 2, StagnationRegressions: 1,
+		StagnationIndeterminate: 5, UnorderedScoreEvaluations: 8,
+		StagnationLaneResets: 1,
+	}
+	directed := metrics{
+		TotalTokens: 250, Turns: 30,
+		MaxNoImprovementStreak: 2,
+		StagnationBaselines:    3, StagnationImprovements: 3,
+		StagnationPlateaus: 2, StagnationRegressions: 3,
+		StagnationIndeterminate: 1, StagnationLaneResets: 1,
+	}
+	records := []runRecord{
+		{Model: "provider:model", Repetition: 1, Variant: "baseline", Score: score{Pass: true}, Metrics: legacy},
+		{Model: "provider:model", Repetition: 1, Variant: "candidate", Score: score{Pass: true}, Metrics: directed},
+	}
+	agg := summarize(c, records)
+	if !agg.Accepted || agg.BaselineLegacyStagnationRuns != 1 || agg.CandidateStagnationDetections != 1 {
+		t.Fatalf("stagnation aggregate = %+v", agg)
+	}
+
+	brokenCandidate := append([]runRecord(nil), records...)
+	brokenCandidate[1].Metrics.StagnationRegressions = 2
+	if rejected := summarize(c, brokenCandidate); rejected.Accepted || !strings.Contains(strings.Join(rejected.Failures, "\n"), "candidate detection coverage") {
+		t.Fatalf("broken candidate trace was accepted: %+v", rejected)
+	}
+
+	brokenBaseline := append([]runRecord(nil), records...)
+	brokenBaseline[0].Metrics.UnorderedScoreEvaluations = 7
+	if rejected := summarize(c, brokenBaseline); rejected.Accepted || !strings.Contains(strings.Join(rejected.Failures, "\n"), "baseline projection coverage") {
+		t.Fatalf("broken baseline trace was accepted: %+v", rejected)
+	}
+}
+
+func TestStagnationRecoveryAcceptanceRequiresOneShotPostNudgeRecovery(t *testing.T) {
+	c := allCases()["stagnation_recovery"]
+	var records []runRecord
+	for rep := 1; rep <= 3; rep++ {
+		records = append(records,
+			runRecord{Model: "provider:model", Repetition: rep, Variant: "baseline", Score: score{Pass: false}, Metrics: metrics{
+				TotalTokens: 100, Turns: 8, RecoveryFailures: 1,
+			}},
+			runRecord{Model: "provider:model", Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{
+				TotalTokens: 150, Turns: 9, StagnationNudgeEvents: 1,
+				RecoveryToolCallsAfterNudge: 2, RecoveryAcceptedAfterNudge: true,
+			}},
+		)
+	}
+	agg := summarize(c, records)
+	if !agg.Accepted || agg.BaselinePasses != 0 || agg.CandidatePasses != 3 || agg.CandidateRecoveryNudgeRuns != 3 || agg.CandidateRecoveriesAfterNudge != 3 || agg.CandidateResetDrivenRecoveries != 3 || agg.Adoptions != 3 || agg.PrimaryReductionPct != 100 {
+		t.Fatalf("stagnation recovery aggregate = %+v", agg)
+	}
+
+	missingNudge := append([]runRecord(nil), records...)
+	missingNudge[1].Metrics.StagnationNudgeEvents = 0
+	if rejected := summarize(c, missingNudge); rejected.Accepted || !strings.Contains(strings.Join(rejected.Failures, "\n"), "strategy-reset coverage") {
+		t.Fatalf("missing candidate nudge was accepted: %+v", rejected)
+	}
+
+	unexpectedBaseline := append([]runRecord(nil), records...)
+	unexpectedBaseline[0].Metrics.StagnationNudgeEvents = 1
+	if rejected := summarize(c, unexpectedBaseline); rejected.Accepted || !strings.Contains(strings.Join(rejected.Failures, "\n"), "baseline runs unexpectedly") {
+		t.Fatalf("unexpected baseline nudge was accepted: %+v", rejected)
+	}
+
+	earlyCandidate := append([]runRecord(nil), records...)
+	earlyCandidate[1].Metrics.RecoveryToolCallsBeforeNudge = 1
+	if rejected := summarize(c, earlyCandidate); rejected.Accepted || !strings.Contains(strings.Join(rejected.Failures, "\n"), "clean reset-driven recovery coverage") {
+		t.Fatalf("pre-reset candidate work was accepted: %+v", rejected)
+	}
+
+	tiedRecovery := append([]runRecord(nil), records...)
+	for i := range tiedRecovery {
+		if tiedRecovery[i].Variant == "baseline" {
+			tiedRecovery[i].Score.Pass = true
+			tiedRecovery[i].Metrics.RecoveryFailures = 0
+		}
+	}
+	if rejected := summarize(c, tiedRecovery); rejected.Accepted || !strings.Contains(strings.Join(rejected.Failures, "\n"), "did not improve over baseline") {
+		t.Fatalf("tied baseline recovery was accepted: %+v", rejected)
+	}
+}
+
+func TestStagnationRecoveryAcceptanceAllowsOneCleanAdoptionMissInNine(t *testing.T) {
+	c := allCases()["stagnation_recovery"]
+	var records []runRecord
+	for model := 1; model <= 3; model++ {
+		for rep := 1; rep <= 3; rep++ {
+			candidateMetrics := metrics{
+				TotalTokens: 150, Turns: 9, StagnationNudgeEvents: 1,
+				RecoveryToolCallsAfterNudge: 2, RecoveryAcceptedAfterNudge: true,
+			}
+			if model == 1 && rep == 1 {
+				candidateMetrics.RecoveryToolCallsBeforeNudge = 1
+			}
+			modelName := fmt.Sprintf("provider:model-%d", model)
+			records = append(records,
+				runRecord{Model: modelName, Repetition: rep, Variant: "baseline", Score: score{Pass: false}, Metrics: metrics{
+					TotalTokens: 100, Turns: 8, RecoveryFailures: 1,
+				}},
+				runRecord{Model: modelName, Repetition: rep, Variant: "candidate", Score: score{Pass: true}, Metrics: candidateMetrics},
+			)
+		}
+	}
+
+	agg := summarize(c, records)
+	if !agg.Accepted || agg.CandidateResetDrivenRecoveries != 8 || agg.Adoptions != 8 {
+		t.Fatalf("stagnation recovery aggregate = %+v", agg)
+	}
+}
+
+func TestStagnationRecoveryAcceptanceAllowsOnePostResetRecoveryMissInNine(t *testing.T) {
+	c := allCases()["stagnation_recovery"]
+	var records []runRecord
+	for model := 1; model <= 3; model++ {
+		for rep := 1; rep <= 3; rep++ {
+			candidatePass := true
+			candidateMetrics := metrics{
+				TotalTokens: 150, Turns: 9, StagnationNudgeEvents: 1,
+				RecoveryToolCallsAfterNudge: 2, RecoveryAcceptedAfterNudge: true,
+			}
+			if model == 1 && rep == 1 {
+				candidatePass = false
+				candidateMetrics.RecoveryToolCallsAfterNudge = 0
+				candidateMetrics.RecoveryAcceptedAfterNudge = false
+				candidateMetrics.RecoveryFailures = 1
+			}
+			modelName := fmt.Sprintf("provider:model-%d", model)
+			records = append(records,
+				runRecord{Model: modelName, Repetition: rep, Variant: "baseline", Score: score{Pass: false}, Metrics: metrics{
+					TotalTokens: 100, Turns: 8, RecoveryFailures: 1,
+				}},
+				runRecord{Model: modelName, Repetition: rep, Variant: "candidate", Score: score{Pass: candidatePass}, Metrics: candidateMetrics},
+			)
+		}
+	}
+
+	agg := summarize(c, records)
+	if !agg.Accepted || agg.CandidatePasses != 8 || agg.CandidateRecoveriesAfterNudge != 8 || agg.CandidateResetDrivenRecoveries != 8 || agg.Adoptions != 8 {
+		t.Fatalf("stagnation recovery aggregate = %+v", agg)
 	}
 }
 
@@ -1098,7 +1985,7 @@ func TestResumeRecordsPreservesMixedInvalidEvidenceAndCompletesOnlyValidKeys(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	valid := runRecord{Version: runRecordVersion, Case: c.Name, Model: "provider:model", Repetition: 1, Variant: "baseline", TargetSHA: targetSHA, HarnessSHA: cfg.BaselineSHA, Completed: true, SessionDir: sessionDir, PromptSHA256: promptDigest(c), OracleVersion: oracleContractVersion, EventsSHA256: digestString(string(raw)), Score: score{Pass: true}}
+	valid := runRecord{Version: runRecordVersion, Case: c.Name, Model: "provider:model", Repetition: 1, Variant: "baseline", TargetSHA: targetSHA, HarnessSHA: cfg.BaselineSHA, Completed: true, SessionDir: sessionDir, Reasoning: "medium", PromptSHA256: promptDigest(c), OracleVersion: oracleContractVersion, EventsSHA256: digestString(string(raw)), Score: score{Pass: true}}
 	invalid := runRecord{Version: runRecordVersion, Case: c.Name, Model: "provider:model", Repetition: 1, Variant: "candidate", Order: 2, TargetSHA: targetSHA, HarnessSHA: cfg.CandidateSHA, Invalid: "interrupted", Started: time.Unix(123, 0).UTC()}
 	if err := writeRecords(results, []runRecord{valid, invalid}); err != nil {
 		t.Fatal(err)
@@ -1180,5 +2067,68 @@ func TestBaselineOrderFollowsAlternatingPairs(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("baseline orders = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestParallelMatrixRoundsGroupOneRunPerModel(t *testing.T) {
+	cfg := runConfig{Models: []string{"provider:a", "provider:b", "provider:c"}, Repetitions: 2}
+	rounds := parallelMatrixRounds(cfg, map[string]bool{
+		recordKey("provider:b", 1, "baseline"): true,
+	})
+	if len(rounds) != 4 {
+		t.Fatalf("parallel rounds = %d, want 4", len(rounds))
+	}
+	wantVariants := []string{"baseline", "candidate", "candidate", "baseline"}
+	for roundIndex, round := range rounds {
+		seen := map[string]bool{}
+		for _, job := range round {
+			if job.Variant != wantVariants[roundIndex] {
+				t.Errorf("round %d variant = %q, want %q", roundIndex, job.Variant, wantVariants[roundIndex])
+			}
+			if seen[job.Model] {
+				t.Errorf("round %d contains model %q more than once", roundIndex, job.Model)
+			}
+			seen[job.Model] = true
+			if got := matrixOrder(job.ModelIndex, cfg.Repetitions, job.Repetition, job.Variant); job.Order != got {
+				t.Errorf("round %d job order = %d, want %d", roundIndex, job.Order, got)
+			}
+		}
+		wantRuns := len(cfg.Models)
+		if roundIndex == 0 {
+			wantRuns--
+		}
+		if len(round) != wantRuns {
+			t.Errorf("round %d runs = %d, want %d", roundIndex, len(round), wantRuns)
+		}
+	}
+}
+
+func TestExecuteRunRoundStartsEveryModelConcurrently(t *testing.T) {
+	jobs := []matrixJob{{Model: "a"}, {Model: "b"}, {Model: "c"}}
+	entered := make(chan string, len(jobs))
+	release := make(chan struct{})
+	results := executeRunRound(jobs, func(job matrixJob) matrixResult {
+		entered <- job.Model
+		<-release
+		return matrixResult{Job: job, Record: runRecord{Model: job.Model}}
+	})
+
+	seen := map[string]bool{}
+	for range jobs {
+		select {
+		case model := <-entered:
+			seen[model] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("round did not start every model concurrently")
+		}
+	}
+	close(release)
+	for result := range results {
+		if result.Record.Model != result.Job.Model {
+			t.Errorf("result model = %q, job model = %q", result.Record.Model, result.Job.Model)
+		}
+	}
+	if len(seen) != len(jobs) {
+		t.Fatalf("started models = %v, want all jobs", seen)
 	}
 }

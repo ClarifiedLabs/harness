@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -59,6 +60,9 @@ const (
 	defaultCooldownSeconds     = 60
 	maxTimeoutCooldownSeconds  = 3600
 	maxConsecutiveTimeoutCount = 1_000_000
+	maxEvaluatorIdentifierLen  = 256
+	maxEvaluatorEvidenceRefLen = 1024
+	maxRemainingRequirements   = 1_000_000
 )
 
 var hookTimeoutUnit = time.Second
@@ -101,7 +105,28 @@ type Result struct {
 	AdditionalContext []string
 	Notices           []string
 	Diagnostics       []Diagnostic
+	EvaluatorResults  []EvaluatorResult
 }
+
+// EvaluatorResult is the bounded semantic outcome emitted by a Stop hook. It
+// is separate from Diagnostic: a hook process may run successfully while its
+// evaluator rejects the current candidate. Score is nil when the evaluator did
+// not supply one, so a real zero remains distinguishable from absence. An
+// optional ScoreDirection is host-only ordering metadata for shadow telemetry.
+type EvaluatorResult struct {
+	Handler               string
+	Accepted              bool
+	Score                 *float64
+	ScoreDirection        string
+	Candidate             string
+	RemainingRequirements *int
+	EvidenceRef           string
+}
+
+const (
+	ScoreDirectionMaximize = "maximize"
+	ScoreDirectionMinimize = "minimize"
+)
 
 // DiagnosticOutcome is a bounded hook execution outcome.
 type DiagnosticOutcome string
@@ -521,7 +546,8 @@ func (r *Runner) Run(ctx context.Context, event Event, target string, payload Pa
 			if elapsed < 0 {
 				elapsed = 0
 			}
-			outcome := commandDiagnosticOutcome(cmdResult)
+			parsed, parseFailed := parseCommandOutput(event, identity, cmdResult)
+			outcome := commandDiagnosticOutcome(cmdResult, parseFailed)
 			count, circuitOpen, openUntil := r.afterHook(stateKey, hook, outcome, finished)
 			diagnostic := Diagnostic{
 				Event: event, Handler: identity, Target: target, ToolID: toolID,
@@ -541,11 +567,11 @@ func (r *Runner) Run(ctx context.Context, event Event, target string, payload Pa
 				out.Notices = append(out.Notices, message+"]")
 				continue
 			}
-			parsed := parseCommandOutput(cmdResult)
 			out.Block = out.Block || parsed.Block
 			out.Reasons = append(out.Reasons, parsed.Reasons...)
 			out.AdditionalContext = append(out.AdditionalContext, parsed.AdditionalContext...)
 			out.Notices = append(out.Notices, parsed.Notices...)
+			out.EvaluatorResults = append(out.EvaluatorResults, parsed.EvaluatorResults...)
 		}
 	}
 	return out
@@ -636,7 +662,7 @@ func (r *Runner) afterHook(identity string, hook Handler, outcome DiagnosticOutc
 	return state.consecutive, !state.openUntil.IsZero() && now.Before(state.openUntil), state.openUntil
 }
 
-func commandDiagnosticOutcome(result commandResult) DiagnosticOutcome {
+func commandDiagnosticOutcome(result commandResult, parseFailed bool) DiagnosticOutcome {
 	switch {
 	case result.StartErr != nil:
 		return OutcomeStartFailed
@@ -646,20 +672,11 @@ func commandDiagnosticOutcome(result commandResult) DiagnosticOutcome {
 		return OutcomeCanceled
 	case result.Code != 0:
 		return OutcomeExitNonzero
-	case malformedJSONObject(result.Stdout):
+	case parseFailed:
 		return OutcomeParseFailed
 	default:
 		return OutcomeSuccess
 	}
-}
-
-func malformedJSONObject(stdout string) bool {
-	stdout = strings.TrimSpace(stdout)
-	if stdout == "" || !strings.HasPrefix(stdout, "{") {
-		return false
-	}
-	var value hookOutput
-	return json.Unmarshal([]byte(stdout), &value) != nil
 }
 
 func (r *Runner) input(event Event, payload Payload) (map[string]any, error) {
@@ -778,33 +795,40 @@ func exitCode(err error) int {
 }
 
 type hookOutput struct {
-	Decision           string `json:"decision"`
-	Continue           *bool  `json:"continue"`
-	Reason             string `json:"reason"`
-	HookSpecificOutput struct {
+	Decision              string   `json:"decision"`
+	Continue              *bool    `json:"continue"`
+	Reason                string   `json:"reason"`
+	Accepted              *bool    `json:"accepted"`
+	Score                 *float64 `json:"score"`
+	ScoreDirection        *string  `json:"score_direction"`
+	Candidate             *string  `json:"candidate"`
+	RemainingRequirements *int     `json:"remaining_requirements"`
+	EvidenceRef           *string  `json:"evidence_ref"`
+	HookSpecificOutput    struct {
 		AdditionalContext string `json:"additionalContext"`
 	} `json:"hookSpecificOutput"`
 	UpdatedInput any `json:"updatedInput"`
 }
 
-func parseCommandOutput(cmd commandResult) Result {
+func parseCommandOutput(event Event, handler string, cmd commandResult) (Result, bool) {
 	var out Result
 	if cmd.StartErr != nil {
 		out.Notices = append(out.Notices, fmt.Sprintf("[hook failed to start: %v]", cmd.StartErr))
-		return out
+		return out, false
 	}
 	stdout := strings.TrimSpace(cmd.Stdout)
 	stderr := strings.TrimSpace(cmd.Stderr)
 	if cmd.TimedOut {
 		out.Notices = append(out.Notices, "[hook timed out; continuing]")
-		return out
+		return out, false
 	}
 	if cmd.Canceled {
 		out.Notices = append(out.Notices, "[hook cancelled]")
-		return out
+		return out, false
 	}
 
 	parsed, parsedJSON := parseJSONOutput(stdout)
+	parseFailed := stdout != "" && strings.HasPrefix(stdout, "{") && !parsedJSON
 	if parsedJSON {
 		if parsed.UpdatedInput != nil {
 			out.Notices = append(out.Notices, "[hook updatedInput ignored: unsupported in harness v1]")
@@ -812,9 +836,23 @@ func parseCommandOutput(cmd commandResult) Result {
 		if ctx := strings.TrimSpace(parsed.HookSpecificOutput.AdditionalContext); ctx != "" {
 			out.AdditionalContext = append(out.AdditionalContext, ctx)
 		}
-		if strings.EqualFold(parsed.Decision, "block") || strings.EqualFold(parsed.Decision, "deny") ||
-			(parsed.Continue != nil && !*parsed.Continue) {
+		classicBlock := strings.EqualFold(parsed.Decision, "block") || strings.EqualFold(parsed.Decision, "deny") ||
+			(parsed.Continue != nil && !*parsed.Continue)
+		evaluation, present, evalErr := parseEvaluatorResult(event, handler, parsed, classicBlock, cmd.Code)
+		if evalErr != nil {
+			parseFailed = true
+			out.Notices = append(out.Notices, fmt.Sprintf("[hook %s handler %s ignored invalid evaluator result: %v]", event, handler, evalErr))
+		} else if present {
+			out.EvaluatorResults = append(out.EvaluatorResults, evaluation)
+			if !evaluation.Accepted {
+				out.Block = true
+				out.Reasons = append(out.Reasons, evaluatorRejectionReason(evaluation))
+			}
+		}
+		if classicBlock {
 			out.Block = true
+		}
+		if out.Block {
 			if reason := strings.TrimSpace(parsed.Reason); reason != "" {
 				out.Reasons = append(out.Reasons, reason)
 			}
@@ -832,7 +870,7 @@ func parseCommandOutput(cmd commandResult) Result {
 			}
 			out.Reasons = append(out.Reasons, reason)
 		}
-		return out
+		return out, parseFailed
 	}
 	if cmd.Code != 0 {
 		msg := fmt.Sprintf("[hook exited with code %d; continuing", cmd.Code)
@@ -841,7 +879,108 @@ func parseCommandOutput(cmd commandResult) Result {
 		}
 		out.Notices = append(out.Notices, msg+"]")
 	}
-	return out
+	return out, parseFailed
+}
+
+func parseEvaluatorResult(event Event, handler string, out hookOutput, classicBlock bool, exitCode int) (EvaluatorResult, bool, error) {
+	present := out.Accepted != nil || out.Score != nil || out.ScoreDirection != nil || out.Candidate != nil ||
+		out.RemainingRequirements != nil || out.EvidenceRef != nil
+	if !present {
+		return EvaluatorResult{}, false, nil
+	}
+	if event != Stop {
+		return EvaluatorResult{}, false, fmt.Errorf("semantic evaluator fields are supported only for Stop hooks")
+	}
+	if exitCode != 0 && exitCode != 2 {
+		return EvaluatorResult{}, false, fmt.Errorf("semantic evaluator fields require exit code 0 or 2")
+	}
+	if out.Accepted == nil {
+		return EvaluatorResult{}, false, fmt.Errorf("accepted is required when semantic evaluator fields are present")
+	}
+	if *out.Accepted && (classicBlock || exitCode == 2) {
+		return EvaluatorResult{}, false, fmt.Errorf("accepted=true conflicts with a blocking hook result")
+	}
+	if *out.Accepted && out.RemainingRequirements != nil && *out.RemainingRequirements != 0 {
+		return EvaluatorResult{}, false, fmt.Errorf("accepted=true requires remaining_requirements to be zero when supplied")
+	}
+	if out.RemainingRequirements != nil && (*out.RemainingRequirements < 0 || *out.RemainingRequirements > maxRemainingRequirements) {
+		return EvaluatorResult{}, false, fmt.Errorf("remaining_requirements must be between 0 and %d", maxRemainingRequirements)
+	}
+	scoreDirection := ""
+	if out.ScoreDirection != nil {
+		if out.Score == nil {
+			return EvaluatorResult{}, false, fmt.Errorf("score_direction requires score")
+		}
+		scoreDirection = strings.TrimSpace(*out.ScoreDirection)
+		if scoreDirection != ScoreDirectionMaximize && scoreDirection != ScoreDirectionMinimize {
+			return EvaluatorResult{}, false, fmt.Errorf("score_direction must be %q or %q", ScoreDirectionMaximize, ScoreDirectionMinimize)
+		}
+	}
+
+	candidate, err := evaluatorIdentifier("candidate", out.Candidate, maxEvaluatorIdentifierLen)
+	if err != nil {
+		return EvaluatorResult{}, false, err
+	}
+	evidenceRef, err := evaluatorIdentifier("evidence_ref", out.EvidenceRef, maxEvaluatorEvidenceRefLen)
+	if err != nil {
+		return EvaluatorResult{}, false, err
+	}
+	result := EvaluatorResult{
+		Handler:        handler,
+		Accepted:       *out.Accepted,
+		ScoreDirection: scoreDirection,
+		Candidate:      candidate,
+		EvidenceRef:    evidenceRef,
+	}
+	if out.Score != nil {
+		score := *out.Score
+		result.Score = &score
+	}
+	if out.RemainingRequirements != nil {
+		remaining := *out.RemainingRequirements
+		result.RemainingRequirements = &remaining
+	}
+	return result, true, nil
+}
+
+func evaluatorIdentifier(field string, value *string, maxLen int) (string, error) {
+	if value == nil {
+		return "", nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s must not be empty when supplied", field)
+	}
+	if len(trimmed) > maxLen {
+		return "", fmt.Errorf("%s exceeds %d bytes", field, maxLen)
+	}
+	for _, r := range trimmed {
+		if r < ' ' || r == 0x7f {
+			return "", fmt.Errorf("%s must be a single-line identifier", field)
+		}
+	}
+	return trimmed, nil
+}
+
+func evaluatorRejectionReason(result EvaluatorResult) string {
+	parts := make([]string, 0, 4)
+	if result.Candidate != "" {
+		parts = append(parts, "candidate="+strconv.Quote(result.Candidate))
+	}
+	if result.Score != nil {
+		parts = append(parts, "score="+strconv.FormatFloat(*result.Score, 'g', -1, 64))
+	}
+	if result.RemainingRequirements != nil {
+		parts = append(parts, fmt.Sprintf("remaining_requirements=%d", *result.RemainingRequirements))
+	}
+	if result.EvidenceRef != "" {
+		parts = append(parts, "evidence_ref="+strconv.Quote(result.EvidenceRef))
+	}
+	reason := fmt.Sprintf("Evaluator %q rejected the candidate", result.Handler)
+	if len(parts) > 0 {
+		reason += " (" + strings.Join(parts, ", ") + ")"
+	}
+	return reason
 }
 
 func parseJSONOutput(stdout string) (hookOutput, bool) {

@@ -336,7 +336,7 @@ Built-in child roles are:
 | `independent` | bounded end-to-end work that can proceed without parent or user input |
 | `plan` | collaborative read-only planning; available only when its complete tool set is a subset of the parent |
 | `review` | findings-first read-only review of a concrete code change |
-| `auto` | the current general-purpose behavior |
+| `auto` | the default general-purpose behavior |
 
 A child always receives the selected agent's configured tool set. Delegate calls
 cannot override or narrow it; select or define a different agent when a task needs

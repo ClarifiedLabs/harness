@@ -24,6 +24,7 @@ import (
 	"harness/internal/config"
 	"harness/internal/delegate"
 	"harness/internal/goal"
+	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/modelproxy/protocol"
@@ -33,6 +34,7 @@ import (
 	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
+	"harness/internal/trajectory"
 	"harness/internal/ui"
 	"harness/prompts"
 )
@@ -1432,7 +1434,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-goal-max-continuations", "-default-context-window", "-context-window",
-		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks", "-version", "-help",
+		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-stagnation-nudge", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-debug-request", "-agents", "-models", "-check-model-proxy", "-candidate-lineage", "-hooks", "-version", "-help",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -2644,13 +2646,17 @@ func TestRunResumeRejectsActiveSession(t *testing.T) {
 func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 	dir := t.TempDir()
 	sessPath := filepath.Join(dir, "prior")
+	priorTrajectory := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
+		Handler: "verify", Accepted: true, Candidate: "candidate:resume", EvidenceRef: "evidence/resume",
+	})
 	prior := session.Session{
-		Version:  session.Version,
-		Provider: "anthropic",
-		Model:    "claude-opus-4-8",
-		Created:  time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC),
-		Plan:     &plan.Plan{Title: "Continue", Body: "Implement the retained plan.", Path: "/session/plans/0001-continue.plan.md"},
-		Todos:    []todo.Item{{Step: "Implement", Status: todo.StatusInProgress}},
+		Version:    session.Version,
+		Provider:   "anthropic",
+		Model:      "claude-opus-4-8",
+		Created:    time.Date(2026, 8, 5, 12, 0, 0, 0, time.UTC),
+		Plan:       &plan.Plan{Title: "Continue", Body: "Implement the retained plan.", Path: "/session/plans/0001-continue.plan.md"},
+		Todos:      []todo.Item{{Step: "Implement", Status: todo.StatusInProgress}},
+		Trajectory: &priorTrajectory,
 	}
 	if err := prior.Save(sessPath); err != nil {
 		t.Fatal(err)
@@ -2658,7 +2664,7 @@ func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 
 	fp := llmtest.New("fake", okStep())
 	env, _, errw, _ := fakeProviderEnv(t,
-		[]string{"-model", "claude-opus-4-8", "-resume", sessPath, "-p", "continue"}, fp, "")
+		[]string{"-model", "claude-opus-4-8", "-stagnation-nudge", "-resume", sessPath, "-p", "continue"}, fp, "")
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("resume exit = %d, want 0; errw=%q", code, errw.String())
 	}
@@ -2668,6 +2674,12 @@ func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 	}
 	if loaded.Plan == nil || loaded.Plan.Path != prior.Plan.Path || !slices.Equal(loaded.Todos, prior.Todos) {
 		t.Fatalf("resumed plan/todos = %+v/%+v", loaded.Plan, loaded.Todos)
+	}
+	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, priorTrajectory) {
+		t.Fatalf("resumed trajectory = %+v, want %+v", loaded.Trajectory, priorTrajectory)
+	}
+	if !loaded.Runtime.StagnationNudge || len(fp.Requests) != 1 || strings.Contains(strings.Join(fp.Requests[0].RequestContext, "\n"), "candidate:resume") {
+		t.Fatalf("model-invisible trajectory/runtime = runtime %+v requests %+v", loaded.Runtime, fp.Requests)
 	}
 }
 
@@ -2719,6 +2731,9 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source")
 	destinationPath := filepath.Join(dir, "destination")
+	priorTrajectory := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
+		Handler: "verify", Accepted: true, Candidate: "candidate:source", EvidenceRef: "evidence/source",
+	})
 	prior := session.Session{
 		Provider: "anthropic",
 		Model:    "claude-opus-4-8",
@@ -2728,9 +2743,10 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "earlier"}}},
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "reply"}}},
 		},
-		Usage: session.UsageTotals{Usage: llm.Usage{InputTokens: 100}},
-		Plan:  &plan.Plan{Title: "Clone", Body: "Retain this plan.", Path: "/source/plans/0001-clone.plan.md"},
-		Todos: []todo.Item{{Step: "Continue", Status: todo.StatusPending}},
+		Usage:      session.UsageTotals{Usage: llm.Usage{InputTokens: 100}},
+		Plan:       &plan.Plan{Title: "Clone", Body: "Retain this plan.", Path: "/source/plans/0001-clone.plan.md"},
+		Todos:      []todo.Item{{Step: "Continue", Status: todo.StatusPending}},
+		Trajectory: &priorTrajectory,
 	}
 	if err := prior.Save(sourcePath); err != nil {
 		t.Fatalf("save source: %v", err)
@@ -2763,12 +2779,18 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	if !reflect.DeepEqual(child.Plan, prior.Plan) || !slices.Equal(child.Todos, prior.Todos) {
 		t.Fatalf("clone plan/todos = %+v/%+v", child.Plan, child.Todos)
 	}
+	if child.Trajectory == nil || child.Trajectory.TotalEvaluations != 0 || child.Trajectory.BranchResets != 1 || child.Trajectory.CurrentCandidateID != "" {
+		t.Fatalf("clone should start a fresh trajectory epoch: %+v", child.Trajectory)
+	}
 	unchanged, err := session.Load(sourcePath)
 	if err != nil {
 		t.Fatalf("reload source: %v", err)
 	}
 	if unchanged.Usage.InputTokens != 100 {
 		t.Fatalf("source usage changed: %+v", unchanged.Usage)
+	}
+	if unchanged.Trajectory == nil || !reflect.DeepEqual(*unchanged.Trajectory, priorTrajectory) {
+		t.Fatalf("source trajectory changed: %+v", unchanged.Trajectory)
 	}
 }
 
@@ -3986,9 +4008,8 @@ func delegateAgentProperty(t *testing.T, req llm.Request) ([]string, string) {
 	return nil, ""
 }
 
-// The default (auto) agent advertises the default tool set, which includes the
-// delegate, todo, and plan coordination tools, and carries no agent-specific
-// section.
+// The default auto agent advertises the default tool set without an additional
+// agent-specific system-prompt suffix.
 func TestRunDefaultAgentTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
@@ -4000,12 +4021,12 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	if got := toolNames(fp.Requests[0]); !slices.Equal(got, want) {
 		t.Errorf("default agent tools = %v, want %v", got, want)
 	}
-	if strings.Contains(fp.Requests[0].System, "plan agent") || strings.Contains(fp.Requests[0].System, "independent agent") || strings.Contains(fp.Requests[0].System, prompts.DelegateChild()) {
-		t.Errorf("default root agent should carry neither an agent section nor the child suffix; system=%q", fp.Requests[0].System)
+	if strings.Contains(fp.Requests[0].System, prompts.DelegateChild()) {
+		t.Errorf("default root agent should not carry the child suffix; system=%q", fp.Requests[0].System)
 	}
 }
 
-func TestRunInteractiveAutoExposesTodosAndPlanButNotHandoffOrGoalTools(t *testing.T) {
+func TestRunInteractiveDefaultExposesTodosAndPlanButNotHandoffOrGoalTools(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -4015,12 +4036,12 @@ func TestRunInteractiveAutoExposesTodosAndPlanButNotHandoffOrGoalTools(t *testin
 	names := toolNames(fp.Requests[0])
 	for _, name := range []string{"update_todos", "record_plan"} {
 		if !slices.Contains(names, name) {
-			t.Fatalf("interactive auto tools missing %s: %v", name, names)
+			t.Fatalf("interactive default tools missing %s: %v", name, names)
 		}
 	}
 	for _, name := range []string{"handoff", "create_goal", "update_goal"} {
 		if slices.Contains(names, name) {
-			t.Fatalf("interactive auto tools unexpectedly include removed %s: %v", name, names)
+			t.Fatalf("interactive default tools unexpectedly include removed %s: %v", name, names)
 		}
 	}
 }
@@ -4613,7 +4634,7 @@ func TestRunDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 	}
 }
 
-func TestRunDelegateSchemaAutoListsOnlyAutoSubsetAgents(t *testing.T) {
+func TestRunDelegateSchemaDefaultListsOnlyCompatibleAgents(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
 	cfg := `{
@@ -5476,6 +5497,66 @@ func TestFuzzyMatchModel(t *testing.T) {
 	// No match.
 	if m, c := fuzzyMatchModel(catalog, "llama"); m != "" || len(c) != 0 {
 		t.Errorf("no-match: match=%q candidates=%v", m, c)
+	}
+}
+
+func TestCandidateLineageSupportsInteractiveSession(t *testing.T) {
+	sessionDir := filepath.Join(t.TempDir(), "session")
+	fp := llmtest.New("fake")
+	env, _, errw, getenv := fakeProviderEnv(t, []string{
+		"-model", "claude-opus-4-8", "-candidate-lineage", "-session", sessionDir,
+	}, fp, "/lineage\n/clear\n/lineage\n/exit\n")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit=%d stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("model received %d requests", len(fp.Requests))
+	}
+	if !strings.Contains(errw.String(), "candidate lineage: no accepted checkpoints") {
+		t.Fatalf("interactive lineage output = %q", errw.String())
+	}
+	state, err := lineage.Load(sessionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Worktree == "" || state.BaseHead == "" || len(state.Entries) != 0 {
+		t.Fatalf("lineage state = %+v", state)
+	}
+	rotated := session.DefaultPath(stateDir(getenv), env.now())
+	rotatedState, err := lineage.Load(rotated)
+	if err != nil {
+		t.Fatalf("load rotated lineage: %v", err)
+	}
+	if rotatedState.Worktree != state.Worktree || len(rotatedState.Entries) != 0 {
+		t.Fatalf("rotated lineage state = %+v", rotatedState)
+	}
+}
+
+func TestCandidateLineageSupportsImplicitSessionPath(t *testing.T) {
+	fp := llmtest.New("fake")
+	env, _, errw, getenv := fakeProviderEnv(t, []string{
+		"-model", "claude-opus-4-8", "-candidate-lineage", "-p", "hi",
+	}, fp, "")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit=%d stderr=%q", code, errw.String())
+	}
+	path := session.DefaultPath(stateDir(getenv), env.now())
+	if _, err := lineage.Load(path); err != nil {
+		t.Fatalf("load implicit lineage: %v", err)
+	}
+}
+
+func TestCandidateLineageStillRejectsNonGitBoundary(t *testing.T) {
+	t.Chdir(t.TempDir())
+	fp := llmtest.New("fake")
+	env, _, errw, _ := fakeProviderEnv(t, []string{
+		"-model", "claude-opus-4-8", "-candidate-lineage", "-session", filepath.Join(t.TempDir(), "session"),
+	}, fp, "")
+	if code := run(env); code != ui.ExitRuntime || !strings.Contains(errw.String(), "requires a Git worktree") {
+		t.Fatalf("exit=%d stderr=%q", code, errw.String())
+	}
+	if len(fp.Requests) != 0 {
+		t.Fatalf("model received %d requests before boundary validation", len(fp.Requests))
 	}
 }
 

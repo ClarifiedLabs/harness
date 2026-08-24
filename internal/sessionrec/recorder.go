@@ -11,6 +11,7 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/internal/trajectory"
 )
 
 // Config configures one session Recorder.
@@ -54,6 +55,9 @@ type Config struct {
 	// OnError, when non-nil, is called for every append failure. The first
 	// error is also retained for Err.
 	OnError func(error)
+	// Trajectory receives diagnostics-only host observations after their source
+	// events are durably appended. Nil disables the shadow projection.
+	Trajectory *trajectory.Tracker
 }
 
 // DefaultPromptUsageLine renders the prompt_usage Display line for a session
@@ -348,6 +352,10 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 	if res.IsError {
 		errorExcerpt = session.ErrorExcerpt(res.Text)
 	}
+	var artifactRef string
+	if res.Truncated {
+		artifactRef = session.ToolResultArtifactReference(r.cfg.Prompt, r.turn, res.ForID)
+	}
 	r.Append(session.Event{
 		Type:                session.EventToolResult,
 		Prompt:              r.cfg.Prompt,
@@ -362,6 +370,7 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 		ResultTruncated:     res.Truncated,
 		ResultOriginalBytes: originalBytes,
 		ResultShownBytes:    shownBytes,
+		ArtifactRef:         artifactRef,
 		ResultMetrics:       maps.Clone(res.Metrics),
 		ModelTarget:         pending.model.targetID,
 		Provider:            pending.model.provider,
@@ -416,7 +425,7 @@ func (r *Recorder) ToolDiff(call llm.ToolCall, path, text string) {
 	if r == nil {
 		return
 	}
-	r.Append(session.Event{
+	if err := r.appendEvent(session.Event{
 		Type:    session.EventToolDiff,
 		Prompt:  r.cfg.Prompt,
 		Turn:    r.turn,
@@ -424,7 +433,31 @@ func (r *Recorder) ToolDiff(call llm.ToolCall, path, text string) {
 		Tool:    call.Name,
 		Path:    path,
 		Display: strings.TrimRight(text, "\n"),
-	})
+	}); err == nil && r.cfg.Trajectory != nil {
+		r.cfg.Trajectory.ConfirmModifiedPaths([]string{path})
+	}
+}
+
+// ToolMutation records bounded host-derived mutation paths independently of
+// diff rendering, then advances the shadow projection after durable append.
+func (r *Recorder) ToolMutation(call llm.ToolCall, paths []string) {
+	if r == nil {
+		return
+	}
+	snapshot := ToolMutationSnapshot(paths)
+	if snapshot == nil || len(snapshot.Paths) == 0 {
+		return
+	}
+	if err := r.appendEvent(session.Event{
+		Type:         session.EventToolMutation,
+		Prompt:       r.cfg.Prompt,
+		Turn:         r.turn,
+		ToolID:       call.ID,
+		Tool:         call.Name,
+		ToolMutation: snapshot,
+	}); err == nil && r.cfg.Trajectory != nil {
+		r.cfg.Trajectory.ObserveModifiedPaths(snapshot.Paths)
+	}
 }
 
 // Notice records one status line. turn overrides the recorder's current turn
@@ -517,6 +550,131 @@ func (r *Recorder) HookDiagnostic(diagnostic hooks.Diagnostic) {
 		Turn:           r.turn,
 		HookDiagnostic: HookDiagnosticSnapshot(diagnostic),
 	})
+}
+
+// EvaluatorResult records bounded candidate fitness without free-form hook
+// output. The detailed evaluator evidence remains behind EvidenceRef.
+func (r *Recorder) EvaluatorResult(result hooks.EvaluatorResult) {
+	if r == nil {
+		return
+	}
+	snapshot := EvaluatorResultSnapshot(result)
+	if err := r.appendEvent(session.Event{
+		Type:            session.EventEvaluatorResult,
+		Prompt:          r.cfg.Prompt,
+		Turn:            r.turn,
+		EvaluatorResult: snapshot,
+	}); err == nil && r.cfg.Trajectory != nil {
+		r.cfg.Trajectory.ObserveEvaluation(trajectory.EvaluationInput{
+			Handler:               snapshot.Handler,
+			Accepted:              snapshot.Accepted,
+			Score:                 snapshot.Score,
+			ScoreDirection:        snapshot.ScoreDirection,
+			Candidate:             snapshot.Candidate,
+			RemainingRequirements: snapshot.RemainingRequirements,
+			EvidenceRef:           snapshot.EvidenceRef,
+			Prompt:                r.cfg.Prompt,
+			Turn:                  r.turn,
+		})
+	}
+}
+
+// LineageAdvance records one durable, content-free accepted-lineage receipt.
+// The detailed candidate, score, tree, patch, and evidence metadata live in
+// <session>/lineage/state.json. Returning the append error lets the opt-in
+// workflow fail visibly instead of claiming an unrecorded advancement.
+func (r *Recorder) LineageAdvance(snapshot session.LineageAdvanceSnapshot) error {
+	if r == nil {
+		return nil
+	}
+	return r.appendEvent(session.Event{
+		Type:           session.EventLineageAdvance,
+		Prompt:         r.cfg.Prompt,
+		Turn:           r.turn,
+		LineageAdvance: &snapshot,
+	})
+}
+
+// TryStagnationNudge decides, records, and advances one lane-scoped
+// strategy-reset trigger. It returns true only when the canonical event was
+// persisted, so model-visible control flow never outruns replayable state.
+func (r *Recorder) TryStagnationNudge(threshold int) bool {
+	if r == nil || r.cfg.Trajectory == nil {
+		return false
+	}
+	current := r.cfg.Trajectory.Snapshot()
+	if !trajectory.CanStagnationNudge(current, threshold) {
+		return false
+	}
+	if err := r.appendEvent(session.Event{
+		Type:    session.EventStagnationNudge,
+		Prompt:  r.cfg.Prompt,
+		Turn:    r.turn,
+		Display: StagnationNudgeDisplay(threshold),
+		StagnationNudge: &session.StagnationNudgeSnapshot{
+			Threshold: threshold,
+			Streak:    current.NoImprovementStreak,
+		},
+	}); err != nil {
+		return false
+	}
+	r.cfg.Trajectory.ObserveStagnationNudge()
+	return true
+}
+
+// StagnationNudgeDisplay is the content-free live/replay status line for a
+// delivered trigger.
+func StagnationNudgeDisplay(threshold int) string {
+	return fmt.Sprintf("[strategy reset: evaluator no-improvement threshold %d reached]", threshold)
+}
+
+// SeedTrajectory makes inherited state replayable in a fresh physical child
+// session. Ordinary root sessions derive from their own event stream and do
+// not need a seed.
+func (r *Recorder) SeedTrajectory(state *trajectory.State, purpose string) {
+	if r == nil || state == nil {
+		return
+	}
+	normalized := trajectory.Normalize(state)
+	if err := r.appendEvent(session.Event{
+		Type:       session.EventTrajectorySeed,
+		Prompt:     r.cfg.Prompt,
+		Purpose:    strings.TrimSpace(purpose),
+		Trajectory: &normalized,
+	}); err == nil && r.cfg.Trajectory != nil {
+		r.cfg.Trajectory.Replace(&normalized)
+	}
+}
+
+// Branch records a host-owned conversation branch transition. Callers reset
+// their live projection only when the returned append succeeds.
+func (r *Recorder) Branch(from, to, summary, source string) error {
+	if r == nil {
+		return nil
+	}
+	err := r.appendEvent(session.Event{
+		Type:        session.EventBranch,
+		Prompt:      r.cfg.Prompt,
+		Display:     fmt.Sprintf("[%s: %s → %s; working directory unchanged]", source, shortID(from), shortID(to)),
+		FromEntryID: from,
+		ToEntryID:   to,
+		Purpose:     source,
+		Summary:     summary,
+	})
+	if err == nil && r.cfg.Trajectory != nil {
+		r.cfg.Trajectory.ResetForBranch()
+	}
+	return err
+}
+
+func shortID(id string) string {
+	if id == "" {
+		return "root"
+	}
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 // TurnProgress records diagnostics-only semantic activity after a tool turn.
