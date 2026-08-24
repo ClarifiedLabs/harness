@@ -11,14 +11,10 @@ import (
 
 func main() {
 	switch filepath.Base(os.Args[0]) {
-	case defaultStackVerifierCommand:
-		os.Exit(runDefaultStackVerifier(".", os.Stdin, os.Stdout))
 	case stagnationEvaluatorCommand:
 		os.Exit(runStagnationEvaluator(".", os.Args[1:], os.Stdin, os.Stdout))
 	case stagnationRecoveryCommand:
 		os.Exit(runStagnationRecoveryEvaluator(".", os.Stdin, os.Stdout))
-	case lineageEvaluatorCommand:
-		os.Exit(runLineageEvaluator(".", os.Stdin, os.Stdout))
 	}
 
 	var (

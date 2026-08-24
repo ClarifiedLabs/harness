@@ -558,28 +558,40 @@ func TestSaveLoadRoundTrip(t *testing.T) {
 	s.ParentEntryID = got.ParentEntryID
 	s.ActiveLeaf = got.ActiveLeaf
 	s.Tree = got.Tree
+	s.TrajectoryPolicyDisabled = true // Save alone creates no canonical raw replay.
 	if !reflect.DeepEqual(s, got) {
 		t.Fatalf("round-trip mismatch:\n want %+v\n  got %+v", s, got)
 	}
 }
 
-func TestLoadReconstructsTrajectoryFromCanonicalRawEvents(t *testing.T) {
+func TestLoadReconstructsTrajectoryOnlyFromCanonicalRawEvents(t *testing.T) {
 	s := sampleSession()
-	stale := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
-		Handler: "stale", Accepted: true, Candidate: "candidate:stale", EvidenceRef: "evidence/stale",
-	})
-	s.Trajectory = &stale
+	cached := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{Handler: "cached", Accepted: true})
+	s.Trajectory = &cached
 	dir := filepath.Join(t.TempDir(), "session")
 	if err := s.Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
 	}
+	stateJSON, err := os.ReadFile(filepath.Join(dir, stateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded map[string]json.RawMessage
+	if err := json.Unmarshal(stateJSON, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := encoded["trajectory"]; ok {
+		t.Fatalf("state.json serialized runtime trajectory: %s", stateJSON)
+	}
 
+	zero := 0.0
 	events := []Event{
-		{Type: EventToolMutation, Prompt: 1, Turn: 1, ToolMutation: &ToolMutationSnapshot{Paths: []string{"before.go"}}},
-		{Type: EventEvaluatorResult, Prompt: 1, Turn: 1, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Candidate: "candidate:before", EvidenceRef: "evidence/before"}},
-		{Type: EventBranch, Prompt: 1},
-		{Type: EventToolMutation, Prompt: 2, Turn: 1, ToolMutation: &ToolMutationSnapshot{Paths: []string{"after.go"}}},
-		{Type: EventEvaluatorResult, Prompt: 2, Turn: 1, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Accepted: true, Candidate: "candidate:after", EvidenceRef: "evidence/after"}},
+		{Type: EventToolMutation, ToolMutation: &ToolMutationSnapshot{Paths: []string{"invisible.go"}}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &zero, ScoreDirection: trajectory.ScoreDirectionMaximize, Candidate: "a"}},
+		{Type: EventToolDiff, Path: "invisible.go"},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &zero, ScoreDirection: trajectory.ScoreDirectionMaximize, Candidate: "b"}},
+		{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &zero, ScoreDirection: trajectory.ScoreDirectionMaximize, Candidate: "c"}},
+		{Type: EventStagnationNudge, StagnationNudge: &StagnationNudgeSnapshot{Threshold: 2, Streak: 2}},
 	}
 	for _, event := range events {
 		if err := AppendEvent(dir, event); err != nil {
@@ -594,15 +606,15 @@ func TestLoadReconstructsTrajectoryFromCanonicalRawEvents(t *testing.T) {
 	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, want) {
 		t.Fatalf("reconstructed trajectory = %+v, want %+v", loaded.Trajectory, want)
 	}
-	if loaded.Trajectory.TotalEvaluations != 2 || loaded.Trajectory.BranchResets != 1 || loaded.Trajectory.CurrentCandidateID != "candidate:after" || !reflect.DeepEqual(loaded.Trajectory.ModifiedPaths, []string{"after.go"}) {
-		t.Fatalf("reconstructed lifecycle = %+v", loaded.Trajectory)
+	if loaded.Trajectory.TotalEvaluations != 3 || loaded.Trajectory.NoImprovementStreak != 2 || !loaded.Trajectory.StagnationNudgeIssued || loaded.Trajectory.StagnationNudges != 1 || trajectory.CanStagnationNudge(*loaded.Trajectory, 2) {
+		t.Fatalf("reconstructed one-shot = %+v", loaded.Trajectory)
 	}
 }
 
-func TestLoadKeepsSavedTrajectoryWhenShadowReplayIsMalformed(t *testing.T) {
+func TestLoadMalformedTrajectoryReplayFailsClosedWithoutCachedPolicy(t *testing.T) {
 	s := sampleSession()
-	saved := trajectory.ApplyModifiedPaths(trajectory.State{}, []string{"saved.go"})
-	s.Trajectory = &saved
+	cached := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{Handler: "cached", Accepted: true})
+	s.Trajectory = &cached
 	dir := filepath.Join(t.TempDir(), "session")
 	if err := s.Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -612,20 +624,66 @@ func TestLoadKeepsSavedTrajectoryWhenShadowReplayIsMalformed(t *testing.T) {
 	}
 	loaded, err := Load(dir)
 	if err != nil {
-		t.Fatalf("Load should fail open for shadow replay: %v", err)
+		t.Fatalf("Load should preserve the conversation: %v", err)
 	}
-	want := trajectory.Normalize(&saved)
-	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, want) {
-		t.Fatalf("fallback trajectory = %+v, want %+v", loaded.Trajectory, want)
+	if loaded.Trajectory != nil || !loaded.TrajectoryPolicyDisabled || !transcriptsEqualMessages(loaded.Messages, s.Messages) {
+		t.Fatalf("malformed replay loaded cached policy or lost conversation: trajectory=%+v disabled=%v messages=%+v", loaded.Trajectory, loaded.TrajectoryPolicyDisabled, loaded.Messages)
 	}
 }
 
-func TestLoadKeepsSavedTrajectoryWhenRawHasNoTrajectoryTransitions(t *testing.T) {
+func TestLoadMalformedStagnationNudgeFailsClosed(t *testing.T) {
+	zero := 0.0
+	for _, tt := range []struct {
+		name  string
+		nudge *StagnationNudgeSnapshot
+	}{
+		{name: "missing payload"},
+		{name: "invalid threshold", nudge: &StagnationNudgeSnapshot{Threshold: 0, Streak: 2}},
+		{name: "streak below threshold", nudge: &StagnationNudgeSnapshot{Threshold: 2, Streak: 1}},
+		{name: "streak inconsistent with state", nudge: &StagnationNudgeSnapshot{Threshold: 2, Streak: 3}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "session")
+			if err := sampleSession().Save(dir); err != nil {
+				t.Fatal(err)
+			}
+			for _, candidate := range []string{"a", "b", "c"} {
+				if err := AppendEvent(dir, Event{Type: EventEvaluatorResult, EvaluatorResult: &EvaluatorResultSnapshot{Handler: "verify", Score: &zero, ScoreDirection: trajectory.ScoreDirectionMaximize, Candidate: candidate}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := AppendEvent(dir, Event{Type: EventStagnationNudge, StagnationNudge: tt.nudge}); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := Load(dir)
+			if err != nil {
+				t.Fatalf("Load should preserve session: %v", err)
+			}
+			if loaded.Trajectory != nil || !loaded.TrajectoryPolicyDisabled {
+				t.Fatalf("malformed nudge replay remained active: trajectory=%+v disabled=%v", loaded.Trajectory, loaded.TrajectoryPolicyDisabled)
+			}
+		})
+	}
+}
+
+func TestLoadMissingTrajectoryReplayFailsClosed(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "session")
+	if err := sampleSession().Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(dir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.Trajectory != nil || !loaded.TrajectoryPolicyDisabled {
+		t.Fatalf("missing raw replay remained active: trajectory=%+v disabled=%v", loaded.Trajectory, loaded.TrajectoryPolicyDisabled)
+	}
+}
+
+func TestLoadPolicyFreeTrajectoryReplayStartsFresh(t *testing.T) {
 	s := sampleSession()
-	saved := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
-		Handler: "verify", Accepted: true, Candidate: "candidate:saved", EvidenceRef: "evidence/saved",
-	})
-	s.Trajectory = &saved
+	cached := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{Handler: "cached", Accepted: true})
+	s.Trajectory = &cached
 	dir := filepath.Join(t.TempDir(), "session")
 	if err := s.Save(dir); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -637,9 +695,8 @@ func TestLoadKeepsSavedTrajectoryWhenRawHasNoTrajectoryTransitions(t *testing.T)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want := trajectory.Normalize(&saved)
-	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, want) {
-		t.Fatalf("trajectory without new transitions = %+v, want %+v", loaded.Trajectory, want)
+	if loaded.Trajectory != nil || loaded.TrajectoryPolicyDisabled {
+		t.Fatalf("policy-free replay did not start fresh: trajectory=%+v disabled=%v", loaded.Trajectory, loaded.TrajectoryPolicyDisabled)
 	}
 }
 

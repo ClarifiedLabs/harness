@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -421,7 +420,10 @@ func TestDelegateImplementationModeAddsStaticPromptAndPersistsMode(t *testing.T)
 	})
 	sessionPath := filepath.Join(t.TempDir(), "session")
 	tool := New(func() Runtime {
-		return Runtime{Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath}
+		return Runtime{
+			Provider: fp, Model: "model", Registry: llm.NewRegistry(nil), SessionPath: sessionPath,
+			RuntimeProfile: session.RuntimeProfile{RetentionPolicy: "auto", StagnationNudge: true},
+		}
 	}, func(runtime Runtime, _ string) (Launch, error) {
 		return Launch{Provider: runtime.Provider, Model: runtime.Model, Registry: runtime.Registry, Tools: childTools}, nil
 	}, Options{MaxTurns: 4})
@@ -453,9 +455,20 @@ func TestDelegateImplementationModeAddsStaticPromptAndPersistsMode(t *testing.T)
 	if err != nil || len(children) != 1 {
 		t.Fatalf("children = %v, err = %v", children, err)
 	}
-	meta := readDelegateChildMeta(t, filepath.Join(sessionPath, "children", children[0].Name()))
+	childDir := filepath.Join(sessionPath, "children", children[0].Name())
+	meta := readDelegateChildMeta(t, childDir)
 	if meta.Mode != ModeImplementation {
 		t.Fatalf("child mode = %q, want implementation", meta.Mode)
+	}
+	if meta.Runtime.StagnationNudge || meta.Runtime.RetentionPolicy != "auto" {
+		t.Fatalf("child metadata runtime = %+v", meta.Runtime)
+	}
+	childSession, err := session.Load(childDir)
+	if err != nil {
+		t.Fatalf("load child session: %v", err)
+	}
+	if childSession.Runtime.StagnationNudge || childSession.Runtime.RetentionPolicy != "auto" {
+		t.Fatalf("child session runtime = %+v", childSession.Runtime)
 	}
 }
 
@@ -494,16 +507,6 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 		t.Fatalf("source Run: %v", err)
 	}
 	sourceDir := session.ChildSessionDir(fixture.sessionPath, "source")
-	trajectoryScore := 0.5
-	if err := session.AppendEvent(sourceDir, session.Event{
-		Type: session.EventEvaluatorResult, Prompt: 1, Turn: 2,
-		EvaluatorResult: &session.EvaluatorResultSnapshot{
-			Handler: "verify", Accepted: true, Score: &trajectoryScore,
-			Candidate: "candidate:source", EvidenceRef: "evidence/source",
-		},
-	}); err != nil {
-		t.Fatalf("append source trajectory fixture: %v", err)
-	}
 	continued, err := fixture.runner.Run(context.Background(), RunRequest{
 		Task:            "finish and verify it",
 		ContinueChildID: "source",
@@ -529,7 +532,7 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 		t.Fatalf("continuation delta messages = %+v", request.Messages)
 	}
 	if strings.Contains(strings.Join(request.RequestContext, "\n"), "candidate:source") {
-		t.Fatalf("continuation exposed host trajectory context = %+v", request.RequestContext)
+		t.Fatalf("continuation exposed host policy context = %+v", request.RequestContext)
 	}
 
 	continuedDir := session.ChildSessionDir(fixture.sessionPath, "continued")
@@ -549,12 +552,6 @@ func TestDelegateContinuationRestoresCompatibleTerminalChildIntoFreshSession(t *
 			sourceState.ProxySessionID,
 			sourceState.CacheAffinityID,
 		)
-	}
-	if sourceState.Trajectory == nil || sourceState.Trajectory.CurrentCandidateID != "candidate:source" || sourceState.Trajectory.TotalEvaluations != 1 {
-		t.Fatalf("source trajectory = %+v", sourceState.Trajectory)
-	}
-	if continuedState.Trajectory == nil || !reflect.DeepEqual(*continuedState.Trajectory, *sourceState.Trajectory) {
-		t.Fatalf("continued trajectory = %+v, want inherited %+v", continuedState.Trajectory, sourceState.Trajectory)
 	}
 	if continuedState.ResponseState == nil ||
 		continuedState.ResponseState.PreviousResponseID != "resp-continued" ||
@@ -840,28 +837,6 @@ func TestDelegateContinuationRejectsRetentionPolicyChange(t *testing.T) {
 	}, nil)
 	if err == nil || !strings.Contains(err.Error(), "provider, model, prompt, tools, or runtime policy changed") {
 		t.Fatalf("retention-policy mismatch error = %v", err)
-	}
-	if len(fixture.provider.Requests) != 1 {
-		t.Fatalf("rejected continuation made %d model requests, want source request only", len(fixture.provider.Requests))
-	}
-}
-
-func TestDelegateContinuationRejectsStagnationNudgePolicyChange(t *testing.T) {
-	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{
-		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "source done"}},
-		Stop:   llm.StopEndTurn,
-	})
-	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "source", ChildID: "source"}, nil); err != nil {
-		t.Fatalf("source Run: %v", err)
-	}
-	fixture.runner.opts.StagnationNudge = true
-	_, err := fixture.runner.Run(context.Background(), RunRequest{
-		Task:            "continue",
-		ContinueChildID: "source",
-		ChildID:         "target",
-	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "provider, model, prompt, tools, or runtime policy changed") {
-		t.Fatalf("stagnation-nudge runtime mismatch error = %v", err)
 	}
 	if len(fixture.provider.Requests) != 1 {
 		t.Fatalf("rejected continuation made %d model requests, want source request only", len(fixture.provider.Requests))
@@ -2043,7 +2018,7 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 		t.Fatalf("child runtime safety fields = depth %d tokens %d cost %v", snapshot.Depth, snapshot.MaxPromptTokens, snapshot.MaxPromptCostUSD)
 	}
 	if snapshot.ParentChildID != "child-1" || snapshot.SessionPath != "session" {
-		t.Fatalf("child runtime lineage = parent %q session %q", snapshot.ParentChildID, snapshot.SessionPath)
+		t.Fatalf("child runtime ancestry = parent %q session %q", snapshot.ParentChildID, snapshot.SessionPath)
 	}
 	if want := childCacheAffinityID("parent-cache", "child-1"); snapshot.CacheAffinityID != want {
 		t.Fatalf("child runtime cache affinity = %q, want %q", snapshot.CacheAffinityID, want)
@@ -2063,7 +2038,7 @@ func TestDelegateRuntimeRebindingIncrementsDepthAndPreservesBudgets(t *testing.T
 	}
 	continuedSnapshot := continuedRebound.runner.snapshot()
 	if continuedSnapshot.ParentChildID != "child-2" || continuedSnapshot.CacheAffinityID != "retained-cache" {
-		t.Fatalf("continued child runtime lineage/cache = parent %q cache %q", continuedSnapshot.ParentChildID, continuedSnapshot.CacheAffinityID)
+		t.Fatalf("continued child runtime ancestry/cache = parent %q cache %q", continuedSnapshot.ParentChildID, continuedSnapshot.CacheAffinityID)
 	}
 }
 
@@ -2130,7 +2105,7 @@ func TestNestedDelegateSharesLiveRegistryUntilIndependentCompletion(t *testing.T
 	}
 	outer, nested := snapshot.Active[0], snapshot.Active[1]
 	if outer.Depth != 1 || nested.Depth != 2 || nested.ParentID != outer.ID || outer.DisplayID != "d1" || nested.DisplayID != "d2" {
-		t.Fatalf("nested registry lineage = outer %+v nested %+v", outer, nested)
+		t.Fatalf("nested registry ancestry = outer %+v nested %+v", outer, nested)
 	}
 
 	close(releaseNested)

@@ -34,8 +34,9 @@ import (
 )
 
 // Version is the on-disk schema version. v7 stores independent latest-plan and
-// advisory-TODO projections plus an additive optional shadow trajectory. There
-// is intentionally no v6 migration reader.
+// advisory-TODO projections. Runtime trajectory policy is reconstructed from
+// raw events and is never serialized here. There is intentionally no v6
+// migration reader.
 const Version = 7
 
 // ReliabilityTelemetryVersion marks raw events and child metadata written with
@@ -84,8 +85,12 @@ type Session struct {
 	Plan          *plan.Plan         `json:"plan,omitempty"`
 	Todos         []todo.Item        `json:"todos,omitempty"`
 	Goal          *goal.State        `json:"goal,omitempty"`
-	Trajectory    *trajectory.State  `json:"trajectory,omitempty"`
-	Usage         UsageTotals        `json:"usage"`
+	// Trajectory is runtime-only stagnation policy reconstructed from raw.ndjson.
+	Trajectory *trajectory.State `json:"-"`
+	// TrajectoryPolicyDisabled fails closed for this process when resumed raw
+	// policy telemetry is missing or malformed.
+	TrajectoryPolicyDisabled bool        `json:"-"`
+	Usage                    UsageTotals `json:"usage"`
 	// UsageByModel breaks usage and cost down per "provider/model" so a session
 	// that switches models still reports accurate per-model cost. Usage remains
 	// the authoritative session aggregate.
@@ -123,7 +128,6 @@ type RuntimeProfile struct {
 	Prewarm                   bool   `json:"prewarm,omitempty"`
 	SearchBackend             string `json:"search_backend,omitempty"`
 	StagnationNudge           bool   `json:"stagnation_nudge,omitempty"`
-	CandidateLineage          bool   `json:"candidate_lineage,omitempty"`
 }
 
 // RecoveryInfo describes an active-turn checkpoint applied by Load.
@@ -236,10 +240,6 @@ func (s Session) Save(dir string) error {
 		return fmt.Errorf("session: create dir: %w", err)
 	}
 	s.Version = Version
-	if s.Trajectory != nil {
-		normalized := trajectory.Normalize(s.Trajectory)
-		s.Trajectory = &normalized
-	}
 	s.Messages = stampMissingMessageTimes(s.Messages, sessionTimestamp(s.Updated, s.Created))
 	// A save may happen after an interrupt while tool calls are still open. Store
 	// the same synthetic interrupted results Load historically supplied so every
@@ -695,9 +695,7 @@ type Event struct {
 	HookDiagnostic      *HookDiagnosticSnapshot  `json:"hook_diagnostic,omitempty"`
 	EvaluatorResult     *EvaluatorResultSnapshot `json:"evaluator_result,omitempty"`
 	StagnationNudge     *StagnationNudgeSnapshot `json:"stagnation_nudge,omitempty"`
-	LineageAdvance      *LineageAdvanceSnapshot  `json:"lineage_advance,omitempty"`
 	ToolMutation        *ToolMutationSnapshot    `json:"tool_mutation,omitempty"`
-	Trajectory          *trajectory.State        `json:"trajectory,omitempty"`
 	TurnProgress        *TurnProgressSnapshot    `json:"turn_progress,omitempty"`
 	TerminationReason   string                   `json:"termination_reason,omitempty"`
 	ClosureTrigger      string                   `json:"closure_trigger,omitempty"`
@@ -808,16 +806,6 @@ type EvaluatorResultSnapshot struct {
 type StagnationNudgeSnapshot struct {
 	Threshold int `json:"threshold"`
 	Streak    int `json:"streak"`
-}
-
-// LineageAdvanceSnapshot records only bounded artifact sizes and the linear
-// sequence relationship. Candidate identifiers, scores, trees, evidence
-// references, and patch bodies remain in the explicit lineage artifact.
-type LineageAdvanceSnapshot struct {
-	Sequence       int   `json:"sequence"`
-	ParentSequence int   `json:"parent_sequence,omitempty"`
-	PatchBytes     int64 `json:"patch_bytes,omitempty"`
-	EvidenceBytes  int64 `json:"evidence_bytes,omitempty"`
 }
 
 // ToolMutationSnapshot is the bounded host-derived set of paths a successful
@@ -939,9 +927,7 @@ const (
 	EventHookDiagnostic       = "hook_diagnostic"
 	EventEvaluatorResult      = "evaluator_result"
 	EventStagnationNudge      = "stagnation_nudge"
-	EventLineageAdvance       = "lineage_advance"
 	EventToolMutation         = "tool_mutation"
-	EventTrajectorySeed       = "trajectory_seed"
 )
 
 // AppendEvent appends ev as one JSON line to raw.ndjson under dir. A close

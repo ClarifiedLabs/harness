@@ -419,13 +419,13 @@ func (r *Recorder) BackgroundJobResultWithIdentity(id, tool, status string, dura
 	}, true)
 }
 
-// ToolDiff records a rendered unified diff with the mutated file path so
-// replay can colorize it.
+// ToolDiff records rendered mutation telemetry for replay. It never advances
+// stagnation policy.
 func (r *Recorder) ToolDiff(call llm.ToolCall, path, text string) {
 	if r == nil {
 		return
 	}
-	if err := r.appendEvent(session.Event{
+	_ = r.appendEvent(session.Event{
 		Type:    session.EventToolDiff,
 		Prompt:  r.cfg.Prompt,
 		Turn:    r.turn,
@@ -433,13 +433,11 @@ func (r *Recorder) ToolDiff(call llm.ToolCall, path, text string) {
 		Tool:    call.Name,
 		Path:    path,
 		Display: strings.TrimRight(text, "\n"),
-	}); err == nil && r.cfg.Trajectory != nil {
-		r.cfg.Trajectory.ConfirmModifiedPaths([]string{path})
-	}
+	})
 }
 
-// ToolMutation records bounded host-derived mutation paths independently of
-// diff rendering, then advances the shadow projection after durable append.
+// ToolMutation records bounded host-derived mutation telemetry independently
+// of diff rendering. It never advances stagnation policy.
 func (r *Recorder) ToolMutation(call llm.ToolCall, paths []string) {
 	if r == nil {
 		return
@@ -448,16 +446,14 @@ func (r *Recorder) ToolMutation(call llm.ToolCall, paths []string) {
 	if snapshot == nil || len(snapshot.Paths) == 0 {
 		return
 	}
-	if err := r.appendEvent(session.Event{
+	_ = r.appendEvent(session.Event{
 		Type:         session.EventToolMutation,
 		Prompt:       r.cfg.Prompt,
 		Turn:         r.turn,
 		ToolID:       call.ID,
 		Tool:         call.Name,
 		ToolMutation: snapshot,
-	}); err == nil && r.cfg.Trajectory != nil {
-		r.cfg.Trajectory.ObserveModifiedPaths(snapshot.Paths)
-	}
+	})
 }
 
 // Notice records one status line. turn overrides the recorder's current turn
@@ -572,27 +568,8 @@ func (r *Recorder) EvaluatorResult(result hooks.EvaluatorResult) {
 			ScoreDirection:        snapshot.ScoreDirection,
 			Candidate:             snapshot.Candidate,
 			RemainingRequirements: snapshot.RemainingRequirements,
-			EvidenceRef:           snapshot.EvidenceRef,
-			Prompt:                r.cfg.Prompt,
-			Turn:                  r.turn,
 		})
 	}
-}
-
-// LineageAdvance records one durable, content-free accepted-lineage receipt.
-// The detailed candidate, score, tree, patch, and evidence metadata live in
-// <session>/lineage/state.json. Returning the append error lets the opt-in
-// workflow fail visibly instead of claiming an unrecorded advancement.
-func (r *Recorder) LineageAdvance(snapshot session.LineageAdvanceSnapshot) error {
-	if r == nil {
-		return nil
-	}
-	return r.appendEvent(session.Event{
-		Type:           session.EventLineageAdvance,
-		Prompt:         r.cfg.Prompt,
-		Turn:           r.turn,
-		LineageAdvance: &snapshot,
-	})
 }
 
 // TryStagnationNudge decides, records, and advances one lane-scoped
@@ -626,24 +603,6 @@ func (r *Recorder) TryStagnationNudge(threshold int) bool {
 // delivered trigger.
 func StagnationNudgeDisplay(threshold int) string {
 	return fmt.Sprintf("[strategy reset: evaluator no-improvement threshold %d reached]", threshold)
-}
-
-// SeedTrajectory makes inherited state replayable in a fresh physical child
-// session. Ordinary root sessions derive from their own event stream and do
-// not need a seed.
-func (r *Recorder) SeedTrajectory(state *trajectory.State, purpose string) {
-	if r == nil || state == nil {
-		return
-	}
-	normalized := trajectory.Normalize(state)
-	if err := r.appendEvent(session.Event{
-		Type:       session.EventTrajectorySeed,
-		Prompt:     r.cfg.Prompt,
-		Purpose:    strings.TrimSpace(purpose),
-		Trajectory: &normalized,
-	}); err == nil && r.cfg.Trajectory != nil {
-		r.cfg.Trajectory.Replace(&normalized)
-	}
 }
 
 // Branch records a host-owned conversation branch transition. Callers reset

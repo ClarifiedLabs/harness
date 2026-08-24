@@ -14,13 +14,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"harness/internal/agent"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/tools"
-	"harness/internal/trajectory"
 )
 
 // pathArgKeys names tool-argument keys whose string values are treated as
@@ -557,14 +558,55 @@ func EvaluatorResultSnapshot(result hooks.EvaluatorResult) *session.EvaluatorRes
 	return snapshot
 }
 
-// ToolMutationSnapshot bounds and deduplicates host-derived mutation paths
-// using the same normalization as the shadow trajectory projection.
+const (
+	maxToolMutationPaths     = 32
+	maxToolMutationPathBytes = 512
+)
+
+// ToolMutationSnapshot locally bounds and deduplicates host-derived mutation
+// paths. Mutation telemetry has no dependency on or projection into trajectory
+// policy state.
 func ToolMutationSnapshot(paths []string) *session.ToolMutationSnapshot {
-	state := trajectory.ApplyModifiedPaths(trajectory.State{}, paths)
-	if len(state.ModifiedPaths) == 0 {
+	bounded := make([]string, 0, min(len(paths), maxToolMutationPaths))
+	seen := make(map[string]struct{}, min(len(paths), maxToolMutationPaths))
+	for _, path := range paths {
+		path = boundedToolMutationPath(path)
+		if path == "" {
+			continue
+		}
+		if _, ok := seen[path]; ok {
+			continue
+		}
+		seen[path] = struct{}{}
+		bounded = append(bounded, path)
+		if len(bounded) == maxToolMutationPaths {
+			break
+		}
+	}
+	if len(bounded) == 0 {
 		return nil
 	}
-	return &session.ToolMutationSnapshot{Paths: append([]string(nil), state.ModifiedPaths...)}
+	return &session.ToolMutationSnapshot{Paths: bounded}
+}
+
+func boundedToolMutationPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	for _, r := range path {
+		if unicode.IsControl(r) {
+			return ""
+		}
+	}
+	if len(path) <= maxToolMutationPathBytes {
+		return path
+	}
+	cut := maxToolMutationPathBytes
+	for cut > 0 && !utf8.ValidString(path[:cut]) {
+		cut--
+	}
+	return strings.TrimSpace(path[:cut])
 }
 
 // TurnProgressSnapshot projects diagnostics-only progress without result bodies

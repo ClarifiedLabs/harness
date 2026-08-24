@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"harness/internal/config"
-	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/tools"
@@ -75,36 +74,6 @@ func TestValidateMetricsModelRejectsAgentOverride(t *testing.T) {
 	}
 	if err := validateMetricsModel("requested:model", metrics{ModelTarget: "requested:model"}); err != nil {
 		t.Fatalf("validateMetricsModel matching target: %v", err)
-	}
-}
-
-func TestCollectMetricsCountsCandidateLineageWithoutContent(t *testing.T) {
-	dir := t.TempDir()
-	state := session.Session{Messages: []llm.Message{{
-		Role: llm.RoleAssistant, Phase: llm.AssistantPhaseFinal,
-		Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "done"}},
-	}}}
-	if err := state.Save(dir); err != nil {
-		t.Fatal(err)
-	}
-	score10, score20 := 10.0, 20.0
-	for _, event := range []session.Event{
-		{Type: session.EventEvaluatorResult, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: lineageEvaluatorHandler, Accepted: true, Score: &score10}},
-		{Type: session.EventLineageAdvance, LineageAdvance: &session.LineageAdvanceSnapshot{Sequence: 1, PatchBytes: 320, EvidenceBytes: 40}},
-		{Type: session.EventEvaluatorResult, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: lineageEvaluatorHandler}},
-		{Type: session.EventEvaluatorResult, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: lineageEvaluatorHandler, Accepted: true, Score: &score20}},
-		{Type: session.EventLineageAdvance, LineageAdvance: &session.LineageAdvanceSnapshot{Sequence: 2, ParentSequence: 1, PatchBytes: 180, EvidenceBytes: 60}},
-	} {
-		if err := session.AppendEvent(dir, event); err != nil {
-			t.Fatal(err)
-		}
-	}
-	m, err := collectMetrics(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if m.LineageEvaluatorResults != 3 || m.LineageEvaluatorAccepts != 2 || m.LineageEvaluatorRejections != 1 || !reflect.DeepEqual(m.LineageScoreProgression, []float64{10, 20}) || m.LineageAdvances != 2 || m.LineagePatchBytes != 500 || m.LineageEvidenceBytes != 100 {
-		t.Fatalf("candidate lineage metrics = %+v", m)
 	}
 }
 
@@ -323,7 +292,7 @@ func TestToolAccuracyCasesRegistered(t *testing.T) {
 
 func TestRetiredExperimentalCasesAreNotRegistered(t *testing.T) {
 	cases := allCases()
-	for _, name := range []string{"trajectory_memory", "conditional_supervisor", "lineage_recovery", "kv_lineage_recovery"} {
+	for _, name := range []string{"trajectory_memory", "conditional_supervisor"} {
 		if _, ok := cases[name]; ok {
 			t.Errorf("retired case %q remains registered", name)
 		}
@@ -554,168 +523,6 @@ func TestScoreStagnationRecoveryRequiresExactPostNudgeRepair(t *testing.T) {
 	}
 }
 
-func TestCandidateLineageCaseChangesOnlyInvocationAuthorization(t *testing.T) {
-	c := allCases()["candidate_lineage"]
-	if c.Setup == nil || c.Score == nil || c.Acceptance != acceptanceLineage || !c.RestartBetweenPrompts || len(c.RestartPhases) != lineagePhaseCount || c.HelperCommand != lineageEvaluatorCommand {
-		t.Fatalf("candidate lineage case = %+v", c)
-	}
-	baseline, candidate := c.variant("baseline"), c.variant("candidate")
-	if baseline.Agent != candidate.Agent || baseline.Config != candidate.Config || baseline.Helper != candidate.Helper {
-		t.Fatalf("model-facing variants differ: baseline=%+v candidate=%+v", baseline, candidate)
-	}
-	if len(baseline.Args) != 0 || !reflect.DeepEqual(candidate.Args, []string{"-candidate-lineage"}) {
-		t.Fatalf("variant args: baseline=%v candidate=%v", baseline.Args, candidate.Args)
-	}
-	if variantPromptDigest(c, "baseline") == variantPromptDigest(c, "candidate") {
-		t.Fatal("variant prompt contracts did not bind the invocation-only treatment")
-	}
-}
-
-func TestLineageEvaluatorEmitsAcceptedScoresAndRepairEvidence(t *testing.T) {
-	dir := t.TempDir()
-	cmd := exec.Command("git", "init", "-q")
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v: %s", err, out)
-	}
-	if err := setupCandidateLineage(dir); err != nil {
-		t.Fatal(err)
-	}
-	candidatePath := filepath.Join(dir, lineageFixture, lineageCandidateFile)
-	var rejected bytes.Buffer
-	if code := runLineageEvaluator(dir, strings.NewReader(`{"prompt_id":1,"can_block":true}`), &rejected); code != 0 {
-		t.Fatalf("rejected helper exit = %d", code)
-	}
-	var rejectedResult lineageEvaluatorOutput
-	if err := json.Unmarshal(rejected.Bytes(), &rejectedResult); err != nil {
-		t.Fatal(err)
-	}
-	if rejectedResult.Accepted || rejectedResult.Score != nil || rejectedResult.EvidenceRef != lineageEvidenceRef(1) || rejectedResult.Reason == "" {
-		t.Fatalf("rejected evaluator result = %+v", rejectedResult)
-	}
-	for phase := 1; phase <= lineagePhaseCount; phase++ {
-		if err := os.WriteFile(candidatePath, []byte(lineageAcceptedCandidates[phase-1]), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		var stdout bytes.Buffer
-		payload := fmt.Sprintf(`{"prompt_id":%d,"can_block":true}`, phase)
-		if code := runLineageEvaluator(dir, strings.NewReader(payload), &stdout); code != 0 {
-			t.Fatalf("phase %d helper exit = %d", phase, code)
-		}
-		var got lineageEvaluatorOutput
-		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-			t.Fatal(err)
-		}
-		if !got.Accepted || got.Score == nil || *got.Score != lineageScores[phase-1] || got.ScoreDirection != lineage.ScoreDirectionMaximize || got.Candidate != candidateID(lineageAcceptedCandidates[phase-1]) || got.EvidenceRef != lineageEvidenceRef(phase) {
-			t.Fatalf("phase %d evaluator result = %+v", phase, got)
-		}
-	}
-}
-
-func TestScoreCandidateLineageRequiresStrictRecoverableArchive(t *testing.T) {
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git unavailable")
-	}
-	repo := filepath.Join(t.TempDir(), "repo")
-	if err := os.MkdirAll(repo, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	runGit := func(dir string, args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	runGit(repo, "init", "-q")
-	runGit(repo, "config", "user.email", "flowbench@example.test")
-	runGit(repo, "config", "user.name", "Flowbench Test")
-	if err := os.WriteFile(filepath.Join(repo, "seed"), []byte("seed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runGit(repo, "add", "seed")
-	runGit(repo, "commit", "-qm", "test: seed")
-	worktree := filepath.Join(t.TempDir(), "worktree")
-	runGit(repo, "worktree", "add", "--detach", worktree, "HEAD")
-	if err := setupCandidateLineage(worktree); err != nil {
-		t.Fatal(err)
-	}
-	sessionDir := filepath.Join(t.TempDir(), "session")
-	manager, err := lineage.Open(worktree, sessionDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	candidatePath := filepath.Join(worktree, lineageFixture, lineageCandidateFile)
-	metric := metrics{
-		LineageEvaluatorResults: lineagePhaseCount,
-		LineageEvaluatorAccepts: lineagePhaseCount,
-		LineageScoreProgression: append([]float64(nil), lineageScores...),
-	}
-	for phase := 1; phase <= lineagePhaseCount; phase++ {
-		if phase > 1 {
-			if err := lineageTransition(phase)(worktree); err != nil {
-				t.Fatal(err)
-			}
-		}
-		if err := os.WriteFile(candidatePath, []byte(lineageAcceptedCandidates[phase-1]), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		scoreValue := lineageScores[phase-1]
-		advance, err := manager.Observe(lineage.Input{
-			Handler: lineageEvaluatorHandler, Accepted: true, Score: &scoreValue, ScoreDirection: lineage.ScoreDirectionMaximize,
-			Candidate: candidateID(lineageAcceptedCandidates[phase-1]), EvidenceRef: lineageEvidenceRef(phase), Prompt: phase, Turn: 1,
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if phase == 2 {
-			if advance != nil {
-				t.Fatalf("lower-scoring phase advanced: %+v", advance)
-			}
-			continue
-		}
-		if advance == nil {
-			t.Fatalf("phase %d did not advance", phase)
-		}
-		metric.LineageAdvances++
-		metric.LineagePatchBytes += advance.PatchBytes
-		metric.LineageEvidenceBytes += advance.EvidenceBytes
-	}
-	valid := scoreInput{Worktree: worktree, SessionDir: sessionDir, Metrics: metric}
-	if got := scoreCandidateLineage(valid); !got.Pass {
-		t.Fatalf("valid lineage score = %+v", got)
-	}
-	baseline := valid
-	baseline.SessionDir = filepath.Join(t.TempDir(), "baseline-session")
-	baseline.Metrics.LineageAdvances = 0
-	baseline.Metrics.LineagePatchBytes = 0
-	baseline.Metrics.LineageEvidenceBytes = 0
-	if got := scoreCandidateLineage(baseline); !got.Pass {
-		t.Fatalf("model-equivalent baseline score = %+v", got)
-	}
-	invalid := valid
-	invalid.Metrics.LineageAdvances = 1
-	if got := scoreCandidateLineage(invalid); got.Pass || !containsAnyFold(strings.Join(got.Reasons, "\n"), "telemetry") {
-		t.Fatalf("incomplete lineage score = %+v", got)
-	}
-}
-
-func TestCandidateLineageAcceptanceRequiresCandidateOnlyArchive(t *testing.T) {
-	c := candidateLineageCase()
-	records := []runRecord{
-		{Model: "provider:model", Repetition: 1, Variant: "baseline", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 1000, Turns: 3, LineageEvaluatorResults: 3, LineageEvaluatorAccepts: 3, LineageScoreProgression: append([]float64(nil), lineageScores...)}},
-		{Model: "provider:model", Repetition: 1, Variant: "candidate", Score: score{Pass: true}, Metrics: metrics{TotalTokens: 1000, Turns: 3, LineageEvaluatorResults: 3, LineageEvaluatorAccepts: 3, LineageScoreProgression: append([]float64(nil), lineageScores...), LineageAdvances: 2, LineagePatchBytes: 400, LineageEvidenceBytes: 200}},
-	}
-	agg := summarize(c, records)
-	if !agg.Accepted || agg.Adoptions != 1 || agg.CandidateLineageRuns != 1 || agg.CandidateLineageAdvances != 2 || agg.BaselineUnexpectedLineageRuns != 0 {
-		t.Fatalf("valid lineage aggregate = %+v", agg)
-	}
-	records[0].Metrics.LineageAdvances = 1
-	if got := summarize(c, records); got.Accepted || !containsAnyFold(strings.Join(got.Failures, "\n"), "baseline") {
-		t.Fatalf("baseline lineage aggregate = %+v", got)
-	}
-}
-
 func TestRunRestartBenchmarkUsesSameSessionAcrossProcesses(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-harness")
@@ -748,15 +555,15 @@ func TestRunRestartBenchmarkUsesSameSessionAcrossProcesses(t *testing.T) {
 func TestRunRestartBenchmarkRunsExplicitPhaseSequence(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "fake-harness")
-	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\ncase \" $* \" in *\" -p \"*) ;; *) mkdir -p \"$COMPACTIONS\"; : > \"$COMPACTIONS/0001.meta.json\" ;; esac\nprintf 'ran %s\\n' \"$*\"\n"
+	body := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$CALLS\"\nprintf 'ran %s\\n' \"$*\"\n"
 	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	calls := filepath.Join(dir, "calls.txt")
-	env := append(os.Environ(), "CALLS="+calls, "COMPACTIONS="+filepath.Join(dir, "session", "compactions"))
+	env := append(os.Environ(), "CALLS="+calls)
 	phases := []benchmarkPhase{
 		{Prompt: "repair checkpoint"},
-		{Prompt: "validate checkpoint", CompactAfter: true, After: func(string) error { return os.WriteFile(filepath.Join(dir, "drifted"), []byte("yes\n"), 0o600) }},
+		{Prompt: "validate checkpoint"},
 		{Prompt: "repair final"},
 		{Prompt: "validate final"},
 	}
@@ -770,62 +577,20 @@ func TestRunRestartBenchmarkRunsExplicitPhaseSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != len(phases)+1 {
+	if len(lines) != len(phases) {
 		t.Fatalf("restart calls = %q", lines)
 	}
-	line := 0
 	for i, phase := range phases {
 		mode := "-resume " + filepath.Join(dir, "session")
 		if i == 0 {
 			mode = "-session " + filepath.Join(dir, "session")
 		}
-		if !strings.Contains(lines[line], mode) || !strings.Contains(lines[line], "-p "+phase.Prompt) {
-			t.Fatalf("phase %d call = %q, want %q and prompt %q", i+1, lines[line], mode, phase.Prompt)
-		}
-		line++
-		if phase.CompactAfter {
-			if !strings.Contains(lines[line], "-resume "+filepath.Join(dir, "session")) || strings.Contains(lines[line], " -p ") {
-				t.Fatalf("compaction control call = %q", lines[line])
-			}
-			line++
+		if !strings.Contains(lines[i], mode) || !strings.Contains(lines[i], "-p "+phase.Prompt) {
+			t.Fatalf("phase %d call = %q, want %q and prompt %q", i+1, lines[i], mode, phase.Prompt)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(dir, "drifted")); err != nil {
-		t.Fatalf("phase boundary did not run: %v", err)
-	}
-	if strings.Count(string(stdout), "ran ") != len(phases)+1 {
+	if strings.Count(string(stdout), "ran ") != len(phases) {
 		t.Fatalf("restart stdout = %q", stdout)
-	}
-}
-
-func TestRunRestartBenchmarkRejectsMissingCompactionRecord(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "fake-harness")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	prompt := "checkpoint"
-	firstArgs := append(benchmarkArgs("provider:model", filepath.Join(dir, "session"), filepath.Join(dir, "config.json"), "auto", "medium"), "-p", prompt)
-	_, _, err := runRestartBenchmark(context.Background(), script, firstArgs, os.Environ(), benchmarkCase{RestartPhases: []benchmarkPhase{{Prompt: prompt, CompactAfter: true}}}, dir, filepath.Join(dir, "session"))
-	if err == nil || !strings.Contains(err.Error(), "did not create a compaction record") {
-		t.Fatalf("missing compaction record error = %v", err)
-	}
-}
-
-func TestRunRestartBenchmarkAcceptsAutomaticPhaseCompaction(t *testing.T) {
-	dir := t.TempDir()
-	script := filepath.Join(dir, "fake-harness")
-	body := "#!/bin/sh\ncase \" $* \" in *\" -p \"*) mkdir -p \"$COMPACTIONS\"; : > \"$COMPACTIONS/0001.meta.json\" ;; esac\nexit 0\n"
-	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	sessionDir := filepath.Join(dir, "session")
-	prompt := "checkpoint"
-	firstArgs := append(benchmarkArgs("provider:model", sessionDir, filepath.Join(dir, "config.json"), "auto", "medium"), "-p", prompt)
-	env := append(os.Environ(), "COMPACTIONS="+filepath.Join(sessionDir, "compactions"))
-	_, _, err := runRestartBenchmark(context.Background(), script, firstArgs, env, benchmarkCase{RestartPhases: []benchmarkPhase{{Prompt: prompt, CompactAfter: true}}}, dir, sessionDir)
-	if err != nil {
-		t.Fatalf("automatic phase compaction: %v", err)
 	}
 }
 
@@ -1132,7 +897,7 @@ func TestValidateArchivedRecordChecksContractAndEvents(t *testing.T) {
 }
 
 func TestValidateArchivedRecordChecksVariantAgentAndConfig(t *testing.T) {
-	c := allCases()["candidate_lineage"]
+	c := allCases()["stagnation_recovery"]
 	dir := t.TempDir()
 	raw := []byte("events\n")
 	if err := os.WriteFile(filepath.Join(dir, "raw.ndjson"), raw, 0o600); err != nil {
@@ -1153,7 +918,7 @@ func TestValidateArchivedRecordChecksVariantAgentAndConfig(t *testing.T) {
 		t.Fatalf("archived exact-oracle score was recomputed without its removed worktree: %+v", got)
 	}
 	badAgent := record
-	badAgent.Agent = "independent"
+	badAgent.Agent = "auto"
 	if err := validateArchivedRecord(badAgent, c, "medium"); err == nil || !strings.Contains(err.Error(), "agent") {
 		t.Fatalf("agent mismatch error = %v", err)
 	}

@@ -63,7 +63,6 @@ func newFlagState() *flagState {
 	state.addInvocationFlag("agents", "show_agents", "list configured agents and exit", true)
 	state.addInvocationFlag("models", "show_models", "list configured models and exit", true)
 	state.addInvocationFlag("check-model-proxy", "check_model_proxy", "check model proxy reachability and exit", true)
-	state.addInvocationFlag("candidate-lineage", "candidate_lineage", "preserve strictly improving accepted candidates for this Git session", true)
 	state.addInvocationFlag("hooks", "hooks_override", "override hook config file for this run", false)
 	annotateSettingFlags(state.set, parameterCatalog)
 	return state
@@ -201,9 +200,6 @@ func resolveRunOptions(context *resolveContext) error {
 		return err
 	}
 	if context.result.Run.CheckModelProxy, _, err = parseInvocationBool(state, "check_model_proxy"); err != nil {
-		return err
-	}
-	if context.result.Run.CandidateLineage, _, err = parseInvocationBool(state, "candidate_lineage"); err != nil {
 		return err
 	}
 	return nil

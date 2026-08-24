@@ -627,8 +627,8 @@ func TestRelativeConfigPathAbsolutizesNestedReferencesOnce(t *testing.T) {
 }
 
 func TestRunOptionsAreSeparateAndRepeatable(t *testing.T) {
-	result := load(t, []string{"-p", "hi", "--image", "low:a.png", "--image", "b.png", "--format", "json", "-q", "--candidate-lineage"}, nil, "")
-	if !result.Run.PromptSet || result.Run.Prompt != "hi" || !result.Run.Quiet || result.Run.OutputFormat != "json" || !result.Run.CandidateLineage || len(result.Run.Images) != 2 || result.Run.Images[0].Detail != "low" || result.Run.Images[1].Detail != "auto" {
+	result := load(t, []string{"-p", "hi", "--image", "low:a.png", "--image", "b.png", "--format", "json", "-q"}, nil, "")
+	if !result.Run.PromptSet || result.Run.Prompt != "hi" || !result.Run.Quiet || result.Run.OutputFormat != "json" || len(result.Run.Images) != 2 || result.Run.Images[0].Detail != "low" || result.Run.Images[1].Detail != "auto" {
 		t.Fatalf("Run=%+v", result.Run)
 	}
 	if _, err := Load(LoadOptions{Args: []string{"-p", "x", "-i", "y"}, LookupEnv: lookup(nil)}); err == nil {

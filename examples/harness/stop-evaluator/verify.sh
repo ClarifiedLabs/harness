@@ -7,11 +7,15 @@ set -u
 # expensive repository work for them. An empty payload means a person or the
 # agent invoked this verifier directly.
 payload=""
+hook_invocation=false
 if [ ! -t 0 ]; then
   IFS= read -r payload || true
+  if [ -n "$payload" ]; then
+    hook_invocation=true
+  fi
 fi
 case "$payload" in
-  *'"can_block":false'*) exit 0 ;;
+  *'"can_block":false'*|*'"can_block": false'*) exit 0 ;;
 esac
 
 verify_log=$(mktemp "${TMPDIR:-/tmp}/harness-verify.XXXXXX") || exit 1
@@ -24,13 +28,24 @@ run_check() {
   "$@" >>"$verify_log" 2>&1
 }
 
-status=0
-run_check go build ./... || status=1
-run_check go vet ./... || status=1
-run_check go test ./... || status=1
+passed=0
+failed=0
+if run_check go build ./...; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+if run_check go vet ./...; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
+if run_check go test ./...; then passed=$((passed + 1)); else failed=$((failed + 1)); fi
 
-if [ "$status" -eq 0 ]; then
+if [ "$failed" -eq 0 ]; then
+  if [ "$hook_invocation" = true ]; then
+    printf '%s\n' '{"accepted":true,"score":3,"score_direction":"maximize","remaining_requirements":0}'
+  else
+    printf '%s\n' 'Repository verification passed.'
+  fi
   exit 0
+fi
+
+if [ "$hook_invocation" = true ]; then
+  printf '{"accepted":false,"score":%s,"score_direction":"maximize","remaining_requirements":%s,"reason":"Repository verification failed; run ./examples/harness/stop-evaluator/verify.sh directly for details."}\n' "$passed" "$failed"
+  exit 2
 fi
 
 printf '%s\n' 'Repository verification failed. Fix the failures below, rerun ./examples/harness/stop-evaluator/verify.sh directly, and finish only after it exits 0.'

@@ -2,15 +2,35 @@ package sessionrec
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"harness/internal/agent"
 	"harness/internal/llm"
 	"harness/internal/session"
 )
+
+func TestToolMutationSnapshotUsesBoundedLocalDedup(t *testing.T) {
+	oversized := strings.Repeat("é", maxToolMutationPathBytes)
+	paths := []string{" a.go ", "a.go", "bad\npath", oversized}
+	for i := 0; i < maxToolMutationPaths+4; i++ {
+		paths = append(paths, fmt.Sprintf("path-%02d", i))
+	}
+	snapshot := ToolMutationSnapshot(paths)
+	if snapshot == nil || len(snapshot.Paths) != maxToolMutationPaths {
+		t.Fatalf("snapshot paths = %+v", snapshot)
+	}
+	if snapshot.Paths[0] != "a.go" || snapshot.Paths[1] == oversized || len(snapshot.Paths[1]) > maxToolMutationPathBytes || !utf8.ValidString(snapshot.Paths[1]) {
+		t.Fatalf("bounded paths = %#v", snapshot.Paths[:2])
+	}
+	if got := ToolMutationSnapshot([]string{" ", "bad\tpath"}); got != nil {
+		t.Fatalf("invalid-only snapshot = %+v, want nil", got)
+	}
+}
 
 func TestWorkflowStatusSnapshotDistinguishesAvailabilityAndOutcomes(t *testing.T) {
 	remaining := 3

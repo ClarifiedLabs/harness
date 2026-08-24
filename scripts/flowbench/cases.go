@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 const targetSHA = "8f76b0b0fb7751a8f7b067fa7f88e4df564f9560"
@@ -33,24 +32,17 @@ type benchmarkCase struct {
 	Acceptance            acceptanceMode
 	MaxTokenRegression    float64
 	MaxTurnRegression     float64
-	MinimumRunTokens      int
-	RunTimeout            time.Duration
 }
 
 // benchmarkPhase is one prompt process in a restart-backed benchmark sequence.
-// CompactAfter runs a prompt-free compaction control process before After and
-// before the next prompt process resumes the same session.
 type benchmarkPhase struct {
-	Prompt       string
-	CompactAfter bool
-	After        func(string) error
+	Prompt string
 }
 
 type benchmarkVariant struct {
 	Agent  string
 	Config string
 	Helper bool
-	Args   []string
 }
 
 type acceptanceMode string
@@ -59,7 +51,6 @@ const (
 	acceptanceEfficiency         acceptanceMode = ""
 	acceptanceStagnation         acceptanceMode = "stagnation"
 	acceptanceStagnationRecovery acceptanceMode = "stagnation_recovery"
-	acceptanceLineage            acceptanceMode = "candidate_lineage"
 )
 
 const defaultBenchmarkConfig = "{}\n"
@@ -85,8 +76,7 @@ func (c benchmarkCase) variant(name string) benchmarkVariant {
 
 func (c benchmarkCase) hasCustomVariants() bool {
 	return c.Baseline.Agent != "" || c.Baseline.Config != "" || c.Baseline.Helper ||
-		len(c.Baseline.Args) > 0 || c.Candidate.Agent != "" || c.Candidate.Config != "" ||
-		c.Candidate.Helper || len(c.Candidate.Args) > 0
+		c.Candidate.Agent != "" || c.Candidate.Config != "" || c.Candidate.Helper
 }
 
 type scoreInput struct {
@@ -112,9 +102,6 @@ func evaluateCase(c benchmarkCase, in scoreInput) (metrics, score) {
 
 func evaluateArchivedCase(c benchmarkCase, in scoreInput, recorded score) (metrics, score) {
 	if c.Name == "stagnation_detection" || c.Name == "stagnation_recovery" {
-		return classifyEffectiveToolErrors(c.Name, in.Metrics, recorded), recorded
-	}
-	if c.Name == "candidate_lineage" {
 		return classifyEffectiveToolErrors(c.Name, in.Metrics, recorded), recorded
 	}
 	if strings.HasPrefix(c.Name, "edit_") {
@@ -187,8 +174,6 @@ func allCases() map[string]benchmarkCase {
 		},
 		stagnationDetectionCase(),
 		stagnationRecoveryCase(),
-		candidateLineageCase(),
-		defaultStackMarathonCase(),
 		{
 			Name: "edit_precision",
 			Prompt: "Work directly; do not delegate or commit. Use the edit tool to make exactly the five requested replacements in .flowbench-tool-accuracy/edit-precision.txt: " +

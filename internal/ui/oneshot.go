@@ -141,9 +141,6 @@ func OneShot(app *App, prompt string) int {
 	select {
 	case err = <-done:
 		sink.FlushEvents()
-		if lineageErr := sink.candidateLineageError(); lineageErr != nil {
-			err = errors.Join(err, lineageErr)
-		}
 	case <-app.ForceExit:
 		if app.Renderer != nil {
 			app.Renderer.StopProgress()

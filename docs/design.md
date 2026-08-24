@@ -109,8 +109,7 @@ internal/delegate        configured child-agent tool; starts child agents withou
 internal/background      process-local background job manager + tools
 internal/session         append-only conversation tree, mutable state, replay, archives, artifacts, and derived human-only evidence catalog
 internal/sessionrec      one canonical raw.ndjson recorder shared by root and delegate sinks
-internal/trajectory      bounded host-owned evaluator/mutation projection and stagnation streak tracking
-internal/lineage         explicit single-line accepted-candidate archive plus human-only export/restore controls
+internal/trajectory      bounded host-owned evaluator stagnation control state
 internal/config          typed harness definitions, strict source resolution, provenance, and redacted projections
 internal/configmeta      package-neutral parameter catalog, source vocabulary, provenance snapshots, and deterministic reference renderers
 internal/modelcatalog    normalized models.dev/OpenAI Codex baseline catalogs
@@ -3181,8 +3180,9 @@ successful exit-0 command as `parse_failed`, while legacy control fields and
 non-zero process outcomes retain their existing behavior.
 
 The agent reports each semantic result through the optional
-`EvaluatorResultSink`, and the root and delegate sinks both delegate persistence
-to `internal/sessionrec`. The resulting displayless `evaluator_result` event
+`EvaluatorResultSink`, and the root sink delegates persistence to
+`internal/sessionrec`. Delegate children currently receive no hook runner. The
+resulting displayless `evaluator_result` event
 contains no reason or command output. If an orchestrator has not supplied
 `WorkflowStatus`, an all-accepted set projects to `complete` and any rejection
 to `in_progress`; a remaining count is projected only for a single result,
@@ -3194,21 +3194,20 @@ detecting whether GNU sed is available as `gsed` or reporting the active bash
 version. Static personal preferences belong in `~/.agents/AGENTS.md`; command
 output belongs in hook context.
 
-### Trajectory projection, stagnation nudge, lineage, and evidence
+### Trajectory, stagnation, and evidence
 
-Harness derives a bounded, host-owned trajectory projection
-(`internal/trajectory`) from facts already in the canonical event stream; it
-is never rendered into prompts, transcripts, tool results, or model-visible
-text. The only model-control consumer is the default-on `stagnation_nudge`
+Harness derives bounded, host-owned stagnation control state
+(`internal/trajectory`) from current evaluator, nudge, and branch events; it is
+runtime-only and never rendered into prompts, transcripts, tool results, or
+model-visible text. Mutation attribution is analyzed separately from canonical
+raw events and never enters policy state. The only model-control consumer is
+the default-on `stagnation_nudge`
 policy: at a no-improvement streak of two during an already blocking Stop-hook
 continuation, it persists a payload-free event and appends one generic
-strategy-reset instruction to the internal corrective turn. The
-invocation-only `-candidate-lineage` flag authorizes a root-only archive of
-strictly improving evaluator-scored workspace trees (`internal/lineage`),
-inspected through the human-only `/lineage` commands. The session evidence
-catalog (`internal/session/evidence.go`) is a read-only, human-only projection
-over one physical session's events, exposed via `/evidence` and `harness
-session evidence`. Deep dive: [trajectory.md](trajectory.md).
+strategy-reset instruction to the internal corrective turn. The session
+evidence catalog (`internal/session/evidence.go`) is a read-only, human-only
+projection over one physical session's events, exposed via `/evidence` and
+`harness session evidence`. Deep dive: [trajectory.md](trajectory.md).
 
 ### Interactive initial prompt (`-i`)
 

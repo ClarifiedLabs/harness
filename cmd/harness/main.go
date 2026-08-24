@@ -37,7 +37,6 @@ import (
 	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
-	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/logging"
 	"harness/internal/markdown"
@@ -176,6 +175,24 @@ func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.Cance
 
 // run wires everything together and returns the process exit code (design §10
 // exit codes: 0 ok, 1 runtime, 2 usage, 130 interrupted).
+func resetTrajectoryForResumeClone(resumed *session.Session) {
+	if resumed == nil {
+		return
+	}
+	resumed.Trajectory = nil
+	resumed.TrajectoryPolicyDisabled = false
+}
+
+func trajectoryTrackerForResume(resumed *session.Session) *trajectory.Tracker {
+	if resumed != nil && resumed.TrajectoryPolicyDisabled {
+		return trajectory.NewDisabledTracker()
+	}
+	if resumed == nil {
+		return trajectory.NewTracker(nil)
+	}
+	return trajectory.NewTracker(resumed.Trajectory)
+}
+
 func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	stdin := env.stdin
 	stdout := env.stdout
@@ -539,7 +556,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		resumed.ResponseState = nil
 		resumed.Usage = session.UsageTotals{}
 		resumed.UsageByModel = nil
-		resumed.Trajectory = nil
+		resetTrajectoryForResumeClone(resumed)
 		created = cloneCreated
 		resumeCloned = true
 	}
@@ -712,14 +729,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// path reasoning. An os.Getwd failure leaves Dir empty (the "." fallback), the
 	// best we can do.
 	wd, _ := os.Getwd()
-	var candidateLineage *lineage.Manager
-	if runOptions.CandidateLineage {
-		candidateLineage, err = lineage.Open(wd, sessionPath)
-		if err != nil {
-			fmt.Fprintf(stderr, "harness: -candidate-lineage: %v\n", err)
-			return ui.ExitRuntime
-		}
-	}
 	// AGENTS.md auto-discovery: include user-level instructions from
 	// ~/.agents/AGENTS.md and project-specific instructions from the directory
 	// harness was launched from. Missing files are silently ignored; a read error
@@ -828,7 +837,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Prewarm:                   env.prewarmCache && !env.stdinPiped && prewarmForProvider(catalog, cfg.Provider),
 		SearchBackend:             searchBackend(),
 		StagnationNudge:           cfg.StagnationNudge,
-		CandidateLineage:          runOptions.CandidateLineage,
 	}
 	delegateState := delegate.NewState(delegate.Runtime{
 		ProviderName:          cfg.Provider,
@@ -898,7 +906,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		RetentionResultHeadBytes:  cfg.RetentionResultHeadBytes,
 		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
 		ShowDiffs:                 cfg.ShowDiffs,
-		StagnationNudge:           cfg.StagnationNudge,
 		Now:                       now,
 		AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate {
 			return delegateAgentCandidates(agents)
@@ -1367,10 +1374,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// same registry after the runtime is seeded.
 	ag.SetTools(toolRegistry)
 	ag.SetResponseState(resumeResponseState)
-	var trajectoryState *trajectory.State
-	if resumed != nil {
-		trajectoryState = resumed.Trajectory
-	}
+	trajectoryTracker := trajectoryTrackerForResume(resumed)
 
 	if runOptions.DebugRequest {
 		includePrompt, prompt, images, err := debugRequestPrompt(runOptions, stdin, env.stdinPiped, modelRegistry.SupportsInputModality(registryModel, "image"))
@@ -1472,9 +1476,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Todos:                        todoStore,
 		Plans:                        planStore,
 		Goal:                         goalStore,
-		Trajectory:                   trajectory.NewTracker(trajectoryState),
-		CandidateLineage:             candidateLineage,
-		CandidateLineageControl:      candidateLineage,
+		Trajectory:                   trajectoryTracker,
 		GoalMaxContinuations:         cfg.GoalMaxContinuations,
 		GoalAutoContinue:             interactiveSession,
 		Handoff:                      handoffPending,
@@ -1496,11 +1498,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		BeforeSessionPathChange: prepareSessionLockChange,
 		OnSessionPathChanged: func(path string) {
 			defer commitSessionLockChange()
-			if candidateLineage != nil {
-				if err := candidateLineage.SwitchSession(path); err != nil {
-					fmt.Fprintf(stderr, "[candidate lineage disabled for new session: %v]\n", err)
-				}
-			}
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
 			snap.CacheAffinityID = ag.CacheAffinityID()

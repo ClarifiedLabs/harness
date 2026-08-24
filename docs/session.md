@@ -129,7 +129,8 @@ identical `raw.ndjson` output.
   mutation/verification state, inspection/no-progress run, batching activity,
   and optional steer reason; hook outcome/duration/timeout/circuit state;
   bounded semantic evaluator result and evidence reference; host-derived
-  trajectory mutations, seeds, and branch resets; context arithmetic and
+  stagnation nudges, successful-tool mutation paths, diffs, and branch resets;
+  context arithmetic and
   provider-count scope; and retention/reset decisions. A `telemetry_version`
   capability marker makes an observed zero distinguishable from a legacy
   unavailable signal. None of these fields contains prompt text, assistant
@@ -154,8 +155,8 @@ identical `raw.ndjson` output.
   `running` by the prior process as `abandoned`; such children are terminal
   and may be continued by child ID when their saved runtime contract still
   matches. Distinct `-resume <source>` and `-session <destination>` clone the
-  active path with parent lineage and fresh usage. `/clear` rotates to a fresh
-  directory.
+  active path with a parent-session link and fresh usage. `/clear` rotates to a
+  fresh directory.
 - `/tree` renders a harness-native searchable/paged line picker over tree
   nodes. The renderer keeps unary paths in one graph lane, adds lanes only for
   sibling branches, labels checkpoint kinds, condenses repeated tools, and
@@ -220,7 +221,7 @@ and remains the full-fidelity source for `session replay --follow`.
   events at or before the requested instant and disables untimestamped
   child-metadata fallback. Aggregate execution completeness has a stable
   severity order (`incomplete` over `unavailable` over `unknown` over
-  `complete`). Analyzer schema v12 groups every physical root plus descendants
+  `complete`). Analyzer schema v13 groups every physical root plus descendants
   as one experimental hierarchy. Items retain their own
   provider/model/agent/build/runtime identity, derive immutable per-attempt
   identity availability/stability, and carry root ownership; cohort
@@ -237,7 +238,7 @@ and remains the full-fidelity source for `session replay --follow`.
   median/p90 token values and known-complete cost. Child completion
   aggregation counts only outcomes, validation states, and contract
   provenance. It never emits blocker text or child report prose, and schema
-  v12 has no contract-specific completion-field analytics. Completion metadata
+  v13 has no contract-specific completion-field analytics. Completion metadata
   is schema-local: current analysis rejects retired rich completion records,
   and sessions created before 0.5.12 should be analyzed with the Harness
   0.5.11 binary. Children without reports remain useful but contribute an

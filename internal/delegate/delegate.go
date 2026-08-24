@@ -27,7 +27,6 @@ import (
 	"harness/internal/sessionrec"
 	"harness/internal/todo"
 	"harness/internal/tools"
-	"harness/internal/trajectory"
 	"harness/prompts"
 )
 
@@ -49,7 +48,7 @@ const (
 	continuationModeRetained   = "retained"
 	continuationModeCheckpoint = "compact_checkpoint"
 )
-const continuationFingerprintVersion = 5
+const continuationFingerprintVersion = 6
 
 var childSeq atomic.Uint64
 
@@ -149,10 +148,7 @@ type Options struct {
 	RetentionPolicy           agent.RetentionPolicy
 	// ShowDiffs lets child agents emit tool_diff events (recorded at parent
 	// fidelity); it mirrors the parent's diff display setting.
-	ShowDiffs bool
-	// StagnationNudge enables the same bounded, lane-scoped strategy reset for
-	// child evaluator repair turns as for the parent.
-	StagnationNudge  bool
+	ShowDiffs        bool
 	AgentCandidates  func(Runtime) []AgentCandidate
 	ActivityRegistry *ActivityRegistry
 	Now              func() time.Time
@@ -778,7 +774,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		RetentionResultHeadBytes:  r.opts.RetentionResultHeadBytes,
 		Now:                       r.opts.Now,
 		ShowDiffs:                 r.opts.ShowDiffs,
-		StagnationNudge:           r.opts.StagnationNudge,
 	})
 	child.SetSystem(launch.System)
 	child.SetCacheAffinityID(cacheAffinityID)
@@ -803,9 +798,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 
 	sink := newChildSink(childDir, childTodos, slices.Contains(toolNames, updateTodosToolName), progress, activity, inlineReasoningEnabled(launch.Reasoning))
-	if continuation != nil {
-		sink.trajectory = trajectory.NewTracker(continuation.state.Trajectory)
-	}
 	if background, ok := r.background.(tools.BackgroundJobDiagnosticIdentitySetter); ok {
 		sink.background = background
 	}
@@ -813,9 +805,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		sink.workflowStatus = func() agent.WorkflowStatus { return r.opts.WorkflowStatus(childID) }
 	}
 	sink.configureRecorder(r.opts.Now, launch.Registry, launch.Agent, launch.ProviderName, launch.Model, runtime.CWD)
-	if continuation != nil && continuation.state.Trajectory != nil {
-		sink.rec.SeedTrajectory(continuation.state.Trajectory, "delegate_continuation")
-	}
 	sink.messageCount = func() int { return len(child.Transcript()) }
 	sink.checkpoint = func(checkpoint agent.PromptCheckpoint) error {
 		updated := r.now()
@@ -823,7 +812,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		if err != nil {
 			return err
 		}
-		state := r.childSessionState(runtime, launch, child, childTodos, childPlans, sink.trajectory.SnapshotPtr(), checkpoint.Usage, created, updated, tree)
+		state := r.childSessionState(runtime, launch, child, childTodos, childPlans, checkpoint.Usage, created, updated, tree)
 		var checkpointErr error
 		switch checkpoint.Kind {
 		case agent.PromptCheckpointClosedTurn:
@@ -889,7 +878,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		}
 		terminalMessageCount = len(child.Transcript())
 		terminalUpdated = r.now()
-		stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, childPlans, sink.trajectory, terminalUsage, created, terminalUpdated, ensureChildTree)
+		stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, childPlans, terminalUsage, created, terminalUpdated, ensureChildTree)
 		persistenceErr := errors.Join(sink.appendError(), stateErr)
 		terminalErr = errors.Join(runErr, persistenceErr)
 		result.Usage = terminalUsage.Usage
@@ -966,7 +955,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	terminalMessageCount = len(child.Transcript())
 	terminalStatus = childTerminalStatus(runErr)
 	terminalUpdated = r.now()
-	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, childPlans, sink.trajectory, usage, created, terminalUpdated, ensureChildTree)
+	stateErr := r.saveChildSession(runtime, launch, childID, child, childTodos, childPlans, usage, created, terminalUpdated, ensureChildTree)
 	persistenceErr := errors.Join(sink.appendError(), stateErr)
 	if runErr != nil {
 		terminalCompletion = unknownCompletion(contract, session.ChildCompletionSourceHost, session.ChildCompletionValidationUnavailable)
@@ -1391,7 +1380,6 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ResponsesStateful      bool                  `json:"responses_stateful"`
 		NativeCompaction       bool                  `json:"native_compaction"`
 		RetentionPolicy        agent.RetentionPolicy `json:"retention_policy"`
-		StagnationNudge        bool                  `json:"stagnation_nudge"`
 		System                 string                `json:"system"`
 		Tools                  []llm.ToolSchema      `json:"tools"`
 		Compaction             struct {
@@ -1425,7 +1413,6 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ResponsesStateful:      launch.ResponsesStateful,
 		NativeCompaction:       launch.NativeCompaction,
 		RetentionPolicy:        r.opts.RetentionPolicy,
-		StagnationNudge:        r.opts.StagnationNudge,
 		System:                 launch.System,
 		Tools:                  toolRegistry.Specs(),
 	}
@@ -1494,7 +1481,7 @@ func (r *Runner) childToolsWithCacheAffinity(parent Runtime, launch Launch, chil
 		MaxPromptTokens:   parent.MaxPromptTokens,
 		MaxPromptCostUSD:  parent.MaxPromptCostUSD,
 		Build:             parent.Build,
-		RuntimeProfile:    parent.RuntimeProfile,
+		RuntimeProfile:    childRuntimeProfile(parent.RuntimeProfile),
 	}
 	childState := NewState(childRuntime)
 	for _, name := range childTools.Names() {
@@ -1826,6 +1813,12 @@ func nextChildID(kind string) string {
 	return fmt.Sprintf("%s_%s_%06d", prefix, time.Now().UTC().Format("20060102T150405Z"), childSeq.Add(1))
 }
 
+func childRuntimeProfile(parent session.RuntimeProfile) session.RuntimeProfile {
+	child := parent
+	child.StagnationNudge = false
+	return child
+}
+
 func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, req RunRequest, effectiveMaxTurns int, runtimeFingerprint, status string, created, updated time.Time, usage agent.PromptUsage, runErr error, messageCount int, completion *CompletionReport) (string, error) {
 	if parent.SessionPath == "" {
 		return "", nil
@@ -1848,7 +1841,7 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 		Provider:            launch.ProviderName,
 		Model:               launch.Model,
 		Build:               parent.Build,
-		Runtime:             parent.RuntimeProfile,
+		Runtime:             childRuntimeProfile(parent.RuntimeProfile),
 		Status:              status,
 		TaskPreview:         preview(req.Task, 240),
 		Created:             created,
@@ -1885,7 +1878,7 @@ func (r *Runner) saveChildMeta(parent Runtime, launch Launch, childID string, re
 	return session.SaveChildMeta(parent.SessionPath, meta)
 }
 
-func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, child *agent.Agent, todos *todo.Store, plans *plan.Store, tracker *trajectory.Tracker, usage agent.PromptUsage, created, updated time.Time, ensureTree func([]llm.Message) (*session.Tree, error)) error {
+func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string, child *agent.Agent, todos *todo.Store, plans *plan.Store, usage agent.PromptUsage, created, updated time.Time, ensureTree func([]llm.Message) (*session.Tree, error)) error {
 	if parent.SessionPath == "" {
 		return nil
 	}
@@ -1894,10 +1887,10 @@ func (r *Runner) saveChildSession(parent Runtime, launch Launch, childID string,
 	if err != nil {
 		return err
 	}
-	return r.childSessionState(parent, launch, child, todos, plans, tracker.SnapshotPtr(), usage, created, updated, tree).SaveConsolidated(childDir)
+	return r.childSessionState(parent, launch, child, todos, plans, usage, created, updated, tree).SaveConsolidated(childDir)
 }
 
-func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.Agent, todos *todo.Store, plans *plan.Store, trajectoryState *trajectory.State, usage agent.PromptUsage, created, updated time.Time, tree *session.Tree) session.Session {
+func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.Agent, todos *todo.Store, plans *plan.Store, usage agent.PromptUsage, created, updated time.Time, tree *session.Tree) session.Session {
 	var todoSnapshot []todo.Item
 	if todos != nil {
 		todoSnapshot = todos.Snapshot()
@@ -1915,7 +1908,7 @@ func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.A
 		Created:         created,
 		Updated:         updated,
 		Build:           parent.Build,
-		Runtime:         parent.RuntimeProfile,
+		Runtime:         childRuntimeProfile(parent.RuntimeProfile),
 		System:          launch.System,
 		Agent:           launch.Agent,
 		ProxySessionID:  child.ProxySessionID(),
@@ -1925,7 +1918,6 @@ func (r *Runner) childSessionState(parent Runtime, launch Launch, child *agent.A
 		ResponseState:   child.ResponseState(),
 		Plan:            planSnapshot,
 		Todos:           todoSnapshot,
-		Trajectory:      trajectoryState,
 		Usage:           session.UsageTotals{Usage: usage.Usage, CostUSD: usage.Usage.CostUSD, Compactions: usage.Compactions},
 		Tree:            tree,
 	}
@@ -1957,7 +1949,6 @@ type childSink struct {
 	checkpoint           func(agent.PromptCheckpoint) error
 	messageCount         func() int
 	workflowStatus       func() agent.WorkflowStatus
-	trajectory           *trajectory.Tracker
 	todos                *todo.Store
 	todoContext          bool
 	todoTurn             int
@@ -1977,12 +1968,11 @@ func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progre
 		pending:     make(map[string]pendingChildTool),
 		todos:       todos,
 		todoContext: todoContext,
-		trajectory:  trajectory.NewTracker(nil),
 	}
 	if len(reasoning) > 0 {
 		sink.reasoning = reasoning[0]
 	}
-	sink.rec = sessionrec.New(childRecorderConfig(sessionDir, time.Now, nil, "", "", "", sink.reasoning, "", sink.trajectory))
+	sink.rec = sessionrec.New(childRecorderConfig(sessionDir, time.Now, nil, "", "", "", sink.reasoning, ""))
 	if activity.hasFeed() {
 		sink.assistant = newInlineLineAccumulator(activityChunkMaxBytes, func(text string, continuation bool) {
 			sink.activity.publishText(ActivityEventAssistant, text, sink.turn, sink.attempt, continuation)
@@ -1996,7 +1986,7 @@ func newChildSink(sessionDir string, todos *todo.Store, todoContext bool, progre
 // child's launch model. Child sessions run one prompt, so the recorder's
 // default prompt-usage line (cumulative totals equal to the prompt's own
 // usage) matches the parent's line shape.
-func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Registry, agentName, provider, model string, reasoning bool, cwd string, tracker *trajectory.Tracker) sessionrec.Config {
+func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Registry, agentName, provider, model string, reasoning bool, cwd string) sessionrec.Config {
 	target := model
 	if provider != "" && model != "" && !strings.HasPrefix(model, provider+":") {
 		target = provider + ":" + model
@@ -2011,7 +2001,6 @@ func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Regis
 		Clock:              clock,
 		ReasoningSummaries: reasoning,
 		CWD:                cwd,
-		Trajectory:         tracker,
 		PriceTurnUsage: func(u llm.Usage) (float64, bool) {
 			return registry.Cost(model, u)
 		},
@@ -2028,7 +2017,7 @@ func childRecorderConfig(dir string, clock func() time.Time, registry *llm.Regis
 // runner's clock and the launch registry/model. The runner calls it once
 // after newChildSink; tests that do not configure pricing keep the defaults.
 func (s *childSink) configureRecorder(clock func() time.Time, registry *llm.Registry, agentName, provider, model, cwd string) {
-	s.rec = sessionrec.New(childRecorderConfig(s.sessionDir, clock, registry, agentName, provider, model, s.reasoning, cwd, s.trajectory))
+	s.rec = sessionrec.New(childRecorderConfig(s.sessionDir, clock, registry, agentName, provider, model, s.reasoning, cwd))
 }
 
 // Progress is a lock-protected snapshot of one delegate run's live activity,
@@ -2292,17 +2281,6 @@ func (s *childSink) Notice(msg string) {
 	}
 }
 
-func (s *childSink) TryStagnationNudge(threshold int) bool {
-	if s == nil || s.rec == nil || !s.rec.TryStagnationNudge(threshold) {
-		return false
-	}
-	s.flushDisplay()
-	if text, ok := safeNoticeLine(sessionrec.StagnationNudgeDisplay(threshold)); ok {
-		s.activity.publishText(ActivityEventNotice, text, s.turn, s.attempt, false)
-	}
-	return true
-}
-
 func (s *childSink) TurnComplete(usage agent.TurnUsage) {
 	s.progress.markContext(usage.Context)
 	s.activity.MarkContext(usage.Context)
@@ -2367,10 +2345,6 @@ func (s *childSink) TurnProgress(progress agent.TurnProgress) {
 
 func (s *childSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
 	s.rec.HookDiagnostic(diagnostic)
-}
-
-func (s *childSink) EvaluatorResult(result hooks.EvaluatorResult) {
-	s.rec.EvaluatorResult(result)
 }
 
 func (s *childSink) WorkflowStatus() agent.WorkflowStatus {

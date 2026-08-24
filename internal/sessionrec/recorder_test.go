@@ -395,7 +395,7 @@ func TestRecorderBranchRecordsCanonicalTransition(t *testing.T) {
 	if event.Type != session.EventBranch || event.Prompt != 4 || event.FromEntryID != "from-entry-long" || event.ToEntryID != "to-entry-long" || event.Purpose != "tree" || event.Summary != "try another path" || event.Display != "[tree: from-ent → to-entry; working directory unchanged]" {
 		t.Fatalf("branch event = %+v", event)
 	}
-	if state := tracker.Snapshot(); state.BranchResets != 1 || state.TotalEvaluations != 1 || len(state.Evaluations) != 0 {
+	if state := tracker.Snapshot(); state.BranchResets != 1 || state.TotalEvaluations != 1 || state.StagnationHandler != "" || state.PreviousObservation != nil {
 		t.Fatalf("branch trajectory = %+v", state)
 	}
 }
@@ -447,33 +447,33 @@ func TestRecorderEvaluatorResultIsStructuredAndDisplayless(t *testing.T) {
 	}
 }
 
-func TestRecorderLineageAdvanceIsContentFreeAndDisplayless(t *testing.T) {
+func TestRecorderAppendsEvaluatorAndNudgeBeforeTrackerAdvance(t *testing.T) {
 	dir := t.TempDir()
-	rec := New(Config{Dir: dir, Prompt: 4})
-	rec.TurnAttemptStart(3, 1, agent.ContextEstimate{})
-	err := rec.LineageAdvance(session.LineageAdvanceSnapshot{
-		Sequence: 2, ParentSequence: 1, PatchBytes: 321, EvidenceBytes: 45,
+	tracker := trajectory.NewTracker(nil)
+	evaluatorCounts := make([]int, 0, 3)
+	nudgeIssuedAtDelivery := true
+	rec := New(Config{
+		Dir: dir, Prompt: 1, Trajectory: tracker,
+		Mirror: func(event session.Event) {
+			switch event.Type {
+			case session.EventEvaluatorResult:
+				evaluatorCounts = append(evaluatorCounts, tracker.Snapshot().TotalEvaluations)
+			case session.EventStagnationNudge:
+				nudgeIssuedAtDelivery = tracker.Snapshot().StagnationNudgeIssued
+			}
+		},
 	})
-	if err != nil {
-		t.Fatal(err)
+	zero := 0.0
+	for range 3 {
+		rec.EvaluatorResult(hooks.EvaluatorResult{
+			Handler: "verify", Score: &zero, ScoreDirection: hooks.ScoreDirectionMaximize,
+		})
 	}
-	events := readEvents(t, dir)
-	event := events[len(events)-1]
-	if event.Type != session.EventLineageAdvance || event.Prompt != 4 || event.Turn != 3 || event.Display != "" || event.LineageAdvance == nil {
-		t.Fatalf("lineage advance event = %+v", event)
+	if !reflect.DeepEqual(evaluatorCounts, []int{0, 1, 2}) || tracker.Snapshot().TotalEvaluations != 3 {
+		t.Fatalf("evaluator append/advance order: delivered at %v, state %+v", evaluatorCounts, tracker.Snapshot())
 	}
-	got := event.LineageAdvance
-	if got.Sequence != 2 || got.ParentSequence != 1 || got.PatchBytes != 321 || got.EvidenceBytes != 45 {
-		t.Fatalf("lineage advance snapshot = %+v", got)
-	}
-	encoded, err := json.Marshal(event)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, secret := range []string{"candidate-secret", "score-secret", "evidence-secret", "tree-secret"} {
-		if strings.Contains(string(encoded), secret) {
-			t.Fatalf("lineage advance exposed %q: %s", secret, encoded)
-		}
+	if !rec.TryStagnationNudge(2) || nudgeIssuedAtDelivery || !tracker.Snapshot().StagnationNudgeIssued {
+		t.Fatalf("nudge append/advance order: delivered issued=%v, state %+v", nudgeIssuedAtDelivery, tracker.Snapshot())
 	}
 }
 
@@ -519,65 +519,53 @@ func TestRecorderStagnationNudgePersistsPayloadFreeTriggerAndReplay(t *testing.T
 	}
 }
 
-func TestRecorderTrajectoryMatchesCanonicalReplay(t *testing.T) {
+func TestRecorderToolTelemetryIsInvisibleToTrajectoryPolicy(t *testing.T) {
 	initial := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
-		Handler: "inherited", Accepted: true, Candidate: "candidate:inherited", EvidenceRef: "evidence/inherited",
+		Handler: "verify", Accepted: false, Candidate: "candidate:before",
 	})
 	tracker := trajectory.NewTracker(&initial)
 	dir := t.TempDir()
 	rec := New(Config{Dir: dir, Prompt: 2, Trajectory: tracker})
-	rec.SeedTrajectory(&initial, "delegate_continuation")
-	rec.TurnAttemptStart(3, 1, agent.ContextEstimate{})
 	rec.ToolMutation(llm.ToolCall{ID: "edit-1", Name: "edit"}, []string{"a.go", "b.go", "a.go"})
 	rec.ToolDiff(llm.ToolCall{ID: "edit-1", Name: "edit"}, "a.go", "--- a.go\n+++ a.go\n")
-	score := 0.75
-	remaining := 1
-	rec.EvaluatorResult(hooks.EvaluatorResult{
-		Handler: "verify", Accepted: false, Score: &score, ScoreDirection: hooks.ScoreDirectionMaximize, Candidate: "candidate:next",
-		RemainingRequirements: &remaining, EvidenceRef: "evidence/verify.log",
-	})
-	rec.Flush()
 	if err := rec.Err(); err != nil {
 		t.Fatalf("Err = %v, want nil", err)
 	}
+	if got := tracker.Snapshot(); !reflect.DeepEqual(got, initial) {
+		t.Fatalf("tool telemetry changed live trajectory:\n got: %+v\nwant: %+v", got, initial)
+	}
 
 	events := readEvents(t, dir)
-	if events[0].Type != session.EventTrajectorySeed || events[0].Purpose != "delegate_continuation" || events[0].Trajectory == nil {
-		t.Fatalf("trajectory seed = %+v", events[0])
+	if len(events) != 2 || events[0].Type != session.EventToolMutation || events[1].Type != session.EventToolDiff {
+		t.Fatalf("tool telemetry events = %+v", events)
 	}
-	var mutation *session.Event
-	for i := range events {
-		if events[i].Type == session.EventToolMutation {
-			mutation = &events[i]
-			break
-		}
+	if events[0].Display != "" || events[0].ToolMutation == nil || !reflect.DeepEqual(events[0].ToolMutation.Paths, []string{"a.go", "b.go"}) {
+		t.Fatalf("tool mutation event = %+v", events[0])
 	}
-	if mutation == nil || mutation.Display != "" || mutation.ToolMutation == nil || !reflect.DeepEqual(mutation.ToolMutation.Paths, []string{"a.go", "b.go"}) {
-		t.Fatalf("tool mutation event = %+v", mutation)
-	}
-	live := tracker.Snapshot()
-	replayed := session.ReconstructTrajectory(events)
-	if !reflect.DeepEqual(live, replayed) {
-		t.Fatalf("live trajectory diverged from replay:\nlive:   %+v\nreplay: %+v", live, replayed)
-	}
-	if live.TotalEvaluations != 2 || live.UnconfirmedMutationPaths != 1 || live.DiffPathConfirmations != 1 {
-		t.Fatalf("trajectory metrics = %+v", live)
+	if replayed := session.ReconstructTrajectory(events); !reflect.DeepEqual(replayed, trajectory.Normalize(nil)) {
+		t.Fatalf("tool telemetry changed replayed trajectory: %+v", replayed)
 	}
 }
 
-func TestRecorderTrajectoryDoesNotAdvanceAfterAppendFailure(t *testing.T) {
+func TestRecorderEvaluatorAppendFailureDoesNotAdvanceOrDeliver(t *testing.T) {
 	blockingPath := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(blockingPath, []byte("file"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	tracker := trajectory.NewTracker(nil)
-	rec := New(Config{Dir: blockingPath, Prompt: 1, Trajectory: tracker})
-	rec.ToolMutation(llm.ToolCall{ID: "edit-1", Name: "edit"}, []string{"a.go"})
+	delivered := 0
+	rec := New(Config{
+		Dir: blockingPath, Prompt: 1, Trajectory: tracker,
+		Mirror: func(session.Event) { delivered++ },
+	})
 	rec.EvaluatorResult(hooks.EvaluatorResult{Handler: "verify", Accepted: true, Candidate: "candidate:one"})
 	if rec.Err() == nil {
 		t.Fatal("Err = nil, want append failure")
 	}
-	if got := tracker.Snapshot(); got.Transitions != 0 || got.TotalEvaluations != 0 || len(got.ModifiedPaths) != 0 {
+	if delivered != 0 {
+		t.Fatalf("failed evaluator append delivered %d mirrored events", delivered)
+	}
+	if got := tracker.Snapshot(); got.TotalEvaluations != 0 || got.StagnationHandler != "" {
 		t.Fatalf("trajectory advanced after append failure: %+v", got)
 	}
 }
@@ -595,9 +583,16 @@ func TestRecorderStagnationNudgeDoesNotAdvanceAfterAppendFailure(t *testing.T) {
 		})
 	}
 	tracker := trajectory.NewTracker(&state)
-	rec := New(Config{Dir: blockingPath, Prompt: 1, Trajectory: tracker})
+	delivered := 0
+	rec := New(Config{
+		Dir: blockingPath, Prompt: 1, Trajectory: tracker,
+		Mirror: func(session.Event) { delivered++ },
+	})
 	if rec.TryStagnationNudge(2) {
 		t.Fatal("append failure reported a delivered nudge")
+	}
+	if delivered != 0 {
+		t.Fatalf("failed nudge append delivered %d mirrored events", delivered)
 	}
 	if got := tracker.Snapshot(); got.StagnationNudgeIssued || got.StagnationNudges != 0 {
 		t.Fatalf("trajectory advanced after nudge append failure: %+v", got)

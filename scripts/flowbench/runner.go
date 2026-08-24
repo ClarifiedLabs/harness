@@ -50,8 +50,8 @@ type runConfig struct {
 }
 
 const (
-	runRecordVersion      = 5
-	oracleContractVersion = "flowbench-oracle-2026-08-24-v33"
+	runRecordVersion      = 6
+	oracleContractVersion = "flowbench-oracle-2026-08-24-v34"
 )
 
 type runRecord struct {
@@ -335,14 +335,7 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		return record, fmt.Errorf("write isolated benchmark config: %w", err)
 	}
 
-	runTimeout := cfg.Case.RunTimeout
-	if runTimeout <= 0 {
-		runTimeout = 45 * time.Minute
-	}
-	runCtx, cancel := context.WithTimeout(ctx, runTimeout)
-	defer cancel()
 	args := benchmarkArgs(model, sessionDir, configPath, runVariant.Agent, cfg.Reasoning)
-	args = append(args, runVariant.Args...)
 	if cfg.Case.SecondPrompt == "" || cfg.Case.RestartBetweenPrompts {
 		args = append(args, "-p", cfg.Case.Prompt)
 	} else {
@@ -357,17 +350,17 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 	var stdout, stderr []byte
 	var runErr error
 	if cfg.Case.RestartBetweenPrompts {
-		stdout, stderr, runErr = runRestartBenchmark(runCtx, binary, args, env, cfg.Case, worktree, sessionDir)
+		stdout, stderr, runErr = runRestartBenchmark(ctx, binary, args, env, cfg.Case, worktree, sessionDir)
 	} else if cfg.Case.SecondPrompt == "" {
 		var stdoutBuffer, stderrBuffer bytes.Buffer
-		cmd := exec.CommandContext(runCtx, binary, args...)
+		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Dir = worktree
 		cmd.Env = env
 		cmd.Stdout, cmd.Stderr = &stdoutBuffer, &stderrBuffer
 		runErr = cmd.Run()
 		stdout, stderr = stdoutBuffer.Bytes(), stderrBuffer.Bytes()
 	} else {
-		cmd := exec.CommandContext(runCtx, binary, args...)
+		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Dir = worktree
 		cmd.Env = env
 		stdout, stderr, runErr = runInteractiveBenchmark(cmd, cfg.Case, worktree)
@@ -381,9 +374,9 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 		sum := sha256.Sum256(data)
 		record.EventsSHA256 = hex.EncodeToString(sum[:])
 	}
-	if runCtx.Err() != nil {
-		record.Invalid = runCtx.Err().Error()
-		return record, fmt.Errorf("%s %s repetition %d: %w", cfg.Case.Name, model, repetition, runCtx.Err())
+	if ctx.Err() != nil {
+		record.Invalid = ctx.Err().Error()
+		return record, fmt.Errorf("%s %s repetition %d: %w", cfg.Case.Name, model, repetition, ctx.Err())
 	}
 	if runErr != nil {
 		record.Invalid = runErr.Error()
@@ -433,18 +426,17 @@ func variantPromptDigest(c benchmarkCase, variant string) string {
 		return promptDigest(c)
 	}
 	runVariant := c.variant(variant)
-	return digestString(fmt.Sprintf("%s\nagent=%s\nconfig=%s\nhelper=%t\nargs=%q", benchmarkPromptContract(c), runVariant.Agent, runVariant.Config, runVariant.Helper, runVariant.Args))
+	return digestString(fmt.Sprintf("%s\nagent=%s\nconfig=%s\nhelper=%t", benchmarkPromptContract(c), runVariant.Agent, runVariant.Config, runVariant.Helper))
 }
 
 func benchmarkPromptContract(c benchmarkCase) string {
 	if len(c.RestartPhases) == 0 {
-		return fmt.Sprintf("%s\n%s\nrestart=%t\nminimum_run_tokens=%d\nrun_timeout=%s", c.Prompt, c.SecondPrompt, c.RestartBetweenPrompts, c.MinimumRunTokens, c.RunTimeout)
+		return fmt.Sprintf("%s\n%s\nrestart=%t", c.Prompt, c.SecondPrompt, c.RestartBetweenPrompts)
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "restart=%t\nphases=%d\nminimum_run_tokens=%d\nrun_timeout=%s\n", c.RestartBetweenPrompts, len(c.RestartPhases), c.MinimumRunTokens, c.RunTimeout)
+	fmt.Fprintf(&b, "restart=%t\nphases=%d\n", c.RestartBetweenPrompts, len(c.RestartPhases))
 	for i, phase := range c.RestartPhases {
-		fmt.Fprintf(&b, "phase=%d compact_after=%t after=%t\n%s\n",
-			i+1, phase.CompactAfter, phase.After != nil, phase.Prompt)
+		fmt.Fprintf(&b, "phase=%d\n%s\n", i+1, phase.Prompt)
 	}
 	return b.String()
 }
@@ -484,14 +476,6 @@ func runRestartPhases(ctx context.Context, binary string, firstArgs, env []strin
 	}
 	var stdout, stderr []byte
 	for i, phase := range phases {
-		compactionsAtPhaseStart := 0
-		if phase.CompactAfter {
-			var err error
-			compactionsAtPhaseStart, err = benchmarkCompactionCount(sessionDir)
-			if err != nil {
-				return stdout, stderr, err
-			}
-		}
 		args := firstArgs
 		var err error
 		if i > 0 {
@@ -506,97 +490,8 @@ func runRestartPhases(ctx context.Context, binary string, firstArgs, env []strin
 		if runErr != nil {
 			return stdout, stderr, runErr
 		}
-		if phase.CompactAfter {
-			compactArgs, err := resumeBenchmarkControlArgs(firstArgs, sessionDir)
-			if err != nil {
-				return stdout, stderr, err
-			}
-			compactOut, compactErr, compactRunErr := runBenchmarkControlProcess(ctx, binary, compactArgs, env, worktree, []string{"/compact"})
-			stdout = joinProcessOutput(stdout, compactOut)
-			stderr = joinProcessOutput(stderr, compactErr)
-			if compactRunErr != nil {
-				return stdout, stderr, compactRunErr
-			}
-			afterCompactions, err := benchmarkCompactionCount(sessionDir)
-			if err != nil {
-				return stdout, stderr, err
-			}
-			if afterCompactions <= compactionsAtPhaseStart {
-				return stdout, stderr, fmt.Errorf("benchmark phase and compaction control did not create a compaction record")
-			}
-		}
-		if phase.After != nil {
-			if err := phase.After(worktree); err != nil {
-				return stdout, stderr, err
-			}
-		}
 	}
 	return stdout, stderr, nil
-}
-
-func benchmarkCompactionCount(sessionDir string) (int, error) {
-	entries, err := os.ReadDir(filepath.Join(sessionDir, "compactions"))
-	if os.IsNotExist(err) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-	count := 0
-	for _, entry := range entries {
-		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".meta.json") {
-			count++
-		}
-	}
-	return count, nil
-}
-
-func resumeBenchmarkControlArgs(first []string, sessionDir string) ([]string, error) {
-	out := append([]string(nil), first...)
-	foundSession := false
-	for i := 0; i+1 < len(out); i++ {
-		if out[i] != "-session" {
-			continue
-		}
-		out[i] = "-resume"
-		out[i+1] = sessionDir
-		foundSession = true
-		break
-	}
-	if !foundSession {
-		return nil, fmt.Errorf("benchmark arguments do not contain -session")
-	}
-	if len(out) < 2 || out[len(out)-2] != "-p" {
-		return nil, fmt.Errorf("restart benchmark arguments do not end in a prompt")
-	}
-	return out[:len(out)-2], nil
-}
-
-func runBenchmarkControlProcess(ctx context.Context, binary string, args, env []string, worktree string, commands []string) ([]byte, []byte, error) {
-	if len(commands) == 0 {
-		return nil, nil, fmt.Errorf("benchmark control requires at least one command")
-	}
-	var input strings.Builder
-	for _, command := range commands {
-		command = strings.TrimSpace(command)
-		if command == "" || strings.ContainsAny(command, "\r\n") {
-			return nil, nil, fmt.Errorf("invalid benchmark control command %q", command)
-		}
-		input.WriteString(command)
-		input.WriteByte('\n')
-	}
-	if strings.TrimSpace(commands[len(commands)-1]) != "/exit" {
-		input.WriteString("/exit\n")
-	}
-	cmd := exec.CommandContext(ctx, binary, args...)
-	cmd.Dir = worktree
-	cmd.Env = env
-	cmd.Stdin = strings.NewReader(input.String())
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	err := cmd.Run()
-	return stdout.Bytes(), stderr.Bytes(), err
 }
 
 func runBenchmarkProcess(ctx context.Context, binary string, args, env []string, worktree string) ([]byte, []byte, error) {

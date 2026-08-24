@@ -340,7 +340,7 @@ func TestRunSessionResumeSelectedPathOverridesEnvironmentAndCloneDestination(t *
 			t.Fatal(err)
 		}
 		if clone.ParentSession != source.ID || clone.ParentEntryID != source.ActiveLeaf {
-			t.Fatalf("clone lineage = %q@%q, want %q@%q", clone.ParentSession, clone.ParentEntryID, source.ID, source.ActiveLeaf)
+			t.Fatalf("clone parent link = %q@%q, want %q@%q", clone.ParentSession, clone.ParentEntryID, source.ID, source.ActiveLeaf)
 		}
 	})
 }

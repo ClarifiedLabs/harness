@@ -1,99 +1,60 @@
 package trajectory
 
 import (
-	"encoding/json"
-	"fmt"
 	"strings"
 	"testing"
 )
 
-func TestEvaluationProjectionAssignsIDsAndTracksImprovement(t *testing.T) {
-	zero := 0.0
-	remaining := 2
+func TestEvaluationStateContainsOnlyBoundedStagnationPolicy(t *testing.T) {
+	score := 0.5
 	state := ApplyEvaluation(State{}, EvaluationInput{
-		Handler: "verify", Accepted: false, Score: &zero,
-		RemainingRequirements: &remaining, Prompt: 3, Turn: 4,
+		Handler: " verify ", Accepted: false, Score: &score,
+		ScoreDirection: ScoreDirectionMaximize,
+		Candidate:      strings.Repeat("c", MaxCandidateBytes+20),
 	})
-	if state.Schema != SchemaVersion || state.Epoch != 1 || state.ObjectiveRef != "prompt:3" || state.TotalEvaluations != 1 || state.RejectedEvaluations != 1 {
-		t.Fatalf("rejected state = %+v", state)
+	if state.Schema != SchemaVersion || state.Epoch != 1 || state.TotalEvaluations != 1 || state.RejectedEvaluations != 1 {
+		t.Fatalf("evaluation counters = %+v", state)
 	}
-	if state.CurrentCandidateID != "candidate-e1-000001" || state.MissingCandidateIDs != 1 || state.MissingEvidenceRefs != 1 || state.EvaluationsSinceImprovement != 1 {
-		t.Fatalf("fallback state = %+v", state)
+	if state.StagnationHandler != "verify" || state.StagnationScoreDirection != ScoreDirectionMaximize || state.StagnationBestScore == nil || *state.StagnationBestScore != score {
+		t.Fatalf("active lane = %+v", state)
 	}
-	if len(state.Evaluations) != 1 || state.Evaluations[0].ID != "eval-e1-000001" || state.Evaluations[0].Score == nil || *state.Evaluations[0].Score != 0 || state.Evaluations[0].FailureClass != "evaluator_rejected" {
-		t.Fatalf("evaluation = %+v", state.Evaluations)
+	if state.PreviousObservation == nil || len(state.PreviousObservation.CandidateID) != MaxCandidateBytes {
+		t.Fatalf("bounded previous observation = %+v", state.PreviousObservation)
 	}
-
-	score := 0.75
-	state = ApplyEvaluation(state, EvaluationInput{
-		Handler: "verify", Accepted: true, Score: &score, Candidate: "sha256:accepted",
-		EvidenceRef: "artifacts/verify.log", Prompt: 3, Turn: 5,
-	})
-	if state.BestAcceptedCandidateID != "sha256:accepted" || state.BestAcceptedScore == nil || *state.BestAcceptedScore != 0.75 ||
-		state.LastImprovementEvaluationID != "eval-e1-000002" || state.EvaluationsSinceImprovement != 0 || state.AcceptedEvaluations != 1 {
-		t.Fatalf("accepted state = %+v", state)
-	}
-	state = ApplyEvaluation(state, EvaluationInput{
-		Handler: "verify", Accepted: false, Candidate: "sha256:rejected", EvidenceRef: "artifacts/rejected.log",
-	})
-	if state.CurrentCandidateID != "sha256:rejected" || state.BestAcceptedCandidateID != "sha256:accepted" || state.LastImprovementEvaluationID != "eval-e1-000002" || state.EvaluationsSinceImprovement != 1 {
-		t.Fatalf("rejection replaced accepted best: %+v", state)
+	if state.StagnationBaselines != 1 || state.NoImprovementStreak != 0 {
+		t.Fatalf("baseline classification = %+v", state)
 	}
 }
 
-func TestOrderedScoreStagnationTracksBestAndResetsOnImprovement(t *testing.T) {
+func TestOrderedScoresAndRemainingRequirementsClassifyStagnation(t *testing.T) {
 	state := State{}
-	apply := func(score float64, accepted bool, candidate string) {
+	for _, score := range []float64{0, 50, 50, 40, 60} {
+		value := score
 		state = ApplyEvaluation(state, EvaluationInput{
-			Handler: "verify", Accepted: accepted, Score: &score,
-			ScoreDirection: ScoreDirectionMaximize, Candidate: candidate,
+			Handler: "verify", Score: &value, ScoreDirection: ScoreDirectionMaximize,
 		})
 	}
-	apply(0, false, "candidate:a")
-	if state.NoImprovementStreak != 0 || state.StagnationBaselines != 1 {
-		t.Fatalf("initial score baseline = %+v", state)
+	if state.StagnationBestScore == nil || *state.StagnationBestScore != 60 || state.NoImprovementStreak != 0 || state.MaxNoImprovementStreak != 2 {
+		t.Fatalf("ordered score state = %+v", state)
 	}
-	apply(50, false, "candidate:b")
-	apply(50, false, "candidate:c")
-	apply(40, false, "candidate:d")
-	if state.NoImprovementStreak != 2 || state.MaxNoImprovementStreak != 2 || state.StagnationImprovements != 1 || state.StagnationPlateaus != 1 || state.StagnationRegressions != 1 {
-		t.Fatalf("ordered plateau/regression = %+v", state)
-	}
-	apply(60, false, "candidate:e")
-	if state.NoImprovementStreak != 0 || state.StagnationBestScore == nil || *state.StagnationBestScore != 60 || state.StagnationImprovements != 2 {
-		t.Fatalf("ordered improvement = %+v", state)
-	}
-	apply(55, true, "candidate:accepted")
-	if state.NoImprovementStreak != 0 || state.StagnationImprovements != 3 || state.StagnationBestScore == nil || *state.StagnationBestScore != 60 {
-		t.Fatalf("acceptance did not reset without replacing best score = %+v", state)
-	}
-}
-
-func TestMinimizedScoreAndRemainingRequirementsDriveStagnation(t *testing.T) {
-	state := State{}
-	for i, score := range []float64{10, 8, 8, 9} {
-		state = ApplyEvaluation(state, EvaluationInput{
-			Handler: "latency", Score: &score, ScoreDirection: ScoreDirectionMinimize,
-			Candidate: fmt.Sprintf("candidate:%d", i),
-		})
-	}
-	if state.StagnationBestScore == nil || *state.StagnationBestScore != 8 || state.NoImprovementStreak != 2 || state.StagnationImprovements != 1 || state.StagnationPlateaus != 1 || state.StagnationRegressions != 1 {
-		t.Fatalf("minimized score state = %+v", state)
+	if state.StagnationBaselines != 1 || state.StagnationImprovements != 2 || state.StagnationPlateaus != 1 || state.StagnationRegressions != 1 {
+		t.Fatalf("ordered score classifications = %+v", state)
 	}
 
 	state = ApplyBranch(state)
-	for i, remaining := range []int{5, 3, 3, 4} {
-		state = ApplyEvaluation(state, EvaluationInput{
-			Handler: "requirements", RemainingRequirements: &remaining,
-			Candidate: fmt.Sprintf("remaining:%d", i),
-		})
+	for _, count := range []int{5, 3, 3, 4} {
+		remaining := count
+		state = ApplyEvaluation(state, EvaluationInput{Handler: "requirements", RemainingRequirements: &remaining})
 	}
-	if state.StagnationBestRemaining == nil || *state.StagnationBestRemaining != 3 || state.NoImprovementStreak != 2 || state.MaxNoImprovementStreak != 2 || state.StagnationImprovements != 2 || state.StagnationPlateaus != 2 || state.StagnationRegressions != 2 {
+	if state.StagnationBestRemaining == nil || *state.StagnationBestRemaining != 3 || state.NoImprovementStreak != 2 || state.MaxNoImprovementStreak != 2 {
 		t.Fatalf("remaining-requirement state = %+v", state)
+	}
+	if state.StagnationBaselines != 2 || state.StagnationImprovements != 3 || state.StagnationPlateaus != 2 || state.StagnationRegressions != 2 {
+		t.Fatalf("aggregate classifications = %+v", state)
 	}
 }
 
-func TestUnorderedNewCandidatesRemainIndeterminate(t *testing.T) {
+func TestPreviousObservationSupportsEqualAndRepeatedComparison(t *testing.T) {
 	state := ApplyEvaluation(State{}, EvaluationInput{Handler: "verify", Candidate: "candidate:a"})
 	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Candidate: "candidate:b"})
 	if state.NoImprovementStreak != 0 || state.StagnationIndeterminate != 1 {
@@ -101,184 +62,118 @@ func TestUnorderedNewCandidatesRemainIndeterminate(t *testing.T) {
 	}
 	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Candidate: "candidate:b"})
 	if state.NoImprovementStreak != 1 || state.StagnationPlateaus != 1 {
-		t.Fatalf("repeated candidate was not a plateau = %+v", state)
+		t.Fatalf("repeated rejected candidate was not a plateau = %+v", state)
 	}
 
-	score10 := 10.0
-	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &score10, Candidate: "candidate:c"})
-	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &score10, Candidate: "candidate:d"})
+	score := 10.0
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &score, Candidate: "candidate:c"})
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &score, Candidate: "candidate:d"})
 	if state.NoImprovementStreak != 2 || state.UnorderedScoreEvaluations != 2 || state.StagnationPlateaus != 2 {
-		t.Fatalf("unchanged unordered score = %+v", state)
-	}
-	score9 := 9.0
-	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &score9, Candidate: "candidate:d"})
-	if state.NoImprovementStreak != 2 || state.StagnationIndeterminate != 3 {
-		t.Fatalf("changed unordered score was classified = %+v", state)
+		t.Fatalf("equal unordered score state = %+v", state)
 	}
 }
 
-func TestStagnationLaneChangesResetActiveStreak(t *testing.T) {
+func TestLaneChangesResetOnlyActiveControlState(t *testing.T) {
 	zero := 0.0
-	state := ApplyEvaluation(State{}, EvaluationInput{Handler: "one", Score: &zero, ScoreDirection: ScoreDirectionMaximize, Candidate: "a"})
-	state = ApplyEvaluation(state, EvaluationInput{Handler: "one", Score: &zero, ScoreDirection: ScoreDirectionMaximize, Candidate: "b"})
-	if state.NoImprovementStreak != 1 {
-		t.Fatalf("setup streak = %+v", state)
+	state := ApplyEvaluation(State{}, EvaluationInput{Handler: "one", Score: &zero, ScoreDirection: ScoreDirectionMaximize})
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "one", Score: &zero, ScoreDirection: ScoreDirectionMaximize})
+	state = ApplyStagnationNudge(state)
+	if !state.StagnationNudgeIssued || state.NoImprovementStreak != 1 {
+		t.Fatalf("setup lane = %+v", state)
 	}
-	state = ApplyEvaluation(state, EvaluationInput{Handler: "two", Score: &zero, ScoreDirection: ScoreDirectionMaximize, Candidate: "c"})
-	if state.NoImprovementStreak != 0 || state.StagnationLaneResets != 1 || state.MaxNoImprovementStreak != 1 {
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "two", Score: &zero, ScoreDirection: ScoreDirectionMaximize})
+	if state.StagnationNudgeIssued || state.NoImprovementStreak != 0 || state.StagnationLaneResets != 1 || state.PreviousObservation == nil {
 		t.Fatalf("handler lane reset = %+v", state)
 	}
-	state = ApplyEvaluation(state, EvaluationInput{Handler: "two", Score: &zero, ScoreDirection: ScoreDirectionMinimize, Candidate: "d"})
-	if state.NoImprovementStreak != 0 || state.StagnationLaneResets != 2 {
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "two", Score: &zero, ScoreDirection: ScoreDirectionMinimize})
+	if state.NoImprovementStreak != 0 || state.StagnationLaneResets != 2 || state.MaxNoImprovementStreak != 1 {
 		t.Fatalf("direction lane reset = %+v", state)
 	}
 }
 
-func TestStagnationNudgeIsOneShotPerEvaluatorLane(t *testing.T) {
-	zero, one := 0.0, 1.0
+func TestBaselinePlusTwoSameLaneNonImprovementsAllowsExactlyOneNudge(t *testing.T) {
+	zero := 0.0
 	state := State{}
-	for _, candidate := range []string{"a", "b", "c"} {
+	for range 3 {
 		state = ApplyEvaluation(state, EvaluationInput{
-			Handler: "score", Score: &zero, ScoreDirection: ScoreDirectionMaximize, Candidate: candidate,
+			Handler: "verify", Score: &zero, ScoreDirection: ScoreDirectionMaximize,
 		})
 	}
-	if state.NoImprovementStreak != 2 || !CanStagnationNudge(state, 2) || CanStagnationNudge(state, 0) {
-		t.Fatalf("nudge threshold state = %+v", state)
+	if state.StagnationBaselines != 1 || state.StagnationPlateaus != 2 || state.NoImprovementStreak != 2 || !CanStagnationNudge(state, 2) {
+		t.Fatalf("threshold state = %+v", state)
 	}
-	beforeTransitions := state.Transitions
 	state = ApplyStagnationNudge(state)
-	if !state.StagnationNudgeIssued || state.StagnationNudges != 1 || state.Transitions != beforeTransitions+1 || state.LastTransition != TransitionNudge || CanStagnationNudge(state, 2) {
+	if !state.StagnationNudgeIssued || state.StagnationNudges != 1 || CanStagnationNudge(state, 2) {
 		t.Fatalf("first nudge state = %+v", state)
 	}
-	if duplicate := ApplyStagnationNudge(state); duplicate.StagnationNudges != 1 || duplicate.Transitions != state.Transitions {
+	duplicate := ApplyStagnationNudge(state)
+	if duplicate.StagnationNudges != 1 {
 		t.Fatalf("duplicate nudge changed state = %+v", duplicate)
 	}
 
-	state = ApplyEvaluation(state, EvaluationInput{
-		Handler: "score", Score: &one, ScoreDirection: ScoreDirectionMaximize, Candidate: "improved",
-	})
-	state = ApplyEvaluation(state, EvaluationInput{
-		Handler: "score", Score: &one, ScoreDirection: ScoreDirectionMaximize, Candidate: "d",
-	})
-	state = ApplyEvaluation(state, EvaluationInput{
-		Handler: "score", Score: &one, ScoreDirection: ScoreDirectionMaximize, Candidate: "e",
-	})
+	one := 1.0
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &one, ScoreDirection: ScoreDirectionMaximize})
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &one, ScoreDirection: ScoreDirectionMaximize})
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &one, ScoreDirection: ScoreDirectionMaximize})
 	if state.NoImprovementStreak != 2 || !state.StagnationNudgeIssued || CanStagnationNudge(state, 2) {
 		t.Fatalf("same lane re-armed after improvement = %+v", state)
 	}
+}
 
-	state = ApplyEvaluation(state, EvaluationInput{
-		Handler: "latency", Score: &one, ScoreDirection: ScoreDirectionMinimize, Candidate: "f",
-	})
-	if state.StagnationNudgeIssued || state.NoImprovementStreak != 0 {
-		t.Fatalf("new lane did not re-arm = %+v", state)
-	}
-	for _, candidate := range []string{"g", "h"} {
-		state = ApplyEvaluation(state, EvaluationInput{
-			Handler: "latency", Score: &one, ScoreDirection: ScoreDirectionMinimize, Candidate: candidate,
-		})
-	}
-	if !CanStagnationNudge(state, 2) {
-		t.Fatalf("second lane did not reach threshold = %+v", state)
-	}
+func TestBranchResetsActiveLaneAndPreservesAggregates(t *testing.T) {
+	zero := 0.0
+	state := ApplyEvaluation(State{}, EvaluationInput{Handler: "verify", Score: &zero, ScoreDirection: ScoreDirectionMaximize})
+	state = ApplyEvaluation(state, EvaluationInput{Handler: "verify", Score: &zero, ScoreDirection: ScoreDirectionMaximize})
 	state = ApplyStagnationNudge(state)
 	state = ApplyBranch(state)
-	if state.StagnationNudgeIssued || state.StagnationNudges != 2 {
-		t.Fatalf("branch nudge state = %+v", state)
+	if state.Epoch != 2 || state.BranchResets != 1 || state.TotalEvaluations != 2 || state.StagnationNudges != 1 {
+		t.Fatalf("branch aggregates = %+v", state)
+	}
+	if state.StagnationHandler != "" || state.StagnationScoreDirection != "" || state.StagnationBestScore != nil || state.PreviousObservation != nil || state.NoImprovementStreak != 0 || state.StagnationNudgeIssued {
+		t.Fatalf("branch retained active policy = %+v", state)
 	}
 }
 
-func TestTrackerStagnationNudgeUsesDefensiveState(t *testing.T) {
-	zero := 0.0
-	tracker := NewTracker(nil)
-	for _, candidate := range []string{"a", "b", "c"} {
-		tracker.ObserveEvaluation(EvaluationInput{
-			Handler: "verify", Score: &zero, ScoreDirection: ScoreDirectionMaximize, Candidate: candidate,
-		})
-	}
-	if !tracker.CanStagnationNudge(2) || !tracker.ObserveStagnationNudge() || tracker.ObserveStagnationNudge() {
-		t.Fatalf("tracker nudge state = %+v", tracker.Snapshot())
-	}
-	if got := tracker.Snapshot(); got.StagnationNudges != 1 || !got.StagnationNudgeIssued {
-		t.Fatalf("tracker snapshot = %+v", got)
-	}
-}
-
-func TestMutationProjectionMeasuresUnconfirmedPaths(t *testing.T) {
-	state := ApplyModifiedPaths(State{}, []string{"a.go", "b.go", "a.go"})
-	if len(state.ModifiedPaths) != 2 || state.MutationPathObservations != 3 || state.UnconfirmedMutationPaths != 2 {
-		t.Fatalf("mutation state = %+v", state)
-	}
-	state = ApplyConfirmedPaths(state, []string{"a.go", "generated.go"})
-	if len(state.ModifiedPaths) != 3 || len(state.ConfirmedModifiedPaths) != 2 || state.DiffPathConfirmations != 2 || state.UnconfirmedMutationPaths != 1 {
-		t.Fatalf("confirmed state = %+v", state)
-	}
-	state = ApplyModifiedPaths(state, []string{"bad\npath"})
-	if state.InvalidModifiedPaths != 1 {
-		t.Fatalf("invalid path metrics = %+v", state)
-	}
-}
-
-func TestBranchResetsActiveEpochButKeepsAggregateMetrics(t *testing.T) {
-	state := ApplyModifiedPaths(State{}, []string{"a.go"})
-	state = ApplyEvaluation(state, EvaluationInput{Accepted: false, Prompt: 1})
-	beforeTransitions := state.Transitions
-	state = ApplyBranch(state)
-	if state.Epoch != 2 || state.BranchResets != 1 || state.Transitions != beforeTransitions+1 || state.TotalEvaluations != 1 {
-		t.Fatalf("branch metrics = %+v", state)
-	}
-	if state.ObjectiveRef != "" || state.CurrentCandidateID != "" || state.BestAcceptedCandidateID != "" || len(state.Evaluations) != 0 || len(state.ModifiedPaths) != 0 || state.UnconfirmedMutationPaths != 0 || state.StagnationHandler != "" || state.NoImprovementStreak != 0 {
-		t.Fatalf("branch retained active state = %+v", state)
-	}
-}
-
-func TestProjectionBoundsHistoryPathsAndEncodedSize(t *testing.T) {
-	state := State{}
-	evidence := strings.Repeat("e", MaxEvidenceRefBytes)
-	for i := 0; i < MaxEvaluations+5; i++ {
-		state = ApplyEvaluation(state, EvaluationInput{
-			Handler: strings.Repeat("h", MaxHandlerBytes), Candidate: fmt.Sprintf("%03d-%s", i, strings.Repeat("c", MaxCandidateBytes)),
-			EvidenceRef: evidence, Prompt: 1,
-		})
-	}
-	paths := make([]string, MaxModifiedPaths+7)
-	for i := range paths {
-		paths[i] = fmt.Sprintf("path-%03d-%s", i, strings.Repeat("p", MaxPathBytes-16))
-	}
-	state = ApplyModifiedPaths(state, paths)
-	state = ApplyConfirmedPaths(state, paths[:MaxModifiedPaths])
-	if len(state.Evaluations) != MaxEvaluations || state.DroppedEvaluations != 5 {
-		t.Fatalf("evaluation bounds = len %d dropped %d", len(state.Evaluations), state.DroppedEvaluations)
-	}
-	if len(state.ModifiedPaths) != MaxModifiedPaths || state.DroppedModifiedPaths != 7 {
-		t.Fatalf("path bounds = len %d dropped %d", len(state.ModifiedPaths), state.DroppedModifiedPaths)
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(data) > 64<<10 {
-		t.Fatalf("bounded projection encoded to %d bytes, want <= 64 KiB", len(data))
+func TestNormalizeRejectsCachedOlderSchemaAndBoundsCounters(t *testing.T) {
+	cached := State{Schema: SchemaVersion - 1, StagnationHandler: "verify", NoImprovementStreak: 9, StagnationNudgeIssued: true}
+	if got := Normalize(&cached); got != (State{Schema: SchemaVersion}) {
+		t.Fatalf("old cached schema survived normalization: %+v", got)
 	}
 	oversized := State{
 		StagnationHandler:      "verify",
 		NoImprovementStreak:    MaxNoImprovementStreak + 1,
 		MaxNoImprovementStreak: MaxNoImprovementStreak + 2,
+		TotalEvaluations:       -1,
 	}
 	normalized := Normalize(&oversized)
-	if normalized.NoImprovementStreak != MaxNoImprovementStreak || normalized.MaxNoImprovementStreak != MaxNoImprovementStreak {
-		t.Fatalf("stagnation bounds = %+v", normalized)
+	if normalized.NoImprovementStreak != MaxNoImprovementStreak || normalized.MaxNoImprovementStreak != MaxNoImprovementStreak || normalized.TotalEvaluations != 0 {
+		t.Fatalf("normalized bounds = %+v", normalized)
+	}
+}
+
+func TestDisabledTrackerNeverAdvancesOrIssuesPolicy(t *testing.T) {
+	tracker := NewDisabledTracker()
+	for _, candidate := range []string{"one", "two", "three"} {
+		tracker.ObserveEvaluation(EvaluationInput{Handler: "verify", Candidate: candidate})
+	}
+	tracker.ResetForBranch()
+	if tracker.CanStagnationNudge(2) || tracker.ObserveStagnationNudge() {
+		t.Fatal("disabled tracker issued stagnation policy")
+	}
+	if got := tracker.Snapshot(); got != (State{Schema: SchemaVersion}) {
+		t.Fatalf("disabled tracker advanced state: %+v", got)
 	}
 }
 
 func TestTrackerSnapshotIsDefensive(t *testing.T) {
+	score := 1.0
 	tracker := NewTracker(nil)
-	tracker.ObserveEvaluation(EvaluationInput{Candidate: "one", Accepted: true})
+	tracker.ObserveEvaluation(EvaluationInput{Handler: "verify", Score: &score, ScoreDirection: ScoreDirectionMaximize, Candidate: "one"})
 	first := tracker.Snapshot()
-	first.Evaluations[0].CandidateID = "mutated"
-	first.ModifiedPaths = append(first.ModifiedPaths, "injected")
+	*first.StagnationBestScore = 9
+	first.PreviousObservation.CandidateID = "mutated"
 	second := tracker.Snapshot()
-	if second.Evaluations[0].CandidateID != "one" || len(second.ModifiedPaths) != 0 {
+	if second.StagnationBestScore == nil || *second.StagnationBestScore != 1 || second.PreviousObservation == nil || second.PreviousObservation.CandidateID != "one" {
 		t.Fatalf("tracker snapshot aliased state: %+v", second)
 	}
 }

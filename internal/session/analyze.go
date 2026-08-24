@@ -14,12 +14,13 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"harness/internal/llm"
 )
 
 // AnalysisVersion is the stable schema version emitted by WriteAnalysisJSON.
-const AnalysisVersion = 12
+const AnalysisVersion = 13
 
 const (
 	maxAnalysisTextSessions     = 100
@@ -134,21 +135,19 @@ type RetentionAnalysis struct {
 	NextRequestFull         int  `json:"next_request_full"`
 }
 
-// TrajectoryAnalysis measures the host-owned shadow projection without
-// exposing candidate IDs, evidence references, or modified paths. Projection
-// bytes are the encoded current-state size; aggregate reports sum that value
-// and retain the largest per-stream projection separately.
+// TrajectoryAnalysis measures current evaluator, stagnation, and mutation
+// telemetry without exposing candidate IDs, scores, evidence references, or
+// modified paths. Mutation attribution is derived passively from raw events and
+// never participates in model-visible policy.
 type TrajectoryAnalysis struct {
 	Available                 bool `json:"available"`
 	Streams                   int  `json:"streams"`
 	Schema                    int  `json:"schema"`
-	Seeds                     int  `json:"seeds"`
 	Transitions               int  `json:"transitions"`
 	BranchResets              int  `json:"branch_resets"`
 	Evaluations               int  `json:"evaluations"`
 	AcceptedEvaluations       int  `json:"accepted_evaluations"`
 	RejectedEvaluations       int  `json:"rejected_evaluations"`
-	ActiveEvaluations         int  `json:"active_evaluations"`
 	ActiveNoImprovementStreak int  `json:"active_no_improvement_streak"`
 	MaxNoImprovementStreak    int  `json:"max_no_improvement_streak"`
 	StagnationBaselines       int  `json:"stagnation_baselines"`
@@ -164,25 +163,7 @@ type TrajectoryAnalysis struct {
 	ActiveModifiedPaths       int  `json:"active_modified_paths"`
 	ActiveConfirmedPaths      int  `json:"active_confirmed_paths"`
 	UnconfirmedMutationPaths  int  `json:"unconfirmed_mutation_paths"`
-	MissingCandidateIDs       int  `json:"missing_candidate_ids"`
-	MissingEvidenceRefs       int  `json:"missing_evidence_refs"`
-	DroppedEvaluations        int  `json:"dropped_evaluations"`
-	DroppedModifiedPaths      int  `json:"dropped_modified_paths"`
-	InvalidModifiedPaths      int  `json:"invalid_modified_paths"`
-	ProjectionBytes           int  `json:"projection_bytes"`
-	MaxProjectionBytes        int  `json:"max_projection_bytes"`
-}
-
-// LineageAnalysis summarizes content-free accepted-lineage receipts. Detailed
-// candidate identifiers, scores, trees, and artifact references stay in the
-// explicitly opted-in lineage manifest.
-type LineageAnalysis struct {
-	Available        bool  `json:"available"`
-	Advances         int   `json:"advances"`
-	PatchBytes       int64 `json:"patch_bytes"`
-	MaxPatchBytes    int64 `json:"max_patch_bytes"`
-	EvidenceBytes    int64 `json:"evidence_bytes"`
-	MaxEvidenceBytes int64 `json:"max_evidence_bytes"`
+	InvalidMutationPaths      int  `json:"invalid_mutation_paths"`
 }
 
 // InvariantAnalysis records impossible values without exposing event payloads.
@@ -205,7 +186,6 @@ type TelemetryAnalysis struct {
 	Context    ContextAnalysis    `json:"context"`
 	Retention  RetentionAnalysis  `json:"retention"`
 	Trajectory TrajectoryAnalysis `json:"trajectory"`
-	Lineage    LineageAnalysis    `json:"lineage"`
 	Invariants InvariantAnalysis  `json:"invariants"`
 }
 
@@ -289,7 +269,6 @@ type TelemetryCoverage struct {
 	ProviderCountScope         int `json:"provider_count_scope"`
 	Retention                  int `json:"retention"`
 	Trajectory                 int `json:"trajectory"`
-	Lineage                    int `json:"lineage"`
 }
 
 // AnalysisReport is a deterministic, transcript-free corpus report. Path may
@@ -779,7 +758,7 @@ func runtimeProfilePresent(runtime RuntimeProfile) bool {
 		runtime.ToolResultMaxBytes != 0 || runtime.ToolResultMaxLines != 0 ||
 		runtime.CompactToolResultMaxBytes != 0 || runtime.CompactTimeoutSeconds != 0 || runtime.ResponsesStateful || runtime.NativeCompaction ||
 		runtime.DelegateMaxTurns != 0 || runtime.DelegateMaxActive != 0 || runtime.DelegateMaxDescendants != 0 ||
-		runtime.Prewarm || runtime.SearchBackend != "" || runtime.StagnationNudge || runtime.CandidateLineage
+		runtime.Prewarm || runtime.SearchBackend != "" || runtime.StagnationNudge
 }
 
 type analysisEventLimits struct {
@@ -938,9 +917,6 @@ func (c *TelemetryCoverage) add(telemetry TelemetryAnalysis, events []Event) {
 	}
 	if telemetry.Trajectory.Available {
 		c.Trajectory++
-	}
-	if telemetry.Lineage.Available {
-		c.Lineage++
 	}
 	for _, event := range events {
 		if event.Context != nil && event.Context.ProviderInputScope != "" {
@@ -1202,17 +1178,6 @@ func deriveTelemetry(events []Event, child *ChildMeta) TelemetryAnalysis {
 					out.Invariants.InconsistentRetentionViolations++
 				}
 			}
-		case EventLineageAdvance:
-			if advance := event.LineageAdvance; advance != nil {
-				out.Lineage.Available = true
-				out.Lineage.Advances++
-				patchBytes := max(int64(0), advance.PatchBytes)
-				evidenceBytes := max(int64(0), advance.EvidenceBytes)
-				out.Lineage.PatchBytes += patchBytes
-				out.Lineage.MaxPatchBytes = max(out.Lineage.MaxPatchBytes, patchBytes)
-				out.Lineage.EvidenceBytes += evidenceBytes
-				out.Lineage.MaxEvidenceBytes = max(out.Lineage.MaxEvidenceBytes, evidenceBytes)
-			}
 		}
 	}
 	if len(events) == 0 && child != nil && (child.TelemetryVersion > 0 || child.ClosureTrigger != "" || child.TurnBudgetExhausted || child.WorkflowStatus != nil) {
@@ -1256,15 +1221,77 @@ func deriveTelemetry(events []Event, child *ChildMeta) TelemetryAnalysis {
 	return out
 }
 
+const (
+	maxAnalysisMutationPaths     = 32
+	maxAnalysisMutationPathBytes = 512
+)
+
+type mutationAnalysisAccumulator struct {
+	active        map[string]struct{}
+	confirmed     map[string]struct{}
+	observations  int
+	confirmations int
+	invalid       int
+}
+
+func newMutationAnalysisAccumulator() mutationAnalysisAccumulator {
+	return mutationAnalysisAccumulator{
+		active:    make(map[string]struct{}, maxAnalysisMutationPaths),
+		confirmed: make(map[string]struct{}, maxAnalysisMutationPaths),
+	}
+}
+
+func (a *mutationAnalysisAccumulator) observe(paths []string, confirmation bool) {
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" || len(path) > maxAnalysisMutationPathBytes || strings.IndexFunc(path, unicode.IsControl) >= 0 {
+			a.invalid++
+			continue
+		}
+		if confirmation {
+			a.confirmations++
+		} else {
+			a.observations++
+		}
+		if _, ok := a.active[path]; !ok {
+			if len(a.active) >= maxAnalysisMutationPaths {
+				continue
+			}
+			a.active[path] = struct{}{}
+		}
+		if confirmation && len(a.confirmed) < maxAnalysisMutationPaths {
+			a.confirmed[path] = struct{}{}
+		}
+	}
+}
+
+func (a *mutationAnalysisAccumulator) reset() {
+	clear(a.active)
+	clear(a.confirmed)
+}
+
 func deriveTrajectory(events []Event) TrajectoryAnalysis {
 	var out TrajectoryAnalysis
+	mutations := newMutationAnalysisAccumulator()
 	for _, event := range events {
 		switch event.Type {
-		case EventTrajectorySeed:
+		case EventEvaluatorResult, EventStagnationNudge:
 			out.Available = true
-			out.Seeds++
-		case EventEvaluatorResult, EventToolMutation, EventToolDiff, EventBranch, EventStagnationNudge:
+			out.Transitions++
+		case EventToolMutation:
 			out.Available = true
+			out.Transitions++
+			if event.ToolMutation != nil {
+				mutations.observe(event.ToolMutation.Paths, false)
+			}
+		case EventToolDiff:
+			out.Available = true
+			out.Transitions++
+			mutations.observe([]string{event.Path}, true)
+		case EventBranch:
+			out.Available = true
+			out.Transitions++
+			mutations.reset()
 		}
 	}
 	if !out.Available {
@@ -1273,12 +1300,10 @@ func deriveTrajectory(events []Event) TrajectoryAnalysis {
 	state := ReconstructTrajectory(events)
 	out.Streams = 1
 	out.Schema = state.Schema
-	out.Transitions = state.Transitions
 	out.BranchResets = state.BranchResets
 	out.Evaluations = state.TotalEvaluations
 	out.AcceptedEvaluations = state.AcceptedEvaluations
 	out.RejectedEvaluations = state.RejectedEvaluations
-	out.ActiveEvaluations = len(state.Evaluations)
 	out.ActiveNoImprovementStreak = state.NoImprovementStreak
 	out.MaxNoImprovementStreak = state.MaxNoImprovementStreak
 	out.StagnationBaselines = state.StagnationBaselines
@@ -1289,20 +1314,12 @@ func deriveTrajectory(events []Event) TrajectoryAnalysis {
 	out.UnorderedScoreEvaluations = state.UnorderedScoreEvaluations
 	out.StagnationLaneResets = state.StagnationLaneResets
 	out.StagnationNudges = state.StagnationNudges
-	out.MutationPathObservations = state.MutationPathObservations
-	out.DiffPathConfirmations = state.DiffPathConfirmations
-	out.ActiveModifiedPaths = len(state.ModifiedPaths)
-	out.ActiveConfirmedPaths = len(state.ConfirmedModifiedPaths)
-	out.UnconfirmedMutationPaths = state.UnconfirmedMutationPaths
-	out.MissingCandidateIDs = state.MissingCandidateIDs
-	out.MissingEvidenceRefs = state.MissingEvidenceRefs
-	out.DroppedEvaluations = state.DroppedEvaluations
-	out.DroppedModifiedPaths = state.DroppedModifiedPaths
-	out.InvalidModifiedPaths = state.InvalidModifiedPaths
-	if encoded, err := json.Marshal(state); err == nil {
-		out.ProjectionBytes = len(encoded)
-		out.MaxProjectionBytes = len(encoded)
-	}
+	out.MutationPathObservations = mutations.observations
+	out.DiffPathConfirmations = mutations.confirmations
+	out.ActiveModifiedPaths = len(mutations.active)
+	out.ActiveConfirmedPaths = len(mutations.confirmed)
+	out.UnconfirmedMutationPaths = len(mutations.active) - len(mutations.confirmed)
+	out.InvalidMutationPaths = mutations.invalid
 	return out
 }
 
@@ -1654,25 +1671,12 @@ func (t *TelemetryAnalysis) add(other TelemetryAnalysis) {
 	t.Retention.NextRequestStateful += other.Retention.NextRequestStateful
 	t.Retention.NextRequestFull += other.Retention.NextRequestFull
 	t.Trajectory.add(other.Trajectory)
-	t.Lineage.add(other.Lineage)
 	t.Invariants.ContextAvailable = t.Invariants.ContextAvailable || other.Invariants.ContextAvailable
 	t.Invariants.RetentionAvailable = t.Invariants.RetentionAvailable || other.Invariants.RetentionAvailable
 	t.Invariants.UsageReconciliationAvailable = t.Invariants.UsageReconciliationAvailable || other.Invariants.UsageReconciliationAvailable
 	t.Invariants.NegativeContextViolations += other.Invariants.NegativeContextViolations
 	t.Invariants.InconsistentRetentionViolations += other.Invariants.InconsistentRetentionViolations
 	t.Invariants.UsageReconciliationViolations += other.Invariants.UsageReconciliationViolations
-}
-
-func (l *LineageAnalysis) add(other LineageAnalysis) {
-	if !other.Available {
-		return
-	}
-	l.Available = true
-	l.Advances += other.Advances
-	l.PatchBytes += other.PatchBytes
-	l.MaxPatchBytes = max(l.MaxPatchBytes, other.MaxPatchBytes)
-	l.EvidenceBytes += other.EvidenceBytes
-	l.MaxEvidenceBytes = max(l.MaxEvidenceBytes, other.MaxEvidenceBytes)
 }
 
 func (t *TrajectoryAnalysis) add(other TrajectoryAnalysis) {
@@ -1682,13 +1686,11 @@ func (t *TrajectoryAnalysis) add(other TrajectoryAnalysis) {
 	t.Available = true
 	t.Streams += other.Streams
 	t.Schema = max(t.Schema, other.Schema)
-	t.Seeds += other.Seeds
 	t.Transitions += other.Transitions
 	t.BranchResets += other.BranchResets
 	t.Evaluations += other.Evaluations
 	t.AcceptedEvaluations += other.AcceptedEvaluations
 	t.RejectedEvaluations += other.RejectedEvaluations
-	t.ActiveEvaluations += other.ActiveEvaluations
 	t.ActiveNoImprovementStreak += other.ActiveNoImprovementStreak
 	t.MaxNoImprovementStreak = max(t.MaxNoImprovementStreak, other.MaxNoImprovementStreak)
 	t.StagnationBaselines += other.StagnationBaselines
@@ -1704,13 +1706,7 @@ func (t *TrajectoryAnalysis) add(other TrajectoryAnalysis) {
 	t.ActiveModifiedPaths += other.ActiveModifiedPaths
 	t.ActiveConfirmedPaths += other.ActiveConfirmedPaths
 	t.UnconfirmedMutationPaths += other.UnconfirmedMutationPaths
-	t.MissingCandidateIDs += other.MissingCandidateIDs
-	t.MissingEvidenceRefs += other.MissingEvidenceRefs
-	t.DroppedEvaluations += other.DroppedEvaluations
-	t.DroppedModifiedPaths += other.DroppedModifiedPaths
-	t.InvalidModifiedPaths += other.InvalidModifiedPaths
-	t.ProjectionBytes += other.ProjectionBytes
-	t.MaxProjectionBytes = max(t.MaxProjectionBytes, other.MaxProjectionBytes)
+	t.InvalidMutationPaths += other.InvalidMutationPaths
 }
 
 func mergeMaximum(dst *AnalysisValue, src AnalysisValue) {
@@ -1757,11 +1753,11 @@ func WriteAnalysisText(report AnalysisReport, w io.Writer) error {
 	fmt.Fprintf(&b, "  turns/tools/results/errors: %d / %d / %d / %d tool, %d model\n", report.Execution.Turns, report.Execution.ToolCalls, report.Execution.ToolResults, report.Execution.ToolErrors, report.Execution.ModelErrors)
 	fmt.Fprintf(&b, "  command results/failures/cancellations; effective failures: %d / %d / %d; %d\n", report.Execution.CommandResults, report.Execution.CommandFailures, report.Execution.CommandCancellations, report.Execution.EffectiveFailures)
 	fmt.Fprintf(&b, "  terminations: %s\n", formatCountMap(report.Execution.TerminationAvailable, report.Execution.Terminations))
-	fmt.Fprintf(&b, "  telemetry coverage closure/workflow/progress/hooks/context/count-scope/retention/trajectory/lineage: %d/%d/%d/%d/%d/%d/%d/%d/%d of %d\n", report.Coverage.Closure, report.Coverage.Workflow, report.Coverage.Progress, report.Coverage.Hooks, report.Coverage.Context, report.Coverage.ProviderCountScope, report.Coverage.Retention, report.Coverage.Trajectory, report.Coverage.Lineage, report.Coverage.Sessions)
+	fmt.Fprintf(&b, "  telemetry coverage closure/workflow/progress/hooks/context/count-scope/retention/trajectory: %d/%d/%d/%d/%d/%d/%d/%d of %d\n", report.Coverage.Closure, report.Coverage.Workflow, report.Coverage.Progress, report.Coverage.Hooks, report.Coverage.Context, report.Coverage.ProviderCountScope, report.Coverage.Retention, report.Coverage.Trajectory, report.Coverage.Sessions)
 	fmt.Fprintf(&b, "  delegate completion valid/failures/applicable: %d / %d / %d\n", report.Coverage.CompletionValid, report.Coverage.CompletionCoverageFailures, report.Coverage.CompletionApplicable)
 	writeTelemetryText(&b, "  ", report.Telemetry)
 	writeAnalysisUsageText(&b, "  ", report.Usage, report.Distributions)
-	fmt.Fprintf(&b, "  storage bytes total/state/tree/raw/compactions/tool-results/lineage: %d / %d / %d / %d / %d / %d / %d\n", report.Storage.TotalBytes, report.Storage.State.Bytes, report.Storage.Tree.Bytes, report.Storage.Raw.Bytes, report.Storage.Compactions.Bytes, report.Storage.ToolResults.Bytes, report.Storage.Lineage.Bytes)
+	fmt.Fprintf(&b, "  storage bytes total/state/tree/raw/compactions/tool-results: %d / %d / %d / %d / %d / %d\n", report.Storage.TotalBytes, report.Storage.State.Bytes, report.Storage.Tree.Bytes, report.Storage.Raw.Bytes, report.Storage.Compactions.Bytes, report.Storage.ToolResults.Bytes)
 	fmt.Fprintf(&b, "  context resets snapshot/legacy-delta; payload bytes: %d / %d; %d / %d\n", report.Storage.SnapshotResetEntries, report.Storage.DeltaResetEntries, report.Storage.SnapshotPayloadBytes, report.Storage.DeltaPayloadBytes)
 	fmt.Fprintf(&b, "  cohorts: %d\n", len(report.Cohorts))
 	limit := min(len(report.Items), maxAnalysisTextSessions)
@@ -1817,18 +1813,12 @@ func writeTelemetryText(w io.Writer, indent string, t TelemetryAnalysis) {
 	}
 	if t.Trajectory.Available {
 		fmt.Fprintf(w, "%strajectory streams/transitions/evaluations/branch resets: %d / %d / %d / %d\n", indent, t.Trajectory.Streams, t.Trajectory.Transitions, t.Trajectory.Evaluations, t.Trajectory.BranchResets)
-		fmt.Fprintf(w, "%strajectory projection bytes total/max; active evals/paths: %d / %d; %d / %d\n", indent, t.Trajectory.ProjectionBytes, t.Trajectory.MaxProjectionBytes, t.Trajectory.ActiveEvaluations, t.Trajectory.ActiveModifiedPaths)
+		fmt.Fprintf(w, "%strajectory active mutation/confirmed paths: %d / %d\n", indent, t.Trajectory.ActiveModifiedPaths, t.Trajectory.ActiveConfirmedPaths)
 		fmt.Fprintf(w, "%strajectory no-improvement active/max; baseline/improved/plateau/regressed/indeterminate: %d / %d; %d / %d / %d / %d / %d\n", indent, t.Trajectory.ActiveNoImprovementStreak, t.Trajectory.MaxNoImprovementStreak, t.Trajectory.StagnationBaselines, t.Trajectory.StagnationImprovements, t.Trajectory.StagnationPlateaus, t.Trajectory.StagnationRegressions, t.Trajectory.StagnationIndeterminate)
 		fmt.Fprintf(w, "%strajectory unordered scores/lane resets/strategy resets: %d / %d / %d\n", indent, t.Trajectory.UnorderedScoreEvaluations, t.Trajectory.StagnationLaneResets, t.Trajectory.StagnationNudges)
-		fmt.Fprintf(w, "%strajectory mutation observations/diff confirmations/unconfirmed paths: %d / %d / %d\n", indent, t.Trajectory.MutationPathObservations, t.Trajectory.DiffPathConfirmations, t.Trajectory.UnconfirmedMutationPaths)
-		fmt.Fprintf(w, "%strajectory missing candidate/evidence; dropped evals/paths; invalid paths: %d / %d; %d / %d; %d\n", indent, t.Trajectory.MissingCandidateIDs, t.Trajectory.MissingEvidenceRefs, t.Trajectory.DroppedEvaluations, t.Trajectory.DroppedModifiedPaths, t.Trajectory.InvalidModifiedPaths)
+		fmt.Fprintf(w, "%strajectory mutation observations/diff confirmations/unconfirmed/invalid paths: %d / %d / %d / %d\n", indent, t.Trajectory.MutationPathObservations, t.Trajectory.DiffPathConfirmations, t.Trajectory.UnconfirmedMutationPaths, t.Trajectory.InvalidMutationPaths)
 	} else {
 		fmt.Fprintf(w, "%strajectory telemetry: unavailable\n", indent)
-	}
-	if t.Lineage.Available {
-		fmt.Fprintf(w, "%scandidate lineage advances/patch bytes/max/evidence bytes/max: %d / %d / %d / %d / %d\n", indent, t.Lineage.Advances, t.Lineage.PatchBytes, t.Lineage.MaxPatchBytes, t.Lineage.EvidenceBytes, t.Lineage.MaxEvidenceBytes)
-	} else {
-		fmt.Fprintf(w, "%scandidate lineage telemetry: unavailable\n", indent)
 	}
 	fmt.Fprintf(w, "%snegative-context violations: %s\n", indent, availableCount(t.Invariants.ContextAvailable || t.Invariants.RetentionAvailable, t.Invariants.NegativeContextViolations))
 	fmt.Fprintf(w, "%sinconsistent-retention violations: %s\n", indent, availableCount(t.Invariants.RetentionAvailable, t.Invariants.InconsistentRetentionViolations))

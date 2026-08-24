@@ -27,7 +27,6 @@ import (
 	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
-	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/otel"
@@ -1444,7 +1443,6 @@ func TestREPLClearResetsAndRotates(t *testing.T) {
 	)
 	app := newTestApp(t, &out, &errw, fp)
 	app.Trajectory = trajectory.NewTracker(nil)
-	app.Trajectory.ObserveModifiedPaths([]string{"before-clear.go"})
 	app.Trajectory.ObserveEvaluation(trajectory.EvaluationInput{Handler: "verify", Candidate: "candidate:before-clear", Accepted: true})
 	origPath := app.SessionPath
 	origProxySessionID := app.Agent.ProxySessionID()
@@ -1477,7 +1475,7 @@ func TestREPLClearResetsAndRotates(t *testing.T) {
 	if !strings.Contains(errw.String(), "/clear") && !strings.Contains(errw.String(), "cleared") {
 		t.Errorf("/clear should acknowledge, errw=%q", errw.String())
 	}
-	if got := app.Trajectory.Snapshot(); got.Transitions != 0 || got.TotalEvaluations != 0 || len(got.ModifiedPaths) != 0 {
+	if got := app.Trajectory.Snapshot(); got.TotalEvaluations != 0 || got.StagnationHandler != "" || got.PreviousObservation != nil {
 		t.Fatalf("/clear retained trajectory state: %+v", got)
 	}
 }
@@ -2344,7 +2342,7 @@ func TestREPLCompactCommand(t *testing.T) {
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("CANNED SUMMARY")}, Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 9100, OutputTokens: 400}},
 	)
 	app := newTestApp(t, &out, &errw, fp)
-	app.ensureTrajectory().ObserveEvaluation(trajectory.EvaluationInput{Handler: "verify", Candidate: "candidate:before-compact", EvidenceRef: "evidence/before-compact"})
+	app.ensureTrajectory().ObserveEvaluation(trajectory.EvaluationInput{Handler: "verify", Candidate: "candidate:before-compact"})
 	wantTrajectory := app.Trajectory.Snapshot()
 
 	// Seed enough whole turns that there is something older than the last eight
@@ -5131,7 +5129,7 @@ func TestTreeCommandBranchesBeforeSelectedPromptAndPrefillsIt(t *testing.T) {
 		t.Fatalf("ensureSessionTree: %v", err)
 	}
 	app.ensureTrajectory().ObserveEvaluation(trajectory.EvaluationInput{
-		Handler: "verify", Candidate: "candidate:before-branch", EvidenceRef: "evidence/before-branch",
+		Handler: "verify", Candidate: "candidate:before-branch",
 	})
 	if err := session.AppendEvent(app.SessionPath, session.Event{
 		Type: session.EventEvaluatorResult, Prompt: 1, Turn: 1,
@@ -5161,7 +5159,7 @@ func TestTreeCommandBranchesBeforeSelectedPromptAndPrefillsIt(t *testing.T) {
 		t.Fatalf("saved tree entries/leaf = %d/%s", len(loaded.Tree.Entries), loaded.ActiveLeaf)
 	}
 	liveTrajectory := app.Trajectory.Snapshot()
-	if liveTrajectory.TotalEvaluations != 1 || liveTrajectory.BranchResets != 1 || len(liveTrajectory.Evaluations) != 0 || liveTrajectory.CurrentCandidateID != "" {
+	if liveTrajectory.TotalEvaluations != 1 || liveTrajectory.BranchResets != 1 || liveTrajectory.StagnationHandler != "" || liveTrajectory.PreviousObservation != nil {
 		t.Fatalf("live branch trajectory = %+v", liveTrajectory)
 	}
 	if loaded.Trajectory == nil || !reflect.DeepEqual(*loaded.Trajectory, liveTrajectory) {
@@ -5218,7 +5216,7 @@ func TestForkCommandCreatesChildSessionWithFreshUsage(t *testing.T) {
 	app.Agent.SetTranscript(seed)
 	app.SetUsage(session.UsageTotals{Usage: llm.Usage{InputTokens: 100}})
 	app.ensureTrajectory().ObserveEvaluation(trajectory.EvaluationInput{
-		Handler: "verify", Candidate: "candidate:parent", Accepted: true, EvidenceRef: "evidence/parent",
+		Handler: "verify", Candidate: "candidate:parent", Accepted: true,
 	})
 	if err := app.ensureSessionTree(); err != nil {
 		t.Fatalf("ensureSessionTree: %v", err)
@@ -5242,9 +5240,9 @@ func TestForkCommandCreatesChildSessionWithFreshUsage(t *testing.T) {
 		t.Fatalf("Load child: %v", err)
 	}
 	if loaded.ParentSession != parentID || loaded.Usage.InputTokens != 0 {
-		t.Fatalf("child lineage/usage = %q/%+v", loaded.ParentSession, loaded.Usage)
+		t.Fatalf("child parent link/usage = %q/%+v", loaded.ParentSession, loaded.Usage)
 	}
-	if loaded.Trajectory == nil || loaded.Trajectory.TotalEvaluations != 0 || loaded.Trajectory.BranchResets != 1 || loaded.Trajectory.CurrentCandidateID != "" {
+	if loaded.Trajectory == nil || loaded.Trajectory.TotalEvaluations != 0 || loaded.Trajectory.BranchResets != 1 || loaded.Trajectory.StagnationHandler != "" {
 		t.Fatalf("fork should start a fresh trajectory epoch: %+v", loaded.Trajectory)
 	}
 	if got := transcriptTextForUI(loaded.Messages); strings.Contains(got, "second answer") || !strings.Contains(got, "first answer") {
@@ -5271,7 +5269,7 @@ func TestHandoffToImplementationReseedsContext(t *testing.T) {
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	ready := readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it"), uiAsstMsg("here is the design")})
-	app.ensureTrajectory().ObserveEvaluation(trajectory.EvaluationInput{Handler: "verify", Candidate: "candidate:planning", EvidenceRef: "evidence/planning"})
+	app.ensureTrajectory().ObserveEvaluation(trajectory.EvaluationInput{Handler: "verify", Candidate: "candidate:planning"})
 	wantTrajectory := app.Trajectory.Snapshot()
 	app.SwitchAgent = func(string) (AgentSelection, error) {
 		return AgentSelection{}, errors.New("hidden from interactive selection")
@@ -8282,167 +8280,6 @@ func TestREPLQueuedUserInputWinsOverGoalContinuation(t *testing.T) {
 	second := fp.Requests[1].Messages
 	if got := second[len(second)-1].Content[0].Text; got != "user input wins" {
 		t.Fatalf("second prompt = %q, want queued user input", got)
-	}
-}
-
-type testLineageObserver struct {
-	inputs  []lineage.Input
-	advance *lineage.Advance
-	err     error
-}
-
-type testLineageController struct {
-	state           lineage.State
-	statusErr       error
-	exportSequence  int
-	exportPath      string
-	exportResult    lineage.Export
-	exportErr       error
-	restoreSequence int
-	restoreForce    bool
-	restoreResult   lineage.Restore
-	restoreErr      error
-}
-
-func (c *testLineageController) Status() (lineage.State, error) {
-	return c.state, c.statusErr
-}
-
-func (c *testLineageController) Export(sequence int, destination string) (lineage.Export, error) {
-	c.exportSequence = sequence
-	c.exportPath = destination
-	return c.exportResult, c.exportErr
-}
-
-func (c *testLineageController) Restore(sequence int, force bool) (lineage.Restore, error) {
-	c.restoreSequence = sequence
-	c.restoreForce = force
-	return c.restoreResult, c.restoreErr
-}
-
-func (o *testLineageObserver) Observe(input lineage.Input) (*lineage.Advance, error) {
-	o.inputs = append(o.inputs, input)
-	return o.advance, o.err
-}
-
-func TestAccumulatingSinkArchivesEvaluatorResultAfterCanonicalEvent(t *testing.T) {
-	var out, errw bytes.Buffer
-	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
-	observer := &testLineageObserver{advance: &lineage.Advance{Sequence: 2, ParentSequence: 1, PatchBytes: 321, EvidenceBytes: 45}}
-	app.CandidateLineage = observer
-	sink := newAccumulatingSink(app.Renderer, app, 4)
-	sink.TurnAttemptStart(3, 1, agent.ContextEstimate{})
-	score := 20.0
-	sink.EvaluatorResult(hooks.EvaluatorResult{
-		Handler: "quality", Accepted: true, Score: &score, ScoreDirection: hooks.ScoreDirectionMaximize,
-		Candidate: "candidate:best", EvidenceRef: "evidence/best.txt",
-	})
-	sink.FlushEvents()
-	if err := sink.candidateLineageError(); err != nil {
-		t.Fatal(err)
-	}
-	if len(observer.inputs) != 1 || observer.inputs[0].Prompt != 4 || observer.inputs[0].Turn != 3 || observer.inputs[0].Candidate != "candidate:best" {
-		t.Fatalf("lineage inputs = %+v", observer.inputs)
-	}
-	events := readRawEvents(t, app.SessionPath)
-	evaluatorIndex, advanceIndex := -1, -1
-	for i, event := range events {
-		switch event.Type {
-		case session.EventEvaluatorResult:
-			evaluatorIndex = i
-		case session.EventLineageAdvance:
-			advanceIndex = i
-			if event.LineageAdvance == nil || event.LineageAdvance.Sequence != 2 || event.LineageAdvance.PatchBytes != 321 {
-				t.Fatalf("lineage event = %+v", event)
-			}
-		}
-	}
-	if evaluatorIndex < 0 || advanceIndex <= evaluatorIndex {
-		t.Fatalf("event order evaluator=%d lineage=%d: %+v", evaluatorIndex, advanceIndex, events)
-	}
-}
-
-func TestAccumulatingSinkRetainsCandidateLineageFailure(t *testing.T) {
-	var out, errw bytes.Buffer
-	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
-	app.CandidateLineage = &testLineageObserver{err: errors.New("archive failed")}
-	sink := newAccumulatingSink(app.Renderer, app, 1)
-	sink.EvaluatorResult(hooks.EvaluatorResult{Accepted: true})
-	if err := sink.candidateLineageError(); err == nil || !strings.Contains(err.Error(), "archive failed") {
-		t.Fatalf("candidate lineage error = %v", err)
-	}
-}
-
-func TestLineageCommandListsExportsAndRestoresExplicitly(t *testing.T) {
-	var out, errw bytes.Buffer
-	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
-	score10, score20 := 10.0, 20.0
-	control := &testLineageController{
-		state: lineage.State{
-			Handler: "quality", ScoreDirection: lineage.ScoreDirectionMaximize, BestScore: &score20,
-			Entries: []lineage.Entry{
-				{Sequence: 1, Score: score10, Candidate: "candidate:one", EvidenceRef: "evidence/one.txt", PatchBytes: 12},
-				{Sequence: 2, Score: score20, Candidate: "candidate:best", EvidenceRef: "evidence/best.txt", PatchBytes: 34},
-			},
-		},
-		exportResult: lineage.Export{Sequence: 2, Path: "/tmp/accepted candidate"},
-		restoreResult: lineage.Restore{
-			Sequence: 2, Changed: true, RecoveryPatch: "lineage/restore-backups/0001.patch", RecoveryPatchBytes: 55,
-		},
-	}
-	app.CandidateLineageControl = control
-
-	app.command("/lineage", nil)
-	for _, want := range []string{"2 accepted checkpoints", "best #2 score 20", "candidate:one", "evidence/best.txt"} {
-		if !strings.Contains(errw.String(), want) {
-			t.Errorf("lineage list missing %q: %q", want, errw.String())
-		}
-	}
-	errw.Reset()
-	app.command("/lineage export best /tmp/accepted candidate", nil)
-	if control.exportSequence != 2 || control.exportPath != "/tmp/accepted candidate" {
-		t.Fatalf("export call = %d, %q", control.exportSequence, control.exportPath)
-	}
-	if !strings.Contains(errw.String(), "lineage exported #2") {
-		t.Fatalf("export output = %q", errw.String())
-	}
-	errw.Reset()
-	app.command("/lineage restore best --force", nil)
-	if control.restoreSequence != 2 || !control.restoreForce {
-		t.Fatalf("restore call = %d, force %t", control.restoreSequence, control.restoreForce)
-	}
-	if !strings.Contains(errw.String(), "recovery patch lineage/restore-backups/0001.patch") {
-		t.Fatalf("restore output = %q", errw.String())
-	}
-	events := readRawEvents(t, app.SessionPath)
-	var actions int
-	for _, event := range events {
-		if event.Type == session.EventNotice && (strings.Contains(event.Text, "lineage exported") || strings.Contains(event.Text, "lineage restored")) {
-			actions++
-		}
-	}
-	if actions != 2 {
-		t.Fatalf("lineage action events = %d, want 2: %+v", actions, events)
-	}
-}
-
-func TestLineageCommandRejectsUnavailableAndInvalidSelectors(t *testing.T) {
-	var out, errw bytes.Buffer
-	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
-	app.command("/lineage", nil)
-	if !strings.Contains(errw.String(), "start Harness with -candidate-lineage") {
-		t.Fatalf("unavailable output = %q", errw.String())
-	}
-	errw.Reset()
-	app.CandidateLineageControl = &testLineageController{state: lineage.State{}}
-	app.command("/lineage export best /tmp/none", nil)
-	if !strings.Contains(errw.String(), "no accepted checkpoints") {
-		t.Fatalf("empty best output = %q", errw.String())
-	}
-	errw.Reset()
-	app.command("/lineage restore 1", nil)
-	if !strings.Contains(errw.String(), "does not exist") {
-		t.Fatalf("invalid restore output = %q", errw.String())
 	}
 }
 

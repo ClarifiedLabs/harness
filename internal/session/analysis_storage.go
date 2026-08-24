@@ -40,7 +40,6 @@ type StorageAnalysis struct {
 	Raw                  StorageComponent `json:"raw"`
 	Compactions          StorageComponent `json:"compactions"`
 	ToolResults          StorageComponent `json:"tool_results"`
-	Lineage              StorageComponent `json:"lineage"`
 	TotalBytes           int64            `json:"total_bytes"`
 	ContextResetEntries  int              `json:"context_reset_entries"`
 	SnapshotResetEntries int              `json:"snapshot_reset_entries"`
@@ -77,20 +76,16 @@ func analyzeStorage(dir string, source AnalysisSource, before time.Time) (Storag
 	if err != nil {
 		return StorageAnalysis{}, err
 	}
-	lineage, err := analyzeStorageDir(filepath.Join(dir, "lineage"), !before.IsZero())
-	if err != nil {
-		return StorageAnalysis{}, err
-	}
 	out := StorageAnalysis{
 		Available: true, State: state, Tree: tree, Raw: raw,
-		Compactions: compactions, ToolResults: toolResults, Lineage: lineage,
+		Compactions: compactions, ToolResults: toolResults,
 		ContextResetEntries:  resets.contextResetEntries,
 		SnapshotResetEntries: resets.snapshotResetEntries,
 		DeltaResetEntries:    resets.deltaResetEntries,
 		SnapshotPayloadBytes: resets.snapshotPayloadBytes,
 		DeltaPayloadBytes:    resets.deltaPayloadBytes,
 	}
-	out.TotalBytes = state.Bytes + tree.Bytes + raw.Bytes + compactions.Bytes + toolResults.Bytes + lineage.Bytes
+	out.TotalBytes = state.Bytes + tree.Bytes + raw.Bytes + compactions.Bytes + toolResults.Bytes
 	return out, nil
 }
 
@@ -296,7 +291,6 @@ func (s *StorageAnalysis) add(other StorageAnalysis) {
 	addStorageComponent(&s.Raw, other.Raw)
 	addStorageComponent(&s.Compactions, other.Compactions)
 	addStorageComponent(&s.ToolResults, other.ToolResults)
-	addStorageComponent(&s.Lineage, other.Lineage)
 	s.TotalBytes += other.TotalBytes
 	s.ContextResetEntries += other.ContextResetEntries
 	s.SnapshotResetEntries += other.SnapshotResetEntries

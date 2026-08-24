@@ -53,8 +53,8 @@ records.
 
 ## Cases
 
-Defined in `scripts/flowbench/cases.go` (plus `stagnation.go`, `recovery.go`,
-`lineage.go`, `default_stack.go`).
+Defined in `scripts/flowbench/cases.go` (plus `stagnation.go` and
+`recovery.go`).
 
 Efficiency cases, each gated on a primary interaction metric:
 
@@ -76,28 +76,6 @@ Host-feature cases:
 
 - `stagnation_detection` — shadow-telemetry oracle for the trajectory projection's ordered scoring. The baseline must predate ordered-score support (for example `ec6dd98`). Twelve fresh processes resume one session and must reply tool-free while a hidden Stop evaluator replays a fixed score trace; each arm must match its projection oracle. Token/turn deltas are reported but not gated — the experiment is shadow-only.
 - `stagnation_recovery` — same-revision arms whose isolated configs differ only in `stagnation_nudge:false` versus `true`. The candidate must persist exactly one payload-free strategy-reset event at no-improvement streak two, then make one exact fixture repair; the gate requires exact-recovery improvement, exactly one reset per candidate run, clean reset-driven recovery in at least 8/9 candidate runs, 2/3 adoption per model, and zero baseline resets.
-- `candidate_lineage` — same-revision arms; the only treatment is the candidate's invocation-only `-candidate-lineage` argument, which never enters model context. The archive must preserve improving evaluator scores as a parented patch chain, skip accepted-but-worse scores, and reopen through the production validator; baselines must create no archive and no `lineage_advance` event.
-- `default_stack_marathon` — long-horizon comparison of the bounded
-  stagnation nudge on the default `auto` agent: same revision, baseline
-  `stagnation_nudge:false` versus candidate `true`. One session implements
-  six incremental releases across three multi-file Go packages with five
-  explicit compactions; the hidden-test evaluator must end at exact score
-  100. Per-arm timeout is four hours with a 1,000,000 reported-token floor
-  per run; falling below the floor rejects the experiment as insufficiently
-  long-horizon, not the candidate. Calibrate with one pair before spending a
-  broad matrix:
-
-  ```sh
-  go run ./scripts/flowbench -case default_stack_marathon \
-    -baseline HEAD -candidate HEAD \
-    -models alibaba-token-plan:qwen3.8-max -repetitions 1 \
-    -results /tmp/harness-default-stack-calibration
-  ```
-
-  If both calibration arms are valid and exceed the floor, run one
-  synchronized `-parallel-models` AB/BA breadth pair across the default
-  models; expand to five pairs per model only after the breadth round shows
-  no correctness loss and no infrastructure or oracle defect.
 
 ## Suites
 
@@ -118,8 +96,8 @@ Default models (source: `defaultModels` in `scripts/flowbench/runner.go`):
 
 Standard cases use medium reasoning, the independent agent, an empty explicit
 config, no web/MCP/LSP/Serena augmentation, an immutable target revision, and
-intentionally high limits: no prompt-token or prompt-cost caps, 200 turns, a
-45-minute per-run deadline, five repetitions per model. Runs are rejected
+intentionally high limits: no prompt-token or prompt-cost caps, 200 turns, and
+five repetitions per model. Runs are rejected
 when recorded telemetry names a model target other than the requested one.
 Efficiency-case acceptance requires:
 

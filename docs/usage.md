@@ -268,7 +268,6 @@ notes.
                   diffs are syntax-highlighted with full-width tinted added/removed line backgrounds when color is on
                   (via background color erase; the tint covers only the text on terminals without BCE)
 -stagnation-nudge   issue one strategy-reset instruction after two same-lane evaluator non-improvements (default true; use -stagnation-nudge=false to disable)
--candidate-lineage   preserve strictly improving accepted candidates for this Git session
 -q, --quiet       suppress status diagnostics and reasoning output unless -reasoning-summary is set;
                   still prints one per-prompt usage/cost line at an interactive terminal (suppressed only
                   when output is also non-TTY/piped), and one-shot runs always print the session summary
@@ -1313,9 +1312,6 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/evidence` | list the newest bounded session evidence metadata without contacting the model or reading artifact bodies |
 | `/evidence list [--kind evaluator\|tool] [--status STATUS] [--prompt N] [--limit N]` | filter evaluator results, archived/truncated tool outputs, and tool errors by metadata |
 | `/evidence show <id>` | inspect one catalog record, including its current local artifact status and resolved path when safe |
-| `/lineage` | list accepted candidate checkpoints when the session was started with `-candidate-lineage` |
-| `/lineage export <entry\|best> <new-directory>` | materialize one accepted checkpoint outside the source worktree and session; the destination must not exist |
-| `/lineage restore <entry\|best> [--force]` | explicitly restore Git-visible worktree files from a checkpoint without changing the real index or refs; a dirty worktree requires `--force`, and every change writes a recovery patch first |
 | `/max-turns` | show the current per-prompt turn limit |
 | `/max-turns <n>` | change the turn limit for subsequent prompts in this REPL session; `n <= 0` means unlimited |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
@@ -1604,7 +1600,7 @@ recovery reminders reset the cadence; request retries do not advance it.
   unchanged.
 - `/fork` presents the same compact fork graph filtered to prior human prompts,
   then performs the selected move in a new session. `/clone` copies the current
-  branch into a new session. Both record parent-session lineage, reset
+  branch into a new session. Both record a parent-session link, reset
   prompt/usage accounting and remote continuation anchors, and preserve the
   current model, agent, reasoning settings, latest plan, and advisory TODO list.
 - Tree navigation changes only model-visible conversation context. It never
@@ -1663,17 +1659,19 @@ forwarded `-session <destination>` retains the existing clone behavior: resume t
 selected source branch into the destination with fresh usage accounting.
 
 `session evidence` derives a read-only metadata catalog from one session's
-canonical `raw.ndjson` and current local artifact metadata. The equivalent
-interactive commands are `/evidence`, `/evidence list ...`, and
-`/evidence show <id>`; none contacts the model. Catalog version 1 includes every
+canonical `raw.ndjson` and current local artifact metadata. Artifact status is
+a point-in-time report about current filesystem metadata, not proof of the
+historical byte identity of a file. The equivalent interactive commands are
+`/evidence`, `/evidence list ...`, and `/evidence show <id>`; the catalog never
+contacts the model or reads artifact bodies. Catalog version 1 includes every
 typed evaluator result, every tool error, and every truncated tool result that
 declares a full-output artifact. Stable chronological IDs use `eval-NNNNNN` and
 `tool-NNNNNN`; lists are newest first, return 20 records by default, and cap
 `--limit` at 100. Supplying a record ID prints that record in text mode; JSON
 always emits the versioned page envelope.
 
-The catalog never reads or prints artifact bodies. Record status vocabulary:
-`available`, `stale` (modified after its event), `missing`, `unreadable`,
+Record status vocabulary: `available`, `stale` (modified after its event),
+`missing`, `unreadable`,
 `unsafe`, `external`, `unreferenced`, and `recorded`. Relative evaluator
 references resolve only beneath the session's persisted startup working
 directory; tool artifacts must stay beneath the session directory. Run the
@@ -1724,8 +1722,10 @@ occurrences is an observed zero; a legacy or missing stream is unavailable.
 The `trajectory` telemetry section reports the host-only evaluator-lane
 streaks and classifications behind the default-on `stagnation_nudge` policy
 (see [trajectory.md](trajectory.md)); candidate IDs, evidence references, and
-filesystem paths are not included in analyzer output. The full analyzer
-vocabulary — usage/storage accounting, hierarchy/cohort summaries, completion
+filesystem paths are not included in analyzer output. Mutation-path counts are
+possible paths attributed to successful mutation-reporting tool calls, not
+proven filesystem deltas. The full analyzer vocabulary — usage/storage
+accounting, hierarchy/cohort summaries, completion
 counters, and availability semantics — is documented in
 [session.md](session.md).
 
@@ -1929,10 +1929,12 @@ independent handlers have no generic count-aggregation rule. A separate legacy
 hook block that has no rejecting semantic result leaves workflow status
 unavailable rather than reporting a false completion.
 
-These events also feed Harness's host-owned shadow trajectory in `state.json`.
-The projection is diagnostics-only and model-invisible; `session stats` and
-`session analyze` report aggregate completeness, churn, attribution, and
-size counters without emitting candidate IDs or evidence paths.
+These events also feed Harness's runtime-only host-owned stagnation state.
+`raw.ndjson` is authoritative; the projection is not serialized into
+`state.json` and is reconstructed only from current evaluator, nudge, and
+branch events. It remains model-invisible, while `session stats` and `session
+analyze` report aggregate evaluator, stagnation, and mutation counters without
+emitting candidate IDs, evidence references, or filesystem paths.
 
 By default, a rejecting Stop continuation receives one generic strategy-reset
 instruction when the active evaluator lane reaches two consecutive
@@ -1980,70 +1982,21 @@ harness -config examples/harness/stop-evaluator/config.json \
 ```
 
 The recipe combines the built-in `auto` agent with a `Stop` hook whose
-`verify.sh` runs `go build ./...`, `go vet ./...`, and `go test ./...`; exit 0
-accepts the result, while exit 2 returns the bounded failure log and requests
-one corrective turn. The one-turn bound is the existing Stop-hook recursion
-guard, not an unbounded self-improvement loop. The script also reads
-`can_block` from hook stdin and skips expensive work for cancellation,
-provider failure, and exhausted-budget notifications. Hard turn, token, and
-cost limits still take precedence.
+`verify.sh` runs `go build ./...`, `go vet ./...`, and `go test ./...`. Hook
+invocations emit a typed evaluator result: success reports `accepted:true`,
+while failure reports `accepted:false` with a deterministic score equal to the
+number of checks that passed, `score_direction:"maximize"`, and the remaining
+failed-check count before exiting 2. Run the script directly for human-readable
+verification output and bounded failure details. The one-turn bound is the
+existing Stop-hook recursion guard, not an unbounded self-improvement loop. The
+script also reads `can_block` from hook stdin and skips expensive work without
+claiming an evaluation result for cancellation, provider failure, and
+exhausted-budget notifications. Hard turn, token, and cost limits still take
+precedence.
 
 To add the external gate in another project: copy the recipe, update the hook
 command path, and replace `verify.sh` with that project's objective checks.
-Keep the contract deterministic — print actionable failure evidence and exit 2
-to reject a candidate, or stay quiet and exit 0 to accept. The recipe never
-rewrites its own verifier, creates commits, or changes git history; candidate
-promotion remains an explicit user action.
-
-### Opt-in candidate lineage
-
-`-candidate-lineage` preserves a single strictly improving chain from typed
-Stop-evaluator results without changing Git history or replacing the current
-workspace during observation. It works in ordinary interactive sessions as well
-as one-shot automation. The invocation flag is the authorization boundary; it
-has no config key or environment variable and must be supplied again on resume.
-The default session location is already outside the worktree, so an interactive
-run in a normal branch checkout can start directly:
-
-```sh
-harness -config /path/to/evaluator-config.json \
-  -candidate-lineage
-
-# At the interactive prompt after accepted evaluator results:
-/lineage
-/lineage export best /tmp/harness-accepted-candidate
-/lineage restore best --force
-```
-
-Automation can use the same archive across explicitly authorized one-shot
-processes:
-
-```sh
-harness -config /path/to/evaluator-config.json \
-  -candidate-lineage -session /tmp/harness-lineage-session \
-  -p 'Produce and verify the first candidate.'
-
-harness -config /path/to/evaluator-config.json \
-  -candidate-lineage -resume /tmp/harness-lineage-session \
-  -p 'Try to improve the accepted candidate.'
-```
-
-Primary checkouts, branch-attached or detached linked worktrees, repository
-subdirectories, implicit session paths, and resume-clones are supported. The
-repository must already have a commit, and the session directory must remain
-outside the worktree so the archive cannot capture itself.
-
-`/lineage` lists accepted checkpoints without contacting the model.
-`/lineage export <entry|best> <new-directory>` reconstructs a checkpoint into
-a new directory outside both the source worktree and session; it refuses to
-overwrite any existing path. `/lineage restore <entry|best>` changes worktree
-files only — never the real index, commits, refs, or history — refuses a
-dirty worktree unless `--force` is explicit, and writes a bounded reverse
-patch under `lineage/restore-backups/` first, so applying that patch from the
-repository root recovers the pre-restore state. Harness never automatically
-checks out, restores, commits, or promotes an entry; promotion remains an
-explicit user action.
-
-The advance-eligibility rules, archive format and bounds, chain verification,
-and rotation semantics are documented in
-[trajectory.md](trajectory.md#explicit-candidate-lineage-internallineage).
+Keep the hook contract deterministic and typed, and keep direct invocation
+useful to a person diagnosing failures. The recipe never rewrites its own
+verifier, creates commits, or changes git history; candidate promotion remains
+an explicit user action.

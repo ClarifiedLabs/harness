@@ -159,8 +159,8 @@ Engineering references:
   branching, recovery, and session analysis commands.
 - [Compaction internals](docs/compaction.md): triggers, retention, and the
   checkpoint algorithm.
-- [Trajectory, lineage, and evidence](docs/trajectory.md): the host-owned
-  projection, stagnation nudge, candidate archive, and evidence catalog.
+- [Trajectory, stagnation, and evidence](docs/trajectory.md): the host-owned
+  projection, stagnation nudge, and evidence catalog.
 - [Release](docs/release.md): release artifacts, tagging, and required secrets.
 - [Smoke tests](docs/smoke.md): end-to-end verification matrix.
 - [Deterministic-flow benchmark](docs/flowbench.md): paired live-model

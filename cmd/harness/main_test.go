@@ -24,7 +24,6 @@ import (
 	"harness/internal/config"
 	"harness/internal/delegate"
 	"harness/internal/goal"
-	"harness/internal/lineage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/modelproxy/protocol"
@@ -1434,7 +1433,7 @@ func TestRunHelpFlagExitsZeroWithUsage(t *testing.T) {
 	flags := []string{
 		"-p", "-i", "-initial-prompt", "-model", "-model-proxy-url", "-system-prompt",
 		"-no-env", "-resume", "-session", "-max-turns", "-max-output-tokens", "-goal-max-continuations", "-default-context-window", "-context-window",
-		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-stagnation-nudge", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-debug-request", "-agents", "-models", "-check-model-proxy", "-candidate-lineage", "-hooks", "-version", "-help",
+		"-reasoning", "-reasoning-summary", "-trace-proxy", "-agent", "-v", "-tool-stream", "-stagnation-nudge", "-q", "-quiet", "-log-level", "-no-color", "-color-theme", "-config", "-repl-prompt", "-repl-edit-mode", "-debug-request", "-agents", "-models", "-check-model-proxy", "-hooks", "-version", "-help",
 	}
 	for _, arg := range []string{"-h", "--help"} {
 		fp := llmtest.New("fake")
@@ -2643,11 +2642,31 @@ func TestRunResumeRejectsActiveSession(t *testing.T) {
 	}
 }
 
+func TestTrajectoryTrackerForResumeKeepsInvalidReplayDisabled(t *testing.T) {
+	tracker := trajectoryTrackerForResume(&session.Session{TrajectoryPolicyDisabled: true})
+	for _, candidate := range []string{"one", "two", "three"} {
+		tracker.ObserveEvaluation(trajectory.EvaluationInput{Handler: "verify", Candidate: candidate})
+	}
+	if tracker.CanStagnationNudge(2) || tracker.Snapshot().TotalEvaluations != 0 {
+		t.Fatalf("invalid replay re-enabled policy: %+v", tracker.Snapshot())
+	}
+
+	clone := &session.Session{TrajectoryPolicyDisabled: true}
+	resetTrajectoryForResumeClone(clone)
+	fresh := trajectoryTrackerForResume(clone)
+	for _, candidate := range []string{"one", "one", "one"} {
+		fresh.ObserveEvaluation(trajectory.EvaluationInput{Handler: "verify", Candidate: candidate})
+	}
+	if clone.TrajectoryPolicyDisabled || !fresh.CanStagnationNudge(2) {
+		t.Fatalf("resume clone did not start fresh: disabled=%v state=%+v", clone.TrajectoryPolicyDisabled, fresh.Snapshot())
+	}
+}
+
 func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 	dir := t.TempDir()
 	sessPath := filepath.Join(dir, "prior")
 	priorTrajectory := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
-		Handler: "verify", Accepted: true, Candidate: "candidate:resume", EvidenceRef: "evidence/resume",
+		Handler: "verify", Accepted: true, Candidate: "candidate:resume",
 	})
 	prior := session.Session{
 		Version:    session.Version,
@@ -2659,6 +2678,14 @@ func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 		Trajectory: &priorTrajectory,
 	}
 	if err := prior.Save(sessPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.AppendEvent(sessPath, session.Event{
+		Type: session.EventEvaluatorResult,
+		EvaluatorResult: &session.EvaluatorResultSnapshot{
+			Handler: "verify", Accepted: true, Candidate: "candidate:resume", EvidenceRef: "evidence/resume",
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -2732,7 +2759,7 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	sourcePath := filepath.Join(dir, "source")
 	destinationPath := filepath.Join(dir, "destination")
 	priorTrajectory := trajectory.ApplyEvaluation(trajectory.State{}, trajectory.EvaluationInput{
-		Handler: "verify", Accepted: true, Candidate: "candidate:source", EvidenceRef: "evidence/source",
+		Handler: "verify", Accepted: true, Candidate: "candidate:source",
 	})
 	prior := session.Session{
 		Provider: "anthropic",
@@ -2751,6 +2778,14 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	if err := prior.Save(sourcePath); err != nil {
 		t.Fatalf("save source: %v", err)
 	}
+	if err := session.AppendEvent(sourcePath, session.Event{
+		Type: session.EventEvaluatorResult,
+		EvaluatorResult: &session.EvaluatorResultSnapshot{
+			Handler: "verify", Accepted: true, Candidate: "candidate:source", EvidenceRef: "evidence/source",
+		},
+	}); err != nil {
+		t.Fatalf("append source evaluator result: %v", err)
+	}
 	source, err := session.Load(sourcePath)
 	if err != nil {
 		t.Fatalf("load source: %v", err)
@@ -2768,7 +2803,7 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 		t.Fatalf("load clone: %v", err)
 	}
 	if child.ParentSession != source.ID || child.ParentEntryID != source.ActiveLeaf {
-		t.Fatalf("clone lineage = %q@%q, want %q@%q", child.ParentSession, child.ParentEntryID, source.ID, source.ActiveLeaf)
+		t.Fatalf("clone parent link = %q@%q, want %q@%q", child.ParentSession, child.ParentEntryID, source.ID, source.ActiveLeaf)
 	}
 	if child.Usage.InputTokens != 5 || child.Usage.OutputTokens != 1 {
 		t.Fatalf("clone usage = %+v, want only new turn usage", child.Usage)
@@ -2779,7 +2814,7 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	if !reflect.DeepEqual(child.Plan, prior.Plan) || !slices.Equal(child.Todos, prior.Todos) {
 		t.Fatalf("clone plan/todos = %+v/%+v", child.Plan, child.Todos)
 	}
-	if child.Trajectory == nil || child.Trajectory.TotalEvaluations != 0 || child.Trajectory.BranchResets != 1 || child.Trajectory.CurrentCandidateID != "" {
+	if child.Trajectory == nil || child.Trajectory.TotalEvaluations != 0 || child.Trajectory.BranchResets != 1 || child.Trajectory.StagnationHandler != "" {
 		t.Fatalf("clone should start a fresh trajectory epoch: %+v", child.Trajectory)
 	}
 	unchanged, err := session.Load(sourcePath)
@@ -5497,66 +5532,6 @@ func TestFuzzyMatchModel(t *testing.T) {
 	// No match.
 	if m, c := fuzzyMatchModel(catalog, "llama"); m != "" || len(c) != 0 {
 		t.Errorf("no-match: match=%q candidates=%v", m, c)
-	}
-}
-
-func TestCandidateLineageSupportsInteractiveSession(t *testing.T) {
-	sessionDir := filepath.Join(t.TempDir(), "session")
-	fp := llmtest.New("fake")
-	env, _, errw, getenv := fakeProviderEnv(t, []string{
-		"-model", "claude-opus-4-8", "-candidate-lineage", "-session", sessionDir,
-	}, fp, "/lineage\n/clear\n/lineage\n/exit\n")
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit=%d stderr=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("model received %d requests", len(fp.Requests))
-	}
-	if !strings.Contains(errw.String(), "candidate lineage: no accepted checkpoints") {
-		t.Fatalf("interactive lineage output = %q", errw.String())
-	}
-	state, err := lineage.Load(sessionDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if state.Worktree == "" || state.BaseHead == "" || len(state.Entries) != 0 {
-		t.Fatalf("lineage state = %+v", state)
-	}
-	rotated := session.DefaultPath(stateDir(getenv), env.now())
-	rotatedState, err := lineage.Load(rotated)
-	if err != nil {
-		t.Fatalf("load rotated lineage: %v", err)
-	}
-	if rotatedState.Worktree != state.Worktree || len(rotatedState.Entries) != 0 {
-		t.Fatalf("rotated lineage state = %+v", rotatedState)
-	}
-}
-
-func TestCandidateLineageSupportsImplicitSessionPath(t *testing.T) {
-	fp := llmtest.New("fake")
-	env, _, errw, getenv := fakeProviderEnv(t, []string{
-		"-model", "claude-opus-4-8", "-candidate-lineage", "-p", "hi",
-	}, fp, "")
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit=%d stderr=%q", code, errw.String())
-	}
-	path := session.DefaultPath(stateDir(getenv), env.now())
-	if _, err := lineage.Load(path); err != nil {
-		t.Fatalf("load implicit lineage: %v", err)
-	}
-}
-
-func TestCandidateLineageStillRejectsNonGitBoundary(t *testing.T) {
-	t.Chdir(t.TempDir())
-	fp := llmtest.New("fake")
-	env, _, errw, _ := fakeProviderEnv(t, []string{
-		"-model", "claude-opus-4-8", "-candidate-lineage", "-session", filepath.Join(t.TempDir(), "session"),
-	}, fp, "")
-	if code := run(env); code != ui.ExitRuntime || !strings.Contains(errw.String(), "requires a Git worktree") {
-		t.Fatalf("exit=%d stderr=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 0 {
-		t.Fatalf("model received %d requests before boundary validation", len(fp.Requests))
 	}
 }
 

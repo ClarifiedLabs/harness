@@ -14,7 +14,6 @@ import (
 	"harness/internal/llm/llmtest"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
-	"harness/internal/trajectory"
 )
 
 // readRawEvents decodes a session raw.ndjson log for parity comparison.
@@ -80,7 +79,6 @@ func TestChildParentRawEventParity(t *testing.T) {
 	parent := newAccumulatingSink(app.Renderer, app, 1)
 
 	childRegistry := llm.NewRegistryWithQualified(nil, models)
-	childTrajectory := trajectory.NewTracker(nil)
 	child := sessionrec.New(sessionrec.Config{
 		Dir:                childDir,
 		Prompt:             1,
@@ -91,7 +89,6 @@ func TestChildParentRawEventParity(t *testing.T) {
 		Clock:              now,
 		ReasoningSummaries: true,
 		CWD:                parentDir,
-		Trajectory:         childTrajectory,
 		PriceTurnUsage: func(u llm.Usage) (float64, bool) {
 			return childRegistry.Cost("anthropic:claude-opus-4-8", u)
 		},
@@ -196,8 +193,5 @@ func TestChildParentRawEventParity(t *testing.T) {
 	}
 	if got := parentEvents[len(parentEvents)-1].Display; got == "" {
 		t.Fatal("prompt_usage display missing from parent-fidelity recording")
-	}
-	if parentTrajectory := app.Trajectory.Snapshot(); !reflect.DeepEqual(parentTrajectory, childTrajectory.Snapshot()) {
-		t.Fatalf("trajectory projections differ: parent=%+v child=%+v", parentTrajectory, childTrajectory.Snapshot())
 	}
 }

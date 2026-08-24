@@ -188,7 +188,6 @@ type RunOptions struct {
 	ShowAgents       bool
 	ShowModels       bool
 	CheckModelProxy  bool
-	CandidateLineage bool
 }
 
 type MCPConfig struct {

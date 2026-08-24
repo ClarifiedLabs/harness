@@ -303,7 +303,7 @@ func TestTreeExtractRecordsParentAndGrowsIndependently(t *testing.T) {
 		t.Fatalf("Extract: %v", err)
 	}
 	if child.Header.ID == tree.Header.ID || child.Header.ParentSession != tree.Header.ID || child.Header.ParentEntryID != parentLeaf {
-		t.Fatalf("child lineage = %+v, parent id/leaf = %s/%s", child.Header, tree.Header.ID, parentLeaf)
+		t.Fatalf("child parent link = %+v, parent id/leaf = %s/%s", child.Header, tree.Header.ID, parentLeaf)
 	}
 	if _, err := child.AppendBranch(parentLeaf, parentLeaf, parentLeaf, "", ""); err != nil {
 		t.Fatalf("child AppendBranch: %v", err)

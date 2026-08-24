@@ -22,11 +22,6 @@ type aggregate struct {
 	CandidateRecoveryNudgeRuns       int                 `json:"candidate_recovery_nudge_runs,omitempty"`
 	CandidateRecoveriesAfterNudge    int                 `json:"candidate_recoveries_after_nudge,omitempty"`
 	CandidateResetDrivenRecoveries   int                 `json:"candidate_reset_driven_recoveries,omitempty"`
-	BaselineUnexpectedLineageRuns    int                 `json:"baseline_unexpected_lineage_runs,omitempty"`
-	CandidateLineageRuns             int                 `json:"candidate_lineage_runs,omitempty"`
-	CandidateLineageAdvances         int                 `json:"candidate_lineage_advances,omitempty"`
-	CandidateLineagePatchBytes       int64               `json:"candidate_lineage_patch_bytes,omitempty"`
-	CandidateLineageEvidenceBytes    int64               `json:"candidate_lineage_evidence_bytes,omitempty"`
 	BaselineMedianTokens             float64             `json:"baseline_median_tokens"`
 	CandidateMedianTokens            float64             `json:"candidate_median_tokens"`
 	TokenSavingPct                   float64             `json:"token_saving_pct"`
@@ -39,8 +34,6 @@ type aggregate struct {
 	Accepted                         bool                `json:"accepted"`
 	Failures                         []string            `json:"failures,omitempty"`
 	Models                           map[string]modelAgg `json:"models"`
-	MinimumRunTokens                 int                 `json:"minimum_run_tokens,omitempty"`
-	RunsMeetingTokenFloor            int                 `json:"runs_meeting_token_floor,omitempty"`
 }
 
 type modelAgg struct {
@@ -106,9 +99,6 @@ func writeSummary(results string, c benchmarkCase, records []runRecord) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Flow benchmark: %s\n\n", c.Name)
 	fmt.Fprintf(&b, "- Runs: %d\n", agg.Runs)
-	if agg.MinimumRunTokens > 0 {
-		fmt.Fprintf(&b, "- Long-horizon token floor: %d/%d runs used at least %d reported tokens\n", agg.RunsMeetingTokenFloor, agg.Runs, agg.MinimumRunTokens)
-	}
 	fmt.Fprintf(&b, "- Correctness: baseline %d, candidate %d\n", agg.BaselinePasses, agg.CandidatePasses)
 	fmt.Fprintf(&b, "- Adoption: %d candidate runs\n", agg.Adoptions)
 	if c.Acceptance == acceptanceStagnation {
@@ -117,9 +107,6 @@ func writeSummary(results string, c benchmarkCase, records []runRecord) error {
 	}
 	if c.Acceptance == acceptanceStagnationRecovery {
 		fmt.Fprintf(&b, "- Strategy-reset recovery: %d candidate one-shot triggers, %d post-trigger acceptances, %d clean reset-driven recoveries; %d unexpected baseline triggers\n", agg.CandidateRecoveryNudgeRuns, agg.CandidateRecoveriesAfterNudge, agg.CandidateResetDrivenRecoveries, agg.BaselineUnexpectedRecoveryNudges)
-	}
-	if c.Acceptance == acceptanceLineage {
-		fmt.Fprintf(&b, "- Candidate lineage: %d candidate archives, %d strict advances, %d patch bytes, %d evidence bytes; %d unexpected baseline archives\n", agg.CandidateLineageRuns, agg.CandidateLineageAdvances, agg.CandidateLineagePatchBytes, agg.CandidateLineageEvidenceBytes, agg.BaselineUnexpectedLineageRuns)
 	}
 	fmt.Fprintf(&b, "- Unpaired median tokens: baseline %.0f, candidate %.0f\n", agg.BaselineMedianTokens, agg.CandidateMedianTokens)
 	fmt.Fprintf(&b, "- Paired-median token saving: %.1f%%\n", agg.TokenSavingPct)
@@ -162,7 +149,6 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		AdoptionsByModel:  map[string]int{},
 		Models:            map[string]modelAgg{},
 		SubscriptionCosts: "N/A (alibaba-token-plan and openai-codex)",
-		MinimumRunTokens:  c.MinimumRunTokens,
 	}
 	var baselineTokens, candidateTokens, baselinePrimary, candidatePrimary []float64
 	byModel := map[string][]runRecord{}
@@ -171,9 +157,6 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 			continue
 		}
 		agg.Runs++
-		if c.MinimumRunTokens > 0 && record.Metrics.TotalTokens >= c.MinimumRunTokens {
-			agg.RunsMeetingTokenFloor++
-		}
 		byModel[record.Model] = append(byModel[record.Model], record)
 		primary := float64(primaryValue(c, record.Metrics))
 		if strings.HasPrefix(record.Model, "deepseek:") {
@@ -190,9 +173,6 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 			}
 			if c.Acceptance == acceptanceStagnationRecovery && record.Metrics.StagnationNudgeEvents > 0 {
 				agg.BaselineUnexpectedRecoveryNudges++
-			}
-			if c.Acceptance == acceptanceLineage && record.Metrics.LineageAdvances > 0 {
-				agg.BaselineUnexpectedLineageRuns++
 			}
 		} else {
 			if record.Score.Pass {
@@ -213,14 +193,6 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 				if resetDrivenStagnationRecovery(record.Metrics) {
 					agg.CandidateResetDrivenRecoveries++
 				}
-			}
-			if c.Acceptance == acceptanceLineage {
-				if record.Metrics.LineageAdvances == 2 {
-					agg.CandidateLineageRuns++
-				}
-				agg.CandidateLineageAdvances += record.Metrics.LineageAdvances
-				agg.CandidateLineagePatchBytes += record.Metrics.LineagePatchBytes
-				agg.CandidateLineageEvidenceBytes += record.Metrics.LineageEvidenceBytes
 			}
 			if adopted(c.Name, record.Metrics) {
 				agg.Adoptions++
@@ -301,12 +273,6 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 	if agg.CandidatePasses < agg.BaselinePasses {
 		agg.Failures = append(agg.Failures, "candidate correctness is below baseline")
 	}
-	if c.MinimumRunTokens > 0 && agg.RunsMeetingTokenFloor != agg.Runs {
-		agg.Failures = append(agg.Failures, fmt.Sprintf(
-			"long-horizon token floor coverage %d/%d is incomplete; every run must use at least %d reported tokens",
-			agg.RunsMeetingTokenFloor, agg.Runs, c.MinimumRunTokens,
-		))
-	}
 	maxTokenRegression := 10.0
 	maxTurnRegression := 10.0
 	if c.MaxTokenRegression > 0 {
@@ -333,7 +299,7 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		if c.Acceptance != acceptanceStagnation && ma.BaselineMedianTurns > 0 && ma.CandidateMedianTurns > ma.BaselineMedianTurns*(1+maxTurnRegression/100) {
 			agg.Failures = append(agg.Failures, fmt.Sprintf("%s median turns regressed beyond the %.1f%% cap", model, maxTurnRegression))
 		}
-		if (c.Acceptance == acceptanceStagnation || c.Acceptance == acceptanceStagnationRecovery || c.Acceptance == acceptanceLineage) && ma.CandidatePasses < ma.BaselinePasses {
+		if (c.Acceptance == acceptanceStagnation || c.Acceptance == acceptanceStagnationRecovery) && ma.CandidatePasses < ma.BaselinePasses {
 			agg.Failures = append(agg.Failures, fmt.Sprintf("%s candidate correctness is below baseline", model))
 		}
 		if isToolAccuracyCase(c.Name) && ma.CandidateMedianPrimary > ma.BaselineMedianPrimary {
@@ -378,20 +344,6 @@ func summarize(c benchmarkCase, records []runRecord) aggregate {
 		if agg.CandidatePasses <= agg.BaselinePasses {
 			agg.Failures = append(agg.Failures, "candidate exact recovery did not improve over baseline")
 		}
-	case acceptanceLineage:
-		baselineRuns := len(baselineTokens)
-		if baselineRuns == 0 || baselineRuns != candidateRuns {
-			agg.Failures = append(agg.Failures, fmt.Sprintf("candidate-lineage matrix is incomplete: baseline %d, candidate %d", baselineRuns, candidateRuns))
-		}
-		if agg.BaselineUnexpectedLineageRuns != 0 {
-			agg.Failures = append(agg.Failures, fmt.Sprintf("%d baseline runs unexpectedly recorded a candidate lineage", agg.BaselineUnexpectedLineageRuns))
-		}
-		if agg.CandidateLineageRuns != candidateRuns || agg.CandidateLineageAdvances != 2*candidateRuns {
-			agg.Failures = append(agg.Failures, fmt.Sprintf("candidate lineage coverage is incomplete: %d/%d archives and %d/%d strict advances", agg.CandidateLineageRuns, candidateRuns, agg.CandidateLineageAdvances, 2*candidateRuns))
-		}
-		if agg.CandidatePasses < agg.BaselinePasses {
-			agg.Failures = append(agg.Failures, "candidate lineage reduced exact correctness")
-		}
 	default:
 		toolAccuracy := isToolAccuracyCase(c.Name)
 		minimumPrimaryReduction := c.MinimumReductionPct
@@ -433,8 +385,6 @@ func primaryValue(c benchmarkCase, m metrics) int {
 			return m.EffectiveToolErrors
 		}
 		return m.ToolErrors + m.NestedToolErrors
-	case "evaluator_turns_to_best":
-		return m.EvaluatorTurnsToBest
 	case "trajectory_max_no_improvement_streak":
 		return m.MaxNoImprovementStreak
 	case "stagnation_recovery_failures":
@@ -465,11 +415,6 @@ func adopted(name string, m metrics) bool {
 		return candidateStagnationTrace(m)
 	case "stagnation_recovery":
 		return resetDrivenStagnationRecovery(m)
-	case "candidate_lineage":
-		return m.LineageAdvances == 2
-	case "default_stack_marathon":
-		return m.DefaultStackEvaluatorResults == defaultStackPhaseCount &&
-			m.EvaluatorBestScoreAvailable && m.EvaluatorBestScore == 100
 	case "edit_precision":
 		return m.ToolCalls["edit"] > 0
 	case "edit_drift_recovery":

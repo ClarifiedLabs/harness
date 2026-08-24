@@ -16,116 +16,99 @@ import (
 )
 
 type metrics struct {
-	ModelTarget                     string         `json:"model_target,omitempty"`
-	APIType                         string         `json:"api_type,omitempty"`
-	TotalTokens                     int            `json:"total_tokens"`
-	InputTokens                     int            `json:"input_tokens"`
-	CacheReadTokens                 int            `json:"cache_read_tokens"`
-	CacheWriteTokens                int            `json:"cache_write_tokens"`
-	CacheWrite1hTokens              int            `json:"cache_write_1h_tokens"`
-	OutputTokens                    int            `json:"output_tokens"`
-	ReasoningTokens                 int            `json:"reasoning_tokens"`
-	CostUSD                         float64        `json:"cost_usd"`
-	CostKnown                       bool           `json:"cost_known"`
-	Turns                           int            `json:"turns"`
-	Prompts                         int            `json:"prompts"`
-	Compactions                     int            `json:"compactions"`
-	ToolCalls                       map[string]int `json:"tool_calls"`
-	ToolErrors                      int            `json:"tool_errors"`
-	NestedToolErrors                int            `json:"nested_tool_errors"`
-	RecoverableEditMisses           int            `json:"recoverable_edit_misses"`
-	RecoveredEditMisses             int            `json:"recovered_edit_misses"`
-	TimelyRecoveredEditMisses       int            `json:"timely_recovered_edit_misses"`
-	UnresolvedEditFailures          int            `json:"unresolved_edit_failures"`
-	UnrelatedToolErrors             int            `json:"unrelated_tool_errors"`
-	EffectiveToolErrors             int            `json:"effective_tool_errors"`
-	EffectiveToolErrorsAvailable    bool           `json:"effective_tool_errors_available"`
-	ErrorKinds                      map[string]int `json:"error_kinds"`
-	ToolResultBytes                 int            `json:"tool_result_bytes"`
-	RGToReadTransitions             int            `json:"rg_to_read_transitions"`
-	CommandToCommandTransitions     int            `json:"command_to_command_transitions"`
-	AvoidableTodoOnlyTurns          int            `json:"avoidable_todo_only_turns"`
-	GitCalls                        int            `json:"git_calls"`
-	BackgroundPolls                 int            `json:"background_polls"`
-	BackgroundWaits                 int            `json:"background_waits"`
-	UsedSearch                      bool           `json:"used_search"`
-	SearchQueries                   int            `json:"search_queries"`
-	SearchContextLines              int            `json:"search_context_lines"`
-	SearchContextLinesBeforeBatch   int            `json:"search_context_lines_before_batch"`
-	SearchDuplicateLines            int            `json:"search_duplicate_lines_suppressed"`
-	SearchBudgetOmittedLines        int            `json:"search_budget_lines_omitted"`
-	SearchBatches                   int            `json:"search_batches"`
-	SearchBatchCalls                int            `json:"search_batch_calls"`
-	SearchLowYieldCalls             int            `json:"search_low_yield_calls"`
-	SearchBatchBytesBefore          int            `json:"search_batch_bytes_before"`
-	SearchBatchBytesAfter           int            `json:"search_batch_bytes_after"`
-	SearchBoundedCalls              int            `json:"search_bounded_calls"`
-	ExactKnownPathSearches          int            `json:"exact_known_path_searches"`
-	ExactKnownPathCommands          int            `json:"exact_known_path_commands"`
-	UsedCommandSteps                bool           `json:"used_command_steps"`
-	UsedWorkspaceSummary            bool           `json:"used_workspace_summary"`
-	StartedRaceSuite                bool           `json:"started_race_suite"`
-	ReadDriftAfterPhaseOne          bool           `json:"read_drift_after_phase_one"`
-	UnresolvedEditFailure           bool           `json:"unresolved_edit_failure"`
-	EditRecoveryTurns               int            `json:"edit_recovery_turns"`
-	InspectOperations               int            `json:"inspect_operations"`
-	InspectReadOperations           int            `json:"inspect_read_operations"`
-	InspectReadPaths                []string       `json:"inspect_read_paths,omitempty"`
-	SuccessfulInspectCalls          int            `json:"successful_inspect_calls"`
-	InspectOperationErrors          int            `json:"inspect_operation_errors"`
-	DirectReadCalls                 int            `json:"direct_read_calls"`
-	DirectReadOperations            int            `json:"direct_read_operations"`
-	DirectReadPaths                 []string       `json:"direct_read_paths,omitempty"`
-	SuccessfulReadPaths             []string       `json:"successful_read_paths,omitempty"`
-	SuccessfulDirectReadPaths       []string       `json:"successful_direct_read_paths,omitempty"`
-	SuccessfulCoissuedReadPaths     []string       `json:"successful_coissued_read_paths,omitempty"`
-	CoissuedReadTurns               int            `json:"coissued_read_turns"`
-	SuccessfulCoissuedReadTurns     int            `json:"successful_coissued_read_turns"`
-	CoissuedLookupTurns             int            `json:"coissued_lookup_turns"`
-	DefaultStackEvaluatorResults    int            `json:"default_stack_evaluator_results"`
-	DefaultStackEvaluatorRejections int            `json:"default_stack_evaluator_rejections"`
-	DefaultStackEvaluatorAccepts    int            `json:"default_stack_evaluator_accepts"`
-	DefaultStackEvaluatorAssetLeaks int            `json:"default_stack_evaluator_asset_leaks"`
-	DefaultStackControlMutations    int            `json:"default_stack_control_mutations"`
-	EvaluatorScoreProgression       []float64      `json:"evaluator_score_progression,omitempty"`
-	EvaluatorBestScore              float64        `json:"evaluator_best_score"`
-	EvaluatorBestScoreAvailable     bool           `json:"evaluator_best_score_available"`
-	EvaluatorTurnsToBest            int            `json:"evaluator_turns_to_best"`
-	EvaluatorAcceptedAfterResume    bool           `json:"evaluator_accepted_after_resume"`
-	StagnationEvaluatorResults      int            `json:"stagnation_evaluator_results"`
-	StagnationEvaluatorRejections   int            `json:"stagnation_evaluator_rejections"`
-	StagnationEvaluatorAccepts      int            `json:"stagnation_evaluator_accepts"`
-	NoImprovementStreak             int            `json:"trajectory_no_improvement_streak"`
-	MaxNoImprovementStreak          int            `json:"trajectory_max_no_improvement_streak"`
-	StagnationBaselines             int            `json:"trajectory_stagnation_baselines"`
-	StagnationImprovements          int            `json:"trajectory_stagnation_improvements"`
-	StagnationPlateaus              int            `json:"trajectory_stagnation_plateaus"`
-	StagnationRegressions           int            `json:"trajectory_stagnation_regressions"`
-	StagnationIndeterminate         int            `json:"trajectory_stagnation_indeterminate"`
-	UnorderedScoreEvaluations       int            `json:"trajectory_unordered_score_evaluations"`
-	StagnationLaneResets            int            `json:"trajectory_stagnation_lane_resets"`
-	StagnationNudgeEvents           int            `json:"stagnation_nudge_events"`
-	RecoveryEvaluatorResults        int            `json:"stagnation_recovery_evaluator_results"`
-	RecoveryEvaluatorRejections     int            `json:"stagnation_recovery_evaluator_rejections"`
-	RecoveryEvaluatorAccepts        int            `json:"stagnation_recovery_evaluator_accepts"`
-	RecoveryToolCallsBeforeNudge    int            `json:"stagnation_recovery_tool_calls_before_nudge"`
-	RecoveryToolCallsAfterNudge     int            `json:"stagnation_recovery_tool_calls_after_nudge"`
-	RecoveryAccepted                bool           `json:"stagnation_recovery_accepted"`
-	RecoveryAcceptedAfterNudge      bool           `json:"stagnation_recovery_accepted_after_nudge"`
-	RecoveryFailures                int            `json:"stagnation_recovery_failures"`
-	LineageEvaluatorResults         int            `json:"lineage_evaluator_results"`
-	LineageEvaluatorRejections      int            `json:"lineage_evaluator_rejections"`
-	LineageEvaluatorAccepts         int            `json:"lineage_evaluator_accepts"`
-	LineageScoreProgression         []float64      `json:"lineage_score_progression,omitempty"`
-	LineageAdvances                 int            `json:"lineage_advances"`
-	LineagePatchBytes               int64          `json:"lineage_patch_bytes"`
-	LineageEvidenceBytes            int64          `json:"lineage_evidence_bytes"`
-	DiscoveryBeforeRead             bool           `json:"discovery_before_read"`
-	ReadBeforeDiscovery             bool           `json:"read_before_discovery"`
-	AllFailedInspectCalls           int            `json:"all_failed_inspect_calls"`
-	CommandText                     string         `json:"-"`
-	FinalText                       string         `json:"-"`
-	AssistantText                   string         `json:"-"`
+	ModelTarget                   string         `json:"model_target,omitempty"`
+	APIType                       string         `json:"api_type,omitempty"`
+	TotalTokens                   int            `json:"total_tokens"`
+	InputTokens                   int            `json:"input_tokens"`
+	CacheReadTokens               int            `json:"cache_read_tokens"`
+	CacheWriteTokens              int            `json:"cache_write_tokens"`
+	CacheWrite1hTokens            int            `json:"cache_write_1h_tokens"`
+	OutputTokens                  int            `json:"output_tokens"`
+	ReasoningTokens               int            `json:"reasoning_tokens"`
+	CostUSD                       float64        `json:"cost_usd"`
+	CostKnown                     bool           `json:"cost_known"`
+	Turns                         int            `json:"turns"`
+	Prompts                       int            `json:"prompts"`
+	Compactions                   int            `json:"compactions"`
+	ToolCalls                     map[string]int `json:"tool_calls"`
+	ToolErrors                    int            `json:"tool_errors"`
+	NestedToolErrors              int            `json:"nested_tool_errors"`
+	RecoverableEditMisses         int            `json:"recoverable_edit_misses"`
+	RecoveredEditMisses           int            `json:"recovered_edit_misses"`
+	TimelyRecoveredEditMisses     int            `json:"timely_recovered_edit_misses"`
+	UnresolvedEditFailures        int            `json:"unresolved_edit_failures"`
+	UnrelatedToolErrors           int            `json:"unrelated_tool_errors"`
+	EffectiveToolErrors           int            `json:"effective_tool_errors"`
+	EffectiveToolErrorsAvailable  bool           `json:"effective_tool_errors_available"`
+	ErrorKinds                    map[string]int `json:"error_kinds"`
+	ToolResultBytes               int            `json:"tool_result_bytes"`
+	RGToReadTransitions           int            `json:"rg_to_read_transitions"`
+	CommandToCommandTransitions   int            `json:"command_to_command_transitions"`
+	AvoidableTodoOnlyTurns        int            `json:"avoidable_todo_only_turns"`
+	GitCalls                      int            `json:"git_calls"`
+	BackgroundPolls               int            `json:"background_polls"`
+	BackgroundWaits               int            `json:"background_waits"`
+	UsedSearch                    bool           `json:"used_search"`
+	SearchQueries                 int            `json:"search_queries"`
+	SearchContextLines            int            `json:"search_context_lines"`
+	SearchContextLinesBeforeBatch int            `json:"search_context_lines_before_batch"`
+	SearchDuplicateLines          int            `json:"search_duplicate_lines_suppressed"`
+	SearchBudgetOmittedLines      int            `json:"search_budget_lines_omitted"`
+	SearchBatches                 int            `json:"search_batches"`
+	SearchBatchCalls              int            `json:"search_batch_calls"`
+	SearchLowYieldCalls           int            `json:"search_low_yield_calls"`
+	SearchBatchBytesBefore        int            `json:"search_batch_bytes_before"`
+	SearchBatchBytesAfter         int            `json:"search_batch_bytes_after"`
+	SearchBoundedCalls            int            `json:"search_bounded_calls"`
+	ExactKnownPathSearches        int            `json:"exact_known_path_searches"`
+	ExactKnownPathCommands        int            `json:"exact_known_path_commands"`
+	UsedCommandSteps              bool           `json:"used_command_steps"`
+	UsedWorkspaceSummary          bool           `json:"used_workspace_summary"`
+	StartedRaceSuite              bool           `json:"started_race_suite"`
+	ReadDriftAfterPhaseOne        bool           `json:"read_drift_after_phase_one"`
+	UnresolvedEditFailure         bool           `json:"unresolved_edit_failure"`
+	EditRecoveryTurns             int            `json:"edit_recovery_turns"`
+	InspectOperations             int            `json:"inspect_operations"`
+	InspectReadOperations         int            `json:"inspect_read_operations"`
+	InspectReadPaths              []string       `json:"inspect_read_paths,omitempty"`
+	SuccessfulInspectCalls        int            `json:"successful_inspect_calls"`
+	InspectOperationErrors        int            `json:"inspect_operation_errors"`
+	DirectReadCalls               int            `json:"direct_read_calls"`
+	DirectReadOperations          int            `json:"direct_read_operations"`
+	DirectReadPaths               []string       `json:"direct_read_paths,omitempty"`
+	SuccessfulReadPaths           []string       `json:"successful_read_paths,omitempty"`
+	SuccessfulDirectReadPaths     []string       `json:"successful_direct_read_paths,omitempty"`
+	SuccessfulCoissuedReadPaths   []string       `json:"successful_coissued_read_paths,omitempty"`
+	CoissuedReadTurns             int            `json:"coissued_read_turns"`
+	SuccessfulCoissuedReadTurns   int            `json:"successful_coissued_read_turns"`
+	CoissuedLookupTurns           int            `json:"coissued_lookup_turns"`
+	StagnationEvaluatorResults    int            `json:"stagnation_evaluator_results"`
+	StagnationEvaluatorRejections int            `json:"stagnation_evaluator_rejections"`
+	StagnationEvaluatorAccepts    int            `json:"stagnation_evaluator_accepts"`
+	NoImprovementStreak           int            `json:"trajectory_no_improvement_streak"`
+	MaxNoImprovementStreak        int            `json:"trajectory_max_no_improvement_streak"`
+	StagnationBaselines           int            `json:"trajectory_stagnation_baselines"`
+	StagnationImprovements        int            `json:"trajectory_stagnation_improvements"`
+	StagnationPlateaus            int            `json:"trajectory_stagnation_plateaus"`
+	StagnationRegressions         int            `json:"trajectory_stagnation_regressions"`
+	StagnationIndeterminate       int            `json:"trajectory_stagnation_indeterminate"`
+	UnorderedScoreEvaluations     int            `json:"trajectory_unordered_score_evaluations"`
+	StagnationLaneResets          int            `json:"trajectory_stagnation_lane_resets"`
+	StagnationNudgeEvents         int            `json:"stagnation_nudge_events"`
+	RecoveryEvaluatorResults      int            `json:"stagnation_recovery_evaluator_results"`
+	RecoveryEvaluatorRejections   int            `json:"stagnation_recovery_evaluator_rejections"`
+	RecoveryEvaluatorAccepts      int            `json:"stagnation_recovery_evaluator_accepts"`
+	RecoveryToolCallsBeforeNudge  int            `json:"stagnation_recovery_tool_calls_before_nudge"`
+	RecoveryToolCallsAfterNudge   int            `json:"stagnation_recovery_tool_calls_after_nudge"`
+	RecoveryAccepted              bool           `json:"stagnation_recovery_accepted"`
+	RecoveryAcceptedAfterNudge    bool           `json:"stagnation_recovery_accepted_after_nudge"`
+	RecoveryFailures              int            `json:"stagnation_recovery_failures"`
+	DiscoveryBeforeRead           bool           `json:"discovery_before_read"`
+	ReadBeforeDiscovery           bool           `json:"read_before_discovery"`
+	AllFailedInspectCalls         int            `json:"all_failed_inspect_calls"`
+	CommandText                   string         `json:"-"`
+	FinalText                     string         `json:"-"`
+	AssistantText                 string         `json:"-"`
 }
 
 type turnTools struct {
@@ -181,9 +164,6 @@ func collectMetrics(sessionDir string) (metrics, error) {
 	turnsSeen := make(map[string]bool)
 	logicalTurns := 0
 	for _, ev := range events {
-		if ev.Type == session.EventToolMutation && ev.ToolMutation != nil && defaultStackControlMutation(ev.ToolMutation.Paths) {
-			m.DefaultStackControlMutations++
-		}
 		if ev.Type == session.EventUser && ev.Prompt > m.Prompts {
 			m.Prompts = ev.Prompt
 		}
@@ -207,36 +187,8 @@ func collectMetrics(sessionDir string) (metrics, error) {
 			stagnationNudgeSeen = true
 			continue
 		}
-		if ev.Type == session.EventLineageAdvance && ev.LineageAdvance != nil {
-			m.LineageAdvances++
-			m.LineagePatchBytes += max(int64(0), ev.LineageAdvance.PatchBytes)
-			m.LineageEvidenceBytes += max(int64(0), ev.LineageAdvance.EvidenceBytes)
-			continue
-		}
 		if ev.Type == session.EventTurnComplete && ev.Turn > m.Turns {
 			m.Turns = ev.Turn
-		}
-		if ev.Type == session.EventEvaluatorResult && ev.EvaluatorResult != nil && ev.EvaluatorResult.Handler == defaultStackEvaluatorName {
-			m.DefaultStackEvaluatorResults++
-			result := ev.EvaluatorResult
-			if result.Accepted {
-				m.DefaultStackEvaluatorAccepts++
-				if ev.Prompt >= 2 {
-					m.EvaluatorAcceptedAfterResume = true
-				}
-			} else {
-				m.DefaultStackEvaluatorRejections++
-			}
-			if result.Score != nil {
-				score := *result.Score
-				m.EvaluatorScoreProgression = append(m.EvaluatorScoreProgression, score)
-				if !m.EvaluatorBestScoreAvailable || score > m.EvaluatorBestScore {
-					m.EvaluatorBestScoreAvailable = true
-					m.EvaluatorBestScore = score
-					m.EvaluatorTurnsToBest = logicalTurns
-				}
-			}
-			continue
 		}
 		if ev.Type == session.EventEvaluatorResult && ev.EvaluatorResult != nil &&
 			(ev.EvaluatorResult.Handler == stagnationScoreHandler || ev.EvaluatorResult.Handler == stagnationLatencyHandler) {
@@ -256,18 +208,6 @@ func collectMetrics(sessionDir string) (metrics, error) {
 				m.RecoveryAcceptedAfterNudge = stagnationNudgeSeen
 			} else {
 				m.RecoveryEvaluatorRejections++
-			}
-			continue
-		}
-		if ev.Type == session.EventEvaluatorResult && ev.EvaluatorResult != nil && ev.EvaluatorResult.Handler == lineageEvaluatorHandler {
-			m.LineageEvaluatorResults++
-			if ev.EvaluatorResult.Score != nil {
-				m.LineageScoreProgression = append(m.LineageScoreProgression, *ev.EvaluatorResult.Score)
-			}
-			if ev.EvaluatorResult.Accepted {
-				m.LineageEvaluatorAccepts++
-			} else {
-				m.LineageEvaluatorRejections++
 			}
 			continue
 		}
@@ -302,9 +242,6 @@ func collectMetrics(sessionDir string) (metrics, error) {
 		}
 		lookupOperationsByTurn[ev.Turn] += repositoryLookupOperationCount(ev.Tool, ev.Input)
 		raw := string(ev.Input)
-		if defaultStackEvaluatorAssetLeak(ev.Tool, ev.Input) {
-			m.DefaultStackEvaluatorAssetLeaks++
-		}
 		switch ev.Tool {
 		case "read":
 			m.DirectReadCalls++
@@ -793,13 +730,11 @@ func normalizeFixturePath(input string) string {
 		return "."
 	}
 	clean := filepath.ToSlash(filepath.Clean(input))
-	for _, fixture := range []string{toolAccuracyFixture, defaultStackFixture} {
-		marker := "/" + fixture
-		if index := strings.LastIndex(clean, marker); index >= 0 {
-			suffix := clean[index+1:]
-			if suffix == fixture || strings.HasPrefix(suffix, fixture+"/") {
-				return suffix
-			}
+	marker := "/" + toolAccuracyFixture
+	if index := strings.LastIndex(clean, marker); index >= 0 {
+		suffix := clean[index+1:]
+		if suffix == toolAccuracyFixture || strings.HasPrefix(suffix, toolAccuracyFixture+"/") {
+			return suffix
 		}
 	}
 	return clean
