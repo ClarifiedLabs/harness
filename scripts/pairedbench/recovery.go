@@ -11,12 +11,12 @@ import (
 )
 
 const (
-	stagnationRecoveryFixture       = ".flowbench-stagnation-recovery"
+	stagnationRecoveryFixture       = ".pairedbench-stagnation-recovery"
 	stagnationRecoveryCandidateFile = "candidate.txt"
 	stagnationRecoveryEvidenceDir   = "evidence"
 	stagnationRecoveryEvidenceFile  = "strategy.txt"
 	stagnationRecoveryStateFile     = "phase.txt"
-	stagnationRecoveryCommand       = "harness-flowbench-stagnation-recovery-evaluate"
+	stagnationRecoveryCommand       = "harness-pairedbench-stagnation-recovery-evaluate"
 	stagnationRecoveryHandler       = "stagnation-recovery"
 	stagnationRecoveryPhaseCount    = 4
 )
@@ -24,7 +24,7 @@ const (
 const stagnationRecoveryInitial = "strategy=repeat\ncheckpoint=unchanged\n"
 const stagnationRecoveryFinal = "strategy=alternate-17\ncheckpoint=unchanged\n"
 const stagnationRecoveryEvidence = `The repeated strategy is not making progress.
-Edit only .flowbench-stagnation-recovery/candidate.txt.
+Edit only .pairedbench-stagnation-recovery/candidate.txt.
 Change its first line to exactly:
 strategy=alternate-17
 Preserve the second line and every other file exactly.

@@ -43,13 +43,13 @@ func main() {
 	if *caseName != "" {
 		c, ok := cases[*caseName]
 		if !ok {
-			fmt.Fprintf(os.Stderr, "flowbench: unknown case %q\n", *caseName)
+			fmt.Fprintf(os.Stderr, "pairedbench: unknown case %q\n", *caseName)
 			os.Exit(2)
 		}
 		selectedCases = append(selectedCases, c)
 	} else {
 		if *suiteName != "tool_accuracy" || (*profile != "smoke" && *profile != "promotion") {
-			fmt.Fprintf(os.Stderr, "flowbench: unsupported suite/profile %q/%q\n", *suiteName, *profile)
+			fmt.Fprintf(os.Stderr, "pairedbench: unsupported suite/profile %q/%q\n", *suiteName, *profile)
 			os.Exit(2)
 		}
 		for _, name := range []string{"edit_precision", "edit_drift_recovery", "known_path_batching", "unknown_path_discovery"} {
@@ -58,18 +58,18 @@ func main() {
 	}
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "flowbench: repo: %v\n", err)
+		fmt.Fprintf(os.Stderr, "pairedbench: repo: %v\n", err)
 		os.Exit(1)
 	}
 	resultDir := *results
 	if resultDir == "" {
-		resultDir, err = os.MkdirTemp("", "harness-flowbench-results-")
+		resultDir, err = os.MkdirTemp("", "harness-pairedbench-results-")
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "flowbench: results: %v\n", err)
+			fmt.Fprintf(os.Stderr, "pairedbench: results: %v\n", err)
 			os.Exit(1)
 		}
 	} else if resultDir, err = filepath.Abs(resultDir); err != nil {
-		fmt.Fprintf(os.Stderr, "flowbench: results: %v\n", err)
+		fmt.Fprintf(os.Stderr, "pairedbench: results: %v\n", err)
 		os.Exit(1)
 	}
 	var selectedModels []string
@@ -106,10 +106,10 @@ func main() {
 			}
 		}
 		if runErr != nil {
-			fmt.Fprintf(os.Stderr, "flowbench: results %s\n", resultDir)
-			fmt.Fprintf(os.Stderr, "flowbench: %v\n", runErr)
+			fmt.Fprintf(os.Stderr, "pairedbench: results %s\n", resultDir)
+			fmt.Fprintf(os.Stderr, "pairedbench: %v\n", runErr)
 			os.Exit(1)
 		}
 	}
-	fmt.Fprintf(os.Stderr, "flowbench: results %s\n", resultDir)
+	fmt.Fprintf(os.Stderr, "pairedbench: results %s\n", resultDir)
 }

@@ -176,14 +176,14 @@ func allCases() map[string]benchmarkCase {
 		stagnationRecoveryCase(),
 		{
 			Name: "edit_precision",
-			Prompt: "Work directly; do not delegate or commit. Use the edit tool to make exactly the five requested replacements in .flowbench-tool-accuracy/edit-precision.txt: " +
+			Prompt: "Work directly; do not delegate or commit. Use the edit tool to make exactly the five requested replacements in .pairedbench-tool-accuracy/edit-precision.txt: " +
 				"alpha pending->ready, beta pending->blocked, gamma 1->2, delta off->on, and epsilon old->new. Preserve every other byte, including sentinel punctuation and trailing spaces. Re-read to verify.",
 			Setup: setupEditPrecision, Score: scoreEditPrecision,
 			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
 		},
 		{
 			Name:           "edit_drift_recovery",
-			Prompt:         "Work directly; do not delegate or edit yet. Read .flowbench-tool-accuracy/edit-drift.txt and plan an exact edit that changes enabled=false to enabled=true only in the service beta block. Finish after describing the planned edit.",
+			Prompt:         "Work directly; do not delegate or edit yet. Read .pairedbench-tool-accuracy/edit-drift.txt and plan an exact edit that changes enabled=false to enabled=true only in the service beta block. Finish after describing the planned edit.",
 			SecondPrompt:   "The workspace may have changed since your plan. Now use the edit tool to make the requested beta-only change, re-reading as needed, and verify the exact result. Do not change anything else.",
 			BetweenPrompts: applyEditDrift,
 			Setup:          setupEditDrift, Score: scoreEditDrift,
@@ -197,7 +197,7 @@ func allCases() map[string]benchmarkCase {
 		},
 		{
 			Name: "unknown_path_discovery",
-			Prompt: "Work directly; do not delegate or edit. Files are somewhere under .flowbench-tool-accuracy/discovery, but their paths are unknown. " +
+			Prompt: "Work directly; do not delegate or edit. Files are somewhere under .pairedbench-tool-accuracy/discovery, but their paths are unknown. " +
 				"Use shell with rg --files or find to discover all matching paths before reading any file, then read the first and last discovered files together. Independent repository lookups may be issued together in one turn. Report Discover01 and Discover18.",
 			Setup: setupUnknownPathDiscovery, Score: scoreUnknownPathDiscovery,
 			PrimaryMetric: "tool_errors", MinimumReductionPct: 0,
@@ -220,7 +220,7 @@ func allCases() map[string]benchmarkCase {
 	return out
 }
 
-const toolAccuracyFixture = ".flowbench-tool-accuracy"
+const toolAccuracyFixture = ".pairedbench-tool-accuracy"
 
 const editPrecisionBefore = "alpha: pending\nbeta: pending\ngamma: 1\ndelta: off\nepsilon: old\nsentinel: “keep—exactly”  \n"
 const editPrecisionAfter = "alpha: ready\nbeta: blocked\ngamma: 2\ndelta: on\nepsilon: new\nsentinel: “keep—exactly”  \n"
@@ -266,7 +266,7 @@ func applyEditDrift(dir string) error {
 func knownPathBatchingPrompt() string {
 	paths := contractFixturePaths("known", "contract-%02d.txt")
 	return "Work directly; do not delegate or edit. Read these known paths efficiently: " + strings.Join(paths, ", ") + ". " +
-		"Use argv-form rg calls through shell to search the .flowbench-tool-accuracy/known directory for the literal strings Widget( and State{ (escape the punctuation in the regular expressions) plus the regular expression Marker[0-9]+. Independent repository lookups may be issued together in one turn. " +
+		"Use argv-form rg calls through shell to search the .pairedbench-tool-accuracy/known directory for the literal strings Widget( and State{ (escape the punctuation in the regular expressions) plus the regular expression Marker[0-9]+. Independent repository lookups may be issued together in one turn. " +
 		"For the requested step outputs, use exactly one shell call with output_mode full and two steps, in order: argv [\"printf\", \"STEP_ALPHA\\n\"] then argv [\"printf\", \"STEP_BETA\\n\"]. Report Marker01, Marker18, and both step outputs."
 }
 
@@ -501,11 +501,11 @@ func setupGitWorkspace(dir string) error {
 	if err != nil {
 		return err
 	}
-	data = append(data, []byte("\nFlowbench workspace note.  \n")...)
+	data = append(data, []byte("\nPaired benchmark workspace note.  \n")...)
 	if err := os.WriteFile(readme, data, 0o644); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "flowbench-note.txt"), []byte("untracked flowbench note\n"), 0o644)
+	return os.WriteFile(filepath.Join(dir, "pairedbench-note.txt"), []byte("untracked pairedbench note\n"), 0o644)
 }
 
 func replaceOnce(path, old, new string) error {
@@ -602,7 +602,7 @@ func scoreGitWorkspace(in scoreInput) score {
 	result := requireOutput(in.Stdout,
 		"internal/todo/todo.go",
 		"README.md",
-		"flowbench-note.txt",
+		"pairedbench-note.txt",
 		"staged",
 		"unstaged",
 		"untracked",

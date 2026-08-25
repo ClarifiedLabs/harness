@@ -1,10 +1,12 @@
-# Flowbench: paired live-model benchmark
+# Benchmarks
 
-Flowbench is a paired live-model A/B benchmark that compares two harness revisions on immutable worktrees with freshly built binaries, so that prompt or tool changes that merely look efficient are not promoted without measured evidence. Results go to a results directory outside the repository. Historical campaign results were removed from this document; they remain recoverable from git history.
+## Paired live-model benchmark (`pairedbench`)
 
-Flowbench exists only under `scripts/`; there is no `harness flowbench` subcommand.
+Pairedbench is a paired live-model benchmark that compares two harness revisions or configurations using alternating AB/BA arms on immutable worktrees with freshly built binaries. The paired protocol reduces ordering and provider-cache bias so prompt, tool, or configuration changes that merely look efficient are not promoted without measured evidence. Results go to a directory outside the repository. Historical campaign results were removed from this document; they remain recoverable from git history.
 
-## Protocol
+Pairedbench exists only under `scripts/`; there is no `harness pairedbench` subcommand.
+
+### Protocol
 
 - Freeze a real target checkout and a before/after harness revision; both
   arms share the same task fixture, correctness oracle, agent/model route,
@@ -17,17 +19,17 @@ Flowbench exists only under `scripts/`; there is no `harness flowbench` subcomma
   never edit scores; iterate on an oracle or routing issue only when the
   persisted transcript demonstrates it.
 
-## Quickstart
+### Quickstart
 
 ```sh
-go run ./scripts/flowbench -case background_wait \
+go run ./scripts/pairedbench -case background_wait \
   -baseline <before-revision> -candidate <after-revision> \
-  -results /tmp/harness-flowbench-results
+  -results /tmp/harness-pairedbench-results
 ```
 
-## Flags
+### Flags
 
-Source of truth: `scripts/flowbench/main.go`.
+Source of truth: `scripts/pairedbench/main.go`.
 
 | Flag | Default | Purpose |
 |---|---|---|
@@ -46,14 +48,14 @@ Source of truth: `scripts/flowbench/main.go`.
 | `-resume` | `false` | reuse valid completed records; rerun interrupted unrecorded runs |
 | `-import-baseline-runs` | — | reuse validated baseline records from another case's runs JSON |
 
-Flowbench waits for the whole arm before starting the next AB/BA arm, never
+Pairedbench waits for the whole arm before starting the next AB/BA arm, never
 runs two instances of the same model at once, serializes Git worktree
 lifecycle operations, and remains the sole writer of resumable result
 records.
 
-## Cases
+### Cases
 
-Defined in `scripts/flowbench/cases.go` (plus `stagnation.go` and
+Defined in `scripts/pairedbench/cases.go` (plus `stagnation.go` and
 `recovery.go`).
 
 Efficiency cases, each gated on a primary interaction metric:
@@ -77,7 +79,7 @@ Host-feature cases:
 - `stagnation_detection` — shadow-telemetry oracle for the trajectory projection's ordered scoring. The baseline must predate ordered-score support (for example `ec6dd98`). Twelve fresh processes resume one session and must reply tool-free while a hidden Stop evaluator replays a fixed score trace; each arm must match its projection oracle. Token/turn deltas are reported but not gated — the experiment is shadow-only.
 - `stagnation_recovery` — same-revision arms whose isolated configs differ only in `stagnation_nudge:false` versus `true`. The candidate must persist exactly one payload-free strategy-reset event at no-improvement streak two, then make one exact fixture repair; the gate requires exact-recovery improvement, exactly one reset per candidate run, clean reset-driven recovery in at least 8/9 candidate runs, 2/3 adoption per model, and zero baseline resets.
 
-## Suites
+### Suites
 
 `-suite tool_accuracy` runs `edit_precision`, `edit_drift_recovery`,
 `known_path_batching`, and `unknown_path_discovery` together. The `smoke`
@@ -85,9 +87,9 @@ profile uses Qwen 3.8 Max for one paired repetition (eight runs);
 `promotion` uses the ten default model targets for five paired repetitions
 (400 runs). Explicit `-models` and `-repetitions` override a profile.
 
-## Default matrix and gates
+### Default matrix and gates
 
-Default models (source: `defaultModels` in `scripts/flowbench/runner.go`):
+Default models (source: `defaultModels` in `scripts/pairedbench/runner.go`):
 `deepseek:deepseek-v4-pro`, `deepseek:deepseek-v4-flash`,
 `alibaba-token-plan:qwen3.8-max`, `openai-codex:gpt-5.6-terra`,
 `openrouter:moonshotai/kimi-k2.7-code`, `openrouter:moonshotai/kimi-k3`,
@@ -112,11 +114,11 @@ in repetition order with sign counts, so a favorable median cannot conceal an
 unstable distribution. Alibaba Token Plan and OpenAI Codex report as
 subscription cost `N/A`; DeepSeek uses the provider-reported dollar amount.
 
-## Records and resume
+### Records and resume
 
-Run records hash prompts, fixtures, binaries, and raw events and version their scoring oracle (`runRecordVersion`, `oracleContractVersion` in `scripts/flowbench/runner.go`); restart-backed cases also bind their phase sequence and helper exposure into the prompt contract. `-resume` and `-import-baseline-runs` reject stale record, prompt, oracle, or event-stream versions/hashes rather than reusing an unverified prior score. Invalid infrastructure samples are retained as immutable evidence, left unscored, and a replacement is appended on `-resume`.
+Run records hash prompts, fixtures, binaries, and raw events and version their scoring oracle (`runRecordVersion`, `oracleContractVersion` in `scripts/pairedbench/runner.go`). The current scoring contract is `pairedbench-oracle-2026-08-24-v35`. Restart-backed cases also bind their phase sequence and helper exposure into the prompt contract. `-resume` and `-import-baseline-runs` reject stale record, prompt, oracle, or event-stream versions/hashes rather than reusing an unverified prior score. Invalid infrastructure samples are retained as immutable evidence, left unscored, and a replacement is appended on `-resume`.
 
-## Decision rule
+### Decision rule
 
 - Rerun the affected case against its immediate parent revision; treat a one-pair smoke failure as a trigger for a fresh five-pair focused confirmation before tuning or reverting.
 - Preserve every valid sample; predeclare any seven-pair extension for borderline lanes.
@@ -147,7 +149,7 @@ The default scored matrix has 18 runs: three policies × two request shapes × t
 
 ## Reliability corpus comparison
 
-Use `scripts/reliabilitybench` after a paired baseline/candidate run when the question is behavioral reliability rather than one flowbench case's oracle. Give it two immutable session directories or corpus snapshots produced by the same task/model matrix:
+Use `scripts/reliabilitybench` after a paired baseline/candidate run when the question is behavioral reliability rather than one paired benchmark case's oracle. Give it two immutable session directories or corpus snapshots produced by the same task/model matrix:
 
 ```sh
 go run ./scripts/reliabilitybench \
@@ -183,4 +185,4 @@ The verdict is deliberately conservative:
 - A candidate task or expected-state failure, or a candidate reconciliation failure, rejects promotion before efficiency is considered.
 - Only then may the candidate promote, and only when median and nearest-rank p90 inclusive tokens and known USD cost do not regress; missing coverage remains `insufficient_data`, never a pass.
 
-Keep the two raw analyzer JSON reports with the benchmark evidence when reproducibility matters: they contain the byte counts and SHA-256 values that identify exactly which records were analyzed. The semantic comparison complements flowbench; it does not replace transcript-backed correctness scoring.
+Keep the two raw analyzer JSON reports with the benchmark evidence when reproducibility matters: they contain the byte counts and SHA-256 values that identify exactly which records were analyzed. The semantic comparison complements the paired benchmark; it does not replace transcript-backed correctness scoring.

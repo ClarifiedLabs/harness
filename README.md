@@ -163,5 +163,5 @@ Engineering references:
   projection, stagnation nudge, and evidence catalog.
 - [Release](docs/release.md): release artifacts, tagging, and required secrets.
 - [Smoke tests](docs/smoke.md): end-to-end verification matrix.
-- [Deterministic-flow benchmark](docs/flowbench.md): paired live-model
-  protocol, cases, acceptance gates, and retention/reliability benchmarks.
+- [Benchmarks](docs/benchmarks.md): paired live-model protocol, cases,
+  acceptance gates, retention-policy coverage, and reliability comparison.

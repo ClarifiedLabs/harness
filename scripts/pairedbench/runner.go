@@ -51,7 +51,7 @@ type runConfig struct {
 
 const (
 	runRecordVersion      = 6
-	oracleContractVersion = "flowbench-oracle-2026-08-24-v34"
+	oracleContractVersion = "pairedbench-oracle-2026-08-24-v35"
 )
 
 type runRecord struct {
@@ -117,13 +117,13 @@ func executeMatrix(ctx context.Context, cfg runConfig) ([]runRecord, error) {
 	if err != nil {
 		return nil, err
 	}
-	tempRoot, err := os.MkdirTemp("", "harness-flowbench-")
+	tempRoot, err := os.MkdirTemp("", "harness-pairedbench-")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(tempRoot)
 	if cfg.Case.HelperCommand != "" {
-		cfg.HelperBinDir, err = installFlowbenchHelperCommand(tempRoot, cfg.Case.HelperCommand)
+		cfg.HelperBinDir, err = installPairedbenchHelperCommand(tempRoot, cfg.Case.HelperCommand)
 		if err != nil {
 			return nil, err
 		}
@@ -976,17 +976,17 @@ func benchmarkEnv(goCache string, helperBinDirs ...string) []string {
 	return env
 }
 
-func installFlowbenchHelperCommand(tempRoot, command string) (string, error) {
+func installPairedbenchHelperCommand(tempRoot, command string) (string, error) {
 	if strings.TrimSpace(command) == "" || filepath.Base(command) != command {
-		return "", fmt.Errorf("invalid flowbench helper command %q", command)
+		return "", fmt.Errorf("invalid pairedbench helper command %q", command)
 	}
 	source, err := os.Executable()
 	if err != nil {
-		return "", fmt.Errorf("resolve flowbench executable: %w", err)
+		return "", fmt.Errorf("resolve pairedbench executable: %w", err)
 	}
 	data, err := os.ReadFile(source)
 	if err != nil {
-		return "", fmt.Errorf("read flowbench executable: %w", err)
+		return "", fmt.Errorf("read pairedbench executable: %w", err)
 	}
 	binDir := filepath.Join(tempRoot, "bin")
 	if err := os.MkdirAll(binDir, 0o700); err != nil {

@@ -97,7 +97,7 @@ func writeSummary(results string, c benchmarkCase, records []runRecord) error {
 		return err
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# Flow benchmark: %s\n\n", c.Name)
+	fmt.Fprintf(&b, "# Paired benchmark: %s\n\n", c.Name)
 	fmt.Fprintf(&b, "- Runs: %d\n", agg.Runs)
 	fmt.Fprintf(&b, "- Correctness: baseline %d, candidate %d\n", agg.BaselinePasses, agg.CandidatePasses)
 	fmt.Fprintf(&b, "- Adoption: %d candidate runs\n", agg.Adoptions)

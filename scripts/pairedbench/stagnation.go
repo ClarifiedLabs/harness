@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	stagnationFixture          = ".flowbench-stagnation"
+	stagnationFixture          = ".pairedbench-stagnation"
 	stagnationStateFile        = "phase.txt"
-	stagnationEvaluatorCommand = "harness-flowbench-stagnation-evaluate"
+	stagnationEvaluatorCommand = "harness-pairedbench-stagnation-evaluate"
 	stagnationScoreHandler     = "stagnation-score"
 	stagnationLatencyHandler   = "stagnation-latency"
 	stagnationPhaseCount       = 12

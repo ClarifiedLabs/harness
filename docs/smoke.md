@@ -194,9 +194,9 @@ These exercise the live provider dialects end to end through
 `harness-model-proxy`. Start the proxy in a separate shell first; `harness`
 should receive only the proxy URL, provider id, and model id.
 
-The reproducible paired live-model protocol for deterministic tool-flow changes
-is recorded separately in [flowbench.md](flowbench.md), including its high
-run limits, acceptance gates, and provider-cost treatment.
+The reproducible paired live-model AB/BA protocol is recorded separately in
+[benchmarks.md](benchmarks.md), including its high run limits, acceptance gates,
+and provider-cost treatment.
 
 ```sh
 go build -o harness ./cmd/harness

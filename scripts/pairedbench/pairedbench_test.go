@@ -19,7 +19,7 @@ import (
 	"harness/internal/tools"
 )
 
-func initFlowbenchTestRepo(t *testing.T) string {
+func initPairedbenchTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	run := func(args ...string) {
@@ -30,8 +30,8 @@ func initFlowbenchTestRepo(t *testing.T) string {
 		}
 	}
 	run("init", "-q")
-	run("config", "user.email", "flowbench@example.test")
-	run("config", "user.name", "Flowbench Test")
+	run("config", "user.email", "pairedbench@example.test")
+	run("config", "user.name", "Pairedbench Test")
 	if err := os.WriteFile(filepath.Join(dir, "seed"), []byte("seed\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestCollectMetricsMeasuresStagnationRecoveryAfterDurableNudge(t *testing.T)
 		{Type: session.EventStagnationNudge, Prompt: 3, Turn: 1, StagnationNudge: &session.StagnationNudgeSnapshot{Threshold: 2, Streak: 2}},
 		{Type: session.EventToolStart, Prompt: 3, Turn: 2, ToolID: "read", Tool: "read", Input: json.RawMessage(fmt.Sprintf(`{"path":%q}`, evidence))},
 		{Type: session.EventToolResult, Prompt: 3, Turn: 2, ToolID: "read", Tool: "read"},
-		{Type: session.EventToolStart, Prompt: 3, Turn: 3, ToolID: "edit", Tool: "edit", Input: json.RawMessage(`{"path":".flowbench-stagnation-recovery/candidate.txt"}`)},
+		{Type: session.EventToolStart, Prompt: 3, Turn: 3, ToolID: "edit", Tool: "edit", Input: json.RawMessage(`{"path":".pairedbench-stagnation-recovery/candidate.txt"}`)},
 		{Type: session.EventToolResult, Prompt: 3, Turn: 3, ToolID: "edit", Tool: "edit"},
 		{Type: session.EventEvaluatorResult, Prompt: 4, Turn: 1, EvaluatorResult: &session.EvaluatorResultSnapshot{Handler: stagnationRecoveryHandler, Accepted: true, Score: &score1, ScoreDirection: "maximize", Candidate: "strategy-alternate-17", RemainingRequirements: &remaining0}},
 	}
@@ -644,7 +644,7 @@ func TestFlattenJSONStrings(t *testing.T) {
 }
 
 func TestKnownPathContractEvidenceRequiresExactShellRGInputsAndSuccess(t *testing.T) {
-	root := ".flowbench-tool-accuracy/known"
+	root := ".pairedbench-tool-accuracy/known"
 	validSearches := []string{
 		`{"argv":["rg","-n","Widget\\(","` + root + `"]}`,
 		`{"argv":["rg","--fixed-strings","State{","` + root + `"]}`,
@@ -674,7 +674,7 @@ func TestKnownPathContractEvidenceRequiresExactShellRGInputsAndSuccess(t *testin
 		t.Fatalf("output-only rg flag rejected: %d searches", searches)
 	}
 
-	batchedSearches := `{"steps":[{"argv":["rg","-F","Widget(",".flowbench-tool-accuracy/known"]},{"argv":["rg","-F","State{",".flowbench-tool-accuracy/known"]},{"argv":["rg","Marker[0-9]+",".flowbench-tool-accuracy/known"]}]}`
+	batchedSearches := `{"steps":[{"argv":["rg","-F","Widget(",".pairedbench-tool-accuracy/known"]},{"argv":["rg","-F","State{",".pairedbench-tool-accuracy/known"]},{"argv":["rg","Marker[0-9]+",".pairedbench-tool-accuracy/known"]}]}`
 	batchedEvents := []session.Event{
 		{Type: session.EventToolStart, ToolID: "searches", Tool: "shell", Input: json.RawMessage(batchedSearches)},
 		{Type: session.EventToolResult, ToolID: "searches", Tool: "shell"},
@@ -747,19 +747,19 @@ func TestDiscoveryTargetsFixtureThroughShell(t *testing.T) {
 		input string
 		want  bool
 	}{
-		{`{"argv":["rg","--files",".flowbench-tool-accuracy/discovery"]}`, true},
-		{`{"argv":["rg","--hidden","--files","--glob","*.txt",".flowbench-tool-accuracy/discovery"]}`, true},
-		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-type","f"]}`, true},
-		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-type","f","-name","shard-*-hidden.txt"]}`, true},
-		{`{"command":"find .flowbench-tool-accuracy/discovery -type f | sort"}`, true},
-		{`{"command":"find .flowbench-tool-accuracy/discovery -type f 2>/dev/null | sort"}`, true},
-		{`{"argv":["sh","-c","rg --files .flowbench-tool-accuracy/discovery | sort"]}`, true},
-		{`{"argv":["sh","-c","rg --files .flowbench-tool-accuracy/discovery 2>/dev/null | sort; echo ---; find .flowbench-tool-accuracy/discovery -type f 2>/dev/null | sort"]}`, true},
-		{`{"steps":[{"argv":["rg","--files",".flowbench-tool-accuracy/discovery"]}]}`, true},
+		{`{"argv":["rg","--files",".pairedbench-tool-accuracy/discovery"]}`, true},
+		{`{"argv":["rg","--hidden","--files","--glob","*.txt",".pairedbench-tool-accuracy/discovery"]}`, true},
+		{`{"argv":["find",".pairedbench-tool-accuracy/discovery","-type","f"]}`, true},
+		{`{"argv":["find",".pairedbench-tool-accuracy/discovery","-type","f","-name","shard-*-hidden.txt"]}`, true},
+		{`{"command":"find .pairedbench-tool-accuracy/discovery -type f | sort"}`, true},
+		{`{"command":"find .pairedbench-tool-accuracy/discovery -type f 2>/dev/null | sort"}`, true},
+		{`{"argv":["sh","-c","rg --files .pairedbench-tool-accuracy/discovery | sort"]}`, true},
+		{`{"argv":["sh","-c","rg --files .pairedbench-tool-accuracy/discovery 2>/dev/null | sort; echo ---; find .pairedbench-tool-accuracy/discovery -type f 2>/dev/null | sort"]}`, true},
+		{`{"steps":[{"argv":["rg","--files",".pairedbench-tool-accuracy/discovery"]}]}`, true},
 		{`{"argv":["rg","--files","."]}`, false},
-		{`{"argv":["rg","Discover",".flowbench-tool-accuracy/discovery"]}`, false},
-		{`{"argv":["find",".flowbench-tool-accuracy/discovery","-name","missing-*"]}`, false},
-		{`{"argv":["rg","--files","--glob","missing-*",".flowbench-tool-accuracy/discovery"]}`, false},
+		{`{"argv":["rg","Discover",".pairedbench-tool-accuracy/discovery"]}`, false},
+		{`{"argv":["find",".pairedbench-tool-accuracy/discovery","-name","missing-*"]}`, false},
+		{`{"argv":["rg","--files","--glob","missing-*",".pairedbench-tool-accuracy/discovery"]}`, false},
 	} {
 		if got := shellDiscoversFixture(json.RawMessage(test.input)); got != test.want {
 			t.Errorf("shellDiscoversFixture(%s) = %v, want %v", test.input, got, test.want)
@@ -768,16 +768,16 @@ func TestDiscoveryTargetsFixtureThroughShell(t *testing.T) {
 }
 
 func TestReadPathNormalizesAbsoluteFixturePath(t *testing.T) {
-	input := json.RawMessage(`{"path":"/tmp/worktree/.flowbench-tool-accuracy/discovery/shard-01-hidden.txt"}`)
-	want := ".flowbench-tool-accuracy/discovery/shard-01-hidden.txt"
+	input := json.RawMessage(`{"path":"/tmp/worktree/.pairedbench-tool-accuracy/discovery/shard-01-hidden.txt"}`)
+	want := ".pairedbench-tool-accuracy/discovery/shard-01-hidden.txt"
 	if got := readPath(input); got != want {
 		t.Fatalf("absolute fixture path normalized to %q, want %q", got, want)
 	}
 }
 
 func TestRemovedTypedSearchEventsDoNotSatisfyKnownPathOracle(t *testing.T) {
-	searchInput := json.RawMessage(`{"queries":[{"pattern":"Widget\\(","paths":[".flowbench-tool-accuracy/known"]},{"pattern":"State\\{","paths":[".flowbench-tool-accuracy/known"]},{"pattern":"Marker[0-9]+","paths":[".flowbench-tool-accuracy/known"]}]}`)
-	inspectInput := json.RawMessage(`{"operations":[{"tool":"search","input":{"queries":[{"pattern":"Marker[0-9]+","paths":[".flowbench-tool-accuracy/known"]}]}}]}`)
+	searchInput := json.RawMessage(`{"queries":[{"pattern":"Widget\\(","paths":[".pairedbench-tool-accuracy/known"]},{"pattern":"State\\{","paths":[".pairedbench-tool-accuracy/known"]},{"pattern":"Marker[0-9]+","paths":[".pairedbench-tool-accuracy/known"]}]}`)
+	inspectInput := json.RawMessage(`{"operations":[{"tool":"search","input":{"queries":[{"pattern":"Marker[0-9]+","paths":[".pairedbench-tool-accuracy/known"]}]}}]}`)
 	for _, tool := range []string{"search", "inspect", "rg", "grep"} {
 		input := searchInput
 		if tool == "inspect" {
@@ -795,9 +795,9 @@ func TestRemovedTypedSearchEventsDoNotSatisfyKnownPathOracle(t *testing.T) {
 
 func TestRemovedTypedDiscoveryEventsDoNotSatisfyDiscoveryOracle(t *testing.T) {
 	inputs := map[string]json.RawMessage{
-		"glob":     json.RawMessage(`{"root":".flowbench-tool-accuracy/discovery","pattern":"*.txt"}`),
-		"list_dir": json.RawMessage(`{"path":".flowbench-tool-accuracy/discovery"}`),
-		"search":   json.RawMessage(`{"queries":[{"pattern":"Discover","paths":[".flowbench-tool-accuracy/discovery"],"max_files":18}]}`),
+		"glob":     json.RawMessage(`{"root":".pairedbench-tool-accuracy/discovery","pattern":"*.txt"}`),
+		"list_dir": json.RawMessage(`{"path":".pairedbench-tool-accuracy/discovery"}`),
+		"search":   json.RawMessage(`{"queries":[{"pattern":"Discover","paths":[".pairedbench-tool-accuracy/discovery"],"max_files":18}]}`),
 	}
 	for tool, input := range inputs {
 		event := session.Event{Type: session.EventToolStart, Tool: tool, Input: input}
@@ -811,7 +811,7 @@ func TestRemovedTypedDiscoveryEventsDoNotSatisfyDiscoveryOracle(t *testing.T) {
 }
 
 func TestSuccessfulDriftRereadRequiresSuccessfulCorrelatedResult(t *testing.T) {
-	readInput := json.RawMessage(`{"path":".flowbench-tool-accuracy/edit-drift.txt"}`)
+	readInput := json.RawMessage(`{"path":".pairedbench-tool-accuracy/edit-drift.txt"}`)
 	tests := []struct {
 		name   string
 		events []session.Event
@@ -971,6 +971,14 @@ func TestSetupWorkBugAndWorkspaceDigest(t *testing.T) {
 	run("commit", "-qm", "initial")
 	if err := setupGitWorkspace(dir); err != nil {
 		t.Fatal(err)
+	}
+	readme, err := os.ReadFile(filepath.Join(dir, "README.md"))
+	if err != nil || !strings.HasSuffix(string(readme), "\nPaired benchmark workspace note.  \n") {
+		t.Fatalf("workspace README note = %q, %v", readme, err)
+	}
+	note, err := os.ReadFile(filepath.Join(dir, "pairedbench-note.txt"))
+	if err != nil || string(note) != "untracked pairedbench note\n" {
+		t.Fatalf("workspace untracked note = %q, %v", note, err)
 	}
 	first, err := fixtureDigest(dir)
 	if err != nil {
@@ -1434,6 +1442,9 @@ func TestWriteSummarySeparatesPairedAndUnpairedTokenMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(data)
+	if !strings.HasPrefix(got, "# Paired benchmark: "+c.Name+"\n") {
+		t.Fatalf("summary heading = %q", strings.SplitN(got, "\n", 2)[0])
+	}
 	for _, want := range []string{
 		"Unpaired median tokens:",
 		"Paired-median token saving: 20.0%",
