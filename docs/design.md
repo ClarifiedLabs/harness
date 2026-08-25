@@ -1343,9 +1343,13 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   for manual or compatible providers.
   The handler resolves model/tier/auth exactly as a stream does, calls the
   optional `ContextCompactor`, prices and records returned usage, and applies the
-  same API-key cost budget. Unsupported targets return `501` with
+  same API-key cost budget. The Responses dialect uses a streamed
+  `POST /responses` with a trailing `compaction_trigger` (v2) for both canonical
+  first-party backends; explicitly enabled compatible providers retain the
+  standalone `POST /responses/compact` (v1) contract. Unsupported targets return
+  `501` with
   `code:"context_compaction_unsupported"`. Managed setup enables the capability
-  for the official OpenAI API and ChatGPT Codex, but not compatible endpoints.
+  for both first-party backends and leaves compatible endpoints opt-in.
 - **Usage aggregation and model-proxy budgets.** The proxy keeps a mutex-guarded
   `{provider, model}` usage map and serves it read-only at `GET /v1/usage` as
   `{"instance":..., "since":..., "models":[{provider, model, requests, input_tokens, output_tokens,

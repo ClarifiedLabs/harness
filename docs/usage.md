@@ -29,7 +29,7 @@ reasoning profiles. Use `harness --agents` to print the resolved built-in and
 config-defined agents. Both commands exit before creating a session.
 
 `--models --format json` also shows each target's `api_type`,
-`continuation_stateful`, standalone `native_compaction`, zero-generation
+`continuation_stateful`, provider-native `native_compaction`, zero-generation
 `prewarm` support, `server_tools`, price, and variant relationship
 (`base_target_id` / `variant`). When a target advertises `web_search`,
 `-web-search auto` lets harness declare the provider-hosted web search tool for
@@ -792,14 +792,16 @@ session and sends only the appended suffix on the next request. A missing,
 malformed, out-of-range, or fingerprint-mismatched anchor is discarded before
 the request and the complete transcript is sent safely.
 
-Responses provider configs can opt into the standalone compaction endpoint with
+Responses provider configs can opt into native compaction with
 `responses_compaction:true`. The model proxy advertises this capability per
 target; Harness does not infer it from `api_type:"responses"` alone. Managed
 providers using the canonical official OpenAI API or ChatGPT Codex identity and
 base URL default on, while `responses_compaction:false` explicitly disables the
-capability. Compatible and manual providers remain opt-in. A manual provider
-config should enable it only when its base URL implements
-`POST /responses/compact` with the OpenAI response-compaction contract.
+capability. The two canonical first-party backends use Responses compaction v2
+through `POST /responses` with a trailing `compaction_trigger`. Compatible and
+manual providers remain opt-in and use the standalone v1 contract, so enable it
+only when their base URL implements `POST /responses/compact` with the OpenAI
+response-compaction contract.
 
 Live transcript retention defaults to `auto`, which batches eligible trimming
 into pressure epochs when the larger of the local and provider-derived estimates
@@ -950,10 +952,10 @@ WebSocket `generate:false`; only that transport returns an explicit transcript
 anchor at message zero, which the owner goroutine installs if the model,
 session, transcript, and continuation generation are still unchanged. HTTP
 warm-up usage is retained but its disposable response ID is never installed.
-ChatGPT Codex advertises standalone Responses compaction. Harness sends the
-current tool and reasoning contract plus the stable Codex request identifiers;
-if the backend rejects the operation, Harness disables native compaction for the
-current compatibility domain and falls back to textual compaction.
+ChatGPT Codex advertises native Responses compaction. Harness uses the normal
+streamed `POST /responses` route with a trailing `compaction_trigger`, rather
+than the unavailable legacy `POST /responses/compact` route; malformed or
+rejected maintenance responses fall back to textual compaction.
 After setup, run:
 
 ```sh
@@ -1788,8 +1790,8 @@ only threshold-based compaction; `/compact` and provider-overflow recovery
 still work. Harness compacts toward `compact_target_percent` (default 65)
 after fixed system/tool overhead.
 
-When the active target advertises standalone Responses compaction, automatic
-compaction and an unfocused `/compact` use that native endpoint; the semantic
+When the active target advertises native Responses compaction, automatic
+compaction and an unfocused `/compact` use that provider operation; the semantic
 transcript is retained, so switching provider or model simply replays normal
 history. Otherwise — and always for focused, delegate-continuation, and idle
 compaction — Harness replaces removed history with a summary checkpoint while

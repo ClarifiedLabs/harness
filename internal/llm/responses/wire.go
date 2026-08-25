@@ -51,6 +51,11 @@ type wireInputItem struct {
 	// locally so request-context insertion can preserve tool suffix adjacency.
 	Raw json.RawMessage `json:"-"`
 
+	// RetainOnCompaction distinguishes genuine user messages (including user
+	// messages replayed from an older checkpoint) from user-role projection items
+	// such as rich tool-result images. It is transport-local and never serialized.
+	RetainOnCompaction bool `json:"-"`
+
 	Type string `json:"type"`
 
 	// message
@@ -359,10 +364,11 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 				return
 			}
 			out = append(out, wireInputItem{
-				Type:    "message",
-				Role:    string(m.Role),
-				Phase:   inputMessagePhase(m),
-				Content: parts,
+				Type:               "message",
+				Role:               string(m.Role),
+				Phase:              inputMessagePhase(m),
+				Content:            parts,
+				RetainOnCompaction: m.Role == llm.RoleUser,
 			})
 			parts = nil
 		}
@@ -372,7 +378,11 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 			case llm.BlockProviderCompaction:
 				flushMessage()
 				for _, raw := range b.ProviderCompaction {
-					out = append(out, wireInputItem{Type: rawInputItemType(raw), Raw: raw})
+					out = append(out, wireInputItem{
+						Type:               rawInputItemType(raw),
+						Raw:                raw,
+						RetainOnCompaction: rawInputItemRole(raw) == string(llm.RoleUser),
+					})
 				}
 			case llm.BlockReasoning:
 				// Replay the encrypted reasoning item verbatim, immediately before
@@ -451,6 +461,14 @@ func rawInputItemType(raw json.RawMessage) string {
 	}
 	_ = json.Unmarshal(raw, &header)
 	return header.Type
+}
+
+func rawInputItemRole(raw json.RawMessage) string {
+	var header struct {
+		Role string `json:"role"`
+	}
+	_ = json.Unmarshal(raw, &header)
+	return header.Role
 }
 
 func textPartType(role llm.Role) string {

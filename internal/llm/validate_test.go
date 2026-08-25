@@ -48,7 +48,7 @@ func TestValidateTranscript(t *testing.T) {
 				Role: RoleUser, Origin: MessageOriginProviderCompaction,
 				Content: []ContentBlock{{
 					Kind: BlockProviderCompaction, ReasoningReplayDomain: "openai:gpt",
-					ProviderCompaction: []json.RawMessage{json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"opaque"}`)},
+					ProviderCompaction: []json.RawMessage{json.RawMessage(`{"type":"compaction","encrypted_content":"opaque"}`)},
 				}},
 			}},
 			wantErr: false,

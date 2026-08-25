@@ -9,15 +9,21 @@ settings and `/compact`. The implementation is `internal/agent/compact.go`.
 
 When the selected proxy target advertises native compaction, ordinary
 automatic compaction and an unfocused `/compact` send the complete current
-provider-visible window plus `Request.System` to the provider's standalone
-compaction endpoint. The request also carries the active tool schemas, server
+provider-visible window plus `Request.System` to the provider's native
+compaction operation. The request also carries the active tool schemas, server
 tools, reasoning controls, cache key, and service tier so the provider sees
-the same model contract as an ordinary turn. ChatGPT Codex requests add stable
-installation/session/thread/window headers, and its response may omit the
-public API's `object` discriminator as long as the output still validates as a
-canonical compaction window. The input must already fit the provider context
-window. Harness persists the complete returned item array in a hidden
-domain-scoped checkpoint and never parses, prunes, or summarizes its contents.
+the same model contract as an ordinary turn. The input must already fit the
+provider context window.
+
+The canonical OpenAI API and ChatGPT Codex use compaction v2: Harness sends a
+streamed `POST /responses` request whose final input item is
+`{"type":"compaction_trigger"}` and enables the `remote_compaction_v2` feature.
+It requires `response.completed` and exactly one `compaction` output item, then
+installs recent retained user messages followed by that item. The opaque
+provider item is never parsed, altered, or summarized. Other Responses
+providers that explicitly enable native compaction retain the standalone v1
+`POST /responses/compact` contract; Harness persists that operation's complete
+returned item array.
 Subsequent same-domain requests send that canonical window followed by newer
 transcript messages. The semantic transcript remains intact, so a
 model/provider switch simply omits the opaque checkpoint and replays normal
@@ -26,7 +32,7 @@ and are added fresh to every active model round; the system prompt remains on
 `Request.System`.
 
 Native compaction resets any stored-response continuation anchor and starts a
-fresh stateless baseline. An endpoint failure disables the path for that
+fresh stateless baseline. A native operation failure disables the path for that
 replay domain for the current process and falls through to textual compaction.
 If a later request rejects a persisted checkpoint's encrypted content, Harness
 disables that checkpoint and retries once from the preserved semantic

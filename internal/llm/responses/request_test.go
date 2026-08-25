@@ -53,6 +53,9 @@ func TestBuildInputRichToolResultsFollowAllFunctionOutputs(t *testing.T) {
 	if len(parts) != 2 || parts[0].ImageURL != "data:image/png;base64,YWJj" || parts[0].Detail != "high" || parts[1].ImageURL != "data:image/jpeg;base64,ZGVm" {
 		t.Fatalf("rich image order = %+v", parts)
 	}
+	if input[2].RetainOnCompaction {
+		t.Fatal("rich tool-result image projection marked as a genuine retained user message")
+	}
 }
 
 func TestBuildInputRichToolResultKeepsEmptyFunctionOutput(t *testing.T) {

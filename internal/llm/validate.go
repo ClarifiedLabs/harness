@@ -163,8 +163,8 @@ func validateProviderCompactionItems(items []json.RawMessage) error {
 			return fmt.Errorf("provider compaction item %d has no type", i)
 		}
 		if header.Type == "compaction" {
-			if header.ID == "" || header.EncryptedContent == "" {
-				return fmt.Errorf("provider compaction item %d is missing id or encrypted_content", i)
+			if header.EncryptedContent == "" {
+				return fmt.Errorf("provider compaction item %d is missing encrypted_content", i)
 			}
 			foundCompaction = true
 		}
