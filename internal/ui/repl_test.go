@@ -5713,10 +5713,65 @@ func liveTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *
 	return app
 }
 
-// The cancelableReader's pump eagerly drains the fd, so a split escape
-// sequence's tail can sit in its Go-side buffers where WaitReadable(fd) can no
-// longer see it. buffered() must report exactly those undelivered bytes so the
-// escape-readiness probe finds them.
+// The pump reads the stream only while a Read is waiting; when no Read is
+// outstanding (e.g. the REPL handed the terminal to an external editor via
+// Ctrl-G), the pump must stay parked so those keystrokes reach the editor
+// instead of resurfacing as stray prompt input after it exits. With a
+// synchronous pipe, a write with no pending Read must block.
+func TestCancelableReaderDoesNotDrainWithoutPendingRead(t *testing.T) {
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	defer pw.Close()
+	cr := newCancelableReader(pr)
+
+	wrote := make(chan struct{})
+	go func() {
+		_, _ = pw.Write([]byte(":q"))
+		close(wrote)
+	}()
+	select {
+	case <-wrote:
+		t.Fatal("pump drained input without a pending Read; an external editor would lose these keystrokes")
+	case <-time.After(100 * time.Millisecond):
+	}
+	if got := cr.buffered(); got != 0 {
+		t.Fatalf("buffered() = %d without a pending Read, want 0", got)
+	}
+
+	// Once a Read is waiting, the blocked write completes and the bytes arrive.
+	buf := make([]byte, 8)
+	readDone := make(chan int, 1)
+	go func() {
+		n, err := cr.Read(buf)
+		if err != nil {
+			t.Errorf("Read: %v", err)
+		}
+		readDone <- n
+	}()
+	select {
+	case <-wrote:
+	case <-time.After(time.Second):
+		t.Fatal("pipe write did not complete once a Read was pending")
+	}
+	select {
+	case n := <-readDone:
+		if got := string(buf[:n]); got != ":q" {
+			t.Fatalf("Read = %q, want %q", got, ":q")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Read did not return after the write completed")
+	}
+	if got := cr.buffered(); got != 0 {
+		t.Fatalf("buffered() = %d after Read consumed the write, want 0", got)
+	}
+}
+
+// buffered() must report exactly the bytes the pump has pulled off the stream
+// but not yet returned through Read (queued chunk plus leftover), so the
+// escape-readiness probe finds input that WaitReadable can no longer see on the
+// fd. The pump fetches a chunk only once a Read is waiting: a 1-byte Read pulls
+// the whole 3-byte escape sequence off the synchronous pipe and keeps the [A
+// tail Go-side.
 func TestCancelableReaderBufferedTracksPendingBytes(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
@@ -5725,13 +5780,23 @@ func TestCancelableReaderBufferedTracksPendingBytes(t *testing.T) {
 	if got := cr.buffered(); got != 0 {
 		t.Fatalf("buffered() = %d on a fresh reader, want 0", got)
 	}
-	writePipe(t, pw, "\x1b[A") // a 3-byte arrow-key escape sequence
-	waitFor(t, func() bool { return cr.buffered() == 3 }, "pump buffers the 3 escape bytes")
 
-	// Reading the ESC leaves the [A tail buffered — invisible to a drained fd.
 	one := make([]byte, 1)
-	if n, err := cr.Read(one); err != nil || n != 1 {
-		t.Fatalf("Read = %d, %v; want 1, nil", n, err)
+	readDone := make(chan struct{})
+	go func() {
+		if n, err := cr.Read(one); err != nil || n != 1 {
+			t.Errorf("Read = %d, %v; want 1, nil", n, err)
+		}
+		close(readDone)
+	}()
+	writePipe(t, pw, "\x1b[A") // a 3-byte arrow-key escape sequence
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("Read did not return")
+	}
+	if one[0] != 0x1b {
+		t.Fatalf("Read byte = %q, want ESC", one[0])
 	}
 	if got := cr.buffered(); got != 2 {
 		t.Fatalf("buffered() = %d after reading 1 of 3, want 2", got)
@@ -5746,25 +5811,111 @@ func TestCancelableReaderBufferedTracksPendingBytes(t *testing.T) {
 }
 
 // Readiness must consult the cancelableReader's Go-side buffers, not only the
-// raw fd: when the pump has pre-drained an escape sequence's tail off the fd, a
-// WaitReadable probe reports not-readable, so escapeSequenceAvailable would
-// otherwise mis-read the sequence as a bare Esc.
+// raw fd: once the pump has delivered bytes Go-side (a queued chunk or
+// leftover), a WaitReadable probe on the fd reports not-readable, so
+// escapeSequenceAvailable would otherwise mis-read the sequence as a bare Esc.
 func TestEscapeSequenceAvailableConsultsCancelableBuffer(t *testing.T) {
 	pr, pw := io.Pipe()
 	defer pw.Close()
 	cr := newCancelableReader(pr)
 	e := newPromptLineEditor(cr, io.Discard)
-	// Mirror the production wiring: the fd probe is stubbed not-readable (the pump
-	// already drained the fd), so readiness must come from the Go-side buffer.
+	// Mirror the production wiring: the fd probe is stubbed not-readable (the
+	// bytes moved Go-side), so readiness must come from the Go-side buffer.
 	e.escapeSequenceReady = func(time.Duration) bool { return cr.buffered() > 0 }
 
 	if e.escapeSequenceAvailable() {
 		t.Fatal("no buffered bytes and fd not readable -> escape sequence must be unavailable")
 	}
-	writePipe(t, pw, "[A") // the tail the pump pre-drained off the fd
-	waitFor(t, func() bool { return cr.buffered() == 2 }, "pump buffers the escape tail")
+	// Move the escape tail Go-side: a 1-byte Read pulls the 2-byte chunk off the
+	// pipe and keeps "A" as leftover the fd probe cannot see.
+	one := make([]byte, 1)
+	readDone := make(chan struct{})
+	go func() {
+		if _, err := cr.Read(one); err != nil {
+			t.Errorf("Read: %v", err)
+		}
+		close(readDone)
+	}()
+	writePipe(t, pw, "[A")
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("Read did not return")
+	}
+	if got := cr.buffered(); got != 1 {
+		t.Fatalf("buffered() = %d, want 1 leftover byte", got)
+	}
 	if !e.escapeSequenceAvailable() {
-		t.Fatal("a buffered escape tail must make the sequence available despite a drained fd")
+		t.Fatal("a Go-side buffered escape tail must make the sequence available despite a not-readable fd")
+	}
+}
+
+// Ctrl-G hands the terminal to the external editor, which reads /dev/tty — the
+// same input queue as the REPL's stdin. Keystrokes typed while the editor is
+// starting up belong to the editor: the REPL's input pump must leave them on
+// the stream rather than draining them into a Go-side buffer, where they would
+// resurface appended to the prompt after the editor exits. Regression test for
+// the editor missing its first keystrokes (e.g. vim's ":q") which then
+// appeared as leftover prompt text.
+func TestREPLCtrlGDoesNotDrainInputWhileEditorOpen(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+
+	editorOpen := make(chan struct{})
+	releaseEditor := make(chan struct{})
+	app.OpenEditor = func(path string) error {
+		close(editorOpen)
+		<-releaseEditor
+		return nil // leave the draft unchanged: nothing to submit
+	}
+
+	pr, pw := io.Pipe()
+	defer pr.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(pr, app, nil, true) }()
+
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "> ") }, "initial prompt")
+	writePipe(t, pw, "\x07") // Ctrl-G opens the editor
+	select {
+	case <-editorOpen:
+	case <-time.After(time.Second):
+		t.Fatal("editor did not open after Ctrl-G")
+	}
+
+	// While the editor owns the terminal the REPL must not consume input: with
+	// a synchronous pipe, a stolen write would complete immediately.
+	wrote := make(chan struct{})
+	go func() {
+		_, _ = pw.Write([]byte(":q"))
+		close(wrote)
+	}()
+	select {
+	case <-wrote:
+		t.Fatal("REPL consumed input while the external editor owned the terminal; it would resurface appended to the prompt")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(releaseEditor)
+
+	// After the editor exits the REPL resumes reading; the typeahead write
+	// completes and the text lands in the prompt buffer intact.
+	select {
+	case <-wrote:
+	case <-time.After(time.Second):
+		t.Fatal("typeahead write did not complete after the editor exited")
+	}
+	writePipe(t, pw, "\r")
+	waitFor(t, func() bool { return fp.RequestCount() == 1 }, "typeahead prompt submission")
+	_ = pw.Close()
+
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d; errw=%q", code, errw.String())
+	}
+	if got := transcriptPrompts(app); got != ":q" {
+		t.Fatalf("prompts = %q, want the typeahead text submitted intact as %q", got, ":q")
 	}
 }
 

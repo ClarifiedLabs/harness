@@ -2139,6 +2139,12 @@ func queuedContainsEditor(inputs []replInput) bool {
 // the REPL hand the terminal from the during-prompt keystroke capture back to the
 // full line editor at a prompt boundary without dropping a keystroke
 // (during-prompt input).
+//
+// The pump reads the stream only while a Read call is waiting for data. When no
+// Read is outstanding — most importantly while the REPL has handed the terminal
+// to an external editor (Ctrl-G, /edit, !command) — the pump stays parked, so it
+// cannot drain keystrokes that belong to the editor into a Go-side buffer where
+// they would resurface as stray prompt input after the editor exits.
 type cancelableReader struct {
 	chunks   chan readChunk
 	leftover []byte
@@ -2146,9 +2152,14 @@ type cancelableReader struct {
 	cancel   chan struct{} // buffered(1); a queued token cancels the next Read
 	// pending counts bytes the pump has read off the underlying fd but Read has
 	// not yet returned to the caller (queued chunk + leftover). It lets readiness
-	// probes see input the eager pump already drained off the fd, which
+	// probes see input the pump already drained off the fd, which
 	// WaitReadable on that fd can no longer report (during-prompt escape decoding).
 	pending atomic.Int64
+	// wantRead gates the pump: it calls the underlying stream's Read only when a
+	// Read call is blocked waiting for data. cond signals transitions to true.
+	mu       sync.Mutex
+	cond     sync.Cond
+	wantRead bool
 }
 
 type readChunk struct {
@@ -2163,9 +2174,22 @@ func newCancelableReader(in io.Reader) *cancelableReader {
 		chunks: make(chan readChunk, 1),
 		cancel: make(chan struct{}, 1),
 	}
+	cr.cond.L = &cr.mu
 	go func() {
 		buf := make([]byte, 4096)
 		for {
+			// Park until a Read is actually waiting. Reading on demand (rather
+			// than eagerly draining the stream) keeps the terminal's input queue
+			// with its current owner while the REPL hands it off — an external
+			// editor attached to /dev/tty races this pump for the same input, and
+			// an eager pump would swallow the user's first keystrokes there.
+			cr.mu.Lock()
+			for !cr.wantRead {
+				cr.cond.Wait()
+			}
+			cr.wantRead = false
+			cr.mu.Unlock()
+
 			n, err := in.Read(buf)
 			if n > 0 {
 				// Count the bytes as buffered Go-side before handing them off, so a
@@ -2195,25 +2219,42 @@ func (cr *cancelableReader) Read(p []byte) (int, error) {
 		// after EOF returns EOF rather than blocking on a dead channel.
 		return 0, cr.err
 	}
+	// Serve a chunk orphaned by a canceled Read without waking the pump, so the
+	// pump never holds an in-flight read no Read call is waiting on.
+	select {
+	case chunk := <-cr.chunks:
+		return cr.serveChunk(p, chunk)
+	default:
+	}
+	// Nothing queued Go-side: ask the pump to read the stream, now that this
+	// Read is here to receive the bytes.
+	cr.mu.Lock()
+	cr.wantRead = true
+	cr.cond.Signal()
+	cr.mu.Unlock()
 	select {
 	case <-cr.cancel:
 		return 0, errReadCanceled
 	case chunk := <-cr.chunks:
-		if chunk.err != nil {
-			cr.err = chunk.err
-			return 0, chunk.err
-		}
-		n := copy(p, chunk.data)
-		cr.leftover = chunk.data[n:]
-		cr.pending.Add(int64(-n))
-		return n, nil
+		return cr.serveChunk(p, chunk)
 	}
+}
+
+func (cr *cancelableReader) serveChunk(p []byte, chunk readChunk) (int, error) {
+	if chunk.err != nil {
+		cr.err = chunk.err
+		return 0, chunk.err
+	}
+	n := copy(p, chunk.data)
+	cr.leftover = chunk.data[n:]
+	cr.pending.Add(int64(-n))
+	return n, nil
 }
 
 // buffered reports how many bytes the pump has read off the underlying fd but
 // not yet returned through Read (the queued chunk plus any leftover). Readiness
 // probes OR this in so a split escape sequence whose tail the pump already
-// drained off the fd is still seen as available (during-prompt escape decoding).
+// delivered Go-side is still seen as available (during-prompt escape decoding).
 func (cr *cancelableReader) buffered() int {
 	if n := cr.pending.Load(); n > 0 {
 		return int(n)
@@ -2287,10 +2328,10 @@ func newREPLReader(in io.Reader, promptWriter io.Writer, promptEditor bool, edit
 			// default; HARNESS_REPL_PASTE_HEURISTIC=off disables it.
 			rr.editor.configurePasteHeuristic(pasteHeuristicEnabled(), time.Now)
 			rr.editor.escapeSequenceReady = func(timeout time.Duration) bool {
-				// The pump eagerly drains f, so a split escape sequence's tail may
-				// already sit in the cancelableReader's Go-side buffers where
-				// WaitReadable(f) can no longer see it. Consult those buffers first
-				// so arrow/Home/End keys are not mis-read as bare Esc + literals.
+				// Bytes the pump already delivered Go-side (an unconsumed chunk or
+				// leftover from a larger one) are invisible to WaitReadable(f), so
+				// consult those buffers first; a split escape sequence's tail that
+				// is still on the fd is reported by the WaitReadable probe.
 				if cancelable != nil && cancelable.buffered() > 0 {
 					return true
 				}

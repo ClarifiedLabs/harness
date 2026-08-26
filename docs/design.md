@@ -3015,8 +3015,10 @@ On the fallback path without the raw prompt editor, harness instead restores the
 terminal mode, configures Escape as the second canonical-mode line delimiter, and
 disables bracketed paste until the prompt returns. Before launching the external editor,
 harness restores the original termios and disables bracketed paste so the editor owns a
-normal TTY; after it exits, the REPL reapplies its prompt settings. `!command` shell
-escapes use the same terminal handoff.
+normal TTY; the REPL's input pump reads stdin only while a prompt read is waiting, so
+keystrokes typed during the handoff reach the editor rather than resurfacing in the
+prompt afterward. After the editor exits, the REPL reapplies its prompt settings.
+`!command` shell escapes use the same terminal handoff.
 
 External editor prompt files use `$VISUAL`, then `$EDITOR`, then `vi`, attached to
 `/dev/tty`. The temp file contains visible output only from the latest completed
