@@ -108,6 +108,41 @@ func TestDisplayPath(t *testing.T) {
 	}
 }
 
+func TestReadPathArg(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+		ok    bool
+	}{
+		{name: "canonical path", input: `{"path":"canonical.go"}`, want: "canonical.go", ok: true},
+		{name: "file_path alias", input: `{"file_path":"snake.go"}`, want: "snake.go", ok: true},
+		{name: "filePath alias", input: `{"filePath":"camel.go"}`, want: "camel.go", ok: true},
+		{name: "file alias", input: `{"file":"file.go"}`, want: "file.go", ok: true},
+		{name: "filename alias", input: `{"filename":"filename.go"}`, want: "filename.go", ok: true},
+		{name: "filepath alias", input: `{"filepath":"filepath.go"}`, want: "filepath.go", ok: true},
+		{name: "absolute_path alias", input: `{"absolute_path":"/tmp/absolute.go"}`, want: "/tmp/absolute.go", ok: true},
+		{name: "target_file alias", input: `{"target_file":"target.go"}`, want: "target.go", ok: true},
+		{name: "canonical precedence", input: `{"path":"canonical.go","file_path":"alias.go"}`, want: "canonical.go", ok: true},
+		{name: "empty canonical uses alias", input: `{"path":"","file_path":"alias.go"}`, want: "alias.go", ok: true},
+		{name: "unknown keys tolerated", input: `{"path":"known.go","future":{"nested":true}}`, want: "known.go", ok: true},
+		{name: "malformed JSON", input: `{"path":`, ok: false},
+		{name: "canonical wrong type", input: `{"path":7}`, ok: false},
+		{name: "alias wrong type", input: `{"file_path":["x.go"]}`, ok: false},
+		{name: "wrong unused alias type", input: `{"path":"known.go","file_path":7}`, ok: false},
+		{name: "missing path", input: `{"offset":3}`, ok: false},
+		{name: "empty paths", input: `{"path":"","file_path":"","file":"  "}`, ok: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ReadPathArg(json.RawMessage(tt.input))
+			if got != tt.want || ok != tt.ok {
+				t.Fatalf("ReadPathArg(%s) = (%q, %t), want (%q, %t)", tt.input, got, ok, tt.want, tt.ok)
+			}
+		})
+	}
+}
+
 func TestFormatToolArgsRelativizesPathArgs(t *testing.T) {
 	cwd := filepath.Join(string(filepath.Separator), "proj")
 	absUnder := filepath.Join(cwd, "sub", "file.go")

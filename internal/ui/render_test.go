@@ -86,6 +86,153 @@ func TestToolSummaryLine(t *testing.T) {
 	}
 }
 
+func TestConciseReadsDeduplicatePathsPerTurn(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "docs", "architecture example.md")
+	second := filepath.Join(dir, "internal", "ui", "render.go")
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{CWD: dir, ConciseReads: true})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+
+	read := func(id, path string, offset, limit int) {
+		t.Helper()
+		input, err := json.Marshal(map[string]any{"path": path, "offset": offset, "limit": limit})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.ToolStart(llm.ToolCall{ID: id, Name: "read", Input: input})
+		r.ToolResult(llm.ToolResult{ForID: id, Text: "1\talpha\n2\tbeta\n"})
+	}
+	read("r1", first, 1, 2)
+	read("r2", first, 3, 2)
+	read("r3", first, 5, 2)
+	read("r4", second, 1, 2)
+	read("r5", second, 3, 2)
+
+	firstLine := `[read] path="docs/architecture example.md"`
+	secondLine := "[read] path=internal/ui/render.go"
+	got := errw.String()
+	if count := strings.Count(got, firstLine); count != 1 {
+		t.Fatalf("first path lines = %d, want 1; stderr=%q", count, got)
+	}
+	if count := strings.Count(got, secondLine); count != 1 {
+		t.Fatalf("second path lines = %d, want 1; stderr=%q", count, got)
+	}
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.Contains(line, "[read]") {
+			continue
+		}
+		for _, detail := range []string{"limit", "offset", "→", "lines", "B"} {
+			if strings.Contains(line, detail) {
+				t.Fatalf("concise read line contains %q: %q", detail, line)
+			}
+		}
+	}
+
+	r.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+	read("r6", first, 7, 2)
+	if count := strings.Count(errw.String(), firstLine); count != 2 {
+		t.Fatalf("same path across turns lines = %d, want 2; stderr=%q", count, errw.String())
+	}
+}
+
+func TestConciseReadsDeduplicateBeforePathClipping(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{ConciseReads: true})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	prefix := strings.Repeat("a", 70)
+	for i, path := range []string{prefix + "-one.go", prefix + "-two.go"} {
+		input, err := json.Marshal(map[string]string{"path": path})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("r%d", i)
+		r.ToolStart(llm.ToolCall{ID: id, Name: "read", Input: input})
+		r.ToolResult(llm.ToolResult{ForID: id, Text: "ok"})
+	}
+	if count := strings.Count(errw.String(), "[read] path="); count != 2 {
+		t.Fatalf("distinct paths sharing a clipped prefix rendered %d lines, want 2; stderr=%q", count, errw.String())
+	}
+}
+
+func TestConciseReadsVerboseRetainsEveryDetailedResult(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{ConciseReads: true, Verbose: true})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	for i, offset := range []int{1, 3, 5} {
+		input, err := json.Marshal(map[string]any{"path": "a.go", "offset": offset, "limit": 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		id := fmt.Sprintf("r%d", i)
+		r.ToolStart(llm.ToolCall{ID: id, Name: "read", Input: input})
+		r.ToolResult(llm.ToolResult{ForID: id, Text: fmt.Sprintf("%d\tfirst-%d\n%d\tsecond-%d\n", offset, i, offset+1, i)})
+	}
+
+	got := errw.String()
+	if count := strings.Count(got, "[read] limit=2 offset="); count != 3 {
+		t.Fatalf("verbose detailed read lines = %d, want 3; stderr=%q", count, got)
+	}
+	for _, offset := range []int{1, 3, 5} {
+		want := fmt.Sprintf("limit=2 offset=%d path=a.go → 2 lines", offset)
+		if !strings.Contains(got, want) {
+			t.Fatalf("verbose stderr missing %q: %q", want, got)
+		}
+	}
+	for _, snippet := range []string{"first-0", "first-1", "first-2"} {
+		if !strings.Contains(got, snippet) {
+			t.Fatalf("verbose stderr missing result snippet %q: %q", snippet, got)
+		}
+	}
+}
+
+func TestConciseReadsFallBackToDetailedActionableResults(t *testing.T) {
+	var out, errw bytes.Buffer
+	r := NewRenderer(&out, &errw, RenderOptions{ConciseReads: true})
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+
+	calls := []struct {
+		call   llm.ToolCall
+		result llm.ToolResult
+	}{
+		{
+			call:   llm.ToolCall{ID: "failed", Name: "read", Input: json.RawMessage(`{"path":"missing.go","limit":2}`)},
+			result: llm.ToolResult{ForID: "failed", Text: "missing.go does not exist", IsError: true},
+		},
+		{
+			call: llm.ToolCall{ID: "truncated", Name: "read", Input: json.RawMessage(`{"path":"large.go","offset":3}`)},
+			result: llm.ToolResult{
+				ForID: "truncated", Text: "head", Truncated: true, OriginalBytes: 100, ShownBytes: 4,
+			},
+		},
+		{
+			call:   llm.ToolCall{ID: "malformed", Name: "read", Input: json.RawMessage(`{"path":`)},
+			result: llm.ToolResult{ForID: "malformed", Text: "a\nb\n"},
+		},
+		{
+			call:   llm.ToolCall{ID: "shell", Name: "shell", Input: json.RawMessage(`{"argv":["printf","ok"]}`)},
+			result: llm.ToolResult{ForID: "shell", Text: "ok\n"},
+		},
+	}
+	for _, tc := range calls {
+		r.ToolStart(tc.call)
+		r.ToolResult(tc.result)
+	}
+
+	got := errw.String()
+	for _, want := range []string{
+		"[read] limit=2 path=missing.go → error: missing.go does not exist",
+		"[read] offset=3 path=large.go → truncated 4B of 100B, 4B",
+		"[read] → 2 lines, 4B",
+		`[shell] argv=["printf","ok"] → 3B`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("fallback stderr missing %q: %q", want, got)
+		}
+	}
+}
+
 func TestToolSummaryRichImagesUsesSafeMetadata(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := NewRenderer(&out, &errw, RenderOptions{Verbose: true})

@@ -30,6 +30,7 @@ import (
 	"harness/internal/plan"
 	"harness/internal/runstream"
 	"harness/internal/session"
+	"harness/internal/sessionrec"
 	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
@@ -4077,6 +4078,81 @@ func TestRunInteractiveDefaultExposesTodosAndPlanButNotHandoffOrGoalTools(t *tes
 	for _, name := range []string{"handoff", "create_goal", "update_goal"} {
 		if slices.Contains(names, name) {
 			t.Fatalf("interactive default tools unexpectedly include removed %s: %v", name, names)
+		}
+	}
+}
+
+func TestRunInteractiveCompactsRepeatedReadSummaries(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sample.txt")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+		t.Fatalf("write read fixture: %v", err)
+	}
+	readInput := func(offset int) json.RawMessage {
+		t.Helper()
+		input, err := json.Marshal(map[string]any{"path": path, "offset": offset, "limit": 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return input
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				{Kind: llm.EventToolCallDone, ToolID: "read-1", ToolName: "read", ToolInput: readInput(1)},
+				{Kind: llm.EventToolCallDone, ToolID: "read-2", ToolName: "read", ToolInput: readInput(2)},
+			},
+			Stop: llm.StopToolUse,
+		},
+		okStep(),
+	)
+	env, _, errw, getenv := fakeProviderEnv(t,
+		[]string{"-model", "claude-opus-4-8", "-timestamps=none"}, fp, "inspect\n/exit\n")
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+
+	var readLines []string
+	for _, line := range strings.Split(errw.String(), "\n") {
+		if strings.Contains(line, "[read]") {
+			readLines = append(readLines, line)
+		}
+	}
+	formattedPath := sessionrec.FormatScalar(path)
+	if want := "[read] path=" + formattedPath; len(readLines) != 1 || readLines[0] != want {
+		t.Fatalf("interactive read lines = %q, want [%q]; stderr=%q", readLines, want, errw.String())
+	}
+
+	// The concise line is a live projection only: raw.ndjson retains one detailed
+	// display line for each executed window.
+	sessionsDir := filepath.Join(getenv("XDG_STATE_HOME"), "harness", "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("saved sessions under %s = %d, err=%v", sessionsDir, len(entries), err)
+	}
+	raw, err := os.ReadFile(filepath.Join(sessionsDir, entries[0].Name(), "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	var displays []string
+	for _, line := range bytes.Split(raw, []byte{'\n'}) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var event session.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode raw event %q: %v", line, err)
+		}
+		if event.Type == session.EventToolResult && event.Tool == "read" {
+			displays = append(displays, event.Display)
+		}
+	}
+	if len(displays) != 2 {
+		t.Fatalf("recorded read displays = %q, want two detailed events", displays)
+	}
+	for _, offset := range []int{1, 2} {
+		want := fmt.Sprintf("limit=1 offset=%d path=%s →", offset, formattedPath)
+		if !slices.ContainsFunc(displays, func(display string) bool { return strings.Contains(display, want) }) {
+			t.Fatalf("recorded read displays missing %q: %q", want, displays)
 		}
 	}
 }

@@ -1395,13 +1395,14 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 
 	color := !cfg.NoColor && env.colorTTY
 	renderer := ui.NewRenderer(stdout, stderr, ui.RenderOptions{
-		Output:     terminalOutput,
-		Color:      color,
-		ColorTheme: highlightColorTheme(cfg.ColorTheme),
-		Markdown:   env.colorTTY,
-		Verbose:    cfg.Verbose,
-		ToolStream: cfg.ToolStream,
-		Quiet:      runOptions.Quiet,
+		Output:       terminalOutput,
+		Color:        color,
+		ColorTheme:   highlightColorTheme(cfg.ColorTheme),
+		Markdown:     env.colorTTY,
+		Verbose:      cfg.Verbose,
+		ConciseReads: interactiveSession,
+		ToolStream:   cfg.ToolStream,
+		Quiet:        runOptions.Quiet,
 		// -quiet still prints the single per-prompt cost line on a TTY (r25);
 		// a piped -quiet run stays fully silent for scripting.
 		SuppressUsage:           runOptions.Quiet && !env.colorTTY,

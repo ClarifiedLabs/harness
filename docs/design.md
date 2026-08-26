@@ -2814,14 +2814,21 @@ implementation prompt.
   `-tool-stream`, `HARNESS_TOOL_STREAM=true`, `"tool_stream": true`, or `-v`.
   Partial argument deltas are not printed; session replay keeps completed tool
   calls and results.
-- Tool results render as one-liners by default:
-  `[grep] args=["-R","-n","func main","."] → 14 lines, 2.1KB`
-  built from the tool name, key args, and a result summary. `-v` adds the first ~5 lines
-  of each result, dimmed, and also enables progress details. Absolute file-path
-  argument values (`path`, `file`, `cwd`, and read's path aliases) are displayed
-  relative to the session working directory when the path lies under it; paths
-  outside it remain absolute. This is display-only and never alters the
-  model-facing transcript or recorded `Input` JSON.
+- Tool results use detailed one-line summaries by default, for example
+  `[grep] args=["-R","-n","func main","."] → 14 lines, 2.1KB`. Successful
+  built-in `read` calls are the interactive exception: non-verbose live text
+  shows `[read] path=docs/design.md` once per unique effective path in each
+  conversational turn, so repeated offset/limit windows of one file do not
+  repeat progress. Deduplication uses the full cwd-relative path before display
+  clipping. Read failures, centrally truncated results, and inputs whose path
+  cannot be decoded safely retain the detailed per-call summary. `-v` restores
+  every detailed read summary, adds the first ~5 result lines (dimmed), and
+  enables progress details. Absolute file-path argument values (`path`, `file`,
+  `cwd`, and read's path aliases) are displayed relative to the session working
+  directory when the path lies under it; paths outside it remain absolute. This
+  projection is display-only: model-facing transcripts, recorded `Input` JSON,
+  `raw.ndjson` display lines, and ordinary session replay retain every detailed
+  tool call/result summary.
 - Large estimated contexts, payloads, or tool schemas print one warning per
   prompt because they can materially slow first response latency.
 - Per-prompt usage line:

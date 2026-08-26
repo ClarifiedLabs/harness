@@ -262,7 +262,7 @@ notes.
 -delegate-tmux-layout <mode> delegate tmux layout: pane (default right-hand stack) or window (requires -delegate-tmux)
 -web-search <mode>     server-side web search: off or auto (default off)
 -trace-proxy      send W3C trace headers to the model and MCP proxies
--v                show tool result snippets (first ~5 lines, dimmed) and tool-call progress details
+-v                restore detailed per-call read summaries, show tool result snippets (first ~5 lines, dimmed), and show tool-call progress details
 -tool-stream      show tool-call progress details (default false)
 -show-diffs       show per-tool-call file diffs for built-in file edits (default true; use -show-diffs=false to disable);
                   diffs are syntax-highlighted with full-width tinted added/removed line backgrounds when color is on
@@ -1386,6 +1386,13 @@ once the model stream has closed and the final token totals are known; the
 cost is omitted for models with no configured price.
 It is erased the instant real output or a tool line appears, and is shown only at a
 TTY when not quiet.
+
+By default, successful built-in reads in an interactive session appear as one
+`[read] path=…` line per unique effective path in each conversational turn;
+repeated offset/limit windows of the same file are deduplicated. Read errors and
+centrally truncated results stay detailed, while `-v` restores detailed summaries
+for every read call. `-q` suppresses these tool/status lines entirely. Session
+recording and ordinary replay remain fully detailed.
 
 Text typed while a prompt is running is captured with echo off and shown on that
 wait line after a `>` marker. Unsubmitted text is deposited into the next prompt

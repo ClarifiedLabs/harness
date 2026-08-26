@@ -2,9 +2,9 @@
 // Both the interactive parent session (internal/ui accumulatingSink) and
 // delegate child sessions (internal/delegate childSink) record through it, so
 // child and parent raw.ndjson logs carry identical Display lines, pricing, and
-// tool metadata by construction. The formatters here are the same ones the
-// live renderer uses (internal/ui keeps thin wrappers), so live output and
-// replay never drift.
+// tool metadata by construction. The formatters here define the canonical
+// detailed/audit form shared by recording, replay, and most live output;
+// interactive built-in reads may use a concise live-only projection.
 package sessionrec
 
 import (
@@ -48,8 +48,49 @@ func DisplayPath(cwd, p string) string {
 	return rel
 }
 
-// ToolResultLine renders the one-line tool summary used by live output and
-// session replay.
+// ReadPathArg returns the effective built-in read path using the same alias
+// precedence as tools.decodeReadFileArgs. It is display-only: unknown keys are
+// ignored, while malformed JSON, type mismatches, and missing paths fail closed
+// so callers can retain the canonical detailed summary.
+func ReadPathArg(input json.RawMessage) (string, bool) {
+	var args struct {
+		Path          string `json:"path"`
+		FilePath      string `json:"file_path"`
+		FilePathCamel string `json:"filePath"`
+		File          string `json:"file"`
+		Filename      string `json:"filename"`
+		FilepathAlt   string `json:"filepath"`
+		AbsolutePath  string `json:"absolute_path"`
+		TargetFile    string `json:"target_file"`
+	}
+	if err := json.Unmarshal(input, &args); err != nil {
+		return "", false
+	}
+	path := args.Path
+	if path == "" {
+		for _, candidate := range []string{
+			args.FilePath,
+			args.FilePathCamel,
+			args.File,
+			args.Filename,
+			args.FilepathAlt,
+			args.AbsolutePath,
+			args.TargetFile,
+		} {
+			if strings.TrimSpace(candidate) != "" {
+				path = candidate
+				break
+			}
+		}
+	}
+	if path == "" {
+		return "", false
+	}
+	return path, true
+}
+
+// ToolResultLine renders the canonical detailed one-line tool summary used by
+// recording, replay, and live output outside concise interactive reads.
 func ToolResultLine(call llm.ToolCall, result llm.ToolResult, cwd string) string {
 	return fmt.Sprintf("[%s]%s → %s", call.Name, FormatToolArgs(call.Name, call.Input, cwd), ResultSummary(result))
 }

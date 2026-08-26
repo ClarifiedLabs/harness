@@ -42,11 +42,15 @@ const submittedPromptRule = markdown.HorizontalRule
 // plus NO_COLOR / -no-color); Now is injected so durations are
 // deterministic in tests (design §10, §13).
 type RenderOptions struct {
-	Output                  *OutputCoordinator
-	Color                   bool
-	ColorTheme              highlight.Theme
-	Markdown                bool
-	Verbose                 bool
+	Output     *OutputCoordinator
+	Color      bool
+	ColorTheme highlight.Theme
+	Markdown   bool
+	Verbose    bool
+	// ConciseReads projects successful built-in reads as one path-only line per
+	// effective path in a conversational turn. The CLI enables it only for
+	// interactive text sessions.
+	ConciseReads            bool
 	ToolStream              bool
 	Quiet                   bool
 	SuppressReasoningOutput bool
@@ -84,6 +88,7 @@ type Renderer struct {
 	colorTheme              highlight.Theme
 	markdown                bool
 	verbose                 bool
+	conciseReads            bool
 	toolStream              bool
 	quiet                   bool
 	suppressUsage           bool
@@ -113,6 +118,7 @@ type Renderer struct {
 
 	pending         map[string]llm.ToolCall // tool_use id -> call, awaiting its result
 	pendingToolUses []string
+	shownReadPaths  map[string]struct{} // full cwd-relative paths shown in the current turn
 
 	cumInput       int
 	cumOutput      int
@@ -189,6 +195,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		colorTheme:              opts.ColorTheme,
 		markdown:                opts.Markdown,
 		verbose:                 opts.Verbose,
+		conciseReads:            opts.ConciseReads,
 		toolStream:              opts.ToolStream,
 		quiet:                   opts.Quiet,
 		suppressReasoningOutput: opts.SuppressReasoningOutput,
@@ -206,6 +213,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		width:                   opts.Width,
 		cwd:                     opts.CWD,
 		pending:                 make(map[string]llm.ToolCall),
+		shownReadPaths:          make(map[string]struct{}),
 		activityBoundary:        make(chan struct{}),
 	}
 }
@@ -228,6 +236,7 @@ func (r *Renderer) StartPromptRun() {
 	now := r.now()
 	r.promptRunStart = now
 	r.currentTurnStart = time.Time{}
+	r.shownReadPaths = make(map[string]struct{})
 	r.renderMu.Lock()
 	if r.promptStart.IsZero() {
 		r.promptStart = now
@@ -335,6 +344,10 @@ func (r *Renderer) ReasoningSummaryStatus(text string) {
 
 func (r *Renderer) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
 	r.flushToolUseStarts()
+	// Physical retries cannot follow dispatched tool results, so resetting at
+	// every attempt start preserves turn-local deduplication without carrying
+	// paths into the next conversational turn.
+	r.shownReadPaths = make(map[string]struct{})
 	r.renderMu.Lock()
 	r.statusModel = ""
 	r.renderMu.Unlock()
@@ -555,7 +568,17 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 	call := r.pending[result.ForID]
 	delete(r.pending, result.ForID)
 
-	r.dimLine(ToolResultLine(call, result, r.cwd))
+	if line, concise := r.conciseReadResultLine(call, result); concise {
+		if line == "" {
+			// A sequential repeated read may have started a new live tool wait;
+			// erase it even though this result intentionally emits no line.
+			r.clearStatus()
+		} else {
+			r.dimLine(line)
+		}
+	} else {
+		r.dimLine(ToolResultLine(call, result, r.cwd))
+	}
 
 	if r.verbose {
 		for _, s := range snippet(result.Text) {
@@ -565,6 +588,22 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 			r.dimLine("  " + richImageMetadata(image))
 		}
 	}
+}
+
+func (r *Renderer) conciseReadResultLine(call llm.ToolCall, result llm.ToolResult) (string, bool) {
+	if !r.conciseReads || r.verbose || call.Name != "read" || result.IsError || result.Truncated {
+		return "", false
+	}
+	path, ok := sessionrec.ReadPathArg(call.Input)
+	if !ok {
+		return "", false
+	}
+	displayPath := sessionrec.DisplayPath(r.cwd, path)
+	if _, shown := r.shownReadPaths[displayPath]; shown {
+		return "", true
+	}
+	r.shownReadPaths[displayPath] = struct{}{}
+	return fmt.Sprintf("[read] path=%s", sessionrec.FormatScalar(displayPath)), true
 }
 
 func (r *Renderer) ToolDiff(_ llm.ToolCall, path, text string) {
@@ -672,6 +711,12 @@ func (r *Renderer) dimLine(s string) {
 		return
 	}
 	r.writeDimLine(s)
+}
+
+func (r *Renderer) clearStatus() {
+	r.renderMu.Lock()
+	r.statusClearLocked()
+	r.renderMu.Unlock()
 }
 
 // writeDimLine writes a status-shaped line even in quiet mode. Terminal model
@@ -1908,8 +1953,9 @@ func (r *Renderer) markAssistantTextVisibleLocked() {
 }
 
 // The one-line summary formatters below are thin wrappers over
-// internal/sessionrec, the canonical home shared by live rendering and the
-// session recorder, so live output and raw.ndjson can never drift.
+// internal/sessionrec, the canonical detailed/audit form shared by recording,
+// replay, and most live rendering. Concise interactive reads intentionally use
+// a live-only path projection in ToolResult.
 
 func formatToolArgs(name string, input json.RawMessage, cwd string) string {
 	return sessionrec.FormatToolArgs(name, input, cwd)
@@ -1919,8 +1965,7 @@ func richImageMetadata(image llm.ContentBlock) string {
 	return sessionrec.RichImageMetadata(image)
 }
 
-// ToolResultLine renders the one-line tool summary used by live output and
-// session replay.
+// ToolResultLine renders the canonical detailed one-line tool summary.
 func ToolResultLine(call llm.ToolCall, result llm.ToolResult, cwd string) string {
 	return sessionrec.ToolResultLine(call, result, cwd)
 }
