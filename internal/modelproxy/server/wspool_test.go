@@ -58,6 +58,19 @@ func poolKey(value byte) wsPoolKey {
 	return key
 }
 
+func TestWSPoolDefaultsRetainHealthySocketsForOneIdleHour(t *testing.T) {
+	ticks := make(chan time.Time)
+	pool := newWSPool(wsPoolOptions{ticks: ticks})
+	defer pool.Close()
+
+	if pool.idleTTL != time.Hour {
+		t.Fatalf("idle TTL = %s, want 1h", pool.idleTTL)
+	}
+	if pool.maxAge != 0 {
+		t.Fatalf("absolute max age = %s, want disabled", pool.maxAge)
+	}
+}
+
 func TestWSPoolLRUEvictionAndDoubleRelease(t *testing.T) {
 	clock := &poolTestClock{now: time.Unix(1, 0)}
 	ticks := make(chan time.Time)

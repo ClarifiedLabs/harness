@@ -31,6 +31,7 @@ import (
 )
 
 const DefaultMaxTurns = 20
+const DefaultForegroundTimeout = 2 * time.Hour
 const DefaultMaxDepth = 3
 const DefaultMaxActiveDescendants = 4
 const DefaultMaxTotalDescendants = 16
@@ -383,6 +384,17 @@ func (*Tool) ReadOnly(json.RawMessage) bool { return false }
 func (*Tool) RequiresSequential(input json.RawMessage) bool {
 	req, err := DecodeRunRequest(input, "delegate")
 	return err == nil && !req.Background
+}
+
+// SelfTimeout raises the dispatch ceiling for synchronous child runs. Background
+// delegates return immediately and then run under the background manager's
+// independently cancelable, deadline-free context.
+func (*Tool) SelfTimeout(input json.RawMessage) (time.Duration, bool) {
+	req, err := DecodeRunRequest(input, "delegate")
+	if err != nil || req.Background {
+		return 0, false
+	}
+	return DefaultForegroundTimeout, true
 }
 
 func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {

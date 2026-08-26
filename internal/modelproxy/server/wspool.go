@@ -11,8 +11,8 @@ import (
 
 const (
 	defaultWSPoolMaxSize     = 64
-	defaultWSPoolIdleTTL     = 10 * time.Minute
-	defaultWSPoolMaxAge      = 50 * time.Minute
+	defaultWSPoolIdleTTL     = time.Hour
+	defaultWSPoolMaxAge      = 0
 	defaultWSPoolJanitorTick = 30 * time.Second
 )
 

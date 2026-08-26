@@ -680,6 +680,33 @@ func TestEditFuzzyMatchPreservesUntouchedBytes(t *testing.T) {
 	}
 }
 
+func TestEditAcceptsUnadvertisedTopLevelPathAndEdits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.txt")
+	mustWrite(t, path, "before\n")
+	if _, err := runEdit(t, map[string]any{
+		"path":  path,
+		"edits": []any{map[string]any{"oldText": "before", "newText": "after"}},
+	}); err != nil {
+		t.Fatalf("top-level path+edits rejected: %v", err)
+	}
+	assertFileContent(t, path, "after\n")
+
+	paths, err := (edit{}).MutatedPaths(json.RawMessage(`{"path":"legacy.txt","edits":[{"oldText":"a","newText":"b"}]}`))
+	if err != nil || len(paths) != 1 || paths[0] != "legacy.txt" {
+		t.Fatalf("MutatedPaths on top-level path+edits = %v, %v", paths, err)
+	}
+
+	var schema struct {
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal((edit{}).Schema(), &schema); err != nil {
+		t.Fatalf("decode schema: %v", err)
+	}
+	if _, advertised := schema.Properties["edits"]; advertised {
+		t.Fatalf("top-level edits compatibility shape must remain unadvertised: %s", (edit{}).Schema())
+	}
+}
+
 func TestDecodeEditArgsAppliesTopLevelPathAsDefaultBase(t *testing.T) {
 	// Two pathless entries inherit the top-level path and apply in order.
 	args, err := decodeEditArgs(json.RawMessage(`{"path":"a.txt","files":[{"edits":[{"oldText":"a","newText":"b"}]},{"edits":[{"oldText":"b","newText":"c"}]}]}`))

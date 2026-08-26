@@ -101,6 +101,13 @@ func TestGeneratedUsageIncludesConfigDefaultsAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestDefaultToolTimeout(t *testing.T) {
+	result := load(t, nil, nil, filepath.Join(t.TempDir(), "missing.json"))
+	if got := result.Config.ToolTimeoutSeconds; got != 1800 {
+		t.Fatalf("ToolTimeoutSeconds = %d, want 1800", got)
+	}
+}
+
 func TestRootMetaFlagsShortCircuitConfigResolution(t *testing.T) {
 	invalidConfig := writeConfig(t, `{"unknown_setting":true}`)
 	tests := []struct {

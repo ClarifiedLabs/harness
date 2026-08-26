@@ -35,7 +35,7 @@ const (
 	defaultDelegateMaxActive      = 4
 	defaultDelegateMaxDescendants = 16
 	defaultDelegateTmuxMaxWindows = 4
-	defaultToolTimeoutSeconds     = 600
+	defaultToolTimeoutSeconds     = 1800
 	defaultCompactTriggerPercent  = 78
 	defaultCompactTargetPercent   = 65
 	defaultCompactIdleTrigger     = 35

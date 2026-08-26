@@ -80,6 +80,19 @@ func TestDelegateSequentialOnlyForValidForegroundCalls(t *testing.T) {
 	}
 }
 
+func TestDelegateSelfTimeoutOnlyRaisesForegroundCalls(t *testing.T) {
+	tool := &Tool{}
+	if got, ok := tool.SelfTimeout(json.RawMessage(`{"task":"inspect"}`)); !ok || got != DefaultForegroundTimeout {
+		t.Fatalf("foreground SelfTimeout = (%s, %t), want (%s, true)", got, ok, DefaultForegroundTimeout)
+	}
+	if _, ok := tool.SelfTimeout(json.RawMessage(`{"task":"inspect","background":true}`)); ok {
+		t.Fatal("background delegate must retain its deadline-free manager context")
+	}
+	if _, ok := tool.SelfTimeout(json.RawMessage(`{"background":`)); ok {
+		t.Fatal("invalid delegate input must not raise the dispatch ceiling")
+	}
+}
+
 func (f *fakeBackgroundStarter) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.BackgroundJobInfo, error) {
 	f.req = req
 	return tools.BackgroundJobInfo{ID: "bg_delegate", Status: "running"}, nil

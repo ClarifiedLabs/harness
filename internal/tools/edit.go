@@ -20,7 +20,7 @@ import (
 const editSchema = `{
   "type": "object",
   "properties": {
-    "path": {"type": "string", "description": "Single-entry compatibility shorthand; entries without path inherit it."},
+    "path": {"type": "string", "description": "Optional default path inherited by files entries that omit path."},
     "files": {
       "type": "array",
       "minItems": 1,
@@ -133,12 +133,16 @@ func (edit) MutatedPaths(input json.RawMessage) ([]string, error) {
 	// A retention receipt keeps only files[].path (plus counts); decode leniently
 	// so compaction file indexing keeps working on trimmed inputs.
 	var args struct {
+		Path  string `json:"path"`
 		Files []struct {
 			Path string `json:"path"`
 		} `json:"files"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return nil, err
+	}
+	if len(args.Files) == 0 && strings.TrimSpace(args.Path) != "" {
+		return []string{args.Path}, nil
 	}
 	paths := make([]string, 0, len(args.Files))
 	for _, file := range args.Files {
@@ -221,11 +225,17 @@ func (edit) RunResult(_ context.Context, input json.RawMessage) (RunResult, erro
 
 func decodeEditArgs(input json.RawMessage) (editArgs, error) {
 	var raw struct {
-		Files []rawEditFile `json:"files"`
-		Path  string        `json:"path"`
+		Files []rawEditFile  `json:"files"`
+		Path  string         `json:"path"`
+		Edits []rawEditBlock `json:"edits"`
 	}
 	if err := json.Unmarshal(input, &raw); err != nil {
 		return editArgs{}, err
+	}
+	if len(raw.Files) == 0 && len(raw.Edits) > 0 {
+		// Accept the common single-file {path, edits} shape for compatibility,
+		// while keeping the model-facing schema canonical and files-based.
+		raw.Files = []rawEditFile{{Path: raw.Path, Edits: raw.Edits}}
 	}
 	if len(raw.Files) == 0 {
 		return editArgs{}, badArgs("files is required and must contain at least one file")

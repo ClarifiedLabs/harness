@@ -1234,7 +1234,7 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   normal proxy-only rolling updates.
 - **Bounded Responses WebSocket pool.** The proxy keys pooled transports by
   separately hashed connection configuration and `ProxySessionID`. Defaults are
-  64 connections, 10-minute idle TTL, 50-minute absolute age, and a 30-second
+  64 connections, a one-hour idle TTL, no absolute-age cap, and a 30-second
   janitor tick. Acquisitions lease an entry; idle capacity pressure evicts LRU,
   while all-busy pressure creates an unpooled provider that closes on release.
   Expired active entries leave lookup immediately but close only after their last
@@ -1754,7 +1754,7 @@ additionally producing `path_not_found`, `regex_invalid`, and `other`; failed
 so they never get an error kind; their diagnostics metrics feed the separate
 command-failure and effective-failure summaries.
 
-**Per-tool dispatch timeout backstop (`-tool-timeout`, default 600s, `<=0`
+**Per-tool dispatch timeout backstop (`-tool-timeout`, default 1800s, `<=0`
 disables).** `Dispatch` runs each tool under a derived `context.WithTimeout` so a
 hung tool that ignores cancellation normally cannot stall a turn; on expiry it
 returns the `tool timed out after <dur>` error result above. Registry dispatch
@@ -1764,8 +1764,11 @@ queued until actual completion so it cannot overtake a context-ignoring mutator;
 this narrow safety case may outlive the result timeout. The ceiling applies to
 both sequential and parallel scheduling. A tool that reports its own deadline
 via `SelfTimeouter` only **raises** the ceiling, never lowers it, so
-`shell`'s `timeout_seconds` stays authoritative. An outer cancellation
-(`^C`) is reported as cancellation, not a dispatch timeout.
+`shell`'s `timeout_seconds` stays authoritative and, while the backstop is
+enabled, synchronous `delegate` calls raise it to two hours. Background
+delegates return a launch receipt immediately and run with no manager-imposed
+wall-clock deadline. An outer cancellation (`^C`) is reported as cancellation,
+not a dispatch timeout.
 
 ### 8.3 Output truncation
 
@@ -2068,6 +2071,9 @@ assertion at dispatch:
 | `files[].edits[].newText` | string, required | replacement text; empty string deletes oldText |
 | `files[].edits[].replaceAll` | bool | optional; replace every occurrence of `oldText` instead of requiring a unique match (default false) |
 
+- The decoder also accepts the common single-file `{path, edits}` shape as an
+  unadvertised compatibility input and normalizes it to `files:[{path,edits}]`.
+  The model-facing schema remains canonical and requires `files`.
 - All edits within one entry match against that entry's base content, not
   against content after earlier edits in the same entry.
 - Every supplied digest is validated during the all-file planning pass. A mismatch

@@ -312,6 +312,10 @@ removed rows use the configured `color_theme` dark/light code palette; changing
 the palette does not change `show_diffs`, snapshot generation, diff text, or
 full-row background-erase behavior.
 
+For compatibility, `edit` also decodes a single-file top-level `{path, edits}`
+input. That legacy form is intentionally omitted from the model-facing schema,
+which continues to require the canonical `files:[{path,edits}]` shape.
+
 With native LSP enabled, a successful built-in `edit` or `write` also synchronizes
 each changed supported file with its configured language server and appends the
 fresh published diagnostics to the tool result. Up to eight unique paths are
@@ -342,7 +346,10 @@ Built-in child roles are:
 
 A child always receives the selected agent's configured tool set. Delegate calls
 cannot override or narrow it; select or define a different agent when a task needs
-a different capability bundle.
+a different capability bundle. A foreground child raises an enabled global
+dispatch ceiling to two hours. A background call returns its launch receipt
+immediately, and the actual child has no fixed wall-clock deadline; completion,
+its turn budget, explicit cancellation/clear, or Harness shutdown ends it.
 
 A delegated task should include the objective, scope, constraints, expected
 report, and verification. Children receive a child-only prompt reminding them

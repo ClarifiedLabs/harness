@@ -231,7 +231,7 @@ notes.
 -histfilesize <n>     max REPL history entries stored on disk (0 disables, default 1000)
 -histsize <n>         max REPL history entries loaded into memory (0 disables, default 1000)
 -max-turns <n>    turns per prompt; <=0 means unlimited (default 0)
--tool-timeout <s>   per-tool-call timeout backstop in seconds; <=0 disables (default 600). A
+-tool-timeout <s>   per-tool-call timeout backstop in seconds; <=0 disables (default 1800). A
                     hung tool that ignores cancellation is force-failed after this many
                     seconds so it cannot stall a turn; shell's own timeout_seconds stays
                     authoritative and is never cut below.
@@ -565,7 +565,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `max_output_tokens` | `integer` | - | `-max-output-tokens` | `HARNESS_MAX_OUTPUT_TOKENS` | `max_output_tokens` | 0 (automatic) | no | Harness max output tokens setting. |
 | `max_prompt_cost_usd` | `number` | - | `-max-prompt-cost` | `HARNESS_MAX_PROMPT_COST` | `max_prompt_cost_usd` | 0 (unlimited) | no | Harness max prompt cost usd setting. |
 | `goal_max_continuations` | `integer` | - | `-goal-max-continuations` | `HARNESS_GOAL_MAX_CONTINUATIONS` | `goal_max_continuations` | 25 (zero means unlimited) | no | Harness goal max continuations setting. |
-| `tool_timeout_seconds` | `integer` | - | `-tool-timeout` | `HARNESS_TOOL_TIMEOUT` | `tool_timeout_seconds` | 600 (non-positive disables) | no | Harness tool timeout seconds setting. |
+| `tool_timeout_seconds` | `integer` | - | `-tool-timeout` | `HARNESS_TOOL_TIMEOUT` | `tool_timeout_seconds` | 1800 (non-positive disables) | no | Harness tool timeout seconds setting. |
 | `shell_timeout_seconds` | `integer` | - | - | `HARNESS_SHELL_TIMEOUT_SECONDS` | `shell_timeout_seconds` | 0 (tool default) | no | Harness shell timeout seconds setting. |
 | `shell_background_timeout_seconds` | `integer` | - | - | `HARNESS_SHELL_BACKGROUND_TIMEOUT_SECONDS` | `shell_background_timeout_seconds` | 0 (tool default) | no | Harness shell background timeout seconds setting. |
 | `default_context_window` | `integer` | - | `-default-context-window` | `HARNESS_DEFAULT_CONTEXT_WINDOW` | `default_context_window` | 256000 (tokens) | no | Harness default context window setting. |
