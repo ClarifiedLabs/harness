@@ -29,6 +29,7 @@
           "effort": "ultra"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
@@ -37,6 +38,11 @@
           "id": "priority",
           "name": "Fast",
           "description": "1.5x speed, increased usage"
+        },
+        {
+          "id": "ultrafast",
+          "name": "Ultrafast",
+          "description": "The fastest available responses for latency-sensitive work."
         }
       ],
       "default_service_tier": null,
@@ -73,6 +79,7 @@
           "effort": "ultra"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
@@ -114,6 +121,7 @@
           "effort": "max"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
@@ -128,6 +136,76 @@
       "additional_speed_tiers": [
         "fast"
       ]
+    },
+    {
+      "slug": "gpt-daybreak-blue-latest",
+      "display_name": "Daybreak Blue",
+      "context_window": 272000,
+      "max_context_window": 872000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low"
+        },
+        {
+          "effort": "medium"
+        },
+        {
+          "effort": "high"
+        },
+        {
+          "effort": "xhigh"
+        },
+        {
+          "effort": "max"
+        },
+        {
+          "effort": "ultra"
+        }
+      ],
+      "supports_reasoning_summary_parameter": true,
+      "supports_reasoning_summaries": true,
+      "visibility": "hide",
+      "supported_in_api": true,
+      "default_service_tier": null
+    },
+    {
+      "slug": "gpt-daybreak-red-latest",
+      "display_name": "Daybreak Red",
+      "context_window": 372000,
+      "max_context_window": 372000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low"
+        },
+        {
+          "effort": "medium"
+        },
+        {
+          "effort": "high"
+        },
+        {
+          "effort": "xhigh"
+        },
+        {
+          "effort": "max"
+        },
+        {
+          "effort": "ultra"
+        }
+      ],
+      "supports_reasoning_summary_parameter": true,
+      "supports_reasoning_summaries": true,
+      "visibility": "hide",
+      "supported_in_api": true,
+      "default_service_tier": null
     },
     {
       "slug": "gpt-5.5",
@@ -152,6 +230,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
@@ -190,6 +269,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "hide",
       "supported_in_api": true,
@@ -228,6 +308,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "hide",
       "supported_in_api": true,
@@ -256,6 +337,7 @@
           "effort": "xhigh"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "list",
       "supported_in_api": true,
@@ -265,7 +347,7 @@
       "slug": "codex-auto-review",
       "display_name": "Codex Auto Review",
       "context_window": 272000,
-      "max_context_window": 1000000,
+      "max_context_window": 872000,
       "input_modalities": [
         "text",
         "image"
@@ -282,12 +364,26 @@
         },
         {
           "effort": "xhigh"
+        },
+        {
+          "effort": "max"
         }
       ],
+      "supports_reasoning_summary_parameter": true,
       "supports_reasoning_summaries": true,
       "visibility": "hide",
       "supported_in_api": true,
-      "default_service_tier": null
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed, increased usage"
+        }
+      ],
+      "default_service_tier": null,
+      "additional_speed_tiers": [
+        "fast"
+      ]
     }
   ]
 }
