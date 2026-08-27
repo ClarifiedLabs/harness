@@ -578,6 +578,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `tool_result_max_bytes` | `integer` | - | - | `HARNESS_TOOL_RESULT_MAX_BYTES` | `tool_result_max_bytes` | 0 (tool default) | no | Harness tool result max bytes setting. |
 | `tool_result_max_lines` | `integer` | - | - | `HARNESS_TOOL_RESULT_MAX_LINES` | `tool_result_max_lines` | 0 (tool default) | no | Harness tool result max lines setting. |
 | `read_default_limit` | `integer` | - | - | `HARNESS_READ_DEFAULT_LIMIT` | `read_default_limit` | 0 (tool default) | no | Harness read default limit setting. |
+| `read_total_lines_max_bytes` | `integer` | - | - | `HARNESS_READ_TOTAL_LINES_MAX_BYTES` | `read_total_lines_max_bytes` | 0 (tool default) | no | Harness read total lines max bytes setting. |
 | `read_result_max_bytes` | `integer` | - | - | `HARNESS_READ_RESULT_MAX_BYTES` | `read_result_max_bytes` | 0 (tool default) | no | Harness read result max bytes setting. |
 | `read_result_max_lines` | `integer` | - | - | `HARNESS_READ_RESULT_MAX_LINES` | `read_result_max_lines` | 0 (tool default) | no | Harness read result max lines setting. |
 | `compact_keep_turns` | `integer` | - | - | - | `compact_keep_turns` | 0 (all retained) | no | Harness compact keep turns setting. |
@@ -668,10 +669,15 @@ environment variables, JSON paths, types, and defaults. The concise
   `compact_tool_result_max_bytes`, and `retention_floor_tokens`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
-  `HARNESS_TOOL_RESULT_MAX_LINES`. `read` defaults to 500 lines and a 32 KB
-  result cap; configure `read_default_limit`, `read_result_max_bytes`, and
-  `read_result_max_lines`, or `HARNESS_READ_DEFAULT_LIMIT`,
-  `HARNESS_READ_RESULT_MAX_BYTES`, and `HARNESS_READ_RESULT_MAX_LINES`. The former
+  `HARNESS_TOOL_RESULT_MAX_LINES`. `read` defaults to a 1000-line window with
+  64 KB and 2000-line result caps; each result cap inherits independently when
+  its corresponding global cap is configured. Configure `read_default_limit`,
+  `read_result_max_bytes`, and `read_result_max_lines`, or
+  `HARNESS_READ_DEFAULT_LIMIT`, `HARNESS_READ_RESULT_MAX_BYTES`, and
+  `HARNESS_READ_RESULT_MAX_LINES`. Truncated reads always report exact file
+  bytes. Regular files no larger than 1 MiB also report exact total lines;
+  configure that threshold with `read_total_lines_max_bytes` or
+  `HARNESS_READ_TOTAL_LINES_MAX_BYTES`. The former
   `read_file_*`, `rg_result_*`, and `grep_result_*` settings are removed; strict
   config decoding rejects them rather than silently ignoring a stale limit. The delegate
   tool also has config-file-only `delegate_max_turns` (maximum per-child

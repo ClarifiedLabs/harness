@@ -804,6 +804,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		MaxResultBytes:                cfg.ToolResultMaxBytes,
 		MaxResultLines:                cfg.ToolResultMaxLines,
 		ReadDefaultLimit:              cfg.ReadDefaultLimit,
+		ReadTotalLinesMaxBytes:        cfg.ReadTotalLinesMaxBytes,
 		ReadResultBytes:               cfg.ReadResultMaxBytes,
 		ReadResultLines:               cfg.ReadResultMaxLines,
 		Background:                    backgroundManager,

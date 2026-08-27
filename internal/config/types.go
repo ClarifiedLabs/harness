@@ -122,6 +122,7 @@ type Config struct {
 	ToolResultMaxBytes            int     `json:"tool_result_max_bytes"`
 	ToolResultMaxLines            int     `json:"tool_result_max_lines"`
 	ReadDefaultLimit              int     `json:"read_default_limit"`
+	ReadTotalLinesMaxBytes        int     `json:"read_total_lines_max_bytes"`
 	ReadResultMaxBytes            int     `json:"read_result_max_bytes"`
 	ReadResultMaxLines            int     `json:"read_result_max_lines"`
 	CompactKeepTurns              int     `json:"compact_keep_turns"`

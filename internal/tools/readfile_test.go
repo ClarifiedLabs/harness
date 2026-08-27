@@ -2,6 +2,7 @@ package tools
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -110,7 +111,7 @@ func TestReadFileOffsetLimit(t *testing.T) {
 	}
 	// Line numbers reflect the true line position, not the window position;
 	// lines 5-10 follow the window, so the read is truncated (r14).
-	want := "3\tL3\n4\tL4\n[file truncated at line 4; continue with offset=5]"
+	want := "3\tL3\n4\tL4\n[file truncated at line 4 of 10; file size 31 bytes; continue with offset=5]"
 	if out != want {
 		t.Errorf("got:\n%q\nwant:\n%q", out, want)
 	}
@@ -232,14 +233,14 @@ func TestReadFileDefaultLineCap(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	lines := strings.Split(out, "\n")
-	// 500 numbered lines plus a trailing truncation notice (see r14).
-	if len(lines) != 501 {
-		t.Errorf("default cap should yield 500 lines + notice, got %d", len(lines))
+	// 1000 numbered lines plus a trailing truncation notice (see r14).
+	if len(lines) != 1001 {
+		t.Errorf("default cap should yield 1000 lines + notice, got %d", len(lines))
 	}
 	if !strings.HasPrefix(lines[0], "1\tline 1") {
 		t.Errorf("first line wrong: %q", lines[0])
 	}
-	if want := "[file truncated at line 500; continue with offset=501]"; lines[len(lines)-1] != want {
+	if want := fmt.Sprintf("[file truncated at line 1000 of 1500; file size %d bytes; continue with offset=1001]", b.Len()); lines[len(lines)-1] != want {
 		t.Errorf("missing truncation notice; got last line %q", lines[len(lines)-1])
 	}
 }
@@ -260,7 +261,7 @@ func TestReadFileTruncationNotice(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if want := "[file truncated at line 4; continue with offset=5]"; !strings.HasSuffix(out, want) {
+	if want := "[file truncated at line 4 of 10; file size 31 bytes; continue with offset=5]"; !strings.HasSuffix(out, want) {
 		t.Errorf("expected truncation notice %q at end of:\n%q", want, out)
 	}
 }
@@ -326,8 +327,41 @@ func TestReadFileWindowedLargeFile(t *testing.T) {
 	if !strings.HasPrefix(got[0], "2\t") || !strings.HasPrefix(got[1], "3\t") {
 		t.Errorf("wrong window lines: %q", out)
 	}
-	if !strings.HasPrefix(got[2], "[file truncated at line 3;") {
+	if !strings.HasPrefix(got[2], "[file truncated at line 3; file size 12000000 bytes;") {
 		t.Errorf("missing truncation notice: %q", got[2])
+	}
+	if strings.Contains(got[2], " of 12000;") {
+		t.Errorf("large-file notice unexpectedly counted every line: %q", got[2])
+	}
+}
+
+func TestReadFileTruncationNoticeCountsUnterminatedFinalLine(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("a\nb\nc"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runReadFile(t, map[string]any{"path": p, "limit": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[file truncated at line 1 of 3; file size 5 bytes; continue with offset=2]"; !strings.HasSuffix(out, want) {
+		t.Fatalf("truncation notice = %q, want suffix %q", out, want)
+	}
+}
+
+func TestReadFileTotalLineThresholdIsConfigurable(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "f.txt")
+	if err := os.WriteFile(p, []byte("a\nb\nc\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runTool(t, readFile{totalLinesMaxBytes: 1}, map[string]any{"path": p, "limit": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "[file truncated at line 1; file size 6 bytes; continue with offset=2]"; !strings.HasSuffix(out, want) {
+		t.Fatalf("truncation notice = %q, want suffix %q", out, want)
 	}
 }
 
@@ -379,6 +413,69 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	c.n += n
 	return n, err
+}
+
+func TestReadPaginationNoticeFormatsAndParsesUnknownSize(t *testing.T) {
+	marker := (readPaginationNotice{}).format(3)
+	want := "[file truncated at line 3; file size unknown; continue with offset=4]"
+	if marker != want {
+		t.Fatalf("unknown-size marker = %q, want %q", marker, want)
+	}
+	parsed, ok := parseReadPaginationNotice(marker)
+	if !ok || parsed.fileSizeKnown || parsed.fileSize != 0 || parsed.totalLines != 0 {
+		t.Fatalf("parsed unknown-size marker = %+v, %v", parsed, ok)
+	}
+}
+
+func TestBoundedRegularFileReaderDoesNotTrustZeroStatSizeAsEOF(t *testing.T) {
+	source, snapshot := boundedRegularFileReader(strings.NewReader("virtual content\n"), true, 0)
+	if snapshot != nil {
+		t.Fatal("zero-size regular reader unexpectedly received a snapshot boundary")
+	}
+	got, err := io.ReadAll(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "virtual content\n" {
+		t.Fatalf("zero-size regular reader returned %q", got)
+	}
+
+	source, snapshot = boundedRegularFileReader(strings.NewReader("abcdef"), true, 3)
+	if snapshot == nil {
+		t.Fatal("positive-size regular reader did not receive a snapshot boundary")
+	}
+	got, err = io.ReadAll(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abc" || snapshot.N != 0 {
+		t.Fatalf("bounded regular reader returned %q with %d bytes remaining, want abc/0", got, snapshot.N)
+	}
+}
+
+func TestCountRemainingLinesHonorsReaderBoundAndCancellation(t *testing.T) {
+	source := strings.NewReader("b\nc\nextra\n")
+	limited := &io.LimitedReader{R: source, N: 4}
+	got, err := countRemainingLines(context.Background(), limited)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 2 || limited.N != 0 {
+		t.Fatalf("bounded line count = %d with %d bytes remaining, want 2/0", got, limited.N)
+	}
+	if rest, err := io.ReadAll(source); err != nil || string(rest) != "extra\n" {
+		t.Fatalf("source remainder = %q, %v; want %q", rest, err, "extra\\n")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	reader := &countingReader{r: strings.NewReader("ignored\n")}
+	if _, err := countRemainingLines(ctx, reader); err != context.Canceled {
+		t.Fatalf("cancelled count error = %v, want context.Canceled", err)
+	}
+	if reader.n != 0 {
+		t.Fatalf("cancelled count read %d bytes, want 0", reader.n)
+	}
 }
 
 func TestReadFileUnknownArgsTolerated(t *testing.T) {

@@ -252,12 +252,13 @@ func (r *Registry) SetSpecFilter(filter func(string) bool) {
 
 // Options configures a tool registry. Zero values keep package defaults.
 type Options struct {
-	MaxResultBytes   int
-	MaxResultLines   int
-	ReadDefaultLimit int
-	ReadResultBytes  int
-	ReadResultLines  int
-	Background       BackgroundJobStarter
+	MaxResultBytes         int
+	MaxResultLines         int
+	ReadDefaultLimit       int
+	ReadTotalLinesMaxBytes int
+	ReadResultBytes        int
+	ReadResultLines        int
+	Background             BackgroundJobStarter
 	// DispatchTimeout is the per-call ceiling applied by Dispatch (zero = none).
 	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch/lsp call) so
 	// one stuck call cannot stall a turn forever. A tool that enforces its own
@@ -341,36 +342,41 @@ func RegisterFileTools(r *Registry) {
 }
 
 func registerFileTools(r *Registry, opts Options) {
-	r.Register(readFile{defaultLimit: opts.ReadDefaultLimit})
+	r.Register(readFile{
+		defaultLimit:       opts.ReadDefaultLimit,
+		totalLinesMaxBytes: opts.ReadTotalLinesMaxBytes,
+	})
+	globalBytes := opts.MaxResultBytes
+	if globalBytes <= 0 {
+		globalBytes = r.resultLimits.maxBytes
+	}
+	globalLines := opts.MaxResultLines
+	if globalLines <= 0 {
+		globalLines = r.resultLimits.maxLines
+	}
 	r.SetToolResultLimits("read",
-		defaultToolResultBytes(opts.ReadResultBytes, opts.ReadResultLines, opts.MaxResultBytes, opts.MaxResultLines, defaultReadResultBytes),
-		defaultToolResultLines(opts.ReadResultBytes, opts.ReadResultLines, opts.MaxResultBytes, opts.MaxResultLines, 0))
+		defaultToolResultBytes(opts.ReadResultBytes, globalBytes, defaultReadResultBytes),
+		defaultToolResultLines(opts.ReadResultLines, globalLines, defaultReadResultLines))
 	r.Register(viewImage{})
 	r.Register(edit{})
 	r.Register(writeFile{})
 }
 
-func defaultToolResultBytes(configBytes, configLines, globalBytes, globalLines, defaultBytes int) int {
+func defaultToolResultBytes(configBytes, globalBytes, defaultBytes int) int {
 	if configBytes > 0 {
 		return configBytes
 	}
-	if configLines > 0 {
-		return 0
-	}
-	if globalBytes > 0 || globalLines > 0 {
+	if globalBytes > 0 {
 		return 0
 	}
 	return defaultBytes
 }
 
-func defaultToolResultLines(configBytes, configLines, globalBytes, globalLines, defaultLines int) int {
+func defaultToolResultLines(configLines, globalLines, defaultLines int) int {
 	if configLines > 0 {
 		return configLines
 	}
-	if configBytes > 0 {
-		return 0
-	}
-	if globalBytes > 0 || globalLines > 0 {
+	if globalLines > 0 {
 		return 0
 	}
 	return defaultLines
@@ -389,8 +395,8 @@ func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
 	}
 	r.Register(webFetch{background: opts.Background})
 	r.SetToolResultLimits("web_fetch",
-		defaultToolResultBytes(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
-		defaultToolResultLines(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
+		defaultToolResultBytes(0, opts.MaxResultBytes, defaultSearchResultBytes),
+		defaultToolResultLines(0, opts.MaxResultLines, defaultSearchResultLines))
 }
 
 // Default returns the built-in tools exposed to default-inheriting agents.
@@ -413,8 +419,8 @@ func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 	})
 	r.Register(webFetch{background: opts.Background})
 	r.SetToolResultLimits("web_fetch",
-		defaultToolResultBytes(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultBytes),
-		defaultToolResultLines(0, 0, opts.MaxResultBytes, opts.MaxResultLines, defaultSearchResultLines))
+		defaultToolResultBytes(0, opts.MaxResultBytes, defaultSearchResultBytes),
+		defaultToolResultLines(0, opts.MaxResultLines, defaultSearchResultLines))
 	return r, nil
 }
 
@@ -472,7 +478,13 @@ func (r *Registry) Subset(names []string) (*Registry, error) {
 	for _, name := range names {
 		want[name] = true
 	}
-	sub := &Registry{resultLimits: r.resultLimits, dispatchTimeout: r.dispatchTimeout, dispatchGuard: r.dispatchGuard, specFilter: r.specFilter}
+	sub := &Registry{
+		resultLimits:     r.resultLimits,
+		toolResultLimits: maps.Clone(r.toolResultLimits),
+		dispatchTimeout:  r.dispatchTimeout,
+		dispatchGuard:    r.dispatchGuard,
+		specFilter:       r.specFilter,
+	}
 	for _, name := range r.order {
 		if want[name] {
 			sub.Register(r.tools[name])
@@ -1037,7 +1049,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 func (r *Registry) PrepareResult(toolName, resultID, out string) llm.ToolResult {
 	res := llm.ToolResult{ForID: resultID}
 	var info truncationInfo
-	res.Text, info = truncate(out, r.resultLimitsFor(toolName))
+	res.Text, info = truncateToolResult(toolName, out, r.resultLimitsFor(toolName))
 	if info.truncated {
 		res.Truncated = true
 		res.OriginalText = out

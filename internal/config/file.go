@@ -61,6 +61,7 @@ type fileConfig struct {
 	ToolResultMaxBytes            optional[int]                        `json:"tool_result_max_bytes"`
 	ToolResultMaxLines            optional[int]                        `json:"tool_result_max_lines"`
 	ReadDefaultLimit              optional[int]                        `json:"read_default_limit"`
+	ReadTotalLinesMaxBytes        optional[int]                        `json:"read_total_lines_max_bytes"`
 	ReadResultMaxBytes            optional[int]                        `json:"read_result_max_bytes"`
 	ReadResultMaxLines            optional[int]                        `json:"read_result_max_lines"`
 	CompactKeepTurns              optional[int]                        `json:"compact_keep_turns"`

@@ -17,8 +17,13 @@ import (
 // file as binary (design §9.1).
 const binarySniffBytes = 8 * 1024
 
-// defaultReadLimit is the default number of lines returned (design §9.1).
-const defaultReadLimit = 500
+const (
+	// defaultReadLimit is the default number of lines returned (design §9.1).
+	defaultReadLimit = 1000
+	// defaultReadTotalLinesMaxBytes bounds the full-file scan used to report an
+	// exact total line count in a truncated read notice.
+	defaultReadTotalLinesMaxBytes = 1 * 1024 * 1024
+)
 
 // readDirectoryCap bounds directory-form read output.
 const readDirectoryCap = 200
@@ -28,14 +33,47 @@ const readFileSchema = `{
 	"properties": {
 		"path": {"type": "string", "description": "File or directory."},
 		"offset": {"type": "integer", "description": "First line; 1-based."},
-		"limit": {"type": "integer", "description": "Maximum lines; default 500."},
+		"limit": {"type": "integer", "description": "Maximum lines; default 1000."},
 		"include_sha256": {"type": "boolean", "description": "Prepend full-file SHA-256 for an edit/write precondition."}
   },
   "required": ["path"]
 }`
 
 type readFile struct {
-	defaultLimit int
+	defaultLimit       int
+	totalLinesMaxBytes int
+}
+
+type readPaginationNotice struct {
+	totalLines    int
+	fileSize      int64
+	fileSizeKnown bool
+}
+
+func (n readPaginationNotice) lineLocation(line int) string {
+	if n.totalLines > 0 {
+		return fmt.Sprintf("%d of %d", line, n.totalLines)
+	}
+	return fmt.Sprintf("%d", line)
+}
+
+func (n readPaginationNotice) sizeDescription() string {
+	if !n.fileSizeKnown {
+		return "file size unknown"
+	}
+	return fmt.Sprintf("file size %d bytes", n.fileSize)
+}
+
+func (n readPaginationNotice) format(lastLine int) string {
+	return fmt.Sprintf("[file truncated at line %s; %s; continue with offset=%d]", n.lineLocation(lastLine), n.sizeDescription(), lastLine+1)
+}
+
+func (n readPaginationNotice) formatBefore(nextLine int) string {
+	return fmt.Sprintf("[file truncated before line %s; %s; next offset=%d; no complete line fits result limits; use a targeted shell command]", n.lineLocation(nextLine), n.sizeDescription(), nextLine)
+}
+
+func (readPaginationNotice) formatCompactBefore(nextLine int) string {
+	return fmt.Sprintf("[file truncated before line %d; continue with offset=%d]", nextLine, nextLine)
 }
 
 type readFileArgs struct {
@@ -113,7 +151,11 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 	if limit == 0 {
 		limit = defaultLimit
 	}
-	out, err := readOneFile(args.Path, offset, limit)
+	totalLinesMaxBytes := r.totalLinesMaxBytes
+	if totalLinesMaxBytes == 0 {
+		totalLinesMaxBytes = defaultReadTotalLinesMaxBytes
+	}
+	out, err := readOneFile(ctx, args.Path, offset, limit, totalLinesMaxBytes)
 	if err != nil {
 		return "", notExistingPathError(args.Path, err)
 	}
@@ -174,11 +216,29 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
+// boundedRegularFileReader constrains ordinary regular-file reads to the size
+// observed on the opened descriptor. A zero stat size is not trusted as an EOF
+// boundary because virtual regular files such as procfs entries can report zero
+// while still yielding content.
+func boundedRegularFileReader(r io.Reader, regular bool, size int64) (io.Reader, *io.LimitedReader) {
+	if !regular || size <= 0 {
+		return r, nil
+	}
+	snapshot := &io.LimitedReader{R: r, N: size}
+	return snapshot, snapshot
+}
+
 // readOneFile reads the [offset, offset+limit) window of a single file and
 // returns its line-numbered body, including the truncation notice (r14) when the
 // file continues past the window.
-func readOneFile(path string, offset, limit int) (string, error) {
-	info, err := os.Stat(path)
+func readOneFile(ctx context.Context, path string, offset, limit, totalLinesMaxBytes int) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
 	if err != nil {
 		return "", err
 	}
@@ -190,16 +250,14 @@ func readOneFile(path string, offset, limit int) (string, error) {
 		return fmt.Sprintf("[directory listing: %s]\n%s", path, listing), nil
 	}
 
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
+	// Appends after Stat do not turn an ordinary small-file metadata scan into
+	// unbounded I/O or make its byte and line totals describe different snapshots.
+	source, snapshot := boundedRegularFileReader(f, info.Mode().IsRegular(), info.Size())
 
 	// Buffer must hold the full sniff window; bufio.NewReader's default 4096-byte
 	// buffer would make Peek(binarySniffBytes) return only 4096 bytes and miss a
 	// NUL deeper in the head.
-	br := bufio.NewReaderSize(f, binarySniffBytes)
+	br := bufio.NewReaderSize(source, binarySniffBytes)
 	head, _ := br.Peek(binarySniffBytes)
 	if bytes.IndexByte(head, 0) >= 0 {
 		return "", fmt.Errorf("%s appears to be binary", path)
@@ -213,6 +271,19 @@ func readOneFile(path string, offset, limit int) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	countedTotalLines := 0
+	if truncated && snapshot != nil && totalLinesMaxBytes > 0 && info.Size() <= int64(totalLinesMaxBytes) {
+		remaining, err := countRemainingLines(ctx, br)
+		if err != nil {
+			return "", err
+		}
+		// A concurrent in-place truncation can reach the underlying file's EOF
+		// before the opened-size boundary. In that case the initial byte size and
+		// observed line count are not one exact snapshot, so omit the total.
+		if snapshot.N == 0 {
+			countedTotalLines = total + remaining
+		}
+	}
 	if total == 0 {
 		return "(empty file)", nil
 	}
@@ -224,9 +295,43 @@ func readOneFile(path string, offset, limit int) (string, error) {
 		// Emit a truncation notice so the model knows line N is not EOF
 		// and can resume from the next line instead of assuming it read the whole file.
 		last := offset + len(lines) - 1
-		out += fmt.Sprintf("\n[file truncated at line %d; continue with offset=%d]", last, last+1)
+		notice := readPaginationNotice{
+			totalLines:    countedTotalLines,
+			fileSize:      info.Size(),
+			fileSizeKnown: snapshot != nil,
+		}
+		out += "\n" + notice.format(last)
 	}
 	return out, nil
+}
+
+// countRemainingLines counts complete and final unterminated lines from the
+// reader's current line boundary without retaining the rest of the file.
+func countRemainingLines(ctx context.Context, r io.Reader) (int, error) {
+	buf := make([]byte, 32*1024)
+	lines := 0
+	sawBytes := false
+	var last byte
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		n, err := r.Read(buf)
+		if n > 0 {
+			sawBytes = true
+			last = buf[n-1]
+			lines += bytes.Count(buf[:n], []byte{'\n'})
+		}
+		if err != nil {
+			if err == io.EOF {
+				if sawBytes && last != '\n' {
+					lines++
+				}
+				return lines, nil
+			}
+			return 0, err
+		}
+	}
 }
 
 // numberLines renders lines as "<n>\t<line>"; startLine is the 1-based number of

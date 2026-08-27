@@ -1043,16 +1043,264 @@ func TestDispatchTruncateLinesStillRespectsBytes(t *testing.T) {
 	}
 }
 
+func TestDispatchPaginatedReadKeepsFileAwareNoticeWhenCentrallyTruncated(t *testing.T) {
+	var body strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&body, "line %02d %s\n", i, strings.Repeat("x", 40))
+	}
+	path := filepath.Join(t.TempDir(), "many.txt")
+	mustWrite(t, path, body.String())
+	input, err := json.Marshal(map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		opts      Options
+		wantLast  int
+		wantLines int
+		maxBytes  int
+	}{
+		{
+			name:      "line cap",
+			opts:      Options{ReadDefaultLimit: 10, ReadResultBytes: 64 * 1024, ReadResultLines: 5},
+			wantLast:  4,
+			wantLines: 5,
+			maxBytes:  64 * 1024,
+		},
+		{
+			name:      "byte cap",
+			opts:      Options{ReadDefaultLimit: 10, ReadResultBytes: 240, ReadResultLines: 20},
+			wantLast:  3,
+			wantLines: 4,
+			maxBytes:  240,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := DefaultWithOptions(tt.opts)
+			res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
+			if res.IsError || !res.Truncated {
+				t.Fatalf("read result = %+v, want successful central truncation", res)
+			}
+			if strings.Contains(res.Text, "[truncated: showing first") {
+				t.Fatalf("read result contains redundant generic marker: %q", res.Text)
+			}
+			if len(res.Text) > tt.maxBytes {
+				t.Fatalf("read result is %d bytes, cap is %d", len(res.Text), tt.maxBytes)
+			}
+			if got := len(strings.Split(res.Text, "\n")); got != tt.wantLines {
+				t.Fatalf("read result has %d output lines, want %d: %q", got, tt.wantLines, res.Text)
+			}
+			wantNotice := fmt.Sprintf("[file truncated at line %d of 20; file size %d bytes; continue with offset=%d]", tt.wantLast, body.Len(), tt.wantLast+1)
+			if !strings.HasSuffix(res.Text, wantNotice) {
+				t.Fatalf("read result missing adjusted notice %q: %q", wantNotice, res.Text)
+			}
+			originalNotice := fmt.Sprintf("[file truncated at line 10 of 20; file size %d bytes; continue with offset=11]", body.Len())
+			if !strings.HasSuffix(res.OriginalText, originalNotice) {
+				t.Fatalf("archived original missing natural notice %q: %q", originalNotice, res.OriginalText)
+			}
+		})
+	}
+}
+
+func TestDispatchPaginatedReadWithSHAKeepsFileAwareNotice(t *testing.T) {
+	var body strings.Builder
+	for i := 1; i <= 20; i++ {
+		fmt.Fprintf(&body, "line %02d %s\n", i, strings.Repeat("x", 40))
+	}
+	path := filepath.Join(t.TempDir(), "many.txt")
+	mustWrite(t, path, body.String())
+	input, err := json.Marshal(map[string]any{"path": path, "offset": 6, "limit": 10, "include_sha256": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name      string
+		opts      Options
+		wantLast  int
+		wantLines int
+		maxBytes  int
+	}{
+		{
+			name:      "line cap",
+			opts:      Options{ReadResultBytes: 64 * 1024, ReadResultLines: 5},
+			wantLast:  8,
+			wantLines: 5,
+			maxBytes:  64 * 1024,
+		},
+		{
+			name:      "byte cap",
+			opts:      Options{ReadResultBytes: 240, ReadResultLines: 20},
+			wantLast:  6,
+			wantLines: 3,
+			maxBytes:  240,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := DefaultWithOptions(tt.opts)
+			res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
+			if res.IsError || !res.Truncated {
+				t.Fatalf("read result = %+v, want successful central truncation", res)
+			}
+			wantHeader := "[sha256:" + sha256Hex([]byte(body.String())) + "]\n"
+			if !strings.HasPrefix(res.Text, wantHeader) {
+				t.Fatalf("read result lost SHA header: %q", res.Text)
+			}
+			if strings.Contains(res.Text, "[truncated: showing first") {
+				t.Fatalf("read result contains redundant generic marker: %q", res.Text)
+			}
+			if len(res.Text) > tt.maxBytes {
+				t.Fatalf("read result is %d bytes, cap is %d", len(res.Text), tt.maxBytes)
+			}
+			if got := len(strings.Split(res.Text, "\n")); got != tt.wantLines {
+				t.Fatalf("read result has %d output lines, want %d: %q", got, tt.wantLines, res.Text)
+			}
+			wantNotice := fmt.Sprintf("[file truncated at line %d of 20; file size %d bytes; continue with offset=%d]", tt.wantLast, body.Len(), tt.wantLast+1)
+			if !strings.HasSuffix(res.Text, wantNotice) {
+				t.Fatalf("read result missing adjusted notice %q: %q", wantNotice, res.Text)
+			}
+		})
+	}
+}
+
+func TestDispatchPaginatedReadWithNoCompleteLineUsesFileAwareNotice(t *testing.T) {
+	t.Run("oversized first line", func(t *testing.T) {
+		body := strings.Repeat("x", 70*1024) + "\nsecond\n"
+		path := filepath.Join(t.TempDir(), "oversized.txt")
+		mustWrite(t, path, body)
+		input, err := json.Marshal(map[string]any{"path": path, "limit": 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, _ := DefaultWithOptions(Options{})
+		res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
+		if res.IsError || !res.Truncated {
+			t.Fatalf("read result = %+v, want successful central truncation", res)
+		}
+		want := fmt.Sprintf("[file truncated before line 1 of 2; file size %d bytes; next offset=1; no complete line fits result limits; use a targeted shell command]", len(body))
+		if res.Text != want {
+			t.Fatalf("read result = %q, want %q", res.Text, want)
+		}
+		if strings.Contains(res.Text, "[truncated: showing first") {
+			t.Fatalf("read result contains redundant generic marker: %q", res.Text)
+		}
+	})
+
+	t.Run("one-line result cap", func(t *testing.T) {
+		body := "one\ntwo\nthree\n"
+		path := filepath.Join(t.TempDir(), "lines.txt")
+		mustWrite(t, path, body)
+		input, err := json.Marshal(map[string]any{"path": path, "limit": 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, _ := DefaultWithOptions(Options{ReadResultBytes: 100, ReadResultLines: 1})
+		res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
+		if res.IsError || !res.Truncated {
+			t.Fatalf("read result = %+v, want successful central truncation", res)
+		}
+		want := "[file truncated before line 1; continue with offset=1]"
+		if res.Text != want {
+			t.Fatalf("read result = %q, want %q", res.Text, want)
+		}
+		if len(res.Text) > 100 || res.ShownBytes != len(res.Text) || res.ShownBytes > res.OriginalBytes {
+			t.Fatalf("read truncation metadata = shown %d/original %d for %d-byte result", res.ShownBytes, res.OriginalBytes, len(res.Text))
+		}
+	})
+
+	t.Run("SHA header and non-first offset", func(t *testing.T) {
+		body := "one\ntwo\nthree\n"
+		path := filepath.Join(t.TempDir(), "lines.txt")
+		mustWrite(t, path, body)
+		input, err := json.Marshal(map[string]any{"path": path, "offset": 2, "limit": 1, "include_sha256": true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r, _ := DefaultWithOptions(Options{ReadResultBytes: 150, ReadResultLines: 2})
+		res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
+		if res.IsError || !res.Truncated {
+			t.Fatalf("read result = %+v, want successful central truncation", res)
+		}
+		want := "[sha256:" + sha256Hex([]byte(body)) + "]\n[file truncated before line 2; continue with offset=2]"
+		if res.Text != want {
+			t.Fatalf("read result = %q, want %q", res.Text, want)
+		}
+		if len(res.Text) > 150 || res.ShownBytes != len(res.Text) || res.ShownBytes > res.OriginalBytes {
+			t.Fatalf("read truncation metadata = shown %d/original %d for %d-byte result", res.ShownBytes, res.OriginalBytes, len(res.Text))
+		}
+	})
+}
+
+func TestDispatchUnpaginatedReadStillUsesGenericTruncationNotice(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "one-long-line.txt")
+	mustWrite(t, path, strings.Repeat("x", 1000))
+	input, err := json.Marshal(map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, _ := DefaultWithOptions(Options{ReadResultBytes: 240, ReadResultLines: 20})
+	res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
+	if res.IsError || !res.Truncated {
+		t.Fatalf("read result = %+v, want successful central truncation", res)
+	}
+	if !strings.Contains(res.Text, "[truncated: showing first") {
+		t.Fatalf("unpaginated read missing generic marker: %q", res.Text)
+	}
+	if strings.Contains(res.Text, "[file truncated at line") {
+		t.Fatalf("unpaginated read unexpectedly gained file pagination: %q", res.Text)
+	}
+}
+
 func TestToolResultLimits(t *testing.T) {
 	r, _ := DefaultWithOptions(Options{})
 	readLimits := r.resultLimitsFor("read")
-	if readLimits.maxBytes != defaultReadResultBytes || readLimits.maxLines != defaultMaxResultLines {
-		t.Fatalf("read limits = %d/%d, want %d/%d", readLimits.maxBytes, readLimits.maxLines, defaultReadResultBytes, defaultMaxResultLines)
+	if readLimits.maxBytes != defaultReadResultBytes || readLimits.maxLines != defaultReadResultLines {
+		t.Fatalf("read limits = %d/%d, want %d/%d", readLimits.maxBytes, readLimits.maxLines, defaultReadResultBytes, defaultReadResultLines)
 	}
 	configured, _ := DefaultWithOptions(Options{MaxResultBytes: 1000, MaxResultLines: 200, ReadResultLines: 40})
 	readLimits = configured.resultLimitsFor("read")
 	if readLimits.maxBytes != 1000 || readLimits.maxLines != 40 {
 		t.Fatalf("configured read limits = %d/%d, want 1000/40", readLimits.maxBytes, readLimits.maxLines)
+	}
+
+	for _, tt := range []struct {
+		name      string
+		opts      Options
+		wantBytes int
+		wantLines int
+	}{
+		{name: "read bytes only", opts: Options{ReadResultBytes: 96 * 1024}, wantBytes: 96 * 1024, wantLines: defaultReadResultLines},
+		{name: "read lines only", opts: Options{ReadResultLines: 2500}, wantBytes: defaultReadResultBytes, wantLines: 2500},
+		{name: "global bytes only", opts: Options{MaxResultBytes: 96 * 1024}, wantBytes: 96 * 1024, wantLines: defaultReadResultLines},
+		{name: "global lines only", opts: Options{MaxResultLines: 750}, wantBytes: defaultReadResultBytes, wantLines: 750},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r, _ := DefaultWithOptions(tt.opts)
+			limits := r.resultLimitsFor("read")
+			if limits.maxBytes != tt.wantBytes || limits.maxLines != tt.wantLines {
+				t.Fatalf("read limits = %d/%d, want %d/%d", limits.maxBytes, limits.maxLines, tt.wantBytes, tt.wantLines)
+			}
+		})
+	}
+
+	selective := &Registry{}
+	selective.SetResultLimits(0, 10)
+	RegisterFileTools(selective)
+	limits := selective.resultLimitsFor("read")
+	if limits.maxBytes != defaultReadResultBytes || limits.maxLines != 10 {
+		t.Fatalf("selectively registered read limits = %d/%d, want %d/10", limits.maxBytes, limits.maxLines, defaultReadResultBytes)
+	}
+
+	selective = &Registry{}
+	selective.SetResultLimits(96*1024, 0)
+	RegisterFileTools(selective)
+	limits = selective.resultLimitsFor("read")
+	if limits.maxBytes != 96*1024 || limits.maxLines != defaultReadResultLines {
+		t.Fatalf("selectively registered read limits = %d/%d, want %d/%d", limits.maxBytes, limits.maxLines, 96*1024, defaultReadResultLines)
 	}
 }
 
@@ -1120,6 +1368,37 @@ func TestSubsetFiltersSpecsAndDispatch(t *testing.T) {
 	res := sub.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "edit", Input: json.RawMessage(`{}`)})
 	if !res.IsError || !strings.Contains(res.Text, "unknown tool") {
 		t.Fatalf("excluded tool dispatch = %+v", res)
+	}
+}
+
+func TestSubsetPreservesReadResultLimitsDuringDispatch(t *testing.T) {
+	catalog, _ := CatalogWithOptions(Options{ReadResultBytes: 96 * 1024, ReadResultLines: 2500})
+	sub, err := catalog.Subset([]string{"read"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := sub.resultLimitsFor("read")
+	if limits.maxBytes != 96*1024 || limits.maxLines != 2500 {
+		t.Fatalf("subset read limits = %d/%d, want %d/%d", limits.maxBytes, limits.maxLines, 96*1024, 2500)
+	}
+
+	var body strings.Builder
+	for i := 1; i <= 1500; i++ {
+		fmt.Fprintf(&body, "line %d\n", i)
+	}
+	path := filepath.Join(t.TempDir(), "large.txt")
+	mustWrite(t, path, body.String())
+	input, err := json.Marshal(map[string]any{"path": path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := sub.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
+	if res.IsError || res.Truncated {
+		t.Fatalf("subset read result = %+v, want natural pagination without central truncation", res)
+	}
+	want := fmt.Sprintf("[file truncated at line 1000 of 1500; file size %d bytes; continue with offset=1001]", body.Len())
+	if !strings.HasSuffix(res.Text, want) {
+		t.Fatalf("subset read result missing notice %q: tail=%q", want, res.Text[max(0, len(res.Text)-200):])
 	}
 }
 

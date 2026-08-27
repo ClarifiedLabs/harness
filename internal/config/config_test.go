@@ -243,7 +243,7 @@ func TestPrecedenceAndExactProvenance(t *testing.T) {
 }
 
 func TestReadLimitsPrecedence(t *testing.T) {
-	globalPath := writeConfig(t, `{"read_default_limit":10,"read_result_max_bytes":100,"read_result_max_lines":1000}`)
+	globalPath := writeConfig(t, `{"read_default_limit":10,"read_total_lines_max_bytes":10000,"read_result_max_bytes":100,"read_result_max_lines":1000}`)
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
 		t.Fatal(err)
@@ -253,7 +253,7 @@ func TestReadLimitsPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 	projectPath := filepath.Join(projectDir, "config.json")
-	if err := os.WriteFile(projectPath, []byte(`{"read_default_limit":20,"read_result_max_bytes":200,"read_result_max_lines":2000}`), 0o644); err != nil {
+	if err := os.WriteFile(projectPath, []byte(`{"read_default_limit":20,"read_total_lines_max_bytes":20000,"read_result_max_bytes":200,"read_result_max_lines":2000}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -266,31 +266,33 @@ func TestReadLimitsPrecedence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Config.ReadDefaultLimit != 20 || result.Config.ReadResultMaxBytes != 200 || result.Config.ReadResultMaxLines != 2000 {
-		t.Fatalf("project read limits = %d/%d/%d, want 20/200/2000", result.Config.ReadDefaultLimit, result.Config.ReadResultMaxBytes, result.Config.ReadResultMaxLines)
+	if result.Config.ReadDefaultLimit != 20 || result.Config.ReadTotalLinesMaxBytes != 20000 || result.Config.ReadResultMaxBytes != 200 || result.Config.ReadResultMaxLines != 2000 {
+		t.Fatalf("project read limits = %d/%d/%d/%d, want 20/20000/200/2000", result.Config.ReadDefaultLimit, result.Config.ReadTotalLinesMaxBytes, result.Config.ReadResultMaxBytes, result.Config.ReadResultMaxLines)
 	}
-	for _, key := range []string{"read_default_limit", "read_result_max_bytes", "read_result_max_lines"} {
+	for _, key := range []string{"read_default_limit", "read_total_lines_max_bytes", "read_result_max_bytes", "read_result_max_lines"} {
 		if got := result.Sources[key]; got != (configmeta.Source{Kind: configmeta.SourceFile, Name: projectPath}) {
 			t.Errorf("%s source = %+v, want project file", key, got)
 		}
 	}
 
 	options.LookupEnv = lookup(map[string]string{
-		"HARNESS_READ_DEFAULT_LIMIT":    "30",
-		"HARNESS_READ_RESULT_MAX_BYTES": "300",
-		"HARNESS_READ_RESULT_MAX_LINES": "3000",
+		"HARNESS_READ_DEFAULT_LIMIT":         "30",
+		"HARNESS_READ_TOTAL_LINES_MAX_BYTES": "30000",
+		"HARNESS_READ_RESULT_MAX_BYTES":      "300",
+		"HARNESS_READ_RESULT_MAX_LINES":      "3000",
 	})
 	result, err = Load(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Config.ReadDefaultLimit != 30 || result.Config.ReadResultMaxBytes != 300 || result.Config.ReadResultMaxLines != 3000 {
-		t.Fatalf("environment read limits = %d/%d/%d, want 30/300/3000", result.Config.ReadDefaultLimit, result.Config.ReadResultMaxBytes, result.Config.ReadResultMaxLines)
+	if result.Config.ReadDefaultLimit != 30 || result.Config.ReadTotalLinesMaxBytes != 30000 || result.Config.ReadResultMaxBytes != 300 || result.Config.ReadResultMaxLines != 3000 {
+		t.Fatalf("environment read limits = %d/%d/%d/%d, want 30/30000/300/3000", result.Config.ReadDefaultLimit, result.Config.ReadTotalLinesMaxBytes, result.Config.ReadResultMaxBytes, result.Config.ReadResultMaxLines)
 	}
 	for key, name := range map[string]string{
-		"read_default_limit":    "HARNESS_READ_DEFAULT_LIMIT",
-		"read_result_max_bytes": "HARNESS_READ_RESULT_MAX_BYTES",
-		"read_result_max_lines": "HARNESS_READ_RESULT_MAX_LINES",
+		"read_default_limit":         "HARNESS_READ_DEFAULT_LIMIT",
+		"read_total_lines_max_bytes": "HARNESS_READ_TOTAL_LINES_MAX_BYTES",
+		"read_result_max_bytes":      "HARNESS_READ_RESULT_MAX_BYTES",
+		"read_result_max_lines":      "HARNESS_READ_RESULT_MAX_LINES",
 	} {
 		if got := result.Sources[key]; got != (configmeta.Source{Kind: configmeta.SourceEnvironment, Name: name}) {
 			t.Errorf("%s source = %+v, want environment %s", key, got, name)
@@ -328,7 +330,7 @@ func TestRemovedParametersAreUnavailable(t *testing.T) {
 		"HARNESS_GREP_RESULT_MAX_BYTES":      "6",
 		"HARNESS_GREP_RESULT_MAX_LINES":      "7",
 	}, "")
-	if result.Config.ReadDefaultLimit != 0 || result.Config.ReadResultMaxBytes != 0 || result.Config.ReadResultMaxLines != 0 {
+	if result.Config.ReadDefaultLimit != 0 || result.Config.ReadTotalLinesMaxBytes != 0 || result.Config.ReadResultMaxBytes != 0 || result.Config.ReadResultMaxLines != 0 {
 		t.Fatalf("obsolete environment variables affected read limits: %+v", result.Config)
 	}
 }

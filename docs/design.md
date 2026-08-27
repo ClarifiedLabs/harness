@@ -1772,20 +1772,29 @@ not a dispatch timeout.
 
 ### 8.3 Output truncation
 
-A central cap in `Dispatch` (backstop for every tool): **64 KB or 1000 lines per
-result** by default, configurable with `tool_result_max_bytes` and
-`tool_result_max_lines`, or env `HARNESS_TOOL_RESULT_MAX_BYTES` and
-`HARNESS_TOOL_RESULT_MAX_LINES`. The `read` tool installs a smaller default when no global cap is configured: a
-500-line window plus a 32 KB result cap. Its per-tool settings are
-`read_default_limit`, `read_result_max_bytes`, and `read_result_max_lines`. The first cap hit
+`Dispatch` applies per-result caps. The global defaults are **64 KB or 1000
+lines**, configurable with `tool_result_max_bytes` and `tool_result_max_lines`,
+or env `HARNESS_TOOL_RESULT_MAX_BYTES` and `HARNESS_TOOL_RESULT_MAX_LINES`;
+per-tool settings may replace either default. On each result-limit axis where the
+corresponding global cap is not configured, the `read` tool installs its own
+default: a 1000-line window plus 64 KB and 2000-line result caps. Its per-tool settings are
+`read_default_limit`, `read_result_max_bytes`, and `read_result_max_lines`; the
+bounded exact-line-count scan used by its pagination notice is configured with
+`read_total_lines_max_bytes`. The first cap hit
 adds a teaching marker:
 
 ```
 [truncated: showing first 1000 of 4213 lines; use read with offset/limit or shell to narrow]
 ```
 
-Individual tools may also apply their own natural limits, but the central cap is the
-backstop for every result. Truncated results carry metadata so the UI can warn and write
+Individual tools may also apply their own natural limits. The resolved global or
+per-tool Dispatch cap remains the output backstop for each result. When that cap
+further clips a `read` result already carrying a file-pagination notice, Dispatch
+preserves its optional SHA header when it fits, keeps complete numbered lines,
+and rewrites the file-aware notice to the actual continuation offset instead of
+adding the generic marker. If no complete line fits, it emits a file-aware
+`before line` notice with targeted-shell guidance. Truncated results still carry
+metadata so the UI can warn and write
 the full output to the session's `artifacts/tool-results/` directory. When an artifact
 is written, the model-visible result includes the absolute artifact path and advises
 using `read` with `offset`/`limit` or a targeted `shell` command for inspection. Foreground tool
@@ -1988,7 +1997,7 @@ assertion at dispatch:
 |---|---|---|
 | `path` | string, required | file or directory to read |
 | `offset` | int | 1-based starting line |
-| `limit` | int | max lines, default 500 or `read_default_limit` |
+| `limit` | int | max lines, default 1000 or `read_default_limit` |
 | `include_sha256` | bool | prepend the SHA-256 of the complete regular file; default false |
 
 - A directory path returns a directories-first, non-recursive listing capped at
@@ -2000,15 +2009,23 @@ assertion at dispatch:
   `path` wins when both names are set.
 - Output is line-numbered (`cat -n` style: right-aligned number, tab, line) so
   `edit` targeting and grep cross-referencing stay reliable. Files are streamed
-  line-by-line and stop after the requested/default window, so memory is bounded
-  by the window and longest line regardless of file size.
+  line-by-line and output collection stops after the requested/default window,
+  so memory is bounded by the window and longest line regardless of file size.
+  A truncated regular file at or below `read_total_lines_max_bytes` (1 MiB by
+  default) is then scanned to EOF without retaining its body so the notice can
+  report an exact total line count. Larger files do not receive that extra scan.
 - **Not-found suggestions:** an ENOENT failure appends
   `similar existing paths: <up to 3>` from a bounded same-directory
   name-similarity scan, plus a one-level parent scan when the directory itself
   is missing; the wider fallback is operational detail covered in tools.md.
-- **Truncation notice:** a read cut off at its line window ends with
-  `[file truncated at line N; continue with offset=N+1]`, so the model knows to
-  page rather than assuming it saw the whole file. Binary sniff: first 8 KB
+- **Truncation notice:** a read cut off at its line window reports the exact stat
+  byte size for ordinary regular files. Files without a trustworthy stat size,
+  such as zero-size virtual regular files that yield content, report `file size
+  unknown`. Ordinary regular files within the total-line scan threshold end with
+  `[file truncated at line N of TOTAL; file size BYTES bytes; continue with
+  offset=N+1]`; larger files omit `of TOTAL`. This lets the model coissue known
+  remaining windows without forcing a full scan of very large files. Binary
+  sniff: first 8 KB
   containing NUL → `error: <path> appears to be binary`. Offset past EOF →
   error stating the file's line count. Empty file → `(empty file)`.
 - `include_sha256` makes one additional cancellable full-file pass and prepends
