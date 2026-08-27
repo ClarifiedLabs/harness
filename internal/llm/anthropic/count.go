@@ -27,7 +27,7 @@ type countResponse struct {
 }
 
 func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.InputTokenCount, error) {
-	w := buildRequestWithReasoningReplay(req, p.contextWindow, p.outputLimit, p.reasoningReplay)
+	w := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.reasoningReplay, p.resolvedToolSearch(req.Model))
 	body, err := json.Marshal(countRequest{
 		Model:        w.Model,
 		System:       w.System,

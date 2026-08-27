@@ -1495,6 +1495,8 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
   "name": "openai-codex",
   "api_type": "responses",
   "base_url": "https://chatgpt.com/backend-api/codex",
+  "responses_tool_search": true,
+  "anthropic_tool_search": "regex",
   "auth": {"type":"codex_oauth","token_file":"tokens/codex.json"},
   "models": [{"name":"gpt-5.5","context_window":1050000}]
 }`), 0o600); err != nil {
@@ -1557,8 +1559,9 @@ func TestHandlerStreamOmitsMaxOutputTokensForCodexOAuth(t *testing.T) {
 	}
 	_, _ = io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if captured.Provider != "responses" || !captured.OmitMaxOutputTokens || !captured.ResponsesWebSocket {
-		t.Fatalf("captured options = %+v, want responses with OmitMaxOutputTokens and ResponsesWebSocket", captured)
+	if captured.Provider != "responses" || !captured.OmitMaxOutputTokens || !captured.ResponsesWebSocket ||
+		captured.ResponsesToolSearch == nil || !*captured.ResponsesToolSearch || captured.AnthropicToolSearch != llm.AnthropicToolSearchRegex {
+		t.Fatalf("captured options = %+v, want provider-specific tool-search settings", captured)
 	}
 	if constructions != 2 {
 		t.Fatalf("provider constructions = %d, want 2 for two proxy sessions", constructions)
@@ -2602,6 +2605,9 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 	if !strings.Contains(out, seriesLine("model_proxy_cache_write_1h_tokens_total", labels)+" 6000") {
 		t.Errorf("missing priced 1h cache-write series:\n%s", out)
 	}
+	if !strings.Contains(out, seriesLine("model_proxy_prompt_input_tokens_total", labels)+" 14000") {
+		t.Errorf("missing priced total prompt-input series:\n%s", out)
+	}
 	// Cost only for the priced model.
 	if !strings.Contains(out, seriesLine("model_proxy_cost_usd_total", labels)+" ") {
 		t.Errorf("missing priced cost series:\n%s", out)
@@ -2620,6 +2626,7 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 		"model_proxy_errors_total",
 		"model_proxy_cost_usd_total",
 		"model_proxy_cache_write_1h_tokens_total",
+		"model_proxy_prompt_input_tokens_total",
 		"model_proxy_request_duration_seconds_total",
 	} {
 		if !strings.Contains(out, "# TYPE "+name+" counter") {

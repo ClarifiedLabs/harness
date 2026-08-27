@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1156,6 +1157,10 @@ func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
 				ReasoningID:           "rs_bad",
 				ReasoningEncrypted:    "INVALID",
 			},
+			{Kind: llm.BlockResponsesToolSearch, ReasoningReplayDomain: "openai:gpt", ResponsesToolSearch: json.RawMessage(`{"type":"tool_search_call","execution":"server","call_id":null,"status":"completed","arguments":{"query":"tools"}}`)},
+			{Kind: llm.BlockResponsesToolSearch, ReasoningReplayDomain: "openai:gpt", ResponsesToolSearch: json.RawMessage(`{"type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":[]}`)},
+			{Kind: llm.BlockAnthropicToolSearch, ReasoningReplayDomain: "openai:gpt", AnthropicToolSearch: json.RawMessage(`{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"tools"}}`)},
+			{Kind: llm.BlockAnthropicToolSearch, ReasoningReplayDomain: "openai:gpt", AnthropicToolSearch: json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`)},
 			{Kind: llm.BlockText, Text: "old answer"},
 		}},
 	})
@@ -1172,6 +1177,14 @@ func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
 	}
 	if requestHasReasoningEncrypted(fp.Requests[1], "INVALID") {
 		t.Fatalf("fallback still replayed rejected reasoning:\n%s", dump(fp.Requests[1].Messages))
+	}
+	for i := range fp.Requests {
+		if got := requestBlockCount(fp.Requests[i], llm.BlockResponsesToolSearch); got != 2 {
+			t.Fatalf("request %d Responses hosted-search blocks = %d, want 2", i, got)
+		}
+		if got := requestBlockCount(fp.Requests[i], llm.BlockAnthropicToolSearch); got != 2 {
+			t.Fatalf("request %d Anthropic hosted-search blocks = %d, want 2", i, got)
+		}
 	}
 	if want := []turnAttemptEvent{{turn: 1, attempt: 1}, {turn: 1, attempt: 2}}; !slices.Equal(sink.attemptStarts, want) {
 		t.Fatalf("attempt starts = %+v, want %+v", sink.attemptStarts, want)
@@ -1207,6 +1220,9 @@ func TestInvalidEncryptedContentRetriesWithoutOpaqueReasoning(t *testing.T) {
 	}
 	if requestHasReasoningEncrypted(fp.Requests[2], "INVALID") {
 		t.Fatalf("disabled domain replayed reasoning on a later turn:\n%s", dump(fp.Requests[2].Messages))
+	}
+	if requestBlockCount(fp.Requests[2], llm.BlockResponsesToolSearch) != 2 || requestBlockCount(fp.Requests[2], llm.BlockAnthropicToolSearch) != 2 {
+		t.Fatalf("disabled reasoning dropped hosted-search replay on later request: %s", dump(fp.Requests[2].Messages))
 	}
 }
 
@@ -1374,6 +1390,18 @@ func requestHasReasoningEncrypted(req llm.Request, encrypted string) bool {
 		}
 	}
 	return false
+}
+
+func requestBlockCount(req llm.Request, kind llm.BlockKind) int {
+	var count int
+	for _, message := range req.Messages {
+		for _, block := range message.Content {
+			if block.Kind == kind {
+				count++
+			}
+		}
+	}
+	return count
 }
 
 func TestSessionIDsHaveDistinctContinuationAndCacheLifetimes(t *testing.T) {
@@ -2037,6 +2065,101 @@ func TestInteractionsStatePersistedAndReplayed(t *testing.T) {
 	}
 	if !replayedThought || !replayedSearch {
 		t.Fatalf("Interactions state not replayed: %s", dump(fp.Requests[1].Messages))
+	}
+}
+
+func TestResponsesToolSearchStatePersistedAndReplayed(t *testing.T) {
+	searchCall := json.RawMessage(`{"type":"tool_search_call","execution":"server","call_id":null,"status":"completed","arguments":{"paths":["mcp_demo"]}}`)
+	searchOutput := json.RawMessage(`{"type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":[{"type":"namespace","name":"mcp_demo","tools":[]}]}`)
+	fp := llmtest.New("responses",
+		llmtest.Step{Events: []llm.StreamEvent{
+			{Kind: llm.EventResponsesToolSearch, ResponsesToolSearch: searchCall},
+			{Kind: llm.EventResponsesToolSearch, ResponsesToolSearch: searchOutput},
+			textDelta("answer"),
+		}, Stop: llm.StopEndTurn},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("again")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{ReasoningReplayDomain: "openai:gpt-5.6"})
+	if err := a.RunPrompt(context.Background(), "hi", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	assistant := a.Transcript()[1]
+	if len(assistant.Content) != 3 || assistant.Content[0].Kind != llm.BlockResponsesToolSearch ||
+		assistant.Content[1].Kind != llm.BlockResponsesToolSearch ||
+		!bytes.Equal(assistant.Content[0].ResponsesToolSearch, searchCall) ||
+		!bytes.Equal(assistant.Content[1].ResponsesToolSearch, searchOutput) {
+		t.Fatalf("assistant tool-search state = %s", dump([]llm.Message{assistant}))
+	}
+	if err := a.RunPrompt(context.Background(), "more", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	var replayed []json.RawMessage
+	for _, message := range fp.Requests[1].Messages {
+		for _, block := range message.Content {
+			if block.Kind == llm.BlockResponsesToolSearch {
+				replayed = append(replayed, block.ResponsesToolSearch)
+			}
+		}
+	}
+	if len(replayed) != 2 || !bytes.Equal(replayed[0], searchCall) || !bytes.Equal(replayed[1], searchOutput) {
+		t.Fatalf("tool-search state not replayed: %s", dump(fp.Requests[1].Messages))
+	}
+}
+
+func TestAnthropicToolSearchStatePreservesOrderAndReplaysWithoutDispatch(t *testing.T) {
+	server := json.RawMessage(`{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"demo search"}}`)
+	searchResult := json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"mcp__demo__search"}]}}`)
+	fp := llmtest.New("anthropic",
+		llmtest.Step{Events: []llm.StreamEvent{
+			{Kind: llm.EventTextDelta, Index: 0, Text: "Searching. "},
+			{Kind: llm.EventAnthropicToolSearch, Index: 1, AnthropicToolSearch: server},
+			{Kind: llm.EventAnthropicToolSearch, Index: 2, AnthropicToolSearch: searchResult},
+			{Kind: llm.EventTextDelta, Index: 3, Text: "Found it."},
+			{Kind: llm.EventToolCallDone, Index: 4, ToolID: "call_1", ToolName: "mcp__demo__search", ToolInput: json.RawMessage(`{}`)},
+		}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	var calls int
+	reg := &tools.Registry{}
+	reg.Register(&recordTool{name: "mcp__demo__search", readOnly: true, run: func(context.Context, json.RawMessage) (string, error) {
+		calls++
+		return "result", nil
+	}})
+	a := newAgent(fp, reg, Options{ReasoningReplayDomain: "anthropic:claude-opus-4-8"})
+	if err := a.RunPrompt(context.Background(), "find it", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("local calls = %d, want only discovered client tool", calls)
+	}
+	assistant := a.Transcript()[1]
+	wantKinds := []llm.BlockKind{llm.BlockText, llm.BlockAnthropicToolSearch, llm.BlockAnthropicToolSearch, llm.BlockText, llm.BlockToolUse}
+	gotKinds := make([]llm.BlockKind, len(assistant.Content))
+	for i, block := range assistant.Content {
+		gotKinds[i] = block.Kind
+	}
+	if !slices.Equal(gotKinds, wantKinds) || assistant.Content[0].Text != "Searching. " || assistant.Content[3].Text != "Found it." ||
+		!bytes.Equal(assistant.Content[1].AnthropicToolSearch, server) || !bytes.Equal(assistant.Content[2].AnthropicToolSearch, searchResult) {
+		t.Fatalf("assistant tool-search order = %s", dump([]llm.Message{assistant}))
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want 2", len(fp.Requests))
+	}
+	var replayedHosted, serverResults, clientResults int
+	for _, message := range fp.Requests[1].Messages {
+		for _, block := range message.Content {
+			switch {
+			case block.Kind == llm.BlockAnthropicToolSearch:
+				replayedHosted++
+			case block.Kind == llm.BlockToolResult && block.ResultForID == "srvtoolu_1":
+				serverResults++
+			case block.Kind == llm.BlockToolResult && block.ResultForID == "call_1":
+				clientResults++
+			}
+		}
+	}
+	if replayedHosted != 2 || serverResults != 0 || clientResults != 1 {
+		t.Fatalf("replay hosted=%d server_results=%d client_results=%d: %s", replayedHosted, serverResults, clientResults, dump(fp.Requests[1].Messages))
 	}
 }
 
@@ -2801,6 +2924,10 @@ func TestAgentRefreshesSpecsAfterLazyToolActivation(t *testing.T) {
 	}
 	if got := specNames(fp.Requests[0].Tools); !slices.Equal(got, []string{tools.ToolCatalogName}) {
 		t.Fatalf("first request tools = %v", got)
+	}
+	if got := fp.Requests[0].DeferredToolGroups; len(got) != 1 || got[0].Name != "mcp_demo" ||
+		!slices.Equal(specNames(got[0].Tools), []string{"mcp__demo__search"}) || fp.Requests[0].ToolSearchFallback != tools.ToolCatalogName {
+		t.Fatalf("first request deferred tools = %+v fallback=%q", got, fp.Requests[0].ToolSearchFallback)
 	}
 	if got := specNames(fp.Requests[1].Tools); !slices.Equal(got, []string{"mcp__demo__search", tools.ToolCatalogName}) {
 		t.Fatalf("second request tools = %v", got)

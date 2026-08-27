@@ -1954,14 +1954,22 @@ func TestUsageLineShowsCacheAndReasoning(t *testing.T) {
 	if !strings.Contains(line, "cache 3.0k read") {
 		t.Errorf("usage line should report cache reads, got %q", line)
 	}
-	if !strings.Contains(line, "(75%)") {
-		t.Errorf("usage line should report the cache-hit ratio, got %q", line)
+	if !strings.Contains(line, "(72.7%)") {
+		t.Errorf("usage line should report the write-inclusive cache-read ratio, got %q", line)
 	}
 	if !strings.Contains(line, "450 reasoning") {
 		t.Errorf("usage line should report reasoning tokens, got %q", line)
 	}
 	if !strings.Contains(line, "125 cache write (1h)") {
 		t.Errorf("usage line should report 1h cache writes, got %q", line)
+	}
+
+	line = usageLine(agent.PromptUsage{
+		Turns: 1,
+		Usage: llm.Usage{InputTokens: 90, CacheReadTokens: 10, CacheWriteTokens: 1000},
+	}, time.Second, 0, false, 90, 0, 0, 0)
+	if !strings.Contains(line, "cache 10 read (0.9%)") {
+		t.Errorf("usage line should retain a sub-one-percent cache-read ratio, got %q", line)
 	}
 }
 

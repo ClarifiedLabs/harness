@@ -296,7 +296,7 @@ func UsageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKno
 	if u.Usage.CacheReadTokens > 0 {
 		fmt.Fprintf(&b, " · cache %s read", HumanTokens(u.Usage.CacheReadTokens))
 		if ratio := CacheHitRatio(u.Usage); ratio > 0 {
-			fmt.Fprintf(&b, " (%d%%)", ratio)
+			fmt.Fprintf(&b, " (%.1f%%)", ratio)
 		}
 	}
 	if u.Usage.ReasoningTokens > 0 {
@@ -512,13 +512,14 @@ func ContextUsed(ctx agent.ContextEstimate) int {
 	return max(ctx.Total, ctx.PayloadTotal)
 }
 
-// CacheHitRatio is the percentage of input tokens served from cache (r15).
-func CacheHitRatio(u llm.Usage) int {
-	total := u.InputTokens + u.CacheReadTokens
-	if total <= 0 {
+// CacheHitRatio is the percentage of prompt input tokens served from cache.
+// Cache writes are misses and remain in the denominator.
+func CacheHitRatio(u llm.Usage) float64 {
+	ratio, ok := llm.CacheReadRatio(u)
+	if !ok {
 		return 0
 	}
-	return u.CacheReadTokens * 100 / total
+	return ratio * 100
 }
 
 // ContextSnapshot maps an agent.ContextEstimate to its durable session-log

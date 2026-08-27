@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"sort"
 
 	"harness/internal/llm"
@@ -11,11 +12,12 @@ type toolAssembler struct {
 }
 
 type pendingTool struct {
-	itemID  string
-	callID  string
-	name    string
-	args    []byte
-	started bool
+	itemID    string
+	callID    string
+	name      string
+	namespace string
+	args      []byte
+	started   bool
 }
 
 func newToolAssembler() *toolAssembler {
@@ -66,7 +68,7 @@ func (a *toolAssembler) outputItemDone(index int, item *wireOutputItem) {
 	}
 	t := a.ensure(index)
 	mergeItem(t, item)
-	t.args = []byte(item.Arguments)
+	t.args = outputItemArguments(item)
 }
 
 func (a *toolAssembler) responseOutput(output []wireOutputItem) {
@@ -77,7 +79,7 @@ func (a *toolAssembler) responseOutput(output []wireOutputItem) {
 		}
 		t := a.ensure(i)
 		mergeItem(t, item)
-		t.args = []byte(item.Arguments)
+		t.args = outputItemArguments(item)
 	}
 }
 
@@ -110,6 +112,7 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 			Index:             i,
 			ToolID:            toolID(t),
 			ToolName:          t.name,
+			ToolNamespace:     t.namespace,
 			ToolInput:         input,
 			InvalidInputError: invalidInputError,
 		}, nil) {
@@ -126,14 +129,26 @@ func (a *toolAssembler) emitStart(index int, t *pendingTool, yield func(llm.Stre
 	}
 	t.started = true
 	return yield(llm.StreamEvent{
-		Kind:     llm.EventToolCallStart,
-		Index:    index,
-		ToolID:   toolID(t),
-		ToolName: t.name,
+		Kind:          llm.EventToolCallStart,
+		Index:         index,
+		ToolID:        toolID(t),
+		ToolName:      t.name,
+		ToolNamespace: t.namespace,
 	}, nil)
 }
 
 func (a *toolAssembler) has() bool { return len(a.pending) > 0 }
+
+func outputItemArguments(item *wireOutputItem) []byte {
+	if item == nil || len(item.Arguments) == 0 {
+		return nil
+	}
+	var arguments string
+	if json.Unmarshal(item.Arguments, &arguments) != nil {
+		return nil
+	}
+	return []byte(arguments)
+}
 
 func mergeItem(t *pendingTool, item *wireOutputItem) {
 	if item.ID != "" {
@@ -144,6 +159,9 @@ func mergeItem(t *pendingTool, item *wireOutputItem) {
 	}
 	if item.Name != "" {
 		t.name = item.Name
+	}
+	if item.Namespace != "" {
+		t.namespace = item.Namespace
 	}
 }
 

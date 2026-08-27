@@ -832,6 +832,34 @@ func TestSaveLoadPreservesProviderCompactionCheckpoint(t *testing.T) {
 	}
 }
 
+func TestSaveLoadPreservesHostedToolSearchState(t *testing.T) {
+	s := sampleSession()
+	s.Messages = append(s.Messages, llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Kind: llm.BlockResponsesToolSearch, ResponsesToolSearch: json.RawMessage(`{"type":"tool_search_call","execution":"server","call_id":null,"status":"completed","arguments":{"paths":["mcp_demo"]}}`)},
+		{Kind: llm.BlockResponsesToolSearch, ResponsesToolSearch: json.RawMessage(`{"type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":[]}`)},
+		{Kind: llm.BlockAnthropicToolSearch, AnthropicToolSearch: json.RawMessage(`{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"tools"}}`)},
+		{Kind: llm.BlockAnthropicToolSearch, AnthropicToolSearch: json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`)},
+		{Kind: llm.BlockText, Text: "done"},
+	}})
+	if err := llm.ValidateTranscript(s.Messages); err != nil {
+		t.Fatalf("tool-search transcript invalid before save: %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "session")
+	if err := s.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := llm.ValidateTranscript(got.Messages); err != nil {
+		t.Fatalf("tool-search transcript invalid after load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Messages[len(got.Messages)-1].Content, s.Messages[len(s.Messages)-1].Content) {
+		t.Fatalf("tool-search state did not round-trip: %+v", got.Messages[len(got.Messages)-1])
+	}
+}
+
 func TestSaveToolResultArtifactIgnoresRichImageContent(t *testing.T) {
 	dir := t.TempDir()
 	result := llm.ToolResult{

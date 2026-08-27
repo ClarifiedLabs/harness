@@ -609,6 +609,7 @@ type Agent struct {
 	provider                  llm.Provider
 	tools                     *tools.Registry
 	toolSpecs                 []llm.ToolSchema
+	deferredToolGroups        []llm.ToolGroup
 	registry                  *llm.Registry
 	transcript                []llm.Message
 	validatedPrefix           int // count of leading transcript messages already known valid (r62)
@@ -708,6 +709,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		provider:                  provider,
 		tools:                     registry,
 		toolSpecs:                 registry.Specs(),
+		deferredToolGroups:        registry.DeferredToolGroups(),
 		registry:                  modelRegistry,
 		model:                     opts.Model,
 		maxTurns:                  opts.MaxTurns,
@@ -794,6 +796,7 @@ func (a *Agent) SetTools(registry *tools.Registry) {
 	if registry != nil {
 		a.tools = registry
 		a.toolSpecs = registry.Specs()
+		a.deferredToolGroups = registry.DeferredToolGroups()
 		a.compactionRuntimeVersion++
 		a.retentionEpochArmed = true
 		a.resetResponseState()
@@ -1057,6 +1060,8 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 		System:               a.system,
 		Messages:             append([]llm.Message(nil), messages...),
 		Tools:                cloneToolSpecs(a.toolSpecs),
+		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
+		ToolSearchFallback:   tools.ToolCatalogName,
 		ServerTools:          cloneServerTools(a.serverTools),
 		Reasoning:            a.reasoning,
 		RequestContext:       append([]string(nil), extraContext...),
@@ -1315,6 +1320,7 @@ func (a *Agent) estimateContextForTranscript(extraContext []string, transcript [
 type turnResult struct {
 	text       string
 	reasoning  []llm.ContentBlock // provider-owned replay state, in arrival order
+	content    []llm.ContentBlock // exact provider block order when hosted search interleaves content
 	toolCalls  []llm.ToolCall
 	phase      string
 	usage      llm.Usage
@@ -1418,6 +1424,8 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		System:               a.system,
 		Messages:             payloadMessages,
 		Tools:                cloneToolSpecs(a.toolSpecs),
+		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
+		ToolSearchFallback:   tools.ToolCatalogName,
 		ServerTools:          cloneServerTools(a.serverTools),
 		Reasoning:            a.reasoning,
 		MaxTokens:            a.maxOutputTokens,
@@ -1452,6 +1460,12 @@ func providerOwnedReasoningBlock(kind llm.BlockKind) bool {
 	}
 }
 
+func providerOwnedReplayBlock(kind llm.BlockKind) bool {
+	return providerOwnedReasoningBlock(kind) ||
+		kind == llm.BlockResponsesToolSearch ||
+		kind == llm.BlockAnthropicToolSearch
+}
+
 // providerVisibleMessages returns request-only copies when messages contain
 // opaque reasoning that is incompatible with the selected target. Every
 // provider boundary uses this helper; the durable transcript is never mutated.
@@ -1483,9 +1497,13 @@ func (a *Agent) providerVisibleMessages(messages []llm.Message) []llm.Message {
 				if i == nativeIndex && block.ReasoningReplayDomain == domain {
 					content = append(content, block)
 				}
-			case !providerOwnedReasoningBlock(block.Kind):
+			case !providerOwnedReplayBlock(block.Kind):
 				content = append(content, block)
-			case !disabledReasoning && block.ReasoningReplayDomain == domain:
+			case block.ReasoningReplayDomain != domain:
+				// Provider-owned replay state never crosses compatibility domains.
+			case !disabledReasoning || !providerOwnedReasoningBlock(block.Kind):
+				// invalid_encrypted_content disables only signed/encrypted reasoning;
+				// same-domain hosted-search state remains required for exact replay.
 				content = append(content, block)
 			}
 		}
@@ -2531,12 +2549,12 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 
 func (a *Agent) refreshToolSpecs() {
 	next := a.tools.Specs()
-	if slices.EqualFunc(a.toolSpecs, next, func(left, right llm.ToolSchema) bool {
-		return left.Name == right.Name && left.Description == right.Description && string(left.Parameters) == string(right.Parameters)
-	}) {
+	nextDeferred := a.tools.DeferredToolGroups()
+	if equalToolSpecs(a.toolSpecs, next) && equalToolGroups(a.deferredToolGroups, nextDeferred) {
 		return
 	}
 	a.toolSpecs = next
+	a.deferredToolGroups = nextDeferred
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
 	a.resetResponseState()
@@ -3641,6 +3659,7 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 			// again as an accepted terminal attempt.
 			res.text = ""
 			res.reasoning = nil
+			res.content = nil
 			res.toolCalls = nil
 			res.usage = llm.Usage{}
 			return res, wasted, serr
@@ -3803,6 +3822,9 @@ func stopReasonNotice(reason llm.StopReason) string {
 func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (turnResult, error) {
 	var res turnResult
 	var text []byte
+	textBlocks := make(map[int][]byte)
+	orderedBlocks := make(map[int]llm.ContentBlock)
+	anthropicToolSearch := false
 	terminalModelEventSeen := false
 
 	for ev, err := range a.provider.Stream(ctx, req) {
@@ -3820,6 +3842,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 		switch ev.Kind {
 		case llm.EventTextDelta:
 			text = append(text, ev.Text...)
+			textBlocks[ev.Index] = append(textBlocks[ev.Index], ev.Text...)
 			sink.TextDelta(ev.Text)
 		case llm.EventReasoningSummary:
 			if summary := reasoningSummaryText(ev.Text); summary != "" {
@@ -3828,11 +3851,24 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 			if block, ok := llm.PersistedReasoningBlock(ev); ok {
 				block.ReasoningReplayDomain = a.reasoningReplayDomain
 				res.reasoning = append(res.reasoning, block)
+				orderedBlocks[ev.Index] = block
 			}
 		case llm.EventInteractionStep:
 			if block, ok := llm.PersistedInteractionStep(ev); ok {
 				block.ReasoningReplayDomain = a.reasoningReplayDomain
 				res.reasoning = append(res.reasoning, block)
+			}
+		case llm.EventResponsesToolSearch:
+			if block, ok := llm.PersistedResponsesToolSearch(ev); ok {
+				block.ReasoningReplayDomain = a.reasoningReplayDomain
+				res.reasoning = append(res.reasoning, block)
+			}
+		case llm.EventAnthropicToolSearch:
+			if block, ok := llm.PersistedAnthropicToolSearch(ev); ok {
+				block.ReasoningReplayDomain = a.reasoningReplayDomain
+				res.reasoning = append(res.reasoning, block)
+				orderedBlocks[ev.Index] = block
+				anthropicToolSearch = true
 			}
 		case llm.EventAssistantPhase:
 			if llm.ValidAssistantPhase(ev.Phase) && ev.Phase != "" {
@@ -3843,19 +3879,29 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 			}
 		case llm.EventToolCallStart:
 			sink.ToolUseStart(llm.ToolCall{
-				ID:    ev.ToolID,
-				Name:  ev.ToolName,
-				Input: ev.ToolInput,
+				ID:        ev.ToolID,
+				Name:      ev.ToolName,
+				Namespace: ev.ToolNamespace,
+				Input:     ev.ToolInput,
 			})
 		case llm.EventToolCallDelta:
 			sink.ToolUseDelta(ev.Index, ev.ArgsDelta)
 		case llm.EventToolCallDone:
-			res.toolCalls = append(res.toolCalls, llm.ToolCall{
+			call := llm.ToolCall{
 				ID:                ev.ToolID,
 				Name:              ev.ToolName,
+				Namespace:         ev.ToolNamespace,
 				Input:             ev.ToolInput,
 				InvalidInputError: ev.InvalidInputError,
-			})
+			}
+			res.toolCalls = append(res.toolCalls, call)
+			orderedBlocks[ev.Index] = llm.ContentBlock{
+				Kind:          llm.BlockToolUse,
+				ToolUseID:     call.ID,
+				ToolName:      call.Name,
+				ToolNamespace: call.Namespace,
+				ToolInput:     call.Input,
+			}
 		case llm.EventUsage:
 			if ev.Usage != nil {
 				res.usage = mergeUsage(res.usage, *ev.Usage)
@@ -3882,6 +3928,21 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 	}
 
 	res.text = string(text)
+	if anthropicToolSearch {
+		for index, blockText := range textBlocks {
+			if len(blockText) > 0 {
+				orderedBlocks[index] = llm.ContentBlock{Kind: llm.BlockText, Text: string(blockText)}
+			}
+		}
+		indexes := make([]int, 0, len(orderedBlocks))
+		for index := range orderedBlocks {
+			indexes = append(indexes, index)
+		}
+		slices.Sort(indexes)
+		for _, index := range indexes {
+			res.content = append(res.content, orderedBlocks[index])
+		}
+	}
 	if len(res.toolCalls) > 0 {
 		// Tool calls are authoritative. Some compatible providers incorrectly
 		// report a normal stop after streaming complete calls.
@@ -4006,11 +4067,19 @@ func textMessageAt(at time.Time, role llm.Role, text string) llm.Message {
 	return llm.Message{Role: role, Time: at, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: text}}}
 }
 
-// assistantMessage builds the assistant message for a completed turn:
-// thinking block(s) first (so signed reasoning is replayed before the tool_use
-// it justified), then the text block (if any), then tool_use blocks in emission
-// order (design §8.1).
+// assistantMessage builds the assistant message for a completed turn. Most
+// dialects use normalized reasoning/text/tool ordering; Anthropic hosted search
+// supplies exact indexed content because its search blocks can interleave text
+// before the eventual client tool_use.
 func (a *Agent) assistantMessage(res turnResult) llm.Message {
+	if len(res.content) > 0 {
+		return llm.Message{
+			Role:    llm.RoleAssistant,
+			Time:    a.now(),
+			Phase:   llm.ResolvedAssistantPhase(res.phase, res.stopReason),
+			Content: res.content,
+		}
+	}
 	message := llm.BuildAssistantMessage(res.reasoning, res.text, res.toolCalls, res.phase, res.stopReason)
 	message.Time = a.now()
 	return message
@@ -4041,6 +4110,26 @@ func cloneToolSpecs(specs []llm.ToolSchema) []llm.ToolSchema {
 		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
 	}
 	return out
+}
+
+func cloneToolGroups(groups []llm.ToolGroup) []llm.ToolGroup {
+	out := append([]llm.ToolGroup(nil), groups...)
+	for i := range out {
+		out[i].Tools = cloneToolSpecs(groups[i].Tools)
+	}
+	return out
+}
+
+func equalToolSpecs(left, right []llm.ToolSchema) bool {
+	return slices.EqualFunc(left, right, func(left, right llm.ToolSchema) bool {
+		return left.Name == right.Name && left.Description == right.Description && string(left.Parameters) == string(right.Parameters)
+	})
+}
+
+func equalToolGroups(left, right []llm.ToolGroup) bool {
+	return slices.EqualFunc(left, right, func(left, right llm.ToolGroup) bool {
+		return left.Name == right.Name && left.Description == right.Description && equalToolSpecs(left.Tools, right.Tools)
+	})
 }
 
 func cloneServerTools(serverTools []llm.ServerTool) []llm.ServerTool {

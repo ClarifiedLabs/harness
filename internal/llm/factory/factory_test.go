@@ -3,6 +3,7 @@ package factory
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -255,5 +256,38 @@ func TestReasoningReplayCurrentTurnReachesAnthropicDialect(t *testing.T) {
 	}
 	if !bytes.Contains(captured, []byte("answer")) {
 		t.Fatalf("assistant text missing from request: %s", captured)
+	}
+}
+
+func TestAnthropicToolSearchReachesDialect(t *testing.T) {
+	var captured []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		captured, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
+	}))
+	defer srv.Close()
+	p, err := New(Options{
+		Provider: "anthropic", Model: "compatible", BaseURL: srv.URL, APIKey: "k",
+		AnthropicToolSearch: llm.AnthropicToolSearchBM25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := llm.Request{
+		Model:              "compatible",
+		Tools:              []llm.ToolSchema{{Name: "tool_catalog", Parameters: json.RawMessage(`{}`)}},
+		DeferredToolGroups: []llm.ToolGroup{{Name: "lsp", Tools: []llm.ToolSchema{{Name: "lsp_definition", Parameters: json.RawMessage(`{}`)}}}},
+		ToolSearchFallback: "tool_catalog",
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
+	}
+	for _, err := range p.Stream(context.Background(), req) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !bytes.Contains(captured, []byte(`"type":"tool_search_tool_bm25_20251119"`)) ||
+		!bytes.Contains(captured, []byte(`"defer_loading":true`)) || bytes.Contains(captured, []byte(`"name":"tool_catalog"`)) {
+		t.Fatalf("Anthropic native tool search not lowered: %s", captured)
 	}
 }

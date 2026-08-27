@@ -533,7 +533,10 @@ prompt. `otel.headers` may come from JSON, `OTEL_EXPORTER_OTLP_HEADERS`, or
 `HARNESS_OTEL_HEADERS` (in increasing precedence), and `${NAME}` references are
 expanded before use. Header values are always redacted from config output. The
 `host.name` resource defaults to the short OS hostname; explicitly setting
-`otel.hostname` to an empty string disables it.
+`otel.hostname` to an empty string disables it. Prompt-cache reporting exports
+`harness.tokens.cache_read` and the write-inclusive denominator
+`harness.tokens.prompt_input`; divide their sums to obtain the token-weighted
+cache-read ratio.
 
 `HARNESS_RESUME` and `HARNESS_SESSION` are invocation-only counterparts to
 `-resume` and `-session`, not persistent settings. `HARNESS_REPL_INPUT_TRACE` is
@@ -739,8 +742,11 @@ environment variables, JSON paths, types, and defaults. The concise
   (empty = core set, `["all"]` = full surface). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
   `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
   If one agent's included MCP/LSP declarations exceed 32 KiB, Harness exposes
-  them lazily through `tool_catalog`; activate selected names there to publish
-  their direct schemas on the next model turn.
+  them lazily from one deferred inventory. Supported native OpenAI Responses
+  requests search complete MCP-server/LSP namespaces; supported Anthropic
+  Messages requests search top-level deferred declarations containing every
+  tool in those groups. Other request paths use `tool_catalog`, where selected
+  names can be activated for the next model turn.
 - Serena can be launched independently with `lsp.serena.enable=true` or
   `HARNESS_LSP_SERENA_ENABLE=true`; this does not imply `lsp.enable=true`.
 - A single turn's output is capped at the configured
@@ -1032,6 +1038,49 @@ URLs. `affinity_headers` can
 copy the same key into non-auth routing headers such as `x-session-id`. The
 proxy derives the provider-facing value as a SHA-256 hash of harness's local
 cache-affinity key, so providers do not receive the raw identifier.
+`explicit_breakpoints` is a tri-state Responses override: omitted enables one
+conservative stable-message breakpoint only for supported first-party OpenAI
+models, `false` disables it, and `true` opts a compatible Responses backend in.
+Harness leaves OpenAI's default implicit breakpoint enabled, keeps top-level
+`instructions` unchanged, and omits explicit markers from token-count and
+compaction requests.
+
+Responses provider configs may set `responses_tool_search`. When omitted,
+Harness enables native hosted tool search on the canonical OpenAI API for
+GPT-5.4-or-newer models except GPT-5.4 Nano, and explicitly for GPT-5.3 Codex
+Spark. It is also enabled for the canonical ChatGPT Codex backend used by
+`openai-codex`, with the same Nano exclusion. Harness sends each complete
+deferred MCP-server or LSP group as
+one namespace tool, adds `{"type":"tool_search"}`, and omits the local
+`tool_catalog` plus any already activated duplicate declarations from that
+request. Set `false` to disable the native path, or `true` to opt a compatible
+Responses endpoint/model in when it implements the same contract. Explicit
+settings override the model defaults, including for Nano.
+Hosted `tool_search_call` and `tool_search_output` items and the selected
+function namespace are persisted for exact stateless replay. If a native
+request is rejected before output with a structured status-400
+`invalid_request_error` for the `tools` parameter, whether in an HTTP response or
+WebSocket error frame, Harness retries once with native search disabled so the
+same neutral inventory is exposed through `tool_catalog`. That downgrade is
+remembered for the model on that provider instance. Other errors and post-output
+failures are not downgraded.
+
+Anthropic provider configs may set `anthropic_tool_search` to `auto`, `bm25`,
+`regex`, or `off`. Omitted and `auto` select the versioned BM25 search tool only
+on the canonical Anthropic API for supported Claude Opus, Sonnet, and Haiku 4.5+
+or Claude 5-family models. Explicit `bm25` or `regex` also opts a compatible
+Anthropic Messages endpoint into that exact wire contract; `off` disables the
+native path. For compatibility with boolean provider files, `true` means `bm25`
+and `false` means `off`.
+
+When enabled, Harness flattens every complete deferred MCP/LSP group into the
+top-level Anthropic `tools` array with `defer_loading:true`, appends the selected
+non-deferred `tool_search_tool_*_20251119` declaration, and omits the local
+`tool_catalog` plus activated duplicates. Anthropic's `server_tool_use` and
+`tool_search_tool_result` blocks are persisted in their original block order for
+same-domain replay; only the ordinary `tool_use` selected from a search result is
+dispatched locally. Anthropic capability selection happens before dispatch; an
+upstream rejection is returned without retry or catalog downgrade.
 
 Provider configs may set `reasoning_replay` to control how much historical
 reasoning state a dialect replays on the wire. The default leaves each
@@ -1316,7 +1365,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/context` | dump the current provider-neutral model context as JSON |
 | `/context <file>` | save the current provider-neutral model context as JSON |
 | `/prompt` | show the full system prompt currently sent to the model, including environment, AGENTS.md, skills, runtime capability hints, and active-agent instructions |
-| `/usage` | cumulative input, cached input, output, reasoning tokens, cost, and successful compactions |
+| `/usage` | cumulative input, cached input and token-weighted cache-read ratio, output, reasoning tokens, cost, and successful compactions |
 | `/evidence` | list the newest bounded session evidence metadata without contacting the model or reading artifact bodies |
 | `/evidence list [--kind evaluator\|tool] [--status STATUS] [--prompt N] [--limit N]` | filter evaluator results, archived/truncated tool outputs, and tool errors by metadata |
 | `/evidence show <id>` | inspect one catalog record, including its current local artifact status and resolved path when safe |
@@ -1370,11 +1419,14 @@ not restored after process restart or `-resume`.
 
 Anthropic extended thinking and 1-hour prompt-cache writes appear as separate
 reasoning and `cache write (1h)` usage buckets. They remain disjoint from output
-and default-rate cache writes in session totals and token budgets.
+and default-rate cache writes in session totals and token budgets. Cache-read
+percentages are token-weighted after aggregation: cache reads divided by
+uncached input plus cache reads plus both cache-write buckets. Cache writes are
+therefore misses for this metric.
 
 An unknown `/command` prints a `did you mean <command>?` suggestion (nearest known
 command by edit distance) instead of failing silently. The per-prompt usage line
-appends cache-read and reasoning token counts (with the cache-hit ratio) when they
+appends cache-read and reasoning token counts (with the cache-read ratio) when they
 are non-zero, conditionally places compaction counters after context usage, and a
 model with no configured price prints a one-time
 `[note: no price configured …]` notice instead of silently dropping cost.

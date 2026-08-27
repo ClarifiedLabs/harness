@@ -5310,8 +5310,12 @@ func compactionPhrase(count int) string {
 // writeUsageTotals writes one usage line: prefix, token counts, afterUsage,
 // then cost when non-zero.
 func writeUsageTotals(b *strings.Builder, prefix string, u session.UsageTotals, afterUsage string) {
-	fmt.Fprintf(b, "%s%d input / %d cached input / %d output / %d reasoning",
-		prefix, u.InputTokens, u.CacheReadTokens, u.OutputTokens, u.ReasoningTokens)
+	fmt.Fprintf(b, "%s%d input / %d cached input",
+		prefix, u.InputTokens, u.CacheReadTokens)
+	if ratio, ok := llm.CacheReadRatio(u.Usage); ok {
+		fmt.Fprintf(b, " (%.1f%%)", ratio*100)
+	}
+	fmt.Fprintf(b, " / %d output / %d reasoning", u.OutputTokens, u.ReasoningTokens)
 	if u.CacheWriteTokens > 0 {
 		fmt.Fprintf(b, " / %d cache write", u.CacheWriteTokens)
 	}
@@ -5790,6 +5794,10 @@ func otelContextComposition(messages []llm.Message) otel.ContextComposition {
 			composition.ReasoningOpaqueBytes += len(block.InteractionThoughtSignature)
 		case llm.BlockInteractionStep:
 			composition.ReasoningOpaqueBytes += len(block.InteractionStep)
+		case llm.BlockResponsesToolSearch:
+			composition.ReasoningOpaqueBytes += len(block.ResponsesToolSearch)
+		case llm.BlockAnthropicToolSearch:
+			composition.ReasoningOpaqueBytes += len(block.AnthropicToolSearch)
 		case llm.BlockProviderCompaction:
 			for _, item := range block.ProviderCompaction {
 				composition.ReasoningOpaqueBytes += len(item)

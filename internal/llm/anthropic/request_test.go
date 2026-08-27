@@ -551,6 +551,92 @@ func TestBuildRequestServerTools(t *testing.T) {
 	}
 }
 
+func TestBuildRequestNativeToolSearchFlattensDeferredGroups(t *testing.T) {
+	req := llm.Request{
+		Model: "claude-opus-4-8",
+		Tools: []llm.ToolSchema{
+			{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)},
+			{Name: "mcp__demo__search", Parameters: json.RawMessage(`{"type":"object"}`)},
+			{Name: "tool_catalog", Parameters: json.RawMessage(`{"type":"object"}`)},
+		},
+		DeferredToolGroups: []llm.ToolGroup{{
+			Name: "mcp_demo",
+			Tools: []llm.ToolSchema{{
+				Name: "mcp__demo__search", Description: "Search demo", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`),
+			}},
+		}},
+		ToolSearchFallback: "tool_catalog",
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
+	}
+	w := buildRequestWithOptions(req, 200_000, 0, "", llm.AnthropicToolSearchBM25)
+	if len(w.Tools) != 3 || w.Tools[0].Name != "read" || w.Tools[0].DeferLoading ||
+		w.Tools[1].Name != "mcp__demo__search" || !w.Tools[1].DeferLoading ||
+		w.Tools[2].Type != "tool_search_tool_bm25_20251119" || w.Tools[2].Name != "tool_search_tool_bm25" {
+		t.Fatalf("tools = %+v, want eager read + deferred MCP tool + BM25 search", w.Tools)
+	}
+	if w.Tools[1].CacheControl != nil || w.Tools[2].CacheControl == nil {
+		t.Fatalf("tool cache controls = deferred:%+v search:%+v, want anchor only on search", w.Tools[1].CacheControl, w.Tools[2].CacheControl)
+	}
+	body, err := json.Marshal(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte(`"name":"tool_catalog"`)) || bytes.Count(body, []byte(`"name":"mcp__demo__search"`)) != 1 {
+		t.Fatalf("native request retained fallback or activated duplicate: %s", body)
+	}
+}
+
+func TestBuildRequestNativeToolSearchRequiresDeferredGroups(t *testing.T) {
+	req := llm.Request{
+		Tools:              []llm.ToolSchema{{Name: "tool_catalog", Parameters: json.RawMessage(`{}`)}},
+		ToolSearchFallback: "tool_catalog",
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
+	}
+	w := buildRequestWithOptions(req, 200_000, 0, "", llm.AnthropicToolSearchBM25)
+	if len(w.Tools) != 1 || w.Tools[0].Name != "tool_catalog" || w.Tools[0].Type != "" {
+		t.Fatalf("tools = %+v, want unchanged local catalog without deferred inventory", w.Tools)
+	}
+}
+
+func TestBuildRequestNativeToolSearchRegexVariant(t *testing.T) {
+	req := llm.Request{
+		Model:              "compatible",
+		DeferredToolGroups: []llm.ToolGroup{{Name: "lsp", Tools: []llm.ToolSchema{{Name: "lsp_definition", Parameters: json.RawMessage(`{}`)}}}},
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
+	}
+	w := buildRequestWithOptions(req, 200_000, 0, "", llm.AnthropicToolSearchRegex)
+	last := w.Tools[len(w.Tools)-1]
+	if last.Type != "tool_search_tool_regex_20251119" || last.Name != "tool_search_tool_regex" {
+		t.Fatalf("search tool = %+v", last)
+	}
+}
+
+func TestBuildRequestReplaysAnthropicToolSearchWithoutCacheMutation(t *testing.T) {
+	server := json.RawMessage(`{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"language server"}}`)
+	result := json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"lsp_definition"}]}}`)
+	req := llm.Request{Model: "claude-opus-4-8", Messages: []llm.Message{{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Kind: llm.BlockText, Text: "Searching."},
+		{Kind: llm.BlockAnthropicToolSearch, AnthropicToolSearch: server},
+		{Kind: llm.BlockAnthropicToolSearch, AnthropicToolSearch: result},
+	}}}}
+	w := buildRequest(req, 200_000, 0)
+	content := w.Messages[0].Content
+	if len(content) != 3 || content[0].CacheControl == nil || content[1].CacheControl != nil || content[2].CacheControl != nil {
+		t.Fatalf("replayed content/cache = %+v", content)
+	}
+	gotServer, err := json.Marshal(content[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotResult, err := json.Marshal(content[2])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotServer, server) || !bytes.Equal(gotResult, result) {
+		t.Fatalf("opaque search blocks changed:\nserver=%s\nresult=%s", gotServer, gotResult)
+	}
+}
+
 func TestBuildRequestCacheBreakpointSkipsRequestContext(t *testing.T) {
 	// The volatile request-only context (e.g. a [todo] reminder) rides a
 	// trailing user message, not the system head: appearing or changing at the

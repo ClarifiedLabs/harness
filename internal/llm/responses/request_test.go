@@ -394,6 +394,132 @@ func TestBuildRequestPromptCacheKeyOmittedWhenEmpty(t *testing.T) {
 	}
 }
 
+func TestBuildRequestPlacesExplicitPromptCacheBreakpointAtStablePrefix(t *testing.T) {
+	req := llm.Request{
+		Model:  "gpt-5.6",
+		System: "stable instructions",
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "stable"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "reply"}}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "current"}}},
+		},
+		CachePolicy: llm.CachePolicy{StableMessagePrefix: 1},
+	}
+	w := buildRequest(req, 0, 0)
+	if w.Instructions != req.System {
+		t.Fatalf("instructions = %q, want unchanged top-level system", w.Instructions)
+	}
+	if got := contentParts(t, w.Input[0])[0].PromptCacheBreakpoint; got == nil || got.Mode != "explicit" {
+		t.Fatalf("stable content breakpoint = %+v, want explicit", got)
+	}
+	if got := countPromptCacheBreakpoints(w.Input); got != 1 {
+		t.Fatalf("breakpoint count = %d, want 1", got)
+	}
+	body, err := json.Marshal(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte("prompt_cache_options")) {
+		t.Fatalf("request unexpectedly changed implicit cache mode: %s", body)
+	}
+}
+
+func TestBuildRequestPromptCacheBreakpointRespectsContextAndImplicitTail(t *testing.T) {
+	req := llm.Request{
+		Model:          "gpt-5.6",
+		RequestContext: []string{"volatile"},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "older"}}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "current"}}},
+		},
+		CachePolicy: llm.CachePolicy{StableMessagePrefix: 2},
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Input) != 3 || w.Input[1].Role != "developer" {
+		t.Fatalf("input order = %+v, want stable/context/current", w.Input)
+	}
+	if contentParts(t, w.Input[0])[0].PromptCacheBreakpoint == nil || countPromptCacheBreakpoints(w.Input) != 1 {
+		t.Fatalf("volatile context was not kept after the sole breakpoint: %+v", w.Input)
+	}
+
+	req.RequestContext = nil
+	w = buildRequest(req, 0, 0)
+	if got := countPromptCacheBreakpoints(w.Input); got != 0 {
+		t.Fatalf("tail breakpoint count = %d, want implicit breakpoint only", got)
+	}
+}
+
+func TestBuildRequestPromptCacheBreakpointCapabilityGate(t *testing.T) {
+	request := func(model string) llm.Request {
+		return llm.Request{
+			Model: model,
+			Messages: []llm.Message{
+				{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "stable"}}},
+				{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "current"}}},
+			},
+			CachePolicy: llm.CachePolicy{StableMessagePrefix: 1},
+		}
+	}
+	if got := countPromptCacheBreakpoints(buildRequest(request("gpt-5.5"), 0, 0).Input); got != 0 {
+		t.Fatalf("older model breakpoint count = %d, want 0", got)
+	}
+	if got := countPromptCacheBreakpoints(buildRequestWithConfig(request("gpt-5.6"), 0, 0, buildOptions{
+		baseURL: "https://compatible.test/v1",
+	}).Input); got != 0 {
+		t.Fatalf("compatible auto breakpoint count = %d, want 0", got)
+	}
+	enabled, disabled := true, false
+	if got := countPromptCacheBreakpoints(buildRequestWithConfig(request("custom-model"), 0, 0, buildOptions{
+		baseURL: "https://compatible.test/v1", promptCache: llm.PromptCacheConfig{ExplicitBreakpoints: &enabled},
+	}).Input); got != 1 {
+		t.Fatalf("compatible opt-in breakpoint count = %d, want 1", got)
+	}
+	if got := countPromptCacheBreakpoints(buildRequestWithConfig(request("gpt-5.6"), 0, 0, buildOptions{
+		baseURL: defaultBaseURL, promptCache: llm.PromptCacheConfig{ExplicitBreakpoints: &disabled},
+	}).Input); got != 0 {
+		t.Fatalf("first-party opt-out breakpoint count = %d, want 0", got)
+	}
+}
+
+func TestBuildRequestPromptCacheBreakpointDoesNotRewriteOpaqueItems(t *testing.T) {
+	raw := json.RawMessage(`{"type":"compaction","encrypted_content":"opaque","provider_extension":{"x":1}}`)
+	req := llm.Request{
+		Model: "gpt-5.6",
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockProviderCompaction, ProviderCompaction: []json.RawMessage{raw}}}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "current"}}},
+		},
+		CachePolicy: llm.CachePolicy{StableMessagePrefix: 1},
+	}
+	w := buildRequest(req, 0, 0)
+	if got := countPromptCacheBreakpoints(w.Input); got != 0 {
+		t.Fatalf("opaque-only stable prefix breakpoint count = %d, want 0", got)
+	}
+	got, err := json.Marshal(w.Input[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatalf("opaque item changed: got %s want %s", got, raw)
+	}
+}
+
+func countPromptCacheBreakpoints(input []wireInputItem) int {
+	count := 0
+	for _, item := range input {
+		parts, ok := item.Content.([]wireContentPart)
+		if !ok {
+			continue
+		}
+		for _, part := range parts {
+			if part.PromptCacheBreakpoint != nil {
+				count++
+			}
+		}
+	}
+	return count
+}
+
 func TestBuildWebSocketRequestUsesResponseCreateEnvelope(t *testing.T) {
 	req := basicRequest()
 	req.StoreResponse = true
@@ -566,6 +692,117 @@ func TestBuildRequestServerTools(t *testing.T) {
 	}
 	if !w.ParallelTools {
 		t.Fatal("parallel_tool_calls = false, want true when server tools are present")
+	}
+}
+
+func TestBuildRequestUsesNativeToolSearchForDeferredGroups(t *testing.T) {
+	req := llm.Request{
+		Model: "gpt-5.6",
+		Tools: []llm.ToolSchema{
+			{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)},
+			{Name: "mcp__demo__search", Parameters: json.RawMessage(`{"type":"object"}`)}, // locally activated duplicate
+			{Name: "tool_catalog", Parameters: json.RawMessage(`{"type":"object"}`)},
+		},
+		DeferredToolGroups: []llm.ToolGroup{{
+			Name:        "mcp_demo",
+			Description: "Tools provided by demo.",
+			Tools: []llm.ToolSchema{{
+				Name: "mcp__demo__search", Description: "Search demo", Parameters: json.RawMessage(`{"type":"object","properties":{"q":{"type":"string"}}}`),
+			}},
+		}},
+		ToolSearchFallback: "tool_catalog",
+	}
+	w := buildRequest(req, 0, 0)
+	if len(w.Tools) != 3 || w.Tools[0].Type != "function" || w.Tools[0].Name != "read" ||
+		w.Tools[1].Type != "namespace" || w.Tools[1].Name != "mcp_demo" || w.Tools[2].Type != "tool_search" {
+		t.Fatalf("tools = %+v, want read + deferred namespace + tool_search", w.Tools)
+	}
+	if len(w.Tools[1].Tools) != 1 || w.Tools[1].Tools[0].Name != "mcp__demo__search" || !w.Tools[1].Tools[0].DeferLoading {
+		t.Fatalf("namespace tools = %+v, want deferred search function", w.Tools[1].Tools)
+	}
+	body, err := json.Marshal(w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(body, []byte(`"name":"tool_catalog"`)) || bytes.Count(body, []byte(`"name":"mcp__demo__search"`)) != 1 {
+		t.Fatalf("native request retained local fallback or duplicate: %s", body)
+	}
+}
+
+func TestToolSearchEnabledDefaultsOnForCodexBackend(t *testing.T) {
+	const baseURL = "https://chatgpt.com/backend-api/codex"
+
+	if !toolSearchEnabled("gpt-5.3-codex-spark", baseURL, nil) {
+		t.Fatal("toolSearchEnabled() = false for Codex Spark on canonical Codex backend, want true")
+	}
+	if !toolSearchEnabled("gpt-5.3-codex-spark", baseURL+"/", nil) {
+		t.Fatal("toolSearchEnabled() = false for canonical Codex backend with trailing slash, want true")
+	}
+	if toolSearchEnabled("gpt-5.4-nano", baseURL, nil) {
+		t.Fatal("toolSearchEnabled() = true for Nano on canonical Codex backend, want false")
+	}
+
+	disabled := false
+	if toolSearchEnabled("gpt-5.3-codex-spark", baseURL, &disabled) {
+		t.Fatal("toolSearchEnabled() = true with explicit opt-out, want false")
+	}
+	if toolSearchEnabled("gpt-5.3-codex-spark", "https://example.com/backend-api/codex", nil) {
+		t.Fatal("toolSearchEnabled() = true for non-canonical Codex endpoint, want false")
+	}
+}
+
+func TestToolSearchCapabilityGate(t *testing.T) {
+	enabled, disabled := true, false
+	for _, tc := range []struct {
+		name     string
+		model    string
+		baseURL  string
+		override *bool
+		want     bool
+	}{
+		{name: "first supported", model: "gpt-5.4", baseURL: defaultBaseURL, want: true},
+		{name: "mini supported", model: "gpt-5.4-mini", baseURL: defaultBaseURL, want: true},
+		{name: "nano excluded", model: "gpt-5.4-nano", baseURL: defaultBaseURL},
+		{name: "nano snapshot excluded", model: "gpt-5.4-nano-2026-08-01", baseURL: defaultBaseURL},
+		{name: "codex spark supported", model: "gpt-5.3-codex-spark", baseURL: defaultBaseURL, want: true},
+		{name: "snapshot", model: "gpt-5.6-2026-08-01", baseURL: defaultBaseURL, want: true},
+		{name: "qualified", model: "openai:gpt-6.0", baseURL: defaultBaseURL, want: true},
+		{name: "older", model: "gpt-5.3", baseURL: defaultBaseURL},
+		{name: "custom endpoint", model: "gpt-5.6", baseURL: "https://compatible.test/v1"},
+		{name: "compatible opt in", model: "custom", baseURL: "https://compatible.test/v1", override: &enabled, want: true},
+		{name: "nano explicit opt in", model: "gpt-5.4-nano", baseURL: defaultBaseURL, override: &enabled, want: true},
+		{name: "official opt out", model: "gpt-5.6", baseURL: defaultBaseURL, override: &disabled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toolSearchEnabled(tc.model, tc.baseURL, tc.override); got != tc.want {
+				t.Fatalf("toolSearchEnabled(%q, %q) = %v, want %v", tc.model, tc.baseURL, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBuildInputReplaysHostedToolSearchItems(t *testing.T) {
+	call := json.RawMessage(`{"type":"tool_search_call","execution":"server","call_id":null,"status":"completed","arguments":{"paths":["mcp_demo"]}}`)
+	output := json.RawMessage(`{"type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":[{"type":"namespace","name":"mcp_demo","tools":[]}]}`)
+	input := buildInput([]llm.Message{{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Kind: llm.BlockResponsesToolSearch, ResponsesToolSearch: call},
+		{Kind: llm.BlockResponsesToolSearch, ResponsesToolSearch: output},
+		{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "mcp__demo__search", ToolNamespace: "mcp_demo", ToolInput: json.RawMessage(`{}`)},
+	}}}, false)
+	if len(input) != 3 || input[0].Type != "tool_search_call" || input[1].Type != "tool_search_output" || input[2].Type != "function_call" {
+		t.Fatalf("input order = %+v", input)
+	}
+	if input[2].Namespace != "mcp_demo" {
+		t.Fatalf("replayed function namespace = %q, want mcp_demo", input[2].Namespace)
+	}
+	for i, want := range []json.RawMessage{call, output} {
+		got, err := json.Marshal(input[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("input[%d] = %s, want exact %s", i, got, want)
+		}
 	}
 }
 

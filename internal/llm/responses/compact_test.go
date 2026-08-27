@@ -59,6 +59,26 @@ func TestCompactContextReturnsCanonicalWindow(t *testing.T) {
 	}
 }
 
+func TestCompactionRequestOmitsPromptCacheBreakpoints(t *testing.T) {
+	enabled := true
+	p := New(Config{BaseURL: "https://compatible.test/v1", PromptCache: llm.PromptCacheConfig{ExplicitBreakpoints: &enabled}})
+	base, input := p.compactionRequestBase(llm.Request{
+		Model: "custom-model",
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "stable"}}},
+			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "current"}}},
+		},
+		CachePolicy: llm.CachePolicy{StableMessagePrefix: 1},
+	})
+	body := mustJSON(t, struct {
+		Base  wireRequest     `json:"base"`
+		Input []wireInputItem `json:"input"`
+	}{base, input})
+	if strings.Contains(body, "prompt_cache_breakpoint") || strings.Contains(body, "prompt_cache_options") {
+		t.Fatalf("compaction request contains cache write controls: %s", body)
+	}
+}
+
 func TestCompactContextRejectsWindowWithoutCompactionItem(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"x","object":"response.compaction","output":[{"type":"message","role":"user","content":[]}],"usage":{}}`))

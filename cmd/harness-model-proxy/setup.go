@@ -65,6 +65,8 @@ type setupProviderConfig struct {
 	ResponsesStateful       *bool                     `json:"responses_stateful,omitempty"`
 	ResponsesWebSocket      *bool                     `json:"responses_websocket,omitempty"`
 	ResponsesCompaction     *bool                     `json:"responses_compaction,omitempty"`
+	ResponsesToolSearch     *bool                     `json:"responses_tool_search,omitempty"`
+	AnthropicToolSearch     llm.AnthropicToolSearch   `json:"anthropic_tool_search,omitempty"`
 	InteractionsStateful    *bool                     `json:"interactions_stateful,omitempty"`
 	ServerTools             []string                  `json:"server_tools,omitempty"`
 	ServiceTiers            []llm.ServiceTier         `json:"service_tiers,omitempty"`
@@ -201,6 +203,12 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 	}
 	if existingProvider.Config.ResponsesCompaction != nil {
 		provider.ResponsesCompaction = existingProvider.Config.ResponsesCompaction
+	}
+	if existingProvider.Config.ResponsesToolSearch != nil {
+		provider.ResponsesToolSearch = existingProvider.Config.ResponsesToolSearch
+	}
+	if existingProvider.Config.AnthropicToolSearch != "" {
+		provider.AnthropicToolSearch = existingProvider.Config.AnthropicToolSearch
 	}
 	if existingProvider.Config.InteractionsStateful != nil {
 		provider.InteractionsStateful = existingProvider.Config.InteractionsStateful
@@ -777,6 +785,12 @@ func setupProviderFromCurrent(current llm.ProviderConfig, meta *modelcatalog.Pro
 	}
 	if current.ResponsesCompaction != nil {
 		next.ResponsesCompaction = current.ResponsesCompaction
+	}
+	if current.ResponsesToolSearch != nil {
+		next.ResponsesToolSearch = current.ResponsesToolSearch
+	}
+	if current.AnthropicToolSearch != "" {
+		next.AnthropicToolSearch = current.AnthropicToolSearch
 	}
 	if current.InteractionsStateful != nil {
 		next.InteractionsStateful = current.InteractionsStateful

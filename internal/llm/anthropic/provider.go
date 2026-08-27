@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,6 +49,7 @@ type Config struct {
 	// "current_turn" drops thinking older than the in-flight tool chain for
 	// providers that document Anthropic-style history dropping.
 	ReasoningReplay llm.ReasoningReplay
+	ToolSearch      llm.AnthropicToolSearch
 	HTTPClient      *http.Client
 	Sleep           func(time.Duration) // nil = time.Sleep
 }
@@ -61,6 +63,7 @@ type Provider struct {
 	outputLimit             int
 	usageInputIncludesCache bool
 	reasoningReplay         llm.ReasoningReplay
+	toolSearch              llm.AnthropicToolSearch
 	client                  *http.Client
 	sleep                   func(time.Duration)
 }
@@ -85,6 +88,7 @@ func New(cfg Config) *Provider {
 		outputLimit:             cfg.OutputLimit,
 		usageInputIncludesCache: cfg.UsageInputIncludesCache,
 		reasoningReplay:         reasoningReplay,
+		toolSearch:              cfg.ToolSearch,
 		client:                  client,
 		sleep:                   sleep,
 	}
@@ -99,10 +103,48 @@ func isOfficialAnthropicEndpoint(base string) bool {
 	}
 	// Accept any scheme/port on the exact official host; gateways on other hosts —
 	// including a localhost proxy that forwards to it — are excluded.
-	return parsed.Hostname() == "api.anthropic.com"
+	return strings.EqualFold(parsed.Hostname(), "api.anthropic.com")
 }
 
 func (p *Provider) Name() string { return "anthropic" }
+
+func (p *Provider) resolvedToolSearch(model string) llm.AnthropicToolSearch {
+	switch p.toolSearch {
+	case llm.AnthropicToolSearchOff:
+		return ""
+	case llm.AnthropicToolSearchBM25, llm.AnthropicToolSearchRegex:
+		return p.toolSearch
+	case "", llm.AnthropicToolSearchAuto:
+		if isOfficialAnthropicEndpoint(p.baseURL) && supportsToolSearch(model) {
+			return llm.AnthropicToolSearchBM25
+		}
+	}
+	return ""
+}
+
+func supportsToolSearch(model string) bool {
+	parts := strings.Split(strings.ToLower(strings.TrimSpace(model)), "-")
+	if len(parts) < 3 || parts[0] != "claude" {
+		return false
+	}
+	switch parts[1] {
+	case "opus", "sonnet", "haiku", "fable", "mythos":
+	default:
+		return false
+	}
+	major, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return false
+	}
+	if major >= 5 {
+		return true
+	}
+	if major != 4 || len(parts) < 4 {
+		return false
+	}
+	minor, err := strconv.Atoi(parts[3])
+	return err == nil && minor >= 5
+}
 
 // Stream runs one model call. Retries here apply only before the first response
 // byte; once tokens stream, failures are terminal for this stream and may be
@@ -110,8 +152,9 @@ func (p *Provider) Name() string { return "anthropic" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		wireReq := buildRequestWithReasoningReplay(req, p.contextWindow, p.outputLimit, p.reasoningReplay)
+		wireReq := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.reasoningReplay, p.resolvedToolSearch(req.Model))
 		var aggregate llm.Usage
+		contentIndexBase := 0
 		for continuations := 0; ; {
 			body, err := json.Marshal(wireReq)
 			if err != nil {
@@ -122,7 +165,13 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			if err != nil || resp == nil {
 				return
 			}
-			result, consumed, decodeErr := p.decode(ctx, resp.Body, aggregate, yield)
+			indexBase := contentIndexBase
+			result, consumed, decodeErr := p.decode(ctx, resp.Body, aggregate, func(ev llm.StreamEvent, err error) bool {
+				if anthropicContentEvent(ev.Kind) {
+					ev.Index += indexBase
+				}
+				return yield(ev, err)
+			})
 			_ = resp.Body.Close()
 			if decodeErr != nil {
 				yield(llm.StreamEvent{}, llm.WithUpstreamRequestID(decodeErr, resp.Header))
@@ -131,6 +180,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			if !consumed {
 				return
 			}
+			contentIndexBase += result.nextContentIndex
 			total := addAnthropicUsage(aggregate, result.usage)
 			if result.stopReason != "pause_turn" {
 				yield(llm.StreamEvent{
@@ -164,6 +214,20 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 	}
 }
 
+func anthropicContentEvent(kind llm.EventKind) bool {
+	switch kind {
+	case llm.EventTextDelta,
+		llm.EventReasoningSummary,
+		llm.EventToolCallStart,
+		llm.EventToolCallDelta,
+		llm.EventToolCallDone,
+		llm.EventAnthropicToolSearch:
+		return true
+	default:
+		return false
+	}
+}
+
 // connect performs the request via the shared retry-before-first-byte loop
 // (llm.Connect); the dialect supplies the Messages endpoint, the versioned
 // x-api-key auth headers, and its error-body parser.
@@ -193,15 +257,22 @@ func (p *Provider) applyHeaders(r *http.Request, betas []string) {
 }
 
 type streamDecodeResult struct {
-	usage         llm.Usage
-	stopReason    string
-	assistant     wireMessage
-	sawClientTool bool
+	usage            llm.Usage
+	stopReason       string
+	assistant        wireMessage
+	sawClientTool    bool
+	nextContentIndex int
+}
+
+type hostedToolSearchCall struct {
+	index int
+	raw   json.RawMessage
 }
 
 type streamedBlock struct {
-	content wireContent
-	args    strings.Builder
+	content    wireContent
+	args       strings.Builder
+	searchCall *hostedToolSearchCall
 }
 
 type wireContentBlockStart struct {
@@ -211,6 +282,7 @@ type wireContentBlockStart struct {
 	Text      string            `json:"text"`
 	Citations []json.RawMessage `json:"citations"`
 	Input     json.RawMessage   `json:"input"`
+	ToolUseID string            `json:"tool_use_id"`
 	Thinking  string            `json:"thinking"`
 	Signature string            `json:"signature"`
 	Data      string            `json:"data"`
@@ -223,6 +295,8 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 	asm := newToolAssembler()
 	active := make(map[int]*streamedBlock)
 	completedBlocks := make(map[int]wireContent)
+	openToolSearch := make(map[string]hostedToolSearchCall)
+	seenToolSearch := make(map[string]bool)
 	var rawUsage wireUsage
 	var usage llm.Usage
 	stopReason := "end_turn"
@@ -286,11 +360,23 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 					return streamDecodeResult{}, false, nil
 				}
 			case "server_tool_use":
-				if start.Name != "web_search" {
+				if start.Name != "web_search" && start.Name != "tool_search_tool_bm25" && start.Name != "tool_search_tool_regex" {
 					return streamDecodeResult{}, true, fmt.Errorf("anthropic: unsupported server tool %q", start.Name)
 				}
+				block.content.Raw = append(json.RawMessage(nil), data.ContentBlock...)
 			case "web_search_tool_result":
 				block.content.Raw = append(json.RawMessage(nil), data.ContentBlock...)
+			case "tool_search_tool_result":
+				block.content.Raw = append(json.RawMessage(nil), data.ContentBlock...)
+				if _, ok := llm.PersistedAnthropicToolSearch(llm.StreamEvent{Kind: llm.EventAnthropicToolSearch, AnthropicToolSearch: block.content.Raw}); !ok {
+					return streamDecodeResult{}, true, fmt.Errorf("anthropic: invalid tool_search_tool_result at index %d", data.Index)
+				}
+				call, ok := openToolSearch[start.ToolUseID]
+				if !ok {
+					return streamDecodeResult{}, true, fmt.Errorf("anthropic: tool_search_tool_result %q at index %d does not match an open server_tool_use", start.ToolUseID, data.Index)
+				}
+				block.searchCall = &call
+				delete(openToolSearch, start.ToolUseID)
 			default:
 				return streamDecodeResult{}, true, fmt.Errorf("anthropic: unsupported content block type %q", start.Type)
 			}
@@ -310,7 +396,7 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
 				}
 				block.content.Text += data.Delta.Text
-				if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: data.Delta.Text}, nil) {
+				if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Index: data.Index, Text: data.Delta.Text}, nil) {
 					return streamDecodeResult{}, false, nil
 				}
 			case "thinking_delta":
@@ -359,6 +445,7 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 				tb := &thinkingBlock{signature: block.content.Signature}
 				tb.text.WriteString(block.content.Thinking)
 				if ev, ok := tb.event(); ok {
+					ev.Index = data.Index
 					if !yield(ev, nil) {
 						return streamDecodeResult{}, false, nil
 					}
@@ -366,6 +453,7 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			case "redacted_thinking":
 				tb := &thinkingBlock{redacted: block.content.Data, isRedacted: true}
 				if ev, ok := tb.event(); ok {
+					ev.Index = data.Index
 					if !yield(ev, nil) {
 						return streamDecodeResult{}, false, nil
 					}
@@ -392,6 +480,31 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 					return streamDecodeResult{}, true, fmt.Errorf("anthropic: invalid server_tool_use input at index %d: %w", data.Index, err)
 				}
 				block.content.Input = input
+				complete, err := serverToolUseWithInput(block.content.Raw, input)
+				if err != nil {
+					return streamDecodeResult{}, true, fmt.Errorf("anthropic: encode server tool input at index %d: %w", data.Index, err)
+				}
+				block.content.Raw = complete
+				if block.content.Name == "tool_search_tool_bm25" || block.content.Name == "tool_search_tool_regex" {
+					if _, ok := llm.PersistedAnthropicToolSearch(llm.StreamEvent{Kind: llm.EventAnthropicToolSearch, AnthropicToolSearch: complete}); !ok {
+						return streamDecodeResult{}, true, fmt.Errorf("anthropic: invalid tool-search server_tool_use at index %d", data.Index)
+					}
+					if seenToolSearch[block.content.ID] {
+						return streamDecodeResult{}, true, fmt.Errorf("anthropic: duplicate tool-search server_tool_use id %q", block.content.ID)
+					}
+					seenToolSearch[block.content.ID] = true
+					openToolSearch[block.content.ID] = hostedToolSearchCall{index: data.Index, raw: append(json.RawMessage(nil), complete...)}
+				}
+			case "tool_search_tool_result":
+				if block.searchCall == nil {
+					return streamDecodeResult{}, true, fmt.Errorf("anthropic: tool_search_tool_result at index %d lost its server call", data.Index)
+				}
+				if !yield(llm.StreamEvent{Kind: llm.EventAnthropicToolSearch, Index: block.searchCall.index, AnthropicToolSearch: append(json.RawMessage(nil), block.searchCall.raw...)}, nil) {
+					return streamDecodeResult{}, false, nil
+				}
+				if !yield(llm.StreamEvent{Kind: llm.EventAnthropicToolSearch, Index: data.Index, AnthropicToolSearch: append(json.RawMessage(nil), block.content.Raw...)}, nil) {
+					return streamDecodeResult{}, false, nil
+				}
 			}
 			completedBlocks[data.Index] = block.content
 
@@ -412,6 +525,9 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			if len(active) != 0 {
 				return streamDecodeResult{}, true, fmt.Errorf("anthropic: message_stop with %d unfinished content blocks", len(active))
 			}
+			if len(openToolSearch) != 0 {
+				return streamDecodeResult{}, true, fmt.Errorf("anthropic: message_stop with %d unanswered tool-search server call(s)", len(openToolSearch))
+			}
 			indexes := make([]int, 0, len(completedBlocks))
 			for index := range completedBlocks {
 				indexes = append(indexes, index)
@@ -421,11 +537,16 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			for _, index := range indexes {
 				content = append(content, completedBlocks[index])
 			}
+			nextContentIndex := 0
+			if len(indexes) > 0 {
+				nextContentIndex = indexes[len(indexes)-1] + 1
+			}
 			return streamDecodeResult{
-				usage:         usage,
-				stopReason:    stopReason,
-				assistant:     wireMessage{Role: "assistant", Content: content},
-				sawClientTool: sawClientTool,
+				usage:            usage,
+				stopReason:       stopReason,
+				assistant:        wireMessage{Role: "assistant", Content: content},
+				sawClientTool:    sawClientTool,
+				nextContentIndex: nextContentIndex,
 			}, true, nil
 
 		case "error":
@@ -454,6 +575,18 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 
 func deltaTypeMismatch(index int, deltaType, blockType string) error {
 	return fmt.Errorf("anthropic: delta type %q does not match content block %d type %q", deltaType, index, blockType)
+}
+
+func serverToolUseWithInput(raw, input json.RawMessage) (json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return nil, err
+	}
+	if fields == nil {
+		return nil, fmt.Errorf("server_tool_use block is not an object")
+	}
+	fields["input"] = append(json.RawMessage(nil), input...)
+	return json.Marshal(fields)
 }
 
 func clearMessageCacheBreakpoints(messages []wireMessage) {

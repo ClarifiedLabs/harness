@@ -114,6 +114,13 @@ const (
 	// BlockInteractionStep carries a complete provider-managed Interactions
 	// step needed for stateless replay. It is never rendered or dispatched.
 	BlockInteractionStep BlockKind = "interaction_step"
+	// BlockResponsesToolSearch carries one complete hosted OpenAI tool-search
+	// call or output item. It is replayed verbatim for stateless continuity and
+	// never rendered or dispatched.
+	BlockResponsesToolSearch BlockKind = "responses_tool_search"
+	// BlockAnthropicToolSearch carries one complete Anthropic server_tool_use or
+	// tool_search_tool_result block. It is replayed verbatim and never dispatched.
+	BlockAnthropicToolSearch BlockKind = "anthropic_tool_search"
 	// BlockProviderCompaction carries a provider-native canonical context window.
 	// It is replayed only to the same configured model compatibility domain and
 	// is never rendered, summarized, or dispatched as conversational content.
@@ -144,9 +151,10 @@ type ContentBlock struct {
 
 	// BlockToolUse (assistant calls a tool). ToolName is also retained on the
 	// matching BlockToolResult for dialects that require it in the result.
-	ToolUseID string          `json:"tool_use_id,omitempty"` // provider-issued call id
-	ToolName  string          `json:"tool_name,omitempty"`
-	ToolInput json.RawMessage `json:"tool_input,omitempty"` // complete JSON object
+	ToolUseID     string          `json:"tool_use_id,omitempty"` // provider-issued call id
+	ToolName      string          `json:"tool_name,omitempty"`
+	ToolNamespace string          `json:"tool_namespace,omitempty"` // provider namespace for exact replay; local dispatch still uses ToolName
+	ToolInput     json.RawMessage `json:"tool_input,omitempty"`     // complete JSON object
 
 	// BlockToolResult (we answer a tool call). ResultContent is shallow,
 	// supplementary model-visible content; it is currently restricted to images.
@@ -181,6 +189,12 @@ type ContentBlock struct {
 	// BlockInteractionStep
 	InteractionStep json.RawMessage `json:"interaction_step,omitempty"`
 
+	// BlockResponsesToolSearch
+	ResponsesToolSearch json.RawMessage `json:"responses_tool_search,omitempty"`
+
+	// BlockAnthropicToolSearch
+	AnthropicToolSearch json.RawMessage `json:"anthropic_tool_search,omitempty"`
+
 	// BlockProviderCompaction. Each entry is one opaque provider input item in
 	// canonical order. The compatibility domain uses ReasoningReplayDomain above.
 	ProviderCompaction []json.RawMessage `json:"provider_compaction,omitempty"`
@@ -191,6 +205,7 @@ type ContentBlock struct {
 type ToolCall struct {
 	ID                string
 	Name              string
+	Namespace         string
 	Input             json.RawMessage
 	InvalidInputError string
 }

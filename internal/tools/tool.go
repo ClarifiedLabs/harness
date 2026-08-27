@@ -227,13 +227,14 @@ type SchemaDescriptionPreserver interface {
 // Registry is an ordered set of tools. Order is preserved so Specs and the
 // model-facing tool list are stable across runs.
 type Registry struct {
-	order            []string
-	tools            map[string]Tool
-	dispatchGuard    func(llm.ToolCall, Activity) error
-	specFilter       func(string) bool
-	dispatchTimeout  time.Duration // zero = no dispatch-level timeout
-	resultLimits     resultLimits
-	toolResultLimits map[string]resultLimits
+	order              []string
+	tools              map[string]Tool
+	dispatchGuard      func(llm.ToolCall, Activity) error
+	specFilter         func(string) bool
+	deferredToolGroups []llm.ToolGroup
+	dispatchTimeout    time.Duration // zero = no dispatch-level timeout
+	resultLimits       resultLimits
+	toolResultLimits   map[string]resultLimits
 }
 
 // SetDispatchGuard installs a dynamic semantic gate checked immediately before
@@ -567,20 +568,42 @@ func (r *Registry) Specs() []llm.ToolSchema {
 		if r.specFilter != nil && !r.specFilter(name) {
 			continue
 		}
-		t := r.tools[name]
-		preserveDescriptions := false
-		if preserver, ok := t.(SchemaDescriptionPreserver); ok {
-			preserveDescriptions = preserver.PreserveSchemaDescriptions()
-		}
-		parameters := modelSchemaWithPolicy(t.Schema(), preserveDescriptions)
-		parameters = modelSchemaWithExecutionMetadata(parameters)
-		specs = append(specs, llm.ToolSchema{
-			Name:        t.Name(),
-			Description: t.Description(),
-			Parameters:  parameters,
-		})
+		specs = append(specs, r.toolSpec(name))
 	}
 	return specs
+}
+
+// DeferredToolGroups returns immutable copies of the optional-tool inventory
+// hidden behind the local catalog. Providers with native tool search may use
+// the same inventory without changing local lookup or authorization.
+func (r *Registry) DeferredToolGroups() []llm.ToolGroup {
+	return cloneToolGroups(r.deferredToolGroups)
+}
+
+func (r *Registry) toolSpec(name string) llm.ToolSchema {
+	t := r.tools[name]
+	preserveDescriptions := false
+	if preserver, ok := t.(SchemaDescriptionPreserver); ok {
+		preserveDescriptions = preserver.PreserveSchemaDescriptions()
+	}
+	parameters := modelSchemaWithPolicy(t.Schema(), preserveDescriptions)
+	parameters = modelSchemaWithExecutionMetadata(parameters)
+	return llm.ToolSchema{
+		Name:        t.Name(),
+		Description: t.Description(),
+		Parameters:  parameters,
+	}
+}
+
+func cloneToolGroups(groups []llm.ToolGroup) []llm.ToolGroup {
+	out := append([]llm.ToolGroup(nil), groups...)
+	for i := range out {
+		out[i].Tools = append([]llm.ToolSchema(nil), groups[i].Tools...)
+		for j := range out[i].Tools {
+			out[i].Tools[j].Parameters = append(json.RawMessage(nil), groups[i].Tools[j].Parameters...)
+		}
+	}
+	return out
 }
 
 func modelSchema(raw json.RawMessage) json.RawMessage {

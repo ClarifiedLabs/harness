@@ -112,16 +112,24 @@ func NormalizeRequestPurpose(purpose RequestPurpose) RequestPurpose {
 
 // Request is one model call's worth of input, provider-neutral.
 type Request struct {
-	Model       string          `json:"model"`
-	Purpose     RequestPurpose  `json:"purpose,omitempty"` // harness/model-proxy metadata; never forwarded upstream
-	System      string          `json:"system,omitempty"`
-	Messages    []Message       `json:"messages,omitempty"`
-	Tools       []ToolSchema    `json:"tools,omitempty"`
-	ServerTools []ServerTool    `json:"server_tools,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`  // 0 = provider policy (see design §5.4)
-	Temperature *float64        `json:"temperature,omitempty"` // nil = omit
-	Reasoning   ReasoningConfig `json:"reasoning,omitempty"`
-	StopSeqs    []string        `json:"stop_seqs,omitempty"`
+	Model    string         `json:"model"`
+	Purpose  RequestPurpose `json:"purpose,omitempty"` // harness/model-proxy metadata; never forwarded upstream
+	System   string         `json:"system,omitempty"`
+	Messages []Message      `json:"messages,omitempty"`
+	Tools    []ToolSchema   `json:"tools,omitempty"`
+	// DeferredToolGroups contains trusted local function schemas grouped by the
+	// integration that provides them. A capable provider may expose the functions
+	// through native tool search instead of loading them into the initial model
+	// context. ToolSearchFallback names the ordinary local discovery tool to omit
+	// when native search is active. Other dialects ignore both fields and keep
+	// Tools unchanged.
+	DeferredToolGroups []ToolGroup     `json:"deferred_tool_groups,omitempty"`
+	ToolSearchFallback string          `json:"tool_search_fallback,omitempty"`
+	ServerTools        []ServerTool    `json:"server_tools,omitempty"`
+	MaxTokens          int             `json:"max_tokens,omitempty"`  // 0 = provider policy (see design §5.4)
+	Temperature        *float64        `json:"temperature,omitempty"` // nil = omit
+	Reasoning          ReasoningConfig `json:"reasoning,omitempty"`
+	StopSeqs           []string        `json:"stop_seqs,omitempty"`
 	// ServiceTier selects a provider-advertised scheduling/cost tier such as
 	// priority or flex. Before provider dispatch the model proxy resolves the
 	// selected catalog target into this wire value and any Speed/Betas below.
@@ -200,6 +208,15 @@ type ToolSchema struct {
 	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema object, owned by the tool layer
 }
 
+// ToolGroup collects deferred functions from one local integration. Provider
+// adapters may lower a group to a native namespace or flatten its functions;
+// they must preserve the local dispatch names.
+type ToolGroup struct {
+	Name        string       `json:"name"`
+	Description string       `json:"description,omitempty"`
+	Tools       []ToolSchema `json:"tools"`
+}
+
 const (
 	ServerToolWebSearch = "web_search"
 
@@ -225,16 +242,18 @@ type ServerTool struct {
 type EventKind int
 
 const (
-	EventTextDelta        EventKind = iota // incremental assistant text
-	EventToolCallStart                     // tool_use began: ID + Name known
-	EventToolCallDelta                     // partial JSON args (rendering only)
-	EventToolCallDone                      // one call fully assembled
-	EventUsage                             // usage snapshot (may arrive >1x)
-	EventDone                              // turn end: StopReason + final Usage
-	EventReasoningSummary                  // display-ready provider-visible reasoning summary text
-	EventAssistantPhase                    // assistant message phase metadata
-	EventInteractionStep                   // hidden complete Gemini server-managed step for stateless replay
-	EventModelRequest                      // diagnostics-only request lifecycle metadata; never model content
+	EventTextDelta           EventKind = iota // incremental assistant text
+	EventToolCallStart                        // tool_use began: ID + Name known
+	EventToolCallDelta                        // partial JSON args (rendering only)
+	EventToolCallDone                         // one call fully assembled
+	EventUsage                                // usage snapshot (may arrive >1x)
+	EventDone                                 // turn end: StopReason + final Usage
+	EventReasoningSummary                     // display-ready provider-visible reasoning summary text
+	EventAssistantPhase                       // assistant message phase metadata
+	EventInteractionStep                      // hidden complete Gemini server-managed step for stateless replay
+	EventResponsesToolSearch                  // hidden complete hosted Responses tool-search item for stateless replay
+	EventAnthropicToolSearch                  // hidden complete hosted Anthropic tool-search block for replay
+	EventModelRequest                         // diagnostics-only request lifecycle metadata; never model content
 )
 
 // ModelRequestState identifies one out-of-band model request lifecycle event.
@@ -336,12 +355,21 @@ type StreamEvent struct {
 	// exact stateless replay.
 	InteractionStep json.RawMessage `json:"interaction_step,omitempty"`
 
-	// EventToolCall*; Index disambiguates parallel calls within one turn.
-	Index     int             `json:"index,omitempty"`
-	ToolID    string          `json:"tool_id,omitempty"`    // Start/Done
-	ToolName  string          `json:"tool_name,omitempty"`  // Start/Done
-	ArgsDelta string          `json:"args_delta,omitempty"` // Delta
-	ToolInput json.RawMessage `json:"tool_input,omitempty"` // Done only: complete JSON object
+	// ResponsesToolSearch carries a complete hosted OpenAI tool_search_call or
+	// tool_search_output item for invisible persistence and exact stateless replay.
+	ResponsesToolSearch json.RawMessage `json:"responses_tool_search,omitempty"`
+
+	// AnthropicToolSearch carries one complete server_tool_use or
+	// tool_search_tool_result block for invisible persistence and exact replay.
+	AnthropicToolSearch json.RawMessage `json:"anthropic_tool_search,omitempty"`
+
+	// EventToolCall* and provider content; Index is the provider block index.
+	Index         int             `json:"index,omitempty"`
+	ToolID        string          `json:"tool_id,omitempty"`        // Start/Done
+	ToolName      string          `json:"tool_name,omitempty"`      // Start/Done
+	ToolNamespace string          `json:"tool_namespace,omitempty"` // Start/Done; hosted Responses namespace for replay
+	ArgsDelta     string          `json:"args_delta,omitempty"`     // Delta
+	ToolInput     json.RawMessage `json:"tool_input,omitempty"`     // Done only: complete JSON object
 	// InvalidInputError is set on EventToolCallDone when the provider streamed
 	// malformed tool-call JSON. ToolInput still contains a valid diagnostic
 	// object so the transcript can feed an error result back to the model.

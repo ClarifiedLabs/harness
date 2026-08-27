@@ -29,6 +29,13 @@ type wireWebSocketRequest struct {
 	ClientMetadata map[string]string `json:"client_metadata,omitempty"`
 }
 
+type webSocketResponseError struct {
+	err error
+}
+
+func (e *webSocketResponseError) Error() string { return e.err.Error() }
+func (e *webSocketResponseError) Unwrap() error { return e.err }
+
 func (p *Provider) streamWebSocket(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) bool {
 	emitted := false
 	wrappedYield := func(ev llm.StreamEvent, err error) bool {
@@ -45,6 +52,10 @@ func (p *Provider) streamWebSocket(ctx context.Context, req llm.Request, yield f
 		yield(llm.StreamEvent{}, err)
 		return true
 	}
+	if nativeToolSearchRejected(err) {
+		yield(llm.StreamEvent{}, err)
+		return true
+	}
 	if emitted {
 		yield(llm.StreamEvent{}, err)
 		return true
@@ -52,6 +63,14 @@ func (p *Provider) streamWebSocket(ctx context.Context, req llm.Request, yield f
 	if req.PreviousResponseID != "" {
 		yield(llm.StreamEvent{}, err)
 		return true
+	}
+	var responseErr *webSocketResponseError
+	if errors.As(err, &responseErr) {
+		var apiErr *llm.APIError
+		if !errors.As(err, &apiErr) || !apiErr.Retryable {
+			yield(llm.StreamEvent{}, err)
+			return true
+		}
 	}
 	return false
 }
@@ -63,10 +82,13 @@ func (p *Provider) runWebSocket(ctx context.Context, req llm.Request, yield func
 }
 
 func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) error {
+	req = p.withToolSearchDowngrade(req)
 	if !webSocketContinuesToolTurn(req) {
 		p.wsTurnState = ""
 	}
-	for attempt := 0; ; attempt++ {
+	freshRetries := 0
+	for {
+		nativeToolSearch := p.nativeToolSearchActive(req)
 		conn, reused, err := p.webSocketConnLocked(ctx, req)
 		if err != nil {
 			return err
@@ -79,8 +101,14 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 		if err == nil {
 			return nil
 		}
+		if !emitted && nativeToolSearch && nativeToolSearchRejected(err) {
+			p.rememberToolSearchDowngrade(req.Model)
+			req.DeferredToolGroups = nil
+			continue
+		}
 		p.closeWebSocketLocked()
-		if reused && !emitted && retryFresh && attempt == 0 {
+		if reused && !emitted && retryFresh && freshRetries == 0 {
+			freshRetries++
 			continue
 		}
 		return err
@@ -137,11 +165,11 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 		}
 		p.captureWebSocketTurnState(data)
 		if apiErr := webSocketErrorEvent(data); apiErr != nil {
-			return emitted, false, apiErr
+			return emitted, false, &webSocketResponseError{err: apiErr}
 		}
 		streamDone, handleErr := decoder.handle(data, wrappedYield)
 		if handleErr != nil {
-			return emitted, false, handleErr
+			return emitted, false, &webSocketResponseError{err: handleErr}
 		}
 		if streamDone {
 			return emitted, false, nil
@@ -187,6 +215,7 @@ func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
 		omitMaxOutputTokens: p.omitMaxOutputTokens,
 		minOutputTokens:     p.minOutputTokens,
 		promptCache:         p.promptCache,
+		toolSearch:          p.toolSearch,
 		baseURL:             p.baseURL,
 		providerName:        p.providerName,
 	})

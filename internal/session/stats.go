@@ -473,6 +473,10 @@ func collectContextComposition(messages []llm.Message) contextCompositionStats {
 				stats.interactionOpaqueBytes += len(block.InteractionThoughtSignature)
 			case llm.BlockInteractionStep:
 				stats.otherBytes += len(block.InteractionStep)
+			case llm.BlockResponsesToolSearch:
+				stats.otherBytes += len(block.ResponsesToolSearch)
+			case llm.BlockAnthropicToolSearch:
+				stats.otherBytes += len(block.AnthropicToolSearch)
 			case llm.BlockProviderCompaction:
 				for _, item := range block.ProviderCompaction {
 					stats.otherBytes += len(item)
@@ -1595,7 +1599,7 @@ func writeDirectUsage(w io.Writer, report statsReport) {
 
 func writeCompactUsage(w io.Writer, label string, usage llm.Usage) {
 	cacheWrite := usage.CacheWriteTokens + usage.CacheWrite1hTokens
-	fmt.Fprintf(w, "%s: %d tokens (%d uncached in, %d cache read, %d cache write, %d output, %d reasoning), $%.4f\n",
+	fmt.Fprintf(w, "%s: %d tokens (%d uncached in, %d cache read, %d cache write, %d output, %d reasoning",
 		label,
 		totalTokens(usage),
 		usage.InputTokens,
@@ -1603,13 +1607,21 @@ func writeCompactUsage(w io.Writer, label string, usage llm.Usage) {
 		cacheWrite,
 		usage.OutputTokens,
 		usage.ReasoningTokens,
-		usage.CostUSD,
 	)
+	if ratio, ok := llm.CacheReadRatio(usage); ok {
+		fmt.Fprintf(w, ", %.1f%% cache read", ratio*100)
+	}
+	fmt.Fprintf(w, "), $%.4f\n", usage.CostUSD)
 }
 
 func writeUsageValues(w io.Writer, indent string, usage llm.Usage, cost float64) {
 	fmt.Fprintf(w, "%suncached input: %d\n", indent, usage.InputTokens)
 	fmt.Fprintf(w, "%scache read: %d\n", indent, usage.CacheReadTokens)
+	if ratio, ok := llm.CacheReadRatio(usage); ok {
+		fmt.Fprintf(w, "%scache read ratio: %.1f%%\n", indent, ratio*100)
+	} else {
+		fmt.Fprintf(w, "%scache read ratio: n/a\n", indent)
+	}
 	fmt.Fprintf(w, "%scache write: %d\n", indent, usage.CacheWriteTokens)
 	if usage.CacheWrite1hTokens > 0 {
 		fmt.Fprintf(w, "%scache write (1h): %d\n", indent, usage.CacheWrite1hTokens)

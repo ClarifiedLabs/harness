@@ -1866,6 +1866,8 @@ func TestSetupProviderPreservesExplicitCodexCompactionOptOut(t *testing.T) {
 		BaseURL:             modelcatalog.OpenAICodexProviderBaseURL,
 		Managed:             true,
 		ResponsesCompaction: &disabled,
+		ResponsesToolSearch: &disabled,
+		AnthropicToolSearch: llm.AnthropicToolSearchRegex,
 	}
 	meta := modelcatalog.Provider{
 		ID:  modelcatalog.OpenAICodexProviderID,
@@ -1874,6 +1876,12 @@ func TestSetupProviderPreservesExplicitCodexCompactionOptOut(t *testing.T) {
 	next := setupProviderFromCurrent(current, &meta, nil)
 	if next.ResponsesCompaction == nil || *next.ResponsesCompaction {
 		t.Fatalf("Codex responses_compaction = %v, want preserved false", next.ResponsesCompaction)
+	}
+	if next.ResponsesToolSearch == nil || *next.ResponsesToolSearch {
+		t.Fatalf("Codex responses_tool_search = %v, want preserved false", next.ResponsesToolSearch)
+	}
+	if next.AnthropicToolSearch != llm.AnthropicToolSearchRegex {
+		t.Fatalf("anthropic_tool_search = %q, want preserved regex", next.AnthropicToolSearch)
 	}
 }
 

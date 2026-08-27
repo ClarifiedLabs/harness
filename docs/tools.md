@@ -32,11 +32,18 @@ the agents that expose them.
 
 When the aggregate model-facing declarations for an agent's optional MCP/LSP
 tools exceed 32 KiB, Harness keeps those tools registered but initially hides
-their schemas behind `tool_catalog`. `list` filters the available catalog,
-`describe` returns exact schemas for up to 16 names, and `activate` publishes
-selected schemas on the next model turn. Activation lasts for that agent
-runtime. This is a context optimization, not an authorization boundary; agent
-tool allowlists are still enforced when the registry is constructed.
+their schemas in a shared deferred inventory grouped by MCP server or LSP
+surface. Native provider tool search consumes that same inventory: OpenAI
+Responses lowers each complete group to one namespace, while Anthropic Messages
+flattens every group's complete tool set into top-level declarations marked
+`defer_loading:true`. Each dialect also declares its hosted search tool, so only
+selected schemas enter the model's active context while the stable prompt-cache
+prefix remains reusable. Other request paths use the inventory through the local
+`tool_catalog`: `list` filters the available catalog, `describe` returns exact
+schemas for up to 16 names, and `activate` publishes selected schemas on the next
+model turn. Activation lasts for that agent runtime. All mechanisms are context
+optimizations, not authorization boundaries; agent tool allowlists are still
+enforced when the registry is constructed.
 
 The former callable names `read_file`, `write_file`, `list_dir`, `glob`, `grep`,
 `rg`, and `apply_patch` are removed from the catalog and cannot be restored with

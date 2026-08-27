@@ -61,3 +61,28 @@ func TestCountInputTokens(t *testing.T) {
 		t.Fatalf("count request speed = %q, want fast", gotBody.Speed)
 	}
 }
+
+func TestCountInputTokensUsesNativeToolSearchShape(t *testing.T) {
+	var body countRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		_ = json.NewEncoder(w).Encode(countResponse{InputTokens: 55})
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, ToolSearch: llm.AnthropicToolSearchBM25})
+	_, err := p.CountInputTokens(context.Background(), llm.Request{
+		Model:              "compatible",
+		Tools:              []llm.ToolSchema{{Name: "tool_catalog", Parameters: json.RawMessage(`{}`)}},
+		DeferredToolGroups: []llm.ToolGroup{{Name: "mcp_demo", Tools: []llm.ToolSchema{{Name: "mcp__demo__search", Parameters: json.RawMessage(`{}`)}}}},
+		ToolSearchFallback: "tool_catalog",
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Tools) != 2 || body.Tools[0].Name != "mcp__demo__search" || !body.Tools[0].DeferLoading || body.Tools[1].Type != "tool_search_tool_bm25_20251119" {
+		t.Fatalf("count tools = %+v", body.Tools)
+	}
+}

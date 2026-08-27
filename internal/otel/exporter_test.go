@@ -215,6 +215,45 @@ func TestSink_Detailed(t *testing.T) {
 	}
 }
 
+func TestSink_PromptCompleteRecordsTotalPromptInput(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	exp, err := NewExporter(Config{Enabled: true, Endpoint: srv.URL, Timeout: 2 * time.Second}, buildinfo.Metadata{Version: "test"}, "", "", "", "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := NewSink(exp, nil, "openai", "gpt-5.6", "auto", false)
+	sink.PromptComplete(agent.PromptUsage{Usage: llm.Usage{
+		InputTokens: 1000, CacheReadTokens: 3000, CacheWriteTokens: 4000, CacheWrite1hTokens: 6000,
+	}}, time.Second)
+	if err := exp.Export(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	var req exportMetricsServiceRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		t.Fatal(err)
+	}
+	for _, rm := range req.ResourceMetrics {
+		for _, sm := range rm.ScopeMetrics {
+			for _, metric := range sm.Metrics {
+				if metric.Name == "harness.tokens.prompt_input" && metric.Sum != nil && len(metric.Sum.DataPoints) == 1 {
+					if got := metric.Sum.DataPoints[0].AsInt; got != "14000" {
+						t.Fatalf("prompt input = %s, want 14000", got)
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("harness.tokens.prompt_input metric not found")
+}
+
 func TestSink_RecordSkillCatalog(t *testing.T) {
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

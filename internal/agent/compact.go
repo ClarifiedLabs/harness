@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/retry"
+	"harness/internal/tools"
 	"harness/prompts"
 )
 
@@ -652,6 +654,8 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		System:               a.system,
 		Messages:             visible,
 		Tools:                cloneToolSpecs(a.toolSpecs),
+		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
+		ToolSearchFallback:   tools.ToolCatalogName,
 		ServerTools:          cloneServerTools(a.serverTools),
 		Reasoning:            a.reasoning,
 		ProxySessionID:       a.proxySessionID,
@@ -853,6 +857,8 @@ func cloneContentBlocks(blocks []llm.ContentBlock) []llm.ContentBlock {
 		out[i].ResultContent = cloneContentBlocks(blocks[i].ResultContent)
 		out[i].ToolInput = append(json.RawMessage(nil), blocks[i].ToolInput...)
 		out[i].InteractionStep = append(json.RawMessage(nil), blocks[i].InteractionStep...)
+		out[i].ResponsesToolSearch = append(json.RawMessage(nil), blocks[i].ResponsesToolSearch...)
+		out[i].AnthropicToolSearch = append(json.RawMessage(nil), blocks[i].AnthropicToolSearch...)
 		if blocks[i].ProviderCompaction != nil {
 			out[i].ProviderCompaction = make([]json.RawMessage, len(blocks[i].ProviderCompaction))
 			for j := range blocks[i].ProviderCompaction {
@@ -1176,6 +1182,9 @@ func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Me
 	}
 	for i, m := range msgs {
 		out[i] = llm.Message{Role: m.Role, Time: m.Time, Phase: m.Phase, Content: cloneContentBlocks(m.Content)}
+		out[i].Content = slices.DeleteFunc(out[i].Content, func(block llm.ContentBlock) bool {
+			return block.Kind == llm.BlockResponsesToolSearch || block.Kind == llm.BlockAnthropicToolSearch
+		})
 		for j := range out[i].Content {
 			b := &out[i].Content[j]
 			switch b.Kind {
@@ -1193,6 +1202,9 @@ func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Me
 					})
 				}
 			case llm.BlockToolUse:
+				// Summary requests are tool-less and do not declare hosted namespaces.
+				// Keep the semantic function call but lower it as an ordinary call.
+				b.ToolNamespace = ""
 				if uselessCalls[b.ToolUseID] {
 					b.ToolInput = json.RawMessage(`{"_omitted":"matching result was semantically empty"}`)
 				} else if maxToolResultBytes > 0 && len(b.ToolInput) > maxToolResultBytes {
@@ -1208,7 +1220,7 @@ func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Me
 			}
 		}
 	}
-	return out
+	return slices.DeleteFunc(out, func(message llm.Message) bool { return len(message.Content) == 0 })
 }
 
 func shortenedToolInput(raw json.RawMessage, maxBytes int) (json.RawMessage, bool) {
@@ -1810,10 +1822,10 @@ func estimateTranscriptContentBlock(b llm.ContentBlock) (bytes, opaque, images i
 	if b.Kind == llm.BlockImage {
 		return len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 0, 1
 	}
-	bytes = len(b.Text) + len(b.Thinking) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName)
+	bytes = len(b.Text) + len(b.Thinking) + len(b.ResultText) + len(b.ToolInput) + len(b.ToolName) + len(b.ToolNamespace)
 	bytes += len(b.ReasoningID) + len(b.InteractionThoughtSummary)
 	opaque = len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
-	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep)
+	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep) + len(b.ResponsesToolSearch) + len(b.AnthropicToolSearch)
 	for _, item := range b.ProviderCompaction {
 		opaque += len(item)
 	}
@@ -1868,11 +1880,11 @@ func estimateRequestContentBlock(b llm.ContentBlock) (bytes, opaque, images int)
 	if b.Kind == llm.BlockImage {
 		return len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 0, 1
 	}
-	bytes = len(b.Kind) + len(b.Text) + len(b.Thinking) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
+	bytes = len(b.Kind) + len(b.Text) + len(b.Thinking) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolNamespace) + len(b.ToolInput) +
 		len(b.ResultForID) + len(b.ResultText)
 	bytes += len(b.ReasoningID) + len(b.InteractionThoughtSummary)
 	opaque = len(b.ReasoningEncrypted) + len(b.RedactedData) + len(b.ThinkingSignature)
-	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep)
+	opaque += len(b.InteractionThoughtSignature) + len(b.InteractionStep) + len(b.ResponsesToolSearch) + len(b.AnthropicToolSearch)
 	for _, item := range b.ProviderCompaction {
 		opaque += len(item)
 	}

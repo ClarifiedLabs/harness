@@ -85,6 +85,7 @@ func countContentBlock(enc *Encoding, b llm.ContentBlock) int {
 	total += enc.CountText(b.Text)
 	total += enc.CountText(b.ToolUseID)
 	total += enc.CountText(b.ToolName)
+	total += enc.CountText(b.ToolNamespace)
 	total += enc.CountText(string(b.ToolInput))
 	total += enc.CountText(b.ResultForID)
 	total += enc.CountText(b.ResultText)
@@ -95,6 +96,8 @@ func countContentBlock(enc *Encoding, b llm.ContentBlock) int {
 	total += enc.CountText(b.InteractionThoughtSummary)
 	total += enc.CountText(b.InteractionThoughtSignature)
 	total += enc.CountText(string(b.InteractionStep))
+	total += enc.CountText(string(b.ResponsesToolSearch))
+	total += enc.CountText(string(b.AnthropicToolSearch))
 	for _, child := range b.ResultContent {
 		total += countContentBlock(enc, child)
 	}

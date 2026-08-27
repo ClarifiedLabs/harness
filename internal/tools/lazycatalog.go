@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"harness/internal/llm"
 )
 
 // ToolCatalogName is the explicit discovery tool installed when optional MCP
@@ -73,6 +75,11 @@ func EnableLazyToolSpecs(r *Registry, candidates []string, thresholdBytes int) b
 	for _, name := range order {
 		state.allowed[name] = true
 	}
+	deferred := make([]llm.ToolSchema, 0, len(order))
+	for _, name := range order {
+		deferred = append(deferred, r.toolSpec(name))
+	}
+	r.deferredToolGroups = buildDeferredToolGroups(deferred)
 	r.Register(&lazyCatalogTool{state: state})
 	r.SetSpecFilter(func(name string) bool {
 		if state.previous != nil && !state.previous(name) {
@@ -83,6 +90,55 @@ func EnableLazyToolSpecs(r *Registry, candidates []string, thresholdBytes int) b
 		return !state.allowed[name] || state.active[name]
 	})
 	return true
+}
+
+type deferredToolGroupBuilder struct {
+	name        string
+	description string
+	tools       []llm.ToolSchema
+}
+
+func buildDeferredToolGroups(specs []llm.ToolSchema) []llm.ToolGroup {
+	groups := make(map[string]*deferredToolGroupBuilder)
+	var order []string
+	for _, spec := range specs {
+		name, description := deferredToolGroupIdentity(spec.Name)
+		group := groups[name]
+		if group == nil {
+			group = &deferredToolGroupBuilder{name: name, description: description}
+			groups[name] = group
+			order = append(order, name)
+		}
+		group.tools = append(group.tools, spec)
+	}
+	out := make([]llm.ToolGroup, 0, len(order))
+	for _, name := range order {
+		group := groups[name]
+		out = append(out, llm.ToolGroup{
+			Name:        group.name,
+			Description: group.description,
+			Tools:       append([]llm.ToolSchema(nil), group.tools...),
+		})
+	}
+	return out
+}
+
+func deferredToolGroupIdentity(toolName string) (string, string) {
+	if strings.HasPrefix(toolName, "mcp__") {
+		server, _, _ := strings.Cut(strings.TrimPrefix(toolName, "mcp__"), "__")
+		if server == "" {
+			server = "tools"
+		}
+		name := "mcp_" + server
+		if len(name) > 64 {
+			name = strings.TrimSuffix(name[:64], "_")
+		}
+		return name, fmt.Sprintf("Tools provided by the %s MCP server.", server)
+	}
+	if strings.HasPrefix(toolName, "lsp_") {
+		return "lsp", "Language-server code navigation, analysis, diagnostics, and refactoring tools."
+	}
+	return "optional_tools", "Optional project and integration tools."
 }
 
 type lazyCatalogTool struct{ state *lazyCatalogState }

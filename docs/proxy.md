@@ -168,6 +168,15 @@ request that produced usage, priced or not, while
 `model_proxy_cost_usd_total` is recorded only when a price is known.
 `model_proxy_cache_write_tokens_total` records default-rate writes and
 `model_proxy_cache_write_1h_tokens_total` records Anthropic's 1-hour writes.
+`model_proxy_prompt_input_tokens_total` is the write-inclusive sum of uncached
+input, cache reads, and both cache-write buckets. Compute the token-weighted
+cache-read ratio without averaging request percentages:
+
+```promql
+sum(rate(model_proxy_cache_read_tokens_total[5m]))
+/
+sum(rate(model_proxy_prompt_input_tokens_total[5m]))
+```
 
 Continuation and transport health use bounded, proxy-observable families:
 

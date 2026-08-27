@@ -2047,7 +2047,7 @@ func TestREPLExitPrintsUsageSummary(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
 	got := errw.String()
-	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write · 0 compactions]\nresume with: harness -resume " + app.SessionPath
+	want := "[session summary: 100 input / 30 cached input (20.0%) / 10 output / 4 reasoning / 20 cache write · 0 compactions]\nresume with: harness -resume " + app.SessionPath
 	if !strings.Contains(got, want) {
 		t.Errorf("exit should print usage summary and resume hint %q, errw=%q", want, got)
 	}
@@ -4968,7 +4968,7 @@ func TestUsageReportSingleModelIncludesCompactions(t *testing.T) {
 	app := &App{Provider: "anthropic", Model: "opus", RegistryModel: "opus"}
 	app.addUsage(agent.PromptUsage{Usage: llm.Usage{InputTokens: 100, CacheReadTokens: 30, OutputTokens: 10, ReasoningTokens: 4, CacheWriteTokens: 20, CostUSD: 0.5, CostKnown: true}, Compactions: 2})
 	got := app.usageReport("session summary")
-	want := "[session summary: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write · 2 compactions · $0.5000]"
+	want := "[session summary: 100 input / 30 cached input (20.0%) / 10 output / 4 reasoning / 20 cache write · 2 compactions · $0.5000]"
 	if got != want {
 		t.Errorf("single-model report = %q, want %q", got, want)
 	}
@@ -4993,7 +4993,7 @@ func TestFormatBackgroundCompletionNotice(t *testing.T) {
 					Compactions: 2,
 				},
 			},
-			want: "[background: bg_delegate completed; child session: 100 input / 30 cached input / 10 output / 4 reasoning / 20 cache write / 8 cache write (1h) · 2 compactions · $0.5000; transcript /tmp/child]",
+			want: "[background: bg_delegate completed; child session: 100 input / 30 cached input (19.0%) / 10 output / 4 reasoning / 20 cache write / 8 cache write (1h) · 2 compactions · $0.5000; transcript /tmp/child]",
 		},
 		{
 			name: "zero unpriced delegate",
@@ -5008,7 +5008,7 @@ func TestFormatBackgroundCompletionNotice(t *testing.T) {
 				ID: "bg_failed", Kind: "delegate", Status: background.StatusFailed, Error: "provider unavailable",
 				Result: tools.BackgroundJobResult{Usage: llm.Usage{InputTokens: 7, OutputTokens: 2}, Compactions: 1},
 			},
-			want: "[background: bg_failed failed: provider unavailable; child session: 7 input / 0 cached input / 2 output / 0 reasoning · 1 compaction]",
+			want: "[background: bg_failed failed: provider unavailable; child session: 7 input / 0 cached input (0.0%) / 2 output / 0 reasoning · 1 compaction]",
 		},
 		{
 			name: "canceled delegate with billable partial usage",
@@ -5016,7 +5016,7 @@ func TestFormatBackgroundCompletionNotice(t *testing.T) {
 				ID: "bg_canceled", Kind: "delegate", Status: background.StatusCanceled,
 				Result: tools.BackgroundJobResult{Usage: llm.Usage{InputTokens: 9, ReasoningTokens: 4, CostUSD: 0.125, CostKnown: true}},
 			},
-			want: "[background: bg_canceled canceled; child session: 9 input / 0 cached input / 0 output / 4 reasoning · 0 compactions · $0.1250]",
+			want: "[background: bg_canceled canceled; child session: 9 input / 0 cached input (0.0%) / 0 output / 4 reasoning · 0 compactions · $0.1250]",
 		},
 		{
 			name: "abandoned delegate",
@@ -5074,12 +5074,12 @@ func TestREPLBackgroundDelegateNoticeIncludesChildStatsOnceAndPersists(t *testin
 	if code := Run(strings.NewReader("/exit\n"), app, nil); code != ExitOK {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
-	notice := fmt.Sprintf("[background: %s completed; child session: 11 input / 5 cached input / 7 output / 0 reasoning · 2 compactions · $0.2500; transcript /tmp/child-session]", job.ID)
+	notice := fmt.Sprintf("[background: %s completed; child session: 11 input / 5 cached input (31.2%%) / 7 output / 0 reasoning · 2 compactions · $0.2500; transcript /tmp/child-session]", job.ID)
 	if got := strings.Count(errw.String(), notice); got != 1 {
 		t.Fatalf("notice count = %d, want 1; stderr:\n%s", got, errw.String())
 	}
 	for _, want := range []string{
-		"[session summary: 100 input / 0 cached input / 20 output / 0 reasoning · 1 compaction]",
+		"[session summary: 100 input / 0 cached input (0.0%) / 20 output / 0 reasoning · 1 compaction]",
 		"resume with: harness -resume " + app.SessionPath,
 	} {
 		if !strings.Contains(errw.String(), want) {

@@ -296,6 +296,7 @@ func (s *Sink) PromptComplete(usage agent.PromptUsage, duration time.Duration) {
 	s.exp.RecordSum("harness.tokens.cache_read", "{token}", int64(u.CacheReadTokens), tokAttrs)
 	s.exp.RecordSum("harness.tokens.cache_write", "{token}", int64(u.CacheWriteTokens), tokAttrs)
 	s.exp.RecordSum("harness.tokens.cache_write_1h", "{token}", int64(u.CacheWrite1hTokens), tokAttrs)
+	s.exp.RecordSum("harness.tokens.prompt_input", "{token}", int64(llm.PromptInputTokens(u)), tokAttrs)
 	s.exp.RecordSum("harness.tokens.reasoning", "{token}", int64(u.ReasoningTokens), tokAttrs)
 	total := u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.CacheWrite1hTokens + u.ReasoningTokens
 	s.exp.RecordSum("harness.tokens.total", "{token}", int64(total), tokAttrs)

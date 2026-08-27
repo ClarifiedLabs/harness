@@ -129,12 +129,15 @@ func (p *Provider) compactContextV2(ctx context.Context, req llm.Request) (llm.C
 }
 
 func (p *Provider) compactionRequestBase(req llm.Request) (wireRequest, []wireInputItem) {
+	req = p.withToolSearchDowngrade(req)
 	base := buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
-		omitMaxOutputTokens: p.omitMaxOutputTokens,
-		minOutputTokens:     p.minOutputTokens,
-		promptCache:         p.promptCache,
-		baseURL:             p.baseURL,
-		providerName:        p.providerName,
+		omitMaxOutputTokens:           p.omitMaxOutputTokens,
+		minOutputTokens:               p.minOutputTokens,
+		promptCache:                   p.promptCache,
+		toolSearch:                    p.toolSearch,
+		baseURL:                       p.baseURL,
+		providerName:                  p.providerName,
+		disablePromptCacheBreakpoints: true,
 	})
 	// Compaction canonicalizes provider-owned reasoning state, so retain encrypted
 	// reasoning inputs even when no new reasoning controls were selected for the

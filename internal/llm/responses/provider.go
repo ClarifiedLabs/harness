@@ -5,6 +5,7 @@ package responses
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -39,6 +40,7 @@ type Config struct {
 	UseWebSocket        bool
 	ProviderName        string
 	PromptCache         llm.PromptCacheConfig
+	ToolSearch          *bool
 	HTTPClient          *http.Client
 	Sleep               func(time.Duration)
 }
@@ -54,8 +56,11 @@ type Provider struct {
 	useWebSocket        bool
 	providerName        string
 	promptCache         llm.PromptCacheConfig
+	toolSearch          *bool
 	client              *http.Client
 	sleep               func(time.Duration)
+
+	toolSearchDowngrades sync.Map // normalized model name -> struct{}
 
 	wsMu         sync.Mutex
 	wsConn       *ws.Conn
@@ -77,6 +82,7 @@ func New(cfg Config) *Provider {
 		useWebSocket:        cfg.UseWebSocket,
 		providerName:        cfg.ProviderName,
 		promptCache:         cfg.PromptCache,
+		toolSearch:          cfg.ToolSearch,
 		client:              client,
 		sleep:               sleep,
 		wsIDs:               randomWebSocketIDs(),
@@ -110,15 +116,118 @@ func (p *Provider) CanContinueResponse(responseID string) bool {
 
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		req = p.withToolSearchDowngrade(req)
 		if p.useWebSocket {
 			if p.streamWebSocket(ctx, req, yield) {
+				return
+			}
+			req = p.withToolSearchDowngrade(req)
+			if p.nativeToolSearchActive(req) {
+				p.streamWithToolSearchFallback(ctx, req, p.streamHTTPFallback, yield)
 				return
 			}
 			p.streamHTTPFallback(ctx, req, yield)
 			return
 		}
-		p.streamHTTP(ctx, req, yield)
+		if !p.nativeToolSearchActive(req) {
+			p.streamHTTP(ctx, req, yield)
+			return
+		}
+		p.streamWithToolSearchFallback(ctx, req, p.streamHTTP, yield)
 	}
+}
+
+type streamAttempt func(context.Context, llm.Request, func(llm.StreamEvent, error) bool)
+
+type bufferedStreamItem struct {
+	event llm.StreamEvent
+	err   error
+}
+
+// streamWithToolSearchFallback holds pre-output diagnostics until the native
+// request is accepted. A structured tools-parameter rejection is then safe to
+// replace with one local-catalog attempt without exposing a terminal first
+// attempt to callers or retrying after model output has begun.
+func (p *Provider) streamWithToolSearchFallback(ctx context.Context, req llm.Request, attempt streamAttempt, yield func(llm.StreamEvent, error) bool) {
+	var pending []bufferedStreamItem
+	var terminalErr error
+	outputStarted := false
+
+	attempt(ctx, req, func(event llm.StreamEvent, err error) bool {
+		if outputStarted {
+			return yield(event, err)
+		}
+		if err == nil && event.Kind != llm.EventModelRequest {
+			outputStarted = true
+			for _, item := range pending {
+				if !yield(item.event, item.err) {
+					return false
+				}
+			}
+			pending = nil
+			return yield(event, nil)
+		}
+		if err != nil {
+			terminalErr = err
+		}
+		pending = append(pending, bufferedStreamItem{event: event, err: err})
+		return true
+	})
+	if outputStarted {
+		return
+	}
+	if nativeToolSearchRejected(terminalErr) {
+		p.rememberToolSearchDowngrade(req.Model)
+		fallback := req
+		fallback.DeferredToolGroups = nil
+		attempt(ctx, fallback, yield)
+		return
+	}
+	for _, item := range pending {
+		if !yield(item.event, item.err) {
+			return
+		}
+	}
+}
+
+func (p *Provider) nativeToolSearchActive(req llm.Request) bool {
+	return len(req.DeferredToolGroups) > 0 &&
+		!p.nativeToolSearchDowngraded(req.Model) &&
+		toolSearchEnabled(req.Model, p.baseURL, p.toolSearch)
+}
+
+func (p *Provider) withToolSearchDowngrade(req llm.Request) llm.Request {
+	if p.nativeToolSearchDowngraded(req.Model) {
+		req.DeferredToolGroups = nil
+	}
+	return req
+}
+
+func (p *Provider) nativeToolSearchDowngraded(model string) bool {
+	_, ok := p.toolSearchDowngrades.Load(normalizeToolSearchModel(model))
+	return ok
+}
+
+func (p *Provider) rememberToolSearchDowngrade(model string) {
+	p.toolSearchDowngrades.Store(normalizeToolSearchModel(model), struct{}{})
+}
+
+func nativeToolSearchRejected(err error) bool {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusBadRequest {
+		return false
+	}
+	var payload struct {
+		Error *wireResponseError `json:"error"`
+	}
+	if json.Unmarshal([]byte(apiErr.ResponsePayload), &payload) != nil || payload.Error == nil || payload.Error.Param != "tools" {
+		return false
+	}
+	errorType := strings.TrimSpace(payload.Error.Type)
+	if errorType == "" {
+		errorType = strings.TrimSpace(apiErr.Code)
+	}
+	return strings.EqualFold(errorType, "invalid_request_error")
 }
 
 // streamHTTPFallback degrades a failed WebSocket request to a stateless HTTP
@@ -142,6 +251,7 @@ func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(l
 		omitMaxOutputTokens: p.omitMaxOutputTokens,
 		minOutputTokens:     p.minOutputTokens,
 		promptCache:         p.promptCache,
+		toolSearch:          p.toolSearch,
 		baseURL:             p.baseURL,
 		providerName:        p.providerName,
 	}))
@@ -212,20 +322,22 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 }
 
 type streamDecoder struct {
-	asm       *toolAssembler
-	text      *textAssembler
-	reasoning *reasoningAssembler
-	phase     *phaseAssembler
-	usage     llm.Usage
-	completed bool
+	asm        *toolAssembler
+	text       *textAssembler
+	reasoning  *reasoningAssembler
+	toolSearch *toolSearchAssembler
+	phase      *phaseAssembler
+	usage      llm.Usage
+	completed  bool
 }
 
 func newStreamDecoder() *streamDecoder {
 	return &streamDecoder{
-		asm:       newToolAssembler(),
-		text:      newTextAssembler(),
-		reasoning: newReasoningAssembler(),
-		phase:     newPhaseAssembler(),
+		asm:        newToolAssembler(),
+		text:       newTextAssembler(),
+		reasoning:  newReasoningAssembler(),
+		toolSearch: newToolSearchAssembler(),
+		phase:      newPhaseAssembler(),
 	}
 }
 
@@ -295,6 +407,9 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		if !d.reasoning.outputItem(event.OutputIndex, event.Item, yield) {
 			return true, nil
 		}
+		if !d.toolSearch.outputItem(event.OutputIndex, event.Item, yield) {
+			return true, nil
+		}
 		d.asm.outputItemDone(event.OutputIndex, event.Item)
 		return false, nil
 
@@ -304,7 +419,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 			if err := validateOutputItems(event.Response.Output); err != nil {
 				return false, err
 			}
-			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.phase, yield) {
+			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.toolSearch, d.phase, yield) {
 				return true, nil
 			}
 			d.asm.responseOutput(event.Response.Output)
@@ -343,7 +458,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 			if err := validateOutputItems(event.Response.Output); err != nil {
 				return false, err
 			}
-			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.phase, yield) {
+			if !emitResponseOutputWithPhase(event.Response.Output, d.text, d.reasoning, d.toolSearch, d.phase, yield) {
 				return true, nil
 			}
 			d.asm.responseOutput(event.Response.Output)
@@ -468,7 +583,7 @@ func validateOutputItem(item *wireOutputItem) error {
 			}
 		}
 		return nil
-	case "function_call", "web_search_call":
+	case "function_call", "web_search_call", "tool_search_call", "tool_search_output":
 		return nil
 	default:
 		return unsupportedResponseOutput("output item", item.Type)

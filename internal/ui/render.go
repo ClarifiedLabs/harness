@@ -1681,7 +1681,7 @@ func contextPercent(ctx agent.ContextEstimate) int { return sessionrec.ContextPe
 func contextUsed(ctx agent.ContextEstimate) int { return sessionrec.ContextUsed(ctx) }
 
 // cacheHitRatio is the percentage of input tokens served from cache (r15).
-func cacheHitRatio(u llm.Usage) int { return sessionrec.CacheHitRatio(u) }
+func cacheHitRatio(u llm.Usage) float64 { return sessionrec.CacheHitRatio(u) }
 
 // delegateProgressSnapshot type-asserts an opaque `any` to the concrete
 // func() agent.DelegateProgressSnapshot closure carried through tools/background

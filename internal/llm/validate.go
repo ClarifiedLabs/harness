@@ -14,6 +14,8 @@ import (
 // in the remote prefix.
 func ValidateMessageContent(msgs []Message) error {
 	for i, message := range msgs {
+		openToolSearch := make(map[string]bool)
+		seenToolSearch := make(map[string]bool)
 		for j, block := range message.Content {
 			switch block.Kind {
 			case BlockImage:
@@ -41,6 +43,33 @@ func ValidateMessageContent(msgs []Message) error {
 				if !validInteractionStep(block.InteractionStep) {
 					return fmt.Errorf("message %d block %d: invalid interaction step", i, j)
 				}
+			case BlockResponsesToolSearch:
+				if message.Role != RoleAssistant {
+					return fmt.Errorf("message %d block %d: Responses tool search is only valid in an assistant message", i, j)
+				}
+				if !validResponsesToolSearchItem(block.ResponsesToolSearch) {
+					return fmt.Errorf("message %d block %d: invalid Responses tool search item", i, j)
+				}
+			case BlockAnthropicToolSearch:
+				if message.Role != RoleAssistant {
+					return fmt.Errorf("message %d block %d: Anthropic tool search is only valid in an assistant message", i, j)
+				}
+				info, ok := parseAnthropicToolSearchBlock(block.AnthropicToolSearch)
+				if !ok {
+					return fmt.Errorf("message %d block %d: invalid Anthropic tool search block", i, j)
+				}
+				if info.server {
+					if seenToolSearch[info.id] {
+						return fmt.Errorf("message %d block %d: duplicate Anthropic tool-search server id %q", i, j, info.id)
+					}
+					seenToolSearch[info.id] = true
+					openToolSearch[info.id] = true
+				} else {
+					if !openToolSearch[info.id] {
+						return fmt.Errorf("message %d block %d: Anthropic tool-search result %q does not match an open server call", i, j, info.id)
+					}
+					delete(openToolSearch, info.id)
+				}
 			case BlockProviderCompaction:
 				if message.Role != RoleUser || message.Origin != MessageOriginProviderCompaction {
 					return fmt.Errorf("message %d block %d: provider compaction requires a provider-compaction user message", i, j)
@@ -55,6 +84,9 @@ func ValidateMessageContent(msgs []Message) error {
 					return fmt.Errorf("message %d block %d: %w", i, j, err)
 				}
 			}
+		}
+		if len(openToolSearch) > 0 {
+			return fmt.Errorf("message %d: %d Anthropic tool-search server call(s) have no result", i, len(openToolSearch))
 		}
 	}
 	return nil
@@ -129,6 +161,7 @@ func imageBlockHasForeignFields(block ContentBlock) bool {
 		block.Text != "" ||
 		block.ToolUseID != "" ||
 		block.ToolName != "" ||
+		block.ToolNamespace != "" ||
 		len(block.ToolInput) > 0 ||
 		block.ResultForID != "" ||
 		block.ResultText != "" ||
@@ -142,6 +175,8 @@ func imageBlockHasForeignFields(block ContentBlock) bool {
 		block.InteractionThoughtSummary != "" ||
 		block.InteractionThoughtSignature != "" ||
 		len(block.InteractionStep) > 0 ||
+		len(block.ResponsesToolSearch) > 0 ||
+		len(block.AnthropicToolSearch) > 0 ||
 		len(block.ProviderCompaction) > 0
 }
 
@@ -190,6 +225,100 @@ func validInteractionStep(raw json.RawMessage) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func validResponsesToolSearchItem(raw json.RawMessage) bool {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return false
+	}
+	var header struct {
+		Type      string `json:"type"`
+		Execution string `json:"execution"`
+		Status    string `json:"status"`
+	}
+	if json.Unmarshal(raw, &header) != nil || header.Execution != "server" || header.Status != "completed" {
+		return false
+	}
+	return header.Type == "tool_search_call" || header.Type == "tool_search_output"
+}
+
+type anthropicToolSearchBlockInfo struct {
+	id     string
+	server bool
+}
+
+func validAnthropicToolSearchBlock(raw json.RawMessage) bool {
+	_, ok := parseAnthropicToolSearchBlock(raw)
+	return ok
+}
+
+func parseAnthropicToolSearchBlock(raw json.RawMessage) (anthropicToolSearchBlockInfo, bool) {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return anthropicToolSearchBlockInfo{}, false
+	}
+	var block struct {
+		Type      string          `json:"type"`
+		ID        string          `json:"id"`
+		Name      string          `json:"name"`
+		Input     json.RawMessage `json:"input"`
+		ToolUseID string          `json:"tool_use_id"`
+		Content   json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(raw, &block) != nil {
+		return anthropicToolSearchBlockInfo{}, false
+	}
+	switch block.Type {
+	case "server_tool_use":
+		if block.ID == "" || (block.Name != "tool_search_tool_bm25" && block.Name != "tool_search_tool_regex") || ValidateToolInputObject(block.Input) != nil {
+			return anthropicToolSearchBlockInfo{}, false
+		}
+		return anthropicToolSearchBlockInfo{id: block.ID, server: true}, true
+	case "tool_search_tool_result":
+		if block.ToolUseID == "" || len(block.Content) == 0 {
+			return anthropicToolSearchBlockInfo{}, false
+		}
+		var content struct {
+			Type           string          `json:"type"`
+			ToolReferences json.RawMessage `json:"tool_references"`
+			ErrorCode      string          `json:"error_code"`
+			ErrorMessage   string          `json:"error_message"`
+		}
+		if json.Unmarshal(block.Content, &content) != nil {
+			return anthropicToolSearchBlockInfo{}, false
+		}
+		switch content.Type {
+		case "tool_search_tool_search_result":
+			if len(content.ToolReferences) == 0 || !strings.HasPrefix(strings.TrimSpace(string(content.ToolReferences)), "[") {
+				return anthropicToolSearchBlockInfo{}, false
+			}
+			var references []struct {
+				Type     string `json:"type"`
+				ToolName string `json:"tool_name"`
+			}
+			if json.Unmarshal(content.ToolReferences, &references) != nil {
+				return anthropicToolSearchBlockInfo{}, false
+			}
+			for _, reference := range references {
+				if reference.Type != "tool_reference" || reference.ToolName == "" {
+					return anthropicToolSearchBlockInfo{}, false
+				}
+			}
+		case "tool_search_tool_result_error":
+			switch content.ErrorCode {
+			case "invalid_tool_input", "unavailable", "too_many_requests", "execution_time_exceeded":
+			default:
+				return anthropicToolSearchBlockInfo{}, false
+			}
+			if content.ErrorMessage == "" {
+				return anthropicToolSearchBlockInfo{}, false
+			}
+		default:
+			return anthropicToolSearchBlockInfo{}, false
+		}
+		return anthropicToolSearchBlockInfo{id: block.ToolUseID}, true
+	default:
+		return anthropicToolSearchBlockInfo{}, false
 	}
 }
 

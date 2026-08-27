@@ -769,7 +769,7 @@ func TestRunJSONInitialBoundaryRefreshesMCPAndPersistsNotice(t *testing.T) {
 		t.Fatalf("wait for background job: %v", err)
 	}
 	app.Background = manager
-	backgroundNotice := fmt.Sprintf("[background: %s completed; child session: 13 input / 4 cached input / 6 output / 0 reasoning · 1 compaction · $0.2000; transcript /tmp/json-child]", job.ID)
+	backgroundNotice := fmt.Sprintf("[background: %s completed; child session: 13 input / 4 cached input (23.5%%) / 6 output / 0 reasoning · 1 compaction · $0.2000; transcript /tmp/json-child]", job.ID)
 	refreshed := &tools.Registry{}
 	refreshed.Register(mcpRefreshTool{name: "mcp__test__initial"})
 	calls := 0

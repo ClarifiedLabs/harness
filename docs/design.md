@@ -169,13 +169,15 @@ The full types live in `internal/llm/message.go` (`Role`, `Message`,
 |---|---|---|
 | `text` | `Text` | ordinary text |
 | `image` | `Image*` | user-provided visual input; `ImageData` is base64 without a `data:` prefix |
-| `tool_use` | `ToolUseID`, `ToolName`, `ToolInput` | assistant calls a tool; `ToolInput` is the complete JSON object |
+| `tool_use` | `ToolUseID`, `ToolName`, `ToolNamespace`, `ToolInput` | assistant calls a tool; `ToolInput` is the complete JSON object; `ToolNamespace` preserves a hosted Responses namespace for exact replay while local dispatch still uses `ToolName` |
 | `tool_result` | `ResultForID`, `ResultText`, `ResultError`, `ResultUseless`, `ResultContent` | answers a tool call; `ResultContent` carries shallow image children only; `ResultUseless` is a local compaction hint |
 | `thinking` | `Thinking`, `ThinkingSignature` | Anthropic extended thinking; the signature is echoed back verbatim |
 | `redacted_thinking` | `RedactedData` | opaque Anthropic payload, echoed verbatim, never rendered |
 | `reasoning` | `ReasoningID`, `ReasoningEncrypted` | OpenAI Responses encrypted reasoning item, replayed verbatim in stateless mode |
 | `interaction_thought` | `InteractionThoughtSummary`, `InteractionThoughtSignature` | Gemini Interactions thought; distinct from Anthropic thinking so signed state cannot cross dialects |
 | `interaction_step` | `InteractionStep` | provider-managed Interactions step for stateless replay; never rendered or dispatched |
+| `responses_tool_search` | `ResponsesToolSearch`, `ReasoningReplayDomain` | complete hosted `tool_search_call` or `tool_search_output`, replayed verbatim on the same provider-local domain |
+| `anthropic_tool_search` | `AnthropicToolSearch`, `ReasoningReplayDomain` | complete hosted `server_tool_use` or `tool_search_tool_result`, replayed verbatim and in block-index order on the same provider-local domain |
 | `provider_compaction` | `ProviderCompaction` | provider-native canonical input items; valid only on a hidden compaction-checkpoint message |
 
 Replay-provenance rules for the opaque reasoning kinds
@@ -196,16 +198,19 @@ Design notes:
   removed; tool classifiers, hooks, dispatch guards, built-in implementations, and
   MCP/LSP adapters never receive it.
 - **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). Opaque provider
-  steps include Gemini Interactions Google Search replay and a provider-native
-  compaction window. Incompatible dialects ignore them.
+  steps include Gemini Interactions Google Search replay, OpenAI Responses and
+  Anthropic hosted tool-search replay, and a provider-native compaction window.
+  Incompatible dialects ignore them.
 - **`Origin` is transcript-only provenance.** It preserves prompt, steering,
   internal, and compaction-checkpoint boundaries; provider adapters ignore it.
-- **Reasoning blocks are opaque replay state.** Anthropic thinking/signatures,
-  Responses encrypted reasoning items, and Gemini Interactions thought
-  summaries/signatures use distinct kinds and record the active target's
-  `ReasoningReplayDomain`. Request assembly replays them only when that domain
-  matches the selected target; filtering is request-only and never rewrites the
-  transcript. They are never treated as ordinary user-visible text.
+- **Provider-owned blocks are opaque replay state.** Anthropic thinking,
+  signatures, and hosted tool-search blocks; Responses encrypted reasoning and
+  hosted tool-search items; and Gemini Interactions thought summaries/signatures
+  use distinct kinds
+  and record the active target's `ReasoningReplayDomain`. Request assembly
+  replays them only when that domain matches the selected target; filtering is
+  request-only and never rewrites the transcript. They are never treated as
+  ordinary user-visible text.
 - **Provider compaction checkpoints are opaque replay state.** A checkpoint is a
   hidden user message whose sole block contains the provider's complete canonical
   input-item array and the active `ReasoningReplayDomain`. Same-domain request
@@ -285,8 +290,9 @@ any assistant `Phase` outside `""`, `AssistantPhaseCommentary` (`commentary`), o
 | user text | `{"role":"user","content":"…"}` | `message` item with `input_text` content | user message with `text` content |
 | user image | structured `image_url` content with a data URL and detail | `input_image` content with a data URL and detail | `image` content with a base64 source |
 | assistant text | assistant message content | `message` item with `output_text` content and optional phase | assistant message with `text` content |
-| tool_use | assistant `tool_calls[].function` with JSON-string arguments | `function_call` item with string arguments | `tool_use` content with object input |
+| tool_use | assistant `tool_calls[].function` with JSON-string arguments | `function_call` item with string arguments and the hosted namespace when present | `tool_use` content with object input |
 | tool_result | sibling `role:"tool"` message; rich images follow in one neighboring user message | `function_call_output` item; rich images follow in one neighboring user message | `tool_result` content inside a user message, including nested image children |
+| hosted tool-search replay | ignored | exact `tool_search_call` / `tool_search_output` items | exact `server_tool_use` / `tool_search_tool_result` blocks in original index order |
 | opaque reasoning replay | ignored by default; `reasoning_content` on assistant messages when the provider opts in (`reasoning_replay`) | `reasoning` item with encrypted content | signed `thinking` or opaque `redacted_thinking` content; `reasoning_replay:"current_turn"` drops blocks older than the in-flight tool chain |
 
 Reasoning replay is gated per dialect. Chat Completions replays persisted
@@ -451,7 +457,9 @@ func Read(ctx context.Context, r io.Reader) iter.Seq2[Event, error]
     normalized type and embedded retry-delay hints). Indexed blocks and legal
     delta types are validated; known unsupported output-bearing blocks fail
     explicitly, while unknown future event envelopes remain ignorable under
-    Anthropic's additive versioning policy.
+    Anthropic's additive versioning policy. Native tool search accumulates the
+    indexed `server_tool_use` input, retains complete `tool_search_tool_result`
+    blocks, and emits both as hidden provider-owned replay events.
   - **Gemini Interactions:** `interaction.created`, indexed `step.start` /
     `step.delta` / `step.stop`, and terminal `interaction.completed`. Model text,
     thought summaries/signatures, function arguments, and Google Search activity
@@ -479,7 +487,10 @@ it. Assembly is per-turn state inside each provider's `Stream`:
   `Done` when `finish_reason: "tool_calls"` arrives.
 - **Anthropic:** `content_block_start` with `type:"tool_use"` gives `id` + `name` at a
   block index (`Start`); `content_block_delta` with `input_json_delta` carries
-  `partial_json` fragments (`Delta`); `content_block_stop` flushes that call (`Done`).
+  `partial_json` fragments (`Delta`); `content_block_stop` flushes that call
+  (`Done`). Hosted `server_tool_use` search blocks consume the same JSON delta
+  shape but never emit client tool-call events, and their matching
+  `tool_search_tool_result` blocks never create local tool results.
 - **Gemini Interactions:** `step.start` with `type:"function_call"` gives `id` +
   `name`; `step.delta` with `type:"arguments_delta"` carries JSON-string
   fragments; `step.stop` flushes the call.
@@ -502,8 +513,8 @@ Edge cases:
 | Endpoint default | `https://api.openai.com/v1/responses` | `https://api.openai.com/v1/chat/completions` | `https://api.anthropic.com/v1/messages` | `https://generativelanguage.googleapis.com/v1beta/interactions` |
 | Auth | `Authorization: Bearer <key>` | same | `x-api-key: <key>` + `anthropic-version: 2023-06-01` | `x-goog-api-key: <key>` |
 | Transport | HTTP SSE by default; provider configs may set `responses_websocket:true`, and the proxy defaults it on for `codex_oauth` Responses providers | HTTP SSE | HTTP SSE | HTTP SSE |
-| Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}` | `tools[] = {type:"function", name, description, parameters}` |
-| Server tools | `web_search`, or OpenRouter `openrouter:web_search` | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search` | `google_search` |
+| Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}`; native search also uses deferred functions inside `namespace` tools plus `tool_search` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}`; native search flattens deferred functions at top level with `defer_loading:true` | `tools[] = {type:"function", name, description, parameters}` |
+| Server tools | `web_search`, or OpenRouter `openrouter:web_search`; `tool_search` for native deferred namespaces | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search`; versioned BM25 or regex `tool_search_tool_*_20251119` | `google_search` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent | not sent |
 | Prompt cache key | provider-configured; OpenAI auto emits `prompt_cache_key`; managed `openai-codex` configs select it explicitly | provider-configured; OpenAI auto emits `prompt_cache_key`, OpenRouter auto emits `session_id` | not sent (explicit `cache_control` breakpoints instead) | not sent; stored continuation and Gemini implicit caching handle stable prefixes |
 | Stateful continuation | CLI-owned `store:true` + `previous_response_id`, fingerprint-validated suffix trimming, and one full-history fallback; `responses_stateful:false` sends `store:false` | ignored | ignored | CLI-owned `store:true` + `previous_interaction_id`, fingerprint-validated suffix trimming, and signed full-history fallback; `interactions_stateful:false` sends `store:false` |
@@ -533,8 +544,8 @@ unsupported.
 | Surface | Supported | Intentionally unsupported |
 |---|---|---|
 | Operations | streaming `POST /responses`; `POST /responses/input_tokens`; opt-in `POST /responses/compact` | retrieve/delete/cancel, conversations, background work |
-| Request controls | model/input/instructions, functions and hosted web search, output cap, temperature, reasoning summaries/encrypted replay, prompt cache key, service tier, stored continuation | arbitrary output formats, moderation, metadata, tool choice, sampling/logprob controls, safety/user identifiers |
-| Content/items | text and image input; message text/refusal, reasoning summary, function calls/results, hosted web-search status | file/audio input; generated media, computer/code/shell/patch/MCP/custom tools |
+| Request controls | model/input/instructions, functions, hosted web search, native deferred namespace tool search, output cap, temperature, reasoning summaries/encrypted replay, prompt cache key, service tier, stored continuation | arbitrary output formats, moderation, metadata, tool choice, sampling/logprob controls, safety/user identifiers |
+| Content/items | text and image input; message text/refusal, reasoning summary, function calls/results, hosted web-search status, hosted tool-search call/output replay | file/audio input; generated media, computer/code/shell/patch/custom tools |
 | Stream/usage | text/refusal/reasoning-summary/function deltas, terminal/error events, cached input, non-reasoning output, and reasoning tokens | raw reasoning disclosure, annotations, and unused total-token fields |
 
 `function_call_output.output` is always present, including for an empty or
@@ -574,17 +585,19 @@ reason, and usage property to be classified.
 |---|---|---|
 | Operations | streaming `POST /v1/messages`; `POST /v1/messages/count_tokens` | batches, files, model listing, and administrative APIs |
 | Request controls | model/messages/system, required output cap, temperature, stop sequences, service tier, beta speed, effort, adaptive/budget thinking, explicit block caching | containers, inference geography, metadata, tool choice, sampling controls, structured output, context-management betas |
-| Content/tools | text and base64 images; client function calls/results; signed and redacted thinking; `web_search_20250305` | documents/search-result input, container uploads, code/bash/text-editor execution, web fetch, memory, computer use, tool search, newer web-search variants |
-| Stream/usage | text/tool/thinking/citation deltas; hosted web-search call/results for continuation; disjoint input/cache/output/reasoning usage; served tier/speed | server-tool request counts and per-query fees, inference geography, stop details |
+| Content/tools | text and base64 images; client function calls/results; signed and redacted thinking; `web_search_20250305`; versioned BM25/regex tool search with top-level deferred functions | documents/search-result input, container uploads, code/bash/text-editor execution, web fetch, memory, computer use, newer web-search variants |
+| Stream/usage | text/tool/thinking/citation deltas; hosted web-search call/results for continuation; hosted tool-search call/results for exact replay; disjoint input/cache/output/reasoning usage; served tier/speed | server-tool request counts and per-query fees, inference geography, stop details |
 
 Required union fields are emitted even when empty (`text`, `input`, and
-`input_schema`). Hosted web-search blocks remain provider-owned: they are
-recognized and retained for same-turn continuation but are not added to the
-provider-neutral transcript.
+`input_schema`). Hosted web-search blocks remain dialect-private and are retained
+only for same-turn continuation. Hosted tool-search blocks instead become opaque,
+same-domain provider-neutral replay blocks while remaining invisible and
+non-dispatchable to the agent tool loop.
 
 Anthropic `pause_turn` is continued inside the dialect. The complete assistant
-content is replayed in original block-index order, rolling cache breakpoints are
-refreshed, and usage snapshots remain cumulative across the resulting HTTP
+content, including hosted search blocks, is replayed in original block-index
+order, rolling cache breakpoints are refreshed without mutating opaque search
+blocks, and usage snapshots remain cumulative across the resulting HTTP
 requests. Five continuations are allowed; another pause returns the terminal
 `pause_turn_limit` error instead of looping indefinitely. A pause response that
 also requests a client tool is rejected as invalid.
@@ -770,8 +783,12 @@ persistence; switching models never erases historical reasoning.
 chooses wire placement within Anthropic's four-breakpoint budget. The last tool
 schema and stable system block use `CachePolicy.StaticTTL`: interactive turns
 request `1h`, while one-shot, delegate, prewarm, compaction, and
-branch-summary requests use `5m`. Message breakpoints always retain the
-provider-default five-minute TTL.
+branch-summary requests use `5m`. Native tool search appends its non-deferred
+search declaration last, so this tool breakpoint covers the complete resident
+and deferred schema prefix; deferred declarations themselves never carry
+`cache_control`. Message breakpoints always retain the provider-default
+five-minute TTL and skip opaque hosted-search replay blocks rather than
+re-encoding them.
 
 After applying retention and before building a request, the agent computes
 `StableMessagePrefix`: the count of leading actual request messages that a
@@ -787,8 +804,15 @@ declared stable prefix. Positions are deduplicated; when the stable position is
 zero/absent or equals the tail, the previous real message is the lagging
 fallback. Volatile request-only context remains an uncached system block.
 Retention can therefore invalidate the rolling tail without ever mutating the
-declared stable-prefix breakpoint. OpenAI caching remains automatic, so its
-dialects ignore this breakpoint policy.
+declared stable-prefix breakpoint. OpenAI Chat Completions remains automatic.
+On supported first-party Responses models, the dialect also maps the declared
+stable prefix to at most one explicit `input_text` or `input_image` breakpoint
+while retaining OpenAI's implicit tail breakpoint. It scans backward across
+ineligible assistant/function/reasoning items, never rewrites opaque provider
+items or string-shaped function outputs, and caps placement before volatile
+request context. Top-level `instructions` remains unchanged. Compatible
+Responses backends are opt-in through `prompt_cache.explicit_breakpoints`, and
+count/compaction requests omit the marker.
 
 ### 5.5 Errors and retries (`internal/retry`)
 
@@ -874,7 +898,10 @@ aggregate is split using `cache_creation.ephemeral_5m_input_tokens` and
 clamped without double-counting. A long-TTL request whose response omits that
 breakdown retains its token usage but has unknown cost rather than being priced
 at the cheaper default rate. After normalization `InputTokens` means the same
-thing across dialects.
+thing across dialects. The derived cache-read ratio is token-weighted after
+aggregation: `CacheReadTokens / (InputTokens + CacheReadTokens +
+CacheWriteTokens + CacheWrite1hTokens)`. It is unavailable when that denominator
+is zero and is never persisted or averaged as an additive usage bucket.
 
 Responses `output_tokens` and Chat Completions `completion_tokens` include the
 `reasoning_tokens` detail. Their normalizers clamp that detail to the aggregate
@@ -1381,8 +1408,8 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   API-key auth**, so a scraper can reach it off the harness CLI path. Counter
   families — `model_proxy_requests_total`, `model_proxy_errors_total`,
   `model_proxy_input_tokens_total`, `model_proxy_output_tokens_total`,
-  `model_proxy_cache_read_tokens_total`, `model_proxy_cache_write_tokens_total`,
-  `model_proxy_cache_write_1h_tokens_total`,
+  `model_proxy_cache_read_tokens_total`, `model_proxy_prompt_input_tokens_total`,
+  `model_proxy_cache_write_tokens_total`, `model_proxy_cache_write_1h_tokens_total`,
   `model_proxy_reasoning_tokens_total`, `model_proxy_cost_usd_total`, and
   `model_proxy_request_duration_seconds_total` — are labeled by `provider`,
   `model`, bounded request `purpose`, and `key`, while the
@@ -1397,6 +1424,9 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   usage, priced or not — a deliberate superset of `/v1/usage`'s priced-only
   cost rollup — while
   `cost_usd_total` is recorded only when the model's price is known.
+  `model_proxy_prompt_input_tokens_total` is the write-inclusive denominator for
+  deriving a token-weighted cache-read ratio from
+  `model_proxy_cache_read_tokens_total`; per-request percentages are not averaged.
   `requests_total`/`errors_total` cover every `/v1/stream` and `/v1/compact`
   attempt, including ones
   that fail before the target resolves (malformed/oversized/unknown `target_id`,
@@ -1981,13 +2011,39 @@ assertion at dispatch:
   an `allowed_tools` entry naming one fails validation.
 - **Large optional surfaces are lazy.** When the aggregate name, description, and
   model-facing schema bytes for an agent's MCP/LSP tools exceed 32 KiB, the CLI
-  installs `tool_catalog` and filters those optional schemas out of
-  `Registry.Specs`. The tools remain registered and allowlist-checked. Catalog
-  `list` and `describe` are read-only; sequential `activate` makes at most 16
-  selected schemas visible on the following request. The agent detects this spec
-  change after dispatch, invalidates continuation/cache state, and rebuilds the
-  request. Activation persists only for that registry lifetime and is a prompt
-  optimization, not an authorization boundary.
+  installs `tool_catalog`, filters those optional schemas out of `Registry.Specs`,
+  and records an immutable deferred tool inventory. MCP tools group by server;
+  native LSP tools group under `lsp`; each complete integration remains one
+  group regardless of its tool count. The tools remain registered and
+  allowlist-checked, and function names remain the exact local dispatch names.
+  The neutral request carries both group metadata and the local fallback name.
+  On the canonical OpenAI Responses API for GPT-5.4+ models except GPT-5.4 Nano,
+  explicitly for GPT-5.3 Codex Spark, and on the canonical ChatGPT Codex
+  Responses backend used by `openai-codex` with the same Nano exclusion, requests
+  lower each group to one
+  `namespace` tool containing `defer_loading:true` functions plus
+  `{"type":"tool_search"}`, while omitting `tool_catalog` and activated
+  duplicates. `responses_tool_search:false` opts out; `true` opts any compatible
+  Responses endpoint/model in and overrides the default model gate. On the
+  canonical Anthropic API, supported Claude 4.5+ and 5-family requests flatten
+  every complete group into top-level custom tools marked `defer_loading:true`
+  and append the non-deferred BM25 search tool.
+  `anthropic_tool_search` can select `auto`, `bm25`, `regex`, or `off`; explicit
+  BM25/regex also opts a compatible endpoint in. Anthropic's hosted search blocks
+  and OpenAI's hosted items are persisted in original order for same-domain exact
+  replay, while only selected ordinary function/tool calls enter local dispatch.
+  Before any output, a structured status-400 Responses `invalid_request_error`
+  whose parameter is exactly `tools`, from either HTTP or a WebSocket error frame,
+  triggers one retry with native search disabled and the same neutral inventory
+  exposed through `tool_catalog`. The per-model downgrade is retained on that
+  provider instance; no provider-message matching or post-output retry is used.
+  Anthropic does not perform this rejection downgrade. All other request paths
+  use the same inventory through the local
+  catalog: `list` and `describe` are read-only; sequential `activate` makes
+  at most 16 selected schemas visible on the following request. The agent detects
+  this spec change after dispatch, invalidates continuation/cache state, and
+  rebuilds the request. Activation persists only for that registry lifetime.
+  Native and local search are prompt optimizations, not authorization boundaries.
 
 ### 9.1 `read`
 

@@ -207,13 +207,7 @@ func subsetForAgentTools(catalog *tools.Registry, names []string, pending *async
 	if err != nil {
 		return nil, err
 	}
-	var optional []string
-	for _, name := range sub.Names() {
-		if strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "lsp_") {
-			optional = append(optional, name)
-		}
-	}
-	tools.EnableLazyToolSpecs(sub, optional, optionalToolSchemaBudget)
+	enableLazyOptionalToolSpecs(sub)
 	return sub, nil
 }
 
@@ -231,6 +225,16 @@ func augmentAgentsWithMCP(agents map[string]agentdef.Definition, allNames, readO
 		a.AllowedTools = next
 		agents[name] = a
 	}
+}
+
+func enableLazyOptionalToolSpecs(registry *tools.Registry) {
+	var optional []string
+	for _, name := range registry.Names() {
+		if strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "lsp_") {
+			optional = append(optional, name)
+		}
+	}
+	tools.EnableLazyToolSpecs(registry, optional, optionalToolSchemaBudget)
 }
 
 func appendMCPNames(base, extra []string) []string {
@@ -515,6 +519,7 @@ func applyMCPRegistration(catalog *tools.Registry, discovered *tools.Registry, a
 		logger.Warn(fmt.Sprintf("mcp: tool list refresh subset failed: %v; keeping current tools", err), logging.Category("mcp"))
 		return nil, ""
 	}
+	enableLazyOptionalToolSpecs(sel)
 	return sel, fmt.Sprintf("[mcp: tool list updated; %d tools]", len(allNames))
 }
 

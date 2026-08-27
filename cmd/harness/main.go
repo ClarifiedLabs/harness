@@ -1960,9 +1960,10 @@ func debugRequestBytes(req llm.Request) debugRequestByteCounts {
 
 func debugContentBlockBytes(b llm.ContentBlock) int {
 	total := len(b.Kind) + len(b.Text) + len(b.ImageMediaType) + len(b.ImageData) +
-		len(b.ImageDetail) + len(b.ImageName) + len(b.ToolUseID) + len(b.ToolName) +
+		len(b.ImageDetail) + len(b.ImageName) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolNamespace) +
 		len(b.ToolInput) + len(b.ResultForID) + len(b.ResultText) + len(b.Thinking) +
-		len(b.ThinkingSignature) + len(b.RedactedData) + len(b.ReasoningID) + len(b.ReasoningEncrypted)
+		len(b.ThinkingSignature) + len(b.RedactedData) + len(b.ReasoningID) + len(b.ReasoningEncrypted) +
+		len(b.ResponsesToolSearch) + len(b.AnthropicToolSearch)
 	for _, child := range b.ResultContent {
 		total += debugContentBlockBytes(child)
 	}

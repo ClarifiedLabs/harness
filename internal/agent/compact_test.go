@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1779,6 +1780,33 @@ func TestPrepareSummaryMessagesDegradesRichResultImagesOnDeepCopy(t *testing.T) 
 	}
 	if len(msgs[0].Content[0].ResultContent) != 1 || msgs[0].Content[0].ResultContent[0].ImageData != imageData {
 		t.Fatalf("summary preparation mutated source: %+v", msgs[0].Content[0])
+	}
+}
+
+func TestPrepareSummaryMessagesOmitsHostedToolSearchState(t *testing.T) {
+	responsesRaw := json.RawMessage(`{"type":"tool_search_output","execution":"server","status":"completed","tools":[]}`)
+	anthropicRaw := json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`)
+	msgs := []llm.Message{
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+			{Kind: llm.BlockResponsesToolSearch, ResponsesToolSearch: responsesRaw},
+			{Kind: llm.BlockAnthropicToolSearch, AnthropicToolSearch: anthropicRaw},
+			{Kind: llm.BlockToolUse, ToolUseID: "call_1", ToolName: "mcp__demo__search", ToolNamespace: "mcp_demo", ToolInput: json.RawMessage(`{}`)},
+			{Kind: llm.BlockText, Text: "kept"},
+		}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+			{Kind: llm.BlockResponsesToolSearch, ResponsesToolSearch: responsesRaw},
+			{Kind: llm.BlockAnthropicToolSearch, AnthropicToolSearch: anthropicRaw},
+		}},
+	}
+
+	got := prepareSummaryMessages(msgs, 4096)
+	if len(got) != 1 || len(got[0].Content) != 2 || got[0].Content[0].Kind != llm.BlockToolUse ||
+		got[0].Content[0].ToolNamespace != "" || got[0].Content[1].Kind != llm.BlockText || got[0].Content[1].Text != "kept" {
+		t.Fatalf("summary messages = %+v, want ordinary function call plus model-visible text", got)
+	}
+	if len(msgs[0].Content) != 4 || !bytes.Equal(msgs[0].Content[0].ResponsesToolSearch, responsesRaw) ||
+		!bytes.Equal(msgs[0].Content[1].AnthropicToolSearch, anthropicRaw) || msgs[0].Content[2].ToolNamespace != "mcp_demo" {
+		t.Fatalf("summary preparation mutated source: %+v", msgs)
 	}
 }
 

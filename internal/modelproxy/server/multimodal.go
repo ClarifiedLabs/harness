@@ -410,6 +410,16 @@ func collectRequestValues(req llm.Request) requestValues {
 		collected.add(tool.Description)
 		collected.addJSON(tool.Parameters, 0)
 	}
+	for _, group := range req.DeferredToolGroups {
+		collected.add(group.Name)
+		collected.add(group.Description)
+		for _, tool := range group.Tools {
+			collected.add(tool.Name)
+			collected.add(tool.Description)
+			collected.addJSON(tool.Parameters, 0)
+		}
+	}
+	collected.add(req.ToolSearchFallback)
 	for _, tool := range req.ServerTools {
 		collected.add(tool.Name)
 		collected.add(tool.Kind)
@@ -473,6 +483,7 @@ func (c *requestValues) addBlock(block llm.ContentBlock, depth int) {
 	c.add(block.ImageName)
 	c.add(block.ToolUseID)
 	c.add(block.ToolName)
+	c.add(block.ToolNamespace)
 	c.addJSON(block.ToolInput, depth)
 	c.add(block.ResultForID)
 	c.add(block.ResultText)
@@ -481,6 +492,8 @@ func (c *requestValues) addBlock(block llm.ContentBlock, depth int) {
 	c.add(block.RedactedData)
 	c.add(block.ReasoningID)
 	c.add(block.ReasoningEncrypted)
+	c.addJSON(block.ResponsesToolSearch, depth)
+	c.addJSON(block.AnthropicToolSearch, depth)
 	if block.Kind == llm.BlockImage {
 		c.addImage(block.ImageData)
 		if len(block.ImageData)+len(block.ImageMediaType)+13 <= maxSanitizerInputBytes {

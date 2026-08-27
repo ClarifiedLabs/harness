@@ -1,6 +1,7 @@
 package responses
 
 import (
+	"encoding/json"
 	"strings"
 
 	"harness/internal/llm"
@@ -22,6 +23,11 @@ type summaryKey struct {
 type phaseKey struct {
 	itemID      string
 	outputIndex int
+}
+
+type toolSearchKey struct {
+	outputIndex int
+	itemType    string
 }
 
 type textAssembler struct {
@@ -223,7 +229,7 @@ func (a *reasoningAssembler) emitComplete(key summaryKey, text string, yield fun
 	return yield(llm.StreamEvent{Kind: llm.EventReasoningSummary, Text: text}, nil)
 }
 
-func emitResponseOutputWithPhase(output []wireOutputItem, text *textAssembler, reasoning *reasoningAssembler, phase *phaseAssembler, yield func(llm.StreamEvent, error) bool) bool {
+func emitResponseOutputWithPhase(output []wireOutputItem, text *textAssembler, reasoning *reasoningAssembler, toolSearch *toolSearchAssembler, phase *phaseAssembler, yield func(llm.StreamEvent, error) bool) bool {
 	for i := range output {
 		item := &output[i]
 		switch item.Type {
@@ -238,9 +244,45 @@ func emitResponseOutputWithPhase(output []wireOutputItem, text *textAssembler, r
 			if !reasoning.outputItem(i, item, yield) {
 				return false
 			}
+		case "tool_search_call", "tool_search_output":
+			if toolSearch != nil && !toolSearch.outputItem(i, item, yield) {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// toolSearchAssembler persists complete hosted search items once even though
+// Responses repeats them in output_item.done and response.completed.
+type toolSearchAssembler struct {
+	seen map[toolSearchKey]bool
+}
+
+func newToolSearchAssembler() *toolSearchAssembler {
+	return &toolSearchAssembler{seen: map[toolSearchKey]bool{}}
+}
+
+func (a *toolSearchAssembler) outputItem(index int, item *wireOutputItem, yield func(llm.StreamEvent, error) bool) bool {
+	if item == nil || (item.Type != "tool_search_call" && item.Type != "tool_search_output") || len(item.Raw) == 0 {
+		return true
+	}
+	var header struct {
+		Execution string `json:"execution"`
+		Status    string `json:"status"`
+	}
+	if json.Unmarshal(item.Raw, &header) != nil || header.Execution != "server" || header.Status != "completed" {
+		return true
+	}
+	key := toolSearchKey{outputIndex: index, itemType: item.Type}
+	if a.seen[key] {
+		return true
+	}
+	a.seen[key] = true
+	return yield(llm.StreamEvent{
+		Kind:                llm.EventResponsesToolSearch,
+		ResponsesToolSearch: append(json.RawMessage(nil), item.Raw...),
+	}, nil)
 }
 
 type phaseAssembler struct {

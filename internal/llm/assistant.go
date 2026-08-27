@@ -43,6 +43,30 @@ func PersistedInteractionStep(ev StreamEvent) (ContentBlock, bool) {
 	}, true
 }
 
+// PersistedResponsesToolSearch converts a complete hosted Responses search
+// item into the neutral opaque block used by sessions and stateless replay.
+func PersistedResponsesToolSearch(ev StreamEvent) (ContentBlock, bool) {
+	if ev.Kind != EventResponsesToolSearch || !validResponsesToolSearchItem(ev.ResponsesToolSearch) {
+		return ContentBlock{}, false
+	}
+	return ContentBlock{
+		Kind:                BlockResponsesToolSearch,
+		ResponsesToolSearch: append(json.RawMessage(nil), ev.ResponsesToolSearch...),
+	}, true
+}
+
+// PersistedAnthropicToolSearch converts a complete hosted Anthropic search
+// block into the neutral opaque block used by sessions and request replay.
+func PersistedAnthropicToolSearch(ev StreamEvent) (ContentBlock, bool) {
+	if ev.Kind != EventAnthropicToolSearch || !validAnthropicToolSearchBlock(ev.AnthropicToolSearch) {
+		return ContentBlock{}, false
+	}
+	return ContentBlock{
+		Kind:                BlockAnthropicToolSearch,
+		AnthropicToolSearch: append(json.RawMessage(nil), ev.AnthropicToolSearch...),
+	}, true
+}
+
 // ResolvedAssistantPhase applies an explicit valid streamed phase when present,
 // otherwise deriving the transcript phase from the normalized stop reason.
 func ResolvedAssistantPhase(explicit string, stop StopReason) string {
@@ -65,10 +89,11 @@ func BuildAssistantMessage(reasoning []ContentBlock, text string, calls []ToolCa
 	}
 	for _, call := range calls {
 		content = append(content, ContentBlock{
-			Kind:      BlockToolUse,
-			ToolUseID: call.ID,
-			ToolName:  call.Name,
-			ToolInput: call.Input,
+			Kind:          BlockToolUse,
+			ToolUseID:     call.ID,
+			ToolName:      call.Name,
+			ToolNamespace: call.Namespace,
+			ToolInput:     call.Input,
 		})
 	}
 	return Message{

@@ -561,7 +561,7 @@ func TestStatsEmptyOptionalDirectories(t *testing.T) {
 		"  by tool: none\n",
 		"  command calls: 0 total (0 root, 0 delegates)\n",
 		"  parallel batches: 0 total (0 root, 0 delegates)\n",
-		"Usage (includes delegates)\n  uncached input: 0\n  cache read: 0\n  cache write: 0\n  output: 0\n  reasoning: 0\n  total tokens: 0\n  cost: $0.0000\n",
+		"Usage (includes delegates)\n  uncached input: 0\n  cache read: 0\n  cache read ratio: n/a\n  cache write: 0\n  output: 0\n  reasoning: 0\n  total tokens: 0\n  cost: $0.0000\n",
 		"Compactions\n  runs: 0 total (0 root, 0 delegates)\n",
 		"Delegates (0)\n  statuses: none\n",
 	} {
@@ -820,7 +820,8 @@ func TestWriteUsageValuesShowsOneHourCacheWrites(t *testing.T) {
 		CacheWrite1hTokens: 7,
 	}, 0)
 	got := out.String()
-	if !strings.Contains(got, "cache write: 3\n") ||
+	if !strings.Contains(got, "cache read ratio: 0.0%\n") ||
+		!strings.Contains(got, "cache write: 3\n") ||
 		!strings.Contains(got, "cache write (1h): 7\n") ||
 		!strings.Contains(got, "total tokens: 20\n") {
 		t.Fatalf("usage values = %q", got)
@@ -949,6 +950,7 @@ func TestStatsUncachedInputReflectsNormalizedUsage(t *testing.T) {
 	for _, want := range []string{
 		"  uncached input: 851\n",
 		"  cache read: 208128\n",
+		"  cache read ratio: 99.6%\n",
 		// total = 851 + 208128 + 100; a total-input figure (208979) here would
 		// mean the cache read is being double-counted.
 		"  total tokens: 209079\n",

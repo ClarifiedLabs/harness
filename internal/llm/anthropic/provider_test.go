@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -731,6 +734,63 @@ func TestMergeWireUsageKeepsOutputAndReasoningDisjoint(t *testing.T) {
 	}
 }
 
+func toolSearchBlockFrames(index int, block string) string {
+	return "event: content_block_start\n" +
+		fmt.Sprintf("data: {\"type\":\"content_block_start\",\"index\":%d,\"content_block\":%s}\n\n", index, block) +
+		"event: content_block_stop\n" +
+		fmt.Sprintf("data: {\"type\":\"content_block_stop\",\"index\":%d}\n\n", index)
+}
+
+func TestStreamValidatesToolSearchResultPairing(t *testing.T) {
+	serverA := `{"type":"server_tool_use","id":"srv_a","name":"tool_search_tool_bm25","input":{"query":"tools"}}`
+	resultA := `{"type":"tool_search_tool_result","tool_use_id":"srv_a","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`
+	resultB := `{"type":"tool_search_tool_result","tool_use_id":"srv_b","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`
+	errorA := `{"type":"tool_search_tool_result","tool_use_id":"srv_a","content":{"type":"tool_search_tool_result_error","error_code":"unavailable","error_message":"search timed out"}}`
+	for _, tc := range []struct {
+		name    string
+		blocks  []string
+		wantErr string
+	}{
+		{name: "valid error result", blocks: []string{serverA, errorA}},
+		{name: "orphan result", blocks: []string{resultA}, wantErr: "does not match an open server_tool_use"},
+		{name: "mismatched result", blocks: []string{serverA, resultB}, wantErr: "does not match an open server_tool_use"},
+		{name: "invalid result content", blocks: []string{serverA, `{"type":"tool_search_tool_result","tool_use_id":"srv_a","content":{}}`}, wantErr: "invalid tool_search_tool_result"},
+		{name: "unanswered server call", blocks: []string{serverA}, wantErr: "unanswered tool-search server call"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var body string
+			for i, block := range tc.blocks {
+				body += toolSearchBlockFrames(i, block)
+			}
+			body += "event: message_stop\n" + `data: {"type":"message_stop"}` + "\n\n"
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("content-type", "text/event-stream")
+				llmtest.WriteBody(w, []byte(body))
+			}))
+			defer srv.Close()
+			events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude-opus-4-8")))
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var hosted int
+			for _, event := range events {
+				if event.Kind == llm.EventAnthropicToolSearch {
+					hosted++
+				}
+			}
+			if hosted != 2 {
+				t.Fatalf("hosted events = %d, want 2", hosted)
+			}
+		})
+	}
+}
+
 func TestStreamRejectsUnsupportedOutputBlock(t *testing.T) {
 	body := "event: content_block_start\n" +
 		`data: {"type":"content_block_start","index":0,"content_block":{"type":"code_execution_tool_result","content":[]}}` + "\n\n"
@@ -859,6 +919,185 @@ func TestStreamContinuesPauseTurnWithCumulativeUsage(t *testing.T) {
 	}
 	if done == nil || done.Usage == nil || done.Usage.InputTokens != 30 || done.Usage.OutputTokens != 10 {
 		t.Fatalf("done = %+v", done)
+	}
+}
+
+func TestStreamEmitsHostedToolSearchBlocksWithoutDispatchEvents(t *testing.T) {
+	body := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Searching. "}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"language server\"}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":2,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"lsp_definition"}]}}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":2}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":3,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Found it."}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":3}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":4,"content_block":{"type":"tool_use","id":"toolu_1","name":"lsp_definition","input":{}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":4,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"main.go\"}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":4}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":8}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "text/event-stream")
+		llmtest.WriteBody(w, []byte(body))
+	}))
+	defer srv.Close()
+
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude-opus-4-8")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hosted []llm.StreamEvent
+	var starts, done int
+	for _, event := range events {
+		switch event.Kind {
+		case llm.EventAnthropicToolSearch:
+			hosted = append(hosted, event)
+		case llm.EventToolCallStart:
+			starts++
+		case llm.EventToolCallDone:
+			done++
+			if event.ToolName != "lsp_definition" || event.Index != 4 {
+				t.Fatalf("client tool event = %+v", event)
+			}
+		}
+	}
+	if len(hosted) != 2 || hosted[0].Index != 1 || hosted[1].Index != 2 || starts != 1 || done != 1 {
+		t.Fatalf("hosted=%+v starts=%d done=%d", hosted, starts, done)
+	}
+	var server struct {
+		Input map[string]any `json:"input"`
+	}
+	if err := json.Unmarshal(hosted[0].AnthropicToolSearch, &server); err != nil || server.Input["query"] != "language server" {
+		t.Fatalf("server search = %s, err=%v", hosted[0].AnthropicToolSearch, err)
+	}
+	if !strings.Contains(string(hosted[1].AnthropicToolSearch), `"tool_name":"lsp_definition"`) {
+		t.Fatalf("search result = %s", hosted[1].AnthropicToolSearch)
+	}
+}
+
+func TestStreamOffsetsToolSearchBlocksAcrossPauseTurn(t *testing.T) {
+	first := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{},"request_id":"search-meta"}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"language server\"}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"tool_reference","tool_name":"lsp_definition"}]}}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"pause_turn"}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+	second := "event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Found it."}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":0}` + "\n\n" +
+		"event: content_block_start\n" +
+		`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"lsp_definition","input":{}}}` + "\n\n" +
+		"event: content_block_delta\n" +
+		`data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{}"}}` + "\n\n" +
+		"event: content_block_stop\n" +
+		`data: {"type":"content_block_stop","index":1}` + "\n\n" +
+		"event: message_delta\n" +
+		`data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}` + "\n\n" +
+		"event: message_stop\n" +
+		`data: {"type":"message_stop"}` + "\n\n"
+
+	var calls int
+	var continuation string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 2 {
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			continuation = string(body)
+		}
+		w.Header().Set("content-type", "text/event-stream")
+		if calls == 1 {
+			llmtest.WriteBody(w, []byte(first))
+		} else {
+			llmtest.WriteBody(w, []byte(second))
+		}
+	}))
+	defer srv.Close()
+
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("claude-opus-4-8")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, event := range events {
+		switch event.Kind {
+		case llm.EventAnthropicToolSearch, llm.EventTextDelta, llm.EventToolCallStart, llm.EventToolCallDelta, llm.EventToolCallDone:
+			got = append(got, fmt.Sprintf("%d:%d", event.Kind, event.Index))
+		}
+	}
+	want := []string{
+		fmt.Sprintf("%d:0", llm.EventAnthropicToolSearch),
+		fmt.Sprintf("%d:1", llm.EventAnthropicToolSearch),
+		fmt.Sprintf("%d:2", llm.EventTextDelta),
+		fmt.Sprintf("%d:3", llm.EventToolCallStart),
+		fmt.Sprintf("%d:3", llm.EventToolCallDelta),
+		fmt.Sprintf("%d:3", llm.EventToolCallDone),
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("indexed events = %v, want %v", got, want)
+	}
+	if !strings.Contains(continuation, `"request_id":"search-meta"`) || !strings.Contains(continuation, `"query":"language server"`) {
+		t.Fatalf("continuation lost server-tool fields or completed input: %s", continuation)
+	}
+	if !strings.Contains(string(events[0].AnthropicToolSearch), `"request_id":"search-meta"`) {
+		t.Fatalf("persisted server tool lost additive field: %s", events[0].AnthropicToolSearch)
+	}
+}
+
+func TestToolSearchCapabilityResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		base  string
+		model string
+		mode  llm.AnthropicToolSearch
+		want  llm.AnthropicToolSearch
+	}{
+		{name: "supported official defaults BM25", base: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5-20250929", want: llm.AnthropicToolSearchBM25},
+		{name: "official host is case insensitive", base: "https://API.ANTHROPIC.COM/v1", model: "claude-sonnet-4-5-20250929", want: llm.AnthropicToolSearchBM25},
+		{name: "future official defaults BM25", base: "https://api.anthropic.com/v1", model: "claude-opus-5", want: llm.AnthropicToolSearchBM25},
+		{name: "old official disabled", base: "https://api.anthropic.com/v1", model: "claude-opus-4-1"},
+		{name: "compatible auto disabled", base: "https://gateway.example/v1", model: "claude-opus-5"},
+		{name: "compatible explicit regex", base: "https://gateway.example/v1", model: "custom", mode: llm.AnthropicToolSearchRegex, want: llm.AnthropicToolSearchRegex},
+		{name: "official explicit off", base: "https://api.anthropic.com/v1", model: "claude-opus-5", mode: llm.AnthropicToolSearchOff},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := New(Config{BaseURL: tc.base, ToolSearch: tc.mode})
+			if got := p.resolvedToolSearch(tc.model); got != tc.want {
+				t.Fatalf("resolvedToolSearch = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

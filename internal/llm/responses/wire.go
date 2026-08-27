@@ -3,6 +3,9 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"strconv"
+	"strings"
 
 	"harness/internal/llm"
 )
@@ -66,6 +69,7 @@ type wireInputItem struct {
 	// function_call / function_call_output
 	CallID    string  `json:"call_id,omitempty"`
 	Name      string  `json:"name,omitempty"`
+	Namespace string  `json:"namespace,omitempty"`
 	Arguments string  `json:"arguments,omitempty"`
 	Output    *string `json:"output,omitempty"`
 
@@ -89,19 +93,26 @@ func (w wireInputItem) MarshalJSON() ([]byte, error) {
 }
 
 type wireContentPart struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Refusal  string `json:"refusal,omitempty"`
-	ImageURL string `json:"image_url,omitempty"`
-	Detail   string `json:"detail,omitempty"`
+	Type                  string                     `json:"type"`
+	Text                  string                     `json:"text,omitempty"`
+	Refusal               string                     `json:"refusal,omitempty"`
+	ImageURL              string                     `json:"image_url,omitempty"`
+	Detail                string                     `json:"detail,omitempty"`
+	PromptCacheBreakpoint *wirePromptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
+}
+
+type wirePromptCacheBreakpoint struct {
+	Mode string `json:"mode"`
 }
 
 type wireTool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name,omitempty"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
-	Strict      *bool           `json:"strict,omitempty"`
+	Type         string          `json:"type"`
+	Name         string          `json:"name,omitempty"`
+	Description  string          `json:"description,omitempty"`
+	Parameters   json.RawMessage `json:"parameters,omitempty"`
+	Strict       *bool           `json:"strict,omitempty"`
+	DeferLoading bool            `json:"defer_loading,omitempty"`
+	Tools        []wireTool      `json:"tools,omitempty"`
 }
 
 // --- streaming event wire structs ---
@@ -147,6 +158,7 @@ type wireEvent struct {
 }
 
 type wireOutputItem struct {
+	Raw              json.RawMessage   `json:"-"`
 	ID               string            `json:"id"`
 	Type             string            `json:"type"`
 	Role             string            `json:"role"`
@@ -156,8 +168,20 @@ type wireOutputItem struct {
 	EncryptedContent string            `json:"encrypted_content"`
 	CallID           string            `json:"call_id"`
 	Name             string            `json:"name"`
-	Arguments        string            `json:"arguments"`
+	Namespace        string            `json:"namespace"`
+	Arguments        json.RawMessage   `json:"arguments"`
 	Status           string            `json:"status"`
+}
+
+func (w *wireOutputItem) UnmarshalJSON(data []byte) error {
+	type plain wireOutputItem
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*w = wireOutputItem(decoded)
+	w.Raw = append(json.RawMessage(nil), data...)
+	return nil
 }
 
 type wireResponse struct {
@@ -213,11 +237,13 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, om
 }
 
 type buildOptions struct {
-	omitMaxOutputTokens bool
-	minOutputTokens     int
-	promptCache         llm.PromptCacheConfig
-	baseURL             string
-	providerName        string
+	omitMaxOutputTokens           bool
+	minOutputTokens               int
+	promptCache                   llm.PromptCacheConfig
+	toolSearch                    *bool
+	baseURL                       string
+	providerName                  string
+	disablePromptCacheBreakpoints bool
 }
 
 func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
@@ -228,8 +254,12 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 	// request with reasoning off (compaction summary, prewarm) must not carry
 	// reasoning input items without the matching reasoning/include fields.
 	replayReasoning := req.Reasoning.Effort != "" || req.Reasoning.Summary != ""
-	input := buildInput(req.Messages, replayReasoning)
-	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
+	input, messageEnds := buildInputWithMessageEnds(req.Messages, replayReasoning)
+	contextText := llm.RequestContextText(req.RequestContext)
+	if !opts.disablePromptCacheBreakpoints && promptCacheBreakpointsEnabled(req.Model, opts.baseURL, opts.promptCache) {
+		placePromptCacheBreakpoint(input, messageEnds, req.CachePolicy.StableMessagePrefix, contextText)
+	}
+	if contextText != "" {
 		input = insertRequestContext(input, contextText)
 	}
 	w := wireRequest{
@@ -256,15 +286,36 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 		w.Include = []string{reasoningInclude}
 	}
 
+	nativeToolSearch := toolSearchEnabled(req.Model, opts.baseURL, opts.toolSearch) && len(req.DeferredToolGroups) > 0
+	deferredNames := make(map[string]bool)
+	if nativeToolSearch {
+		for _, group := range req.DeferredToolGroups {
+			for _, tool := range group.Tools {
+				deferredNames[tool.Name] = true
+			}
+		}
+	}
 	for _, t := range req.Tools {
-		strict := false
-		w.Tools = append(w.Tools, wireTool{
-			Type:        "function",
-			Name:        t.Name,
-			Description: t.Description,
-			Parameters:  t.Parameters,
-			Strict:      &strict,
-		})
+		if nativeToolSearch && (t.Name == req.ToolSearchFallback || deferredNames[t.Name]) {
+			continue
+		}
+		w.Tools = append(w.Tools, buildFunctionTool(t, false))
+	}
+	if nativeToolSearch {
+		for _, group := range req.DeferredToolGroups {
+			tool := wireTool{
+				Type:        "namespace",
+				Name:        group.Name,
+				Description: group.Description,
+			}
+			for _, deferred := range group.Tools {
+				tool.Tools = append(tool.Tools, buildFunctionTool(deferred, true))
+			}
+			if len(tool.Tools) > 0 {
+				w.Tools = append(w.Tools, tool)
+			}
+		}
+		w.Tools = append(w.Tools, wireTool{Type: "tool_search"})
 	}
 	for _, t := range req.ServerTools {
 		if tool, ok := buildServerTool(t); ok {
@@ -276,6 +327,81 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 	}
 
 	return w
+}
+
+func buildFunctionTool(tool llm.ToolSchema, deferred bool) wireTool {
+	strict := false
+	return wireTool{
+		Type:         "function",
+		Name:         tool.Name,
+		Description:  tool.Description,
+		Parameters:   tool.Parameters,
+		Strict:       &strict,
+		DeferLoading: deferred,
+	}
+}
+
+func toolSearchEnabled(model, baseURL string, override *bool) bool {
+	if override != nil {
+		return *override
+	}
+	name := normalizeToolSearchModel(model)
+	if name == "gpt-5.4-nano" || strings.HasPrefix(name, "gpt-5.4-nano-") {
+		return false
+	}
+	if canonicalCodexEndpoint(baseURL) {
+		return true
+	}
+	if !canonicalOpenAIEndpoint(baseURL) {
+		return false
+	}
+	if name == "gpt-5.3-codex-spark" || strings.HasPrefix(name, "gpt-5.3-codex-spark-") {
+		return true
+	}
+	if !strings.HasPrefix(name, "gpt-") {
+		return false
+	}
+	version := strings.TrimPrefix(name, "gpt-")
+	dot := strings.IndexByte(version, '.')
+	if dot <= 0 {
+		return false
+	}
+	major, err := strconv.Atoi(version[:dot])
+	if err != nil {
+		return false
+	}
+	minorText := version[dot+1:]
+	end := 0
+	for end < len(minorText) && minorText[end] >= '0' && minorText[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return false
+	}
+	minor, err := strconv.Atoi(minorText[:end])
+	if err != nil {
+		return false
+	}
+	return major > 5 || major == 5 && minor >= 4
+}
+
+func normalizeToolSearchModel(model string) string {
+	name := strings.ToLower(strings.TrimSpace(model))
+	return strings.TrimPrefix(name, "openai:")
+}
+
+func canonicalCodexEndpoint(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(u.Hostname(), "chatgpt.com") &&
+		strings.TrimRight(u.Path, "/") == "/backend-api/codex"
+}
+
+func canonicalOpenAIEndpoint(baseURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && strings.EqualFold(u.Hostname(), "api.openai.com")
 }
 
 func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
@@ -300,10 +426,19 @@ func insertRequestContext(input []wireInputItem, contextText string) []wireInput
 		return []wireInputItem{contextItem}
 	}
 
-	// Keep volatile request context as late as possible so the stable system,
-	// tools, and transcript prefix remains cacheable. Put it before the current
-	// user message. For a tool round, keep the assistant call/reasoning and its
-	// trailing outputs together and insert before that whole suffix.
+	insertAt := requestContextInsertIndex(input)
+	input = append(input, wireInputItem{})
+	copy(input[insertAt+1:], input[insertAt:])
+	input[insertAt] = contextItem
+	return input
+}
+
+// requestContextInsertIndex keeps volatile request context as late as possible
+// while preserving the current user or assistant-call/tool-output suffix.
+func requestContextInsertIndex(input []wireInputItem) int {
+	if len(input) == 0 {
+		return 0
+	}
 	insertAt := len(input)
 	last := input[len(input)-1]
 	toolSuffix := last.Type == "function_call" || last.Type == "function_call_output"
@@ -320,16 +455,14 @@ func insertRequestContext(input []wireInputItem, contextText string) []wireInput
 		}
 		for insertAt > 0 {
 			item := input[insertAt-1]
-			if item.Type != "reasoning" && !(item.Type == "message" && item.Role == string(llm.RoleAssistant)) {
+			if item.Type != "reasoning" && item.Type != "tool_search_call" && item.Type != "tool_search_output" &&
+				!(item.Type == "message" && item.Role == string(llm.RoleAssistant)) {
 				break
 			}
 			insertAt--
 		}
 	}
-	input = append(input, wireInputItem{})
-	copy(input[insertAt+1:], input[insertAt:])
-	input[insertAt] = contextItem
-	return input
+	return insertAt
 }
 
 func inputMessageContainsOnlyImages(item wireInputItem) bool {
@@ -346,7 +479,13 @@ func inputMessageContainsOnlyImages(item wireInputItem) bool {
 }
 
 func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
+	out, _ := buildInputWithMessageEnds(messages, replayReasoning)
+	return out
+}
+
+func buildInputWithMessageEnds(messages []llm.Message, replayReasoning bool) ([]wireInputItem, []int) {
 	var out []wireInputItem
+	ends := make([]int, 0, len(messages))
 	for _, m := range messages {
 		var text string
 		var parts []wireContentPart
@@ -382,6 +521,14 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 						Type:               rawInputItemType(raw),
 						Raw:                raw,
 						RetainOnCompaction: rawInputItemRole(raw) == string(llm.RoleUser),
+					})
+				}
+			case llm.BlockResponsesToolSearch:
+				flushMessage()
+				if rawResponsesToolSearchItemType(b.ResponsesToolSearch) != "" {
+					out = append(out, wireInputItem{
+						Type: rawResponsesToolSearchItemType(b.ResponsesToolSearch),
+						Raw:  append(json.RawMessage(nil), b.ResponsesToolSearch...),
 					})
 				}
 			case llm.BlockReasoning:
@@ -421,6 +568,7 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 					Type:      "function_call",
 					CallID:    b.ToolUseID,
 					Name:      b.ToolName,
+					Namespace: b.ToolNamespace,
 					Arguments: args,
 				})
 			case llm.BlockToolResult:
@@ -451,8 +599,69 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 				Content: resultImages,
 			})
 		}
+		ends = append(ends, len(out))
 	}
-	return out
+	return out, ends
+}
+
+func promptCacheBreakpointsEnabled(model, baseURL string, cfg llm.PromptCacheConfig) bool {
+	if cfg.ExplicitBreakpoints != nil {
+		return *cfg.ExplicitBreakpoints
+	}
+	if !canonicalOpenAIEndpoint(baseURL) {
+		return false
+	}
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
+}
+
+// placePromptCacheBreakpoint maps the neutral stable-message count onto the
+// typed Responses input and marks the latest eligible input content part. It
+// never rewrites opaque provider items or string-shaped function outputs.
+func placePromptCacheBreakpoint(input []wireInputItem, messageEnds []int, stablePrefix int, contextText string) bool {
+	if stablePrefix <= 0 || len(input) == 0 || len(messageEnds) == 0 {
+		return false
+	}
+	stablePrefix = min(stablePrefix, len(messageEnds))
+	limit := messageEnds[stablePrefix-1]
+	if contextText != "" {
+		limit = min(limit, requestContextInsertIndex(input))
+	} else if limit == len(input) {
+		// The API's implicit tail breakpoint already covers this exact boundary.
+		return false
+	}
+	limit = min(limit, len(input))
+	for i := limit - 1; i >= 0; i-- {
+		if len(input[i].Raw) > 0 {
+			continue
+		}
+		parts, ok := input[i].Content.([]wireContentPart)
+		if !ok {
+			continue
+		}
+		for j := len(parts) - 1; j >= 0; j-- {
+			if parts[j].Type != "input_text" && parts[j].Type != "input_image" {
+				continue
+			}
+			parts[j].PromptCacheBreakpoint = &wirePromptCacheBreakpoint{Mode: "explicit"}
+			input[i].Content = parts
+			return true
+		}
+	}
+	return false
+}
+
+func rawResponsesToolSearchItemType(raw json.RawMessage) string {
+	var header struct {
+		Type string `json:"type"`
+	}
+	if json.Unmarshal(raw, &header) != nil {
+		return ""
+	}
+	if header.Type == "tool_search_call" || header.Type == "tool_search_output" {
+		return header.Type
+	}
+	return ""
 }
 
 func rawInputItemType(raw json.RawMessage) string {

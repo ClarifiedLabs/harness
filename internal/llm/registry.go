@@ -51,17 +51,19 @@ type ProviderConfig struct {
 	// real Anthropic's uncached-only figure. The dialect subtracts the cache
 	// buckets so Usage.InputTokens stays "uncached input". Anthropic dialect
 	// only; default off.
-	UsageInputIncludesCache bool              `json:"usage_input_includes_cache,omitempty"`
-	MinOutputTokens         int               `json:"min_output_tokens,omitempty"`
-	PromptCache             PromptCacheConfig `json:"prompt_cache,omitempty"`
-	ResponsesStateful       *bool             `json:"responses_stateful,omitempty"`
-	ResponsesWebSocket      *bool             `json:"responses_websocket,omitempty"`
-	ResponsesCompaction     *bool             `json:"responses_compaction,omitempty"`
-	InteractionsStateful    *bool             `json:"interactions_stateful,omitempty"`
-	ServerTools             []string          `json:"server_tools,omitempty"`
-	ServiceTiers            []ServiceTier     `json:"service_tiers,omitempty"`
-	APIKeyEnv               []string          `json:"api_key_env"`
-	Auth                    *auth.Config      `json:"auth,omitempty"`
+	UsageInputIncludesCache bool                `json:"usage_input_includes_cache,omitempty"`
+	MinOutputTokens         int                 `json:"min_output_tokens,omitempty"`
+	PromptCache             PromptCacheConfig   `json:"prompt_cache,omitempty"`
+	ResponsesStateful       *bool               `json:"responses_stateful,omitempty"`
+	ResponsesWebSocket      *bool               `json:"responses_websocket,omitempty"`
+	ResponsesCompaction     *bool               `json:"responses_compaction,omitempty"`
+	ResponsesToolSearch     *bool               `json:"responses_tool_search,omitempty"`
+	AnthropicToolSearch     AnthropicToolSearch `json:"anthropic_tool_search,omitempty"`
+	InteractionsStateful    *bool               `json:"interactions_stateful,omitempty"`
+	ServerTools             []string            `json:"server_tools,omitempty"`
+	ServiceTiers            []ServiceTier       `json:"service_tiers,omitempty"`
+	APIKeyEnv               []string            `json:"api_key_env"`
+	Auth                    *auth.Config        `json:"auth,omitempty"`
 	// ModelDiscovery controls provider-direct model catalog discovery. Nil uses
 	// the model proxy's provider and dialect defaults.
 	ModelDiscovery *ModelDiscoveryConfig `json:"model_discovery,omitempty"`
@@ -144,11 +146,58 @@ func (r ReasoningReplay) MarshalJSON() ([]byte, error) {
 	return json.Marshal(string(r))
 }
 
-// PromptCacheConfig controls how a provider receives the stable
-// Request.PromptCacheKey. Empty/auto keeps provider-specific defaults.
+// AnthropicToolSearch selects Anthropic's hosted search implementation. The
+// zero value and "auto" enable BM25 only for supported models on the official
+// API. Explicit variants opt compatible endpoints in; "off" disables search.
+type AnthropicToolSearch string
+
+const (
+	AnthropicToolSearchAuto  AnthropicToolSearch = "auto"
+	AnthropicToolSearchBM25  AnthropicToolSearch = "bm25"
+	AnthropicToolSearchRegex AnthropicToolSearch = "regex"
+	AnthropicToolSearchOff   AnthropicToolSearch = "off"
+)
+
+func ValidAnthropicToolSearch(value AnthropicToolSearch) bool {
+	switch value {
+	case "", AnthropicToolSearchAuto, AnthropicToolSearchBM25, AnthropicToolSearchRegex, AnthropicToolSearchOff:
+		return true
+	default:
+		return false
+	}
+}
+
+// UnmarshalJSON accepts booleans as convenient aliases: true selects BM25 and
+// false disables native search.
+func (a *AnthropicToolSearch) UnmarshalJSON(data []byte) error {
+	var enabled bool
+	if err := json.Unmarshal(data, &enabled); err == nil {
+		if enabled {
+			*a = AnthropicToolSearchBM25
+		} else {
+			*a = AnthropicToolSearchOff
+		}
+		return nil
+	}
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return fmt.Errorf("anthropic_tool_search must be a boolean or string: %w", err)
+	}
+	mode := AnthropicToolSearch(strings.ToLower(strings.TrimSpace(value)))
+	if !ValidAnthropicToolSearch(mode) {
+		return fmt.Errorf("unknown anthropic_tool_search value %q (want \"auto\", \"bm25\", \"regex\", or \"off\")", value)
+	}
+	*a = mode
+	return nil
+}
+
+// PromptCacheConfig controls provider prompt-cache hints. Empty/auto keeps
+// provider-specific defaults. ExplicitBreakpoints is tri-state so compatible
+// Responses backends remain off unless an operator opts them in.
 type PromptCacheConfig struct {
-	KeyField        string   `json:"key_field,omitempty"`
-	AffinityHeaders []string `json:"affinity_headers,omitempty"`
+	KeyField            string   `json:"key_field,omitempty"`
+	AffinityHeaders     []string `json:"affinity_headers,omitempty"`
+	ExplicitBreakpoints *bool    `json:"explicit_breakpoints,omitempty"`
 }
 
 // ModelEntry is one model inside a ProviderConfig.

@@ -37,6 +37,7 @@ func TestLoadProviderConfigsReadsProviderWrapper(t *testing.T) {
       "api_type": "openai",
       "base_url": "https://openrouter.ai/api/v1",
       "prompt_cache": {"key_field":"session_id","affinity_headers":["x-session-id"]},
+      "responses_tool_search": true,
       "models": [
         {"name":"openai/gpt-5.1","context_window":1000000,"output_limit":96000,"price":{"input":2,"output":8},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
       ]
@@ -44,6 +45,7 @@ func TestLoadProviderConfigsReadsProviderWrapper(t *testing.T) {
     {
       "name": "anthropic",
       "api_type": "anthropic",
+      "anthropic_tool_search": "regex",
       "models": [
         {"name":"claude-sonnet-4-5","context_window":1000000,"price":{"input":3,"output":15}}
       ]
@@ -78,6 +80,12 @@ func TestLoadProviderConfigsReadsProviderWrapper(t *testing.T) {
 	}
 	if providers[0].PromptCache.KeyField != "session_id" || len(providers[0].PromptCache.AffinityHeaders) != 1 || providers[0].PromptCache.AffinityHeaders[0] != "x-session-id" {
 		t.Fatalf("provider prompt cache = %+v, want session_id/x-session-id", providers[0].PromptCache)
+	}
+	if providers[0].ResponsesToolSearch == nil || !*providers[0].ResponsesToolSearch {
+		t.Fatalf("provider responses_tool_search = %v, want true", providers[0].ResponsesToolSearch)
+	}
+	if providers[1].AnthropicToolSearch != AnthropicToolSearchRegex {
+		t.Fatalf("provider anthropic_tool_search = %q, want regex", providers[1].AnthropicToolSearch)
 	}
 	info, ok := r.Lookup("openai/gpt-5.1")
 	if !ok || info.Reasoning == nil || !info.Reasoning.SupportsEffort("medium") {
@@ -133,6 +141,34 @@ func TestMergeModelFillsOutputLimit(t *testing.T) {
 	r.MergeModel("gpt-x", ModelInfo{OutputLimit: 1_000})
 	if got := r.OutputLimit("gpt-x"); got != 48_000 {
 		t.Fatalf("output limit = %d, want 48000 (explicit value preserved)", got)
+	}
+}
+
+func TestAnthropicToolSearchJSON(t *testing.T) {
+	for _, tc := range []struct {
+		input string
+		want  AnthropicToolSearch
+	}{
+		{`true`, AnthropicToolSearchBM25},
+		{`false`, AnthropicToolSearchOff},
+		{`" AUTO "`, AnthropicToolSearchAuto},
+		{`"bm25"`, AnthropicToolSearchBM25},
+		{`"regex"`, AnthropicToolSearchRegex},
+		{`"off"`, AnthropicToolSearchOff},
+	} {
+		var got AnthropicToolSearch
+		if err := json.Unmarshal([]byte(tc.input), &got); err != nil {
+			t.Fatalf("unmarshal %s: %v", tc.input, err)
+		}
+		if got != tc.want {
+			t.Errorf("unmarshal %s = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+	for _, bad := range []string{`"sometimes"`, `3`} {
+		var got AnthropicToolSearch
+		if err := json.Unmarshal([]byte(bad), &got); err == nil {
+			t.Errorf("unmarshal %s: expected error, got %q", bad, got)
+		}
 	}
 }
 

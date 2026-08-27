@@ -33,9 +33,9 @@ func estimateContentBlock(b ContentBlock) (bytes, images int) {
 	if b.Kind == BlockImage {
 		return len(b.Kind) + len(b.ImageMediaType) + len(b.ImageDetail) + len(b.ImageName), 1
 	}
-	bytes = len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolInput) +
+	bytes = len(b.Kind) + len(b.Text) + len(b.ToolUseID) + len(b.ToolName) + len(b.ToolNamespace) + len(b.ToolInput) +
 		len(b.ResultForID) + len(b.ResultText) + len(b.InteractionThoughtSummary) +
-		len(b.InteractionThoughtSignature) + len(b.InteractionStep)
+		len(b.InteractionThoughtSignature) + len(b.InteractionStep) + len(b.ResponsesToolSearch) + len(b.AnthropicToolSearch)
 	for _, item := range b.ProviderCompaction {
 		bytes += len(item)
 	}

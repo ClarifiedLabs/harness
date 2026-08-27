@@ -1167,6 +1167,8 @@ func cloneMessagesForTree(messages []llm.Message) []llm.Message {
 		out[i].Content = append([]llm.ContentBlock(nil), messages[i].Content...)
 		for j := range out[i].Content {
 			out[i].Content[j].ResultContent = append([]llm.ContentBlock(nil), messages[i].Content[j].ResultContent...)
+			out[i].Content[j].ResponsesToolSearch = append(json.RawMessage(nil), messages[i].Content[j].ResponsesToolSearch...)
+			out[i].Content[j].AnthropicToolSearch = append(json.RawMessage(nil), messages[i].Content[j].AnthropicToolSearch...)
 			if messages[i].Content[j].ProviderCompaction != nil {
 				out[i].Content[j].ProviderCompaction = make([]json.RawMessage, len(messages[i].Content[j].ProviderCompaction))
 				for k := range messages[i].Content[j].ProviderCompaction {

@@ -211,6 +211,7 @@ type metricsCollectors struct {
 	input        *metrics.Counter
 	output       *metrics.Counter
 	cacheRead    *metrics.Counter
+	promptInput  *metrics.Counter
 	cacheWrite   *metrics.Counter
 	cacheWrite1h *metrics.Counter
 	reasoning    *metrics.Counter
@@ -412,6 +413,7 @@ func registerMetricFamilies(r *metrics.Registry) *metricsCollectors {
 		input:        r.Counter("model_proxy_input_tokens_total", "Input tokens billed at full rate."),
 		output:       r.Counter("model_proxy_output_tokens_total", "Generated output tokens."),
 		cacheRead:    r.Counter("model_proxy_cache_read_tokens_total", "Prompt-cache read tokens."),
+		promptInput:  r.Counter("model_proxy_prompt_input_tokens_total", "Total prompt input tokens across uncached input, cache reads, and cache writes."),
 		cacheWrite:   r.Counter("model_proxy_cache_write_tokens_total", "Default-rate prompt-cache write tokens."),
 		cacheWrite1h: r.Counter("model_proxy_cache_write_1h_tokens_total", "One-hour prompt-cache write tokens."),
 		reasoning:    r.Counter("model_proxy_reasoning_tokens_total", "Reasoning tokens."),
@@ -552,6 +554,9 @@ func (h *Handler) recordMetrics(r *http.Request, providerID, model string, purpo
 	}
 	if usage.CacheReadTokens != 0 {
 		h.metricFams.cacheRead.Add(float64(usage.CacheReadTokens), labels)
+	}
+	if promptInput := llm.PromptInputTokens(usage); promptInput != 0 {
+		h.metricFams.promptInput.Add(float64(promptInput), labels)
 	}
 	if usage.CacheWriteTokens != 0 {
 		h.metricFams.cacheWrite.Add(float64(usage.CacheWriteTokens), labels)
@@ -2015,6 +2020,8 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 		ReasoningReplay:         pc.ReasoningReplay,
 		OmitMaxOutputTokens:     providerOmitMaxOutputTokens(pc),
 		ResponsesWebSocket:      providerResponsesWebSocket(pc),
+		ResponsesToolSearch:     pc.ResponsesToolSearch,
+		AnthropicToolSearch:     pc.AnthropicToolSearch,
 		UsageInputIncludesCache: pc.UsageInputIncludesCache,
 	}, nil
 }

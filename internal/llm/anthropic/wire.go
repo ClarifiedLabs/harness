@@ -99,9 +99,8 @@ type wireContent struct {
 
 	CacheControl *cacheControl `json:"cache_control,omitempty"`
 
-	// Raw preserves provider-owned content blocks (currently hosted web-search
-	// results) for an exact pause_turn replay. It is never populated for ordinary
-	// request content.
+	// Raw preserves provider-owned hosted search blocks for exact pause_turn and
+	// stateless replay. It is never populated for ordinary request content.
 	Raw json.RawMessage `json:"-"`
 }
 
@@ -193,6 +192,7 @@ type wireTool struct {
 	Name         string          `json:"name"`
 	Description  string          `json:"description,omitempty"`
 	InputSchema  json.RawMessage `json:"input_schema,omitempty"`
+	DeferLoading bool            `json:"defer_loading,omitempty"`
 	MaxUses      int             `json:"max_uses,omitempty"`
 	CacheControl *cacheControl   `json:"cache_control,omitempty"`
 }
@@ -212,8 +212,9 @@ func (t wireTool) MarshalJSON() ([]byte, error) {
 		Name         string          `json:"name"`
 		Description  string          `json:"description,omitempty"`
 		InputSchema  json.RawMessage `json:"input_schema"`
+		DeferLoading bool            `json:"defer_loading,omitempty"`
 		CacheControl *cacheControl   `json:"cache_control,omitempty"`
-	}{t.Name, t.Description, requiredJSONObject(t.InputSchema), t.CacheControl})
+	}{t.Name, t.Description, requiredJSONObject(t.InputSchema), t.DeferLoading, t.CacheControl})
 }
 
 // --- streaming event wire structs ---
@@ -282,10 +283,14 @@ type wireEvent struct {
 // tool-schema entry (when tools are present), the system block, and the last
 // content block of the final message, refreshed every call (design §5.4, §7).
 func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
-	return buildRequestWithReasoningReplay(req, contextWindow, outputLimit, "")
+	return buildRequestWithOptions(req, contextWindow, outputLimit, "", "")
 }
 
 func buildRequestWithReasoningReplay(req llm.Request, contextWindow, outputLimit int, reasoningReplay llm.ReasoningReplay) wireRequest {
+	return buildRequestWithOptions(req, contextWindow, outputLimit, reasoningReplay, "")
+}
+
+func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, reasoningReplay llm.ReasoningReplay, toolSearch llm.AnthropicToolSearch) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:       req.Model,
@@ -322,17 +327,44 @@ func buildRequestWithReasoningReplay(req llm.Request, contextWindow, outputLimit
 	}
 	w.Thinking = buildThinking(req.Reasoning)
 
+	nativeToolSearch := toolSearch != "" && len(req.DeferredToolGroups) > 0
+	deferredNames := make(map[string]bool)
+	if nativeToolSearch {
+		for _, group := range req.DeferredToolGroups {
+			for _, tool := range group.Tools {
+				deferredNames[tool.Name] = true
+			}
+		}
+	}
 	for _, t := range req.Tools {
+		if nativeToolSearch && (t.Name == req.ToolSearchFallback || deferredNames[t.Name]) {
+			continue
+		}
 		w.Tools = append(w.Tools, wireTool{
 			Name:        t.Name,
 			Description: t.Description,
 			InputSchema: t.Parameters,
 		})
 	}
+	if nativeToolSearch {
+		for _, group := range req.DeferredToolGroups {
+			for _, t := range group.Tools {
+				w.Tools = append(w.Tools, wireTool{
+					Name:         t.Name,
+					Description:  t.Description,
+					InputSchema:  t.Parameters,
+					DeferLoading: true,
+				})
+			}
+		}
+	}
 	for _, t := range req.ServerTools {
 		if tool, ok := buildServerTool(t); ok {
 			w.Tools = append(w.Tools, tool)
 		}
+	}
+	if nativeToolSearch {
+		w.Tools = append(w.Tools, buildToolSearchTool(toolSearch))
 	}
 
 	// Third breakpoint (of the 4 allowed): the tool-schema array is the static
@@ -411,6 +443,13 @@ func thinkingReplayBoundary(messages []llm.Message) int {
 	return boundary
 }
 
+func buildToolSearchTool(mode llm.AnthropicToolSearch) wireTool {
+	if mode == llm.AnthropicToolSearchRegex {
+		return wireTool{Type: "tool_search_tool_regex_20251119", Name: "tool_search_tool_regex"}
+	}
+	return wireTool{Type: "tool_search_tool_bm25_20251119", Name: "tool_search_tool_bm25"}
+}
+
 func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
 	if tool.Kind != llm.ServerToolKindAnthropicWebSearch && !(tool.Kind == "" && tool.Name == llm.ServerToolWebSearch) {
 		return wireTool{}, false
@@ -456,6 +495,10 @@ func buildContent(blocks []llm.ContentBlock, includeThinking bool) []wireContent
 				Name:  b.ToolName,
 				Input: b.ToolInput,
 			})
+		case llm.BlockAnthropicToolSearch:
+			if validAnthropicToolSearchRaw(b.AnthropicToolSearch) {
+				out = append(out, wireContent{Raw: append(json.RawMessage(nil), b.AnthropicToolSearch...)})
+			}
 		case llm.BlockToolResult:
 			var content any = b.ResultText
 			if len(b.ResultContent) > 0 {
@@ -517,10 +560,37 @@ func markLastBlock(msgs []wireMessage, i int) {
 		return
 	}
 	content := msgs[i].Content
-	if len(content) == 0 {
+	for j := len(content) - 1; j >= 0; j-- {
+		if isToolSearchWireContent(content[j]) {
+			continue
+		}
+		content[j].CacheControl = ephemeral
 		return
 	}
-	content[len(content)-1].CacheControl = ephemeral
+}
+
+func isToolSearchWireContent(content wireContent) bool {
+	if content.Type == "server_tool_use" && (content.Name == "tool_search_tool_bm25" || content.Name == "tool_search_tool_regex") {
+		return true
+	}
+	return validAnthropicToolSearchRaw(content.Raw)
+}
+
+func validAnthropicToolSearchRaw(raw json.RawMessage) bool {
+	if len(raw) == 0 || !json.Valid(raw) {
+		return false
+	}
+	var header struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(raw, &header) != nil {
+		return false
+	}
+	if header.Type == "tool_search_tool_result" {
+		return true
+	}
+	return header.Type == "server_tool_use" && (header.Name == "tool_search_tool_bm25" || header.Name == "tool_search_tool_regex")
 }
 
 // buildThinking maps the provider-neutral reasoning controls onto the Anthropic

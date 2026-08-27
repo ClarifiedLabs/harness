@@ -329,6 +329,429 @@ func TestStreamEncryptedReasoningDedupedAcrossEvents(t *testing.T) {
 	}
 }
 
+func nativeToolSearchTestRequest(model string) llm.Request {
+	req := llmtest.SimpleRequest(model)
+	req.Tools = []llm.ToolSchema{
+		{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)},
+		{Name: "mcp__demo__search", Parameters: json.RawMessage(`{"type":"object"}`)},
+		{Name: "tool_catalog", Parameters: json.RawMessage(`{"type":"object"}`)},
+	}
+	req.DeferredToolGroups = []llm.ToolGroup{{
+		Name: "mcp_demo",
+		Tools: []llm.ToolSchema{{
+			Name: "mcp__demo__search", Parameters: json.RawMessage(`{"type":"object"}`),
+		}},
+	}}
+	req.ToolSearchFallback = "tool_catalog"
+	return req
+}
+
+func wireToolsContain(tools []wireTool, toolType, name string) bool {
+	for _, tool := range tools {
+		if tool.Type == toolType && tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func TestStreamFallsBackToCatalogWhenNativeToolSearchRejected(t *testing.T) {
+	var mu sync.Mutex
+	var requests []wireRequest
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request wireRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		mu.Lock()
+		requests = append(requests, request)
+		mu.Unlock()
+		if attempts.Add(1) == 1 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			llmtest.WriteBody(w, []byte(`{"error":{"message":"unsupported hosted tool","type":"invalid_request_error","param":"tools","code":"unsupported_value"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_fallback","status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1}}}`+"\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+
+	enabled := true
+	p := New(Config{APIKey: "k", BaseURL: srv.URL, ToolSearch: &enabled, Sleep: func(time.Duration) {}})
+	events, err := llmtest.Drain(p.Stream(context.Background(), nativeToolSearchTestRequest("openai:gpt-5.4-nano")))
+	if err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if _, err := llmtest.Drain(p.Stream(context.Background(), nativeToolSearchTestRequest("gpt-5.4-nano"))); err != nil {
+		t.Fatalf("second Stream with bare model name: %v", err)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("attempts = %d, want native request, fallback, and persisted catalog request", got)
+	}
+	for _, event := range events {
+		if event.Kind == llm.EventModelRequest {
+			t.Fatalf("first-attempt failure leaked to caller: %+v", event.ModelRequest)
+		}
+	}
+	mu.Lock()
+	got := append([]wireRequest(nil), requests...)
+	mu.Unlock()
+	if len(got) != 3 {
+		t.Fatalf("requests = %d, want 3", len(got))
+	}
+	if !wireToolsContain(got[0].Tools, "namespace", "mcp_demo") || !wireToolsContain(got[0].Tools, "tool_search", "") || wireToolsContain(got[0].Tools, "function", "tool_catalog") {
+		t.Fatalf("native tools = %+v", got[0].Tools)
+	}
+	for i := 1; i < len(got); i++ {
+		if wireToolsContain(got[i].Tools, "namespace", "mcp_demo") || wireToolsContain(got[i].Tools, "tool_search", "") || !wireToolsContain(got[i].Tools, "function", "tool_catalog") {
+			t.Fatalf("catalog tools on request %d = %+v", i+1, got[i].Tools)
+		}
+	}
+}
+
+func TestNativeToolSearchRejectedRequiresStructuredToolsParam(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		apiErr  *llm.APIError
+		matches bool
+	}{
+		{
+			name: "tools rejection",
+			apiErr: &llm.APIError{StatusCode: http.StatusBadRequest, Code: "unsupported_value",
+				ResponsePayload: llm.DiagnosticPayload(`{"error":{"type":"invalid_request_error","code":"unsupported_value","param":"tools"}}`)},
+			matches: true,
+		},
+		{
+			name: "different parameter",
+			apiErr: &llm.APIError{StatusCode: http.StatusBadRequest, Code: "invalid_request_error",
+				ResponsePayload: llm.DiagnosticPayload(`{"error":{"type":"invalid_request_error","param":"max_output_tokens"}}`)},
+		},
+		{
+			name: "message alone",
+			apiErr: &llm.APIError{StatusCode: http.StatusBadRequest, Code: "invalid_request_error", Message: "Tool tool_search is not supported",
+				ResponsePayload: llm.DiagnosticPayload(`{"error":{"type":"invalid_request_error"}}`)},
+		},
+		{
+			name: "different status",
+			apiErr: &llm.APIError{StatusCode: http.StatusUnprocessableEntity, Code: "invalid_request_error",
+				ResponsePayload: llm.DiagnosticPayload(`{"error":{"type":"invalid_request_error","param":"tools"}}`)},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := nativeToolSearchRejected(tc.apiErr); got != tc.matches {
+				t.Fatalf("nativeToolSearchRejected() = %v, want %v", got, tc.matches)
+			}
+		})
+	}
+}
+
+func TestStreamWebSocketFallsBackToCatalogWhenNativeToolSearchRejected(t *testing.T) {
+	var handshakes atomic.Int32
+	requests := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			t.Errorf("unexpected HTTP fallback")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		handshakes.Add(1)
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Errorf("flush handshake: %v", err)
+			return
+		}
+		responseIDs := []string{"resp_initial", "", "resp_fallback", "resp_next"}
+		for i := range responseIDs {
+			request, err := ws.ReadClientText(rw.Reader)
+			if err != nil {
+				t.Errorf("read websocket request %d: %v", i+1, err)
+				return
+			}
+			requests <- request
+			if i == 1 {
+				if err := ws.WriteServerText(conn, `{"type":"error","status_code":400,"error":{"type":"invalid_request_error","code":"unsupported_value","message":"unsupported hosted tool","param":"tools"}}`); err != nil {
+					t.Errorf("write rejection: %v", err)
+				}
+				continue
+			}
+			completed := fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"status":"completed","output":[],"usage":{"input_tokens":2,"output_tokens":1}}}`, responseIDs[i])
+			if err := ws.WriteServerText(conn, completed); err != nil {
+				t.Errorf("write completion %d: %v", i+1, err)
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	enabled := true
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, ToolSearch: &enabled, Sleep: func(time.Duration) {}})
+	initial := llmtest.SimpleRequest("gpt-5.4")
+	initial.StoreResponse = true
+	if _, err := llmtest.Drain(p.Stream(context.Background(), initial)); err != nil {
+		t.Fatalf("initial Stream: %v", err)
+	}
+	if !p.CanContinueResponse("resp_initial") {
+		t.Fatal("initial response is not available for continuation")
+	}
+
+	req := nativeToolSearchTestRequest("gpt-5.4")
+	req.StoreResponse = true
+	req.PreviousResponseID = "resp_initial"
+	if _, err := llmtest.Drain(p.Stream(context.Background(), req)); err != nil {
+		t.Fatalf("fallback Stream: %v", err)
+	}
+	req.PreviousResponseID = "resp_fallback"
+	if _, err := llmtest.Drain(p.Stream(context.Background(), req)); err != nil {
+		t.Fatalf("persisted fallback Stream: %v", err)
+	}
+	if got := handshakes.Load(); got != 1 {
+		t.Fatalf("websocket handshakes = %d, want fallback on the live connection", got)
+	}
+
+	got := make([]string, 4)
+	for i := range got {
+		got[i] = <-requests
+	}
+	if strings.Contains(got[0], `"type":"tool_search"`) {
+		t.Fatalf("initial websocket request unexpectedly used tool search: %s", got[0])
+	}
+	if !strings.Contains(got[1], `"type":"tool_search"`) || strings.Contains(got[1], `"name":"tool_catalog"`) {
+		t.Fatalf("native websocket request = %s", got[1])
+	}
+	for i := 2; i < len(got); i++ {
+		if strings.Contains(got[i], `"type":"tool_search"`) || !strings.Contains(got[i], `"name":"tool_catalog"`) {
+			t.Fatalf("catalog websocket request %d = %s", i+1, got[i])
+		}
+	}
+	if !strings.Contains(got[2], `"previous_response_id":"resp_initial"`) || !strings.Contains(got[3], `"previous_response_id":"resp_fallback"`) {
+		t.Fatalf("fallback lost continuation state: third=%s fourth=%s", got[2], got[3])
+	}
+}
+
+func TestStreamDoesNotFallbackAfterWebSocketOutput(t *testing.T) {
+	var attempts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if r.Method == http.MethodPost {
+			t.Errorf("unexpected HTTP fallback")
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Errorf("flush handshake: %v", err)
+			return
+		}
+		if _, err := ws.ReadClientText(rw.Reader); err != nil {
+			t.Errorf("read websocket request: %v", err)
+			return
+		}
+		if err := ws.WriteServerText(conn, `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"partial"}`); err != nil {
+			t.Errorf("write delta: %v", err)
+			return
+		}
+		if err := ws.WriteServerText(conn, `{"type":"error","status_code":400,"error":{"type":"invalid_request_error","code":"unsupported_value","message":"unsupported hosted tool","param":"tools"}}`); err != nil {
+			t.Errorf("write rejection: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	enabled := true
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, ToolSearch: &enabled, Sleep: func(time.Duration) {}})
+	events, err := llmtest.Drain(p.Stream(context.Background(), nativeToolSearchTestRequest("gpt-5.4")))
+	if err == nil {
+		t.Fatal("post-output rejection unexpectedly succeeded")
+	}
+	if got := textOf(events); got != "partial" {
+		t.Fatalf("text = %q, want partial", got)
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("attempts = %d, want no fallback after output", got)
+	}
+	if p.nativeToolSearchDowngraded("gpt-5.4") {
+		t.Fatal("post-output rejection persisted a tool-search downgrade")
+	}
+}
+
+func TestStreamWebSocketCatalogFallbackErrorIsNotRetried(t *testing.T) {
+	var websocketRequests atomic.Int32
+	var httpRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			httpRequests.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Errorf("flush handshake: %v", err)
+			return
+		}
+		for i := 0; i < 2; i++ {
+			if _, err := ws.ReadClientText(rw.Reader); err != nil {
+				t.Errorf("read websocket request %d: %v", i+1, err)
+				return
+			}
+			websocketRequests.Add(1)
+			if err := ws.WriteServerText(conn, `{"type":"error","status_code":400,"error":{"type":"invalid_request_error","code":"unsupported_value","message":"invalid tools","param":"tools"}}`); err != nil {
+				t.Errorf("write rejection %d: %v", i+1, err)
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	enabled := true
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, ToolSearch: &enabled, Sleep: func(time.Duration) {}})
+	if _, err := llmtest.Drain(p.Stream(context.Background(), nativeToolSearchTestRequest("gpt-5.4"))); err == nil {
+		t.Fatal("catalog rejection unexpectedly succeeded")
+	}
+	if got := websocketRequests.Load(); got != 2 {
+		t.Fatalf("websocket requests = %d, want one native and one catalog attempt", got)
+	}
+	if got := httpRequests.Load(); got != 0 {
+		t.Fatalf("catalog rejection retried over HTTP %d times", got)
+	}
+}
+
+func TestStreamWebSocketStatuslessAPIErrorDoesNotFallBackToHTTP(t *testing.T) {
+	var websocketRequests atomic.Int32
+	var httpRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			httpRequests.Add(1)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		h, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("response writer is not a hijacker")
+			return
+		}
+		conn, rw, err := h.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+		fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+		fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+		fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", testAcceptKey(r.Header.Get("Sec-WebSocket-Key")))
+		if err := rw.Flush(); err != nil {
+			t.Errorf("flush handshake: %v", err)
+			return
+		}
+		if _, err := ws.ReadClientText(rw.Reader); err != nil {
+			t.Errorf("read websocket request: %v", err)
+			return
+		}
+		websocketRequests.Add(1)
+		if err := ws.WriteServerText(conn, `{"type":"error","error":{"type":"invalid_request_error","code":"invalid_request_error","message":"bad input","param":"input"}}`); err != nil {
+			t.Errorf("write rejection: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, Sleep: func(time.Duration) {}})
+	_, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	if err == nil {
+		t.Fatal("status-less websocket API error unexpectedly succeeded")
+	}
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) || apiErr.Code != "invalid_request_error" || apiErr.Message != "bad input" {
+		t.Fatalf("error = %v, want original invalid_request_error", err)
+	}
+	if got := websocketRequests.Load(); got != 1 {
+		t.Fatalf("websocket requests = %d, want 1", got)
+	}
+	if got := httpRequests.Load(); got != 0 {
+		t.Fatalf("status-less API error retried over HTTP %d times", got)
+	}
+}
+
+func TestStreamHostedToolSearchItemsPersistedAndDeduped(t *testing.T) {
+	searchCall := `{"type":"tool_search_call","execution":"server","call_id":null,"status":"completed","arguments":{"paths":["mcp_demo"]}}`
+	searchOutput := `{"type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":[{"type":"namespace","name":"mcp_demo","tools":[{"type":"function","name":"mcp__demo__search","defer_loading":true,"parameters":{"type":"object"}}]}]}`
+	// response.completed may repeat semantically identical output items with a
+	// different serialization. Dedupe by output identity, not raw bytes.
+	completedSearchCall := `{"status":"completed","arguments":{"paths":["mcp_demo"]},"call_id":null,"execution":"server","type":"tool_search_call"}`
+	completedSearchOutput := `{"status":"completed","tools":[{"name":"mcp_demo","type":"namespace","tools":[{"name":"mcp__demo__search","type":"function","parameters":{"type":"object"},"defer_loading":true}]}],"call_id":null,"execution":"server","type":"tool_search_output"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		llmtest.WriteBody(w, []byte("event: response.output_item.done\n"+`data: {"type":"response.output_item.done","output_index":0,"item":`+searchCall+`}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.output_item.done\n"+`data: {"type":"response.output_item.done","output_index":1,"item":`+searchOutput+`}`+"\n\n"))
+		llmtest.WriteBody(w, []byte("event: response.completed\n"+`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[`+completedSearchCall+`,`+completedSearchOutput+`,{"type":"function_call","call_id":"call_1","name":"mcp__demo__search","namespace":"mcp_demo","arguments":"{}","status":"completed"}],"usage":{"input_tokens":1,"output_tokens":1}}}`+"\n\n"))
+	}))
+	t.Cleanup(srv.Close)
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), llmtest.SimpleRequest("gpt-5.6")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var search []json.RawMessage
+	var toolNamespace string
+	for _, event := range events {
+		switch event.Kind {
+		case llm.EventResponsesToolSearch:
+			search = append(search, event.ResponsesToolSearch)
+		case llm.EventToolCallDone:
+			toolNamespace = event.ToolNamespace
+		}
+	}
+	if len(search) != 2 || !strings.Contains(string(search[0]), `"type":"tool_search_call"`) ||
+		!strings.Contains(string(search[1]), `"type":"tool_search_output"`) || !strings.Contains(string(search[1]), `"mcp__demo__search"`) {
+		t.Fatalf("search events = %s", search)
+	}
+	if toolNamespace != "mcp_demo" {
+		t.Fatalf("tool namespace = %q, want mcp_demo", toolNamespace)
+	}
+}
+
 func TestStreamAssistantPhase(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")

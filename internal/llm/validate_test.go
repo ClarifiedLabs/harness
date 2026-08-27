@@ -311,6 +311,108 @@ func TestValidateMessageContentInteractionState(t *testing.T) {
 	}
 }
 
+func TestValidateMessageContentResponsesToolSearch(t *testing.T) {
+	valid := ContentBlock{
+		Kind:                BlockResponsesToolSearch,
+		ResponsesToolSearch: json.RawMessage(`{"type":"tool_search_output","execution":"server","call_id":null,"status":"completed","tools":[]}`),
+	}
+	if err := ValidateMessageContent([]Message{{Role: RoleAssistant, Content: []ContentBlock{valid}}}); err != nil {
+		t.Fatalf("valid hosted tool search: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		role  Role
+		value string
+	}{
+		{name: "user role", role: RoleUser, value: string(valid.ResponsesToolSearch)},
+		{name: "client execution", role: RoleAssistant, value: `{"type":"tool_search_output","execution":"client","status":"completed","tools":[]}`},
+		{name: "incomplete", role: RoleAssistant, value: `{"type":"tool_search_call","execution":"server","status":"in_progress"}`},
+		{name: "unknown type", role: RoleAssistant, value: `{"type":"additional_tools","execution":"server","status":"completed"}`},
+		{name: "malformed", role: RoleAssistant, value: `{`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block := ContentBlock{Kind: BlockResponsesToolSearch, ResponsesToolSearch: json.RawMessage(tc.value)}
+			if err := ValidateMessageContent([]Message{{Role: tc.role, Content: []ContentBlock{block}}}); err == nil {
+				t.Fatal("ValidateMessageContent = nil, want error")
+			}
+		})
+	}
+}
+
+func TestValidateMessageContentAnthropicToolSearch(t *testing.T) {
+	server := ContentBlock{
+		Kind:                BlockAnthropicToolSearch,
+		AnthropicToolSearch: json.RawMessage(`{"type":"server_tool_use","id":"srvtoolu_1","name":"tool_search_tool_bm25","input":{"query":"tools"}}`),
+	}
+	result := ContentBlock{
+		Kind:                BlockAnthropicToolSearch,
+		AnthropicToolSearch: json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`),
+	}
+	if err := ValidateMessageContent([]Message{{Role: RoleAssistant, Content: []ContentBlock{server, result}}}); err != nil {
+		t.Fatalf("valid Anthropic tool search: %v", err)
+	}
+	errorResult := ContentBlock{
+		Kind:                BlockAnthropicToolSearch,
+		AnthropicToolSearch: json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srvtoolu_1","content":{"type":"tool_search_tool_result_error","error_code":"unavailable","error_message":"search timed out"}}`),
+	}
+	if err := ValidateMessageContent([]Message{{Role: RoleAssistant, Content: []ContentBlock{server, errorResult}}}); err != nil {
+		t.Fatalf("valid Anthropic tool-search error: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		role Role
+		raw  string
+	}{
+		{name: "user role", role: RoleUser, raw: string(server.AnthropicToolSearch)},
+		{name: "missing server id", role: RoleAssistant, raw: `{"type":"server_tool_use","name":"tool_search_tool_bm25","input":{}}`},
+		{name: "wrong server name", role: RoleAssistant, raw: `{"type":"server_tool_use","id":"srv_1","name":"web_search","input":{}}`},
+		{name: "non-object input", role: RoleAssistant, raw: `{"type":"server_tool_use","id":"srv_1","name":"tool_search_tool_regex","input":"x"}`},
+		{name: "missing result content", role: RoleAssistant, raw: `{"type":"tool_search_tool_result","tool_use_id":"srv_1"}`},
+		{name: "empty result content", role: RoleAssistant, raw: `{"type":"tool_search_tool_result","tool_use_id":"srv_1","content":{}}`},
+		{name: "missing references", role: RoleAssistant, raw: `{"type":"tool_search_tool_result","tool_use_id":"srv_1","content":{"type":"tool_search_tool_search_result"}}`},
+		{name: "bad reference", role: RoleAssistant, raw: `{"type":"tool_search_tool_result","tool_use_id":"srv_1","content":{"type":"tool_search_tool_search_result","tool_references":[{"type":"text","tool_name":"read"}]}}`},
+		{name: "unknown error code", role: RoleAssistant, raw: `{"type":"tool_search_tool_result","tool_use_id":"srv_1","content":{"type":"tool_search_tool_result_error","error_code":"bad","error_message":"failed"}}`},
+		{name: "missing error message", role: RoleAssistant, raw: `{"type":"tool_search_tool_result","tool_use_id":"srv_1","content":{"type":"tool_search_tool_result_error","error_code":"unavailable"}}`},
+		{name: "unknown type", role: RoleAssistant, raw: `{"type":"tool_reference"}`},
+		{name: "malformed", role: RoleAssistant, raw: `{`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block := ContentBlock{Kind: BlockAnthropicToolSearch, AnthropicToolSearch: json.RawMessage(tc.raw)}
+			if err := ValidateMessageContent([]Message{{Role: tc.role, Content: []ContentBlock{block}}}); err == nil {
+				t.Fatal("ValidateMessageContent = nil, want error")
+			}
+		})
+	}
+}
+
+func TestValidateTranscriptPairsAnthropicToolSearchBlocks(t *testing.T) {
+	serverA := ContentBlock{Kind: BlockAnthropicToolSearch, AnthropicToolSearch: json.RawMessage(`{"type":"server_tool_use","id":"srv_a","name":"tool_search_tool_bm25","input":{"query":"tools"}}`)}
+	serverB := ContentBlock{Kind: BlockAnthropicToolSearch, AnthropicToolSearch: json.RawMessage(`{"type":"server_tool_use","id":"srv_b","name":"tool_search_tool_regex","input":{"pattern":"tools"}}`)}
+	resultA := ContentBlock{Kind: BlockAnthropicToolSearch, AnthropicToolSearch: json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srv_a","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`)}
+	resultB := ContentBlock{Kind: BlockAnthropicToolSearch, AnthropicToolSearch: json.RawMessage(`{"type":"tool_search_tool_result","tool_use_id":"srv_b","content":{"type":"tool_search_tool_search_result","tool_references":[]}}`)}
+	for _, tc := range []struct {
+		name    string
+		content []ContentBlock
+		wantErr bool
+	}{
+		{name: "valid", content: []ContentBlock{serverA, resultA}},
+		{name: "multiple valid", content: []ContentBlock{serverA, serverB, resultA, resultB}},
+		{name: "orphan result", content: []ContentBlock{resultA}, wantErr: true},
+		{name: "mismatched result", content: []ContentBlock{serverA, resultB}, wantErr: true},
+		{name: "duplicate result", content: []ContentBlock{serverA, resultA, resultA}, wantErr: true},
+		{name: "missing result", content: []ContentBlock{serverA}, wantErr: true},
+		{name: "duplicate open server id", content: []ContentBlock{serverA, serverA, resultA}, wantErr: true},
+		{name: "reuse completed server id", content: []ContentBlock{serverA, resultA, serverA, resultA}, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateTranscript([]Message{{Role: RoleAssistant, Content: tc.content}})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ValidateTranscript error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
 func TestValidateMessageContentRejectsMalformedImages(t *testing.T) {
 	valid := ContentBlock{
 		Kind:           BlockImage,

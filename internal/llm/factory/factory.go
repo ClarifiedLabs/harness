@@ -46,6 +46,8 @@ type Options struct {
 	// that reject the standard parameter.
 	OmitMaxOutputTokens bool
 	ResponsesWebSocket  bool
+	ResponsesToolSearch *bool
+	AnthropicToolSearch llm.AnthropicToolSearch
 	ReasoningMode       string // "openai" | "openrouter" | "google" | "anthropic"; empty = infer
 }
 
@@ -69,6 +71,9 @@ func New(opts Options) (llm.Provider, error) {
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {
 			return nil, fmt.Errorf("llm: ANTHROPIC_API_KEY is required (or set a custom base URL for a local server)")
 		}
+		if !llm.ValidAnthropicToolSearch(opts.AnthropicToolSearch) {
+			return nil, fmt.Errorf("llm: invalid anthropic_tool_search %q", opts.AnthropicToolSearch)
+		}
 		return anthropic.New(anthropic.Config{
 			APIKey:                  opts.APIKey,
 			AuthHeaders:             opts.AuthHeaders,
@@ -77,6 +82,7 @@ func New(opts Options) (llm.Provider, error) {
 			OutputLimit:             opts.OutputLimit,
 			UsageInputIncludesCache: opts.UsageInputIncludesCache,
 			ReasoningReplay:         opts.ReasoningReplay,
+			ToolSearch:              opts.AnthropicToolSearch,
 		}), nil
 	case "openai":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {
@@ -111,6 +117,7 @@ func New(opts Options) (llm.Provider, error) {
 			UseWebSocket:        opts.ResponsesWebSocket,
 			ProviderName:        opts.ProviderName,
 			PromptCache:         opts.PromptCache,
+			ToolSearch:          opts.ResponsesToolSearch,
 		}), nil
 	case "interactions":
 		if opts.APIKey == "" && opts.BaseURL == "" && len(opts.AuthHeaders) == 0 {

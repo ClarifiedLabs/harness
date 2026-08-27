@@ -56,14 +56,14 @@ func TestAPISupportedSurfaceIsExplicitlyPartitioned(t *testing.T) {
 		[]string{"max_tokens", "messages", "model", "output_config", "service_tier", "speed", "stop_sequences", "stream", "system", "temperature", "thinking", "tools"},
 		[]string{"cache_control", "container", "inference_geo", "metadata", "tool_choice", "top_k", "top_p"})
 	assertAnthropicPartition(t, "input content", spec.InputContentTypes,
-		[]string{"image", "redacted_thinking", "server_tool_use", "text", "thinking", "tool_result", "tool_use", "web_search_tool_result"},
-		[]string{"bash_code_execution_tool_result", "code_execution_tool_result", "container_upload", "document", "mid_conv_system", "search_result", "text_editor_code_execution_tool_result", "tool_search_tool_result", "web_fetch_tool_result"})
+		[]string{"image", "redacted_thinking", "server_tool_use", "text", "thinking", "tool_result", "tool_search_tool_result", "tool_use", "web_search_tool_result"},
+		[]string{"bash_code_execution_tool_result", "code_execution_tool_result", "container_upload", "document", "mid_conv_system", "search_result", "text_editor_code_execution_tool_result", "web_fetch_tool_result"})
 	assertAnthropicPartition(t, "output content", spec.OutputContentTypes,
-		[]string{"redacted_thinking", "server_tool_use", "text", "thinking", "tool_use", "web_search_tool_result"},
-		[]string{"bash_code_execution_tool_result", "code_execution_tool_result", "container_upload", "text_editor_code_execution_tool_result", "tool_search_tool_result", "web_fetch_tool_result"})
+		[]string{"redacted_thinking", "server_tool_use", "text", "thinking", "tool_search_tool_result", "tool_use", "web_search_tool_result"},
+		[]string{"bash_code_execution_tool_result", "code_execution_tool_result", "container_upload", "text_editor_code_execution_tool_result", "web_fetch_tool_result"})
 	assertAnthropicPartition(t, "tools", spec.ToolTypes,
-		[]string{"custom", "web_search_20250305"},
-		[]string{"bash", "code_execution", "computer", "memory", "text_editor", "tool_search", "web_fetch", "web_search_20260209"})
+		[]string{"custom", "tool_search", "web_search_20250305"},
+		[]string{"bash", "code_execution", "computer", "memory", "text_editor", "web_fetch", "web_search_20260209"})
 	assertAnthropicPartition(t, "events", spec.EventTypes,
 		[]string{"content_block_delta", "content_block_start", "content_block_stop", "error", "message_delta", "message_start", "message_stop", "ping"},
 		nil)
