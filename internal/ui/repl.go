@@ -2439,8 +2439,10 @@ func (rr *replReader) readDuringPrompt() (replInput, bool, error) {
 			}
 			if result.input.text != "" || result.input.pasted || result.input.interactive {
 				// Enter during a prompt: the editor committed the buffer as queued
-				// next-prompt input. Hand it to the run loop, which queues it to run
-				// after the current prompt; capture keeps reading further input.
+				// next-prompt input. Refresh the navigation snapshot so the next active
+				// read can immediately recall this submission, then hand it to the run
+				// loop; capture keeps reading further input.
+				rr.promptHistory = rr.editor.historyState()
 				return result.input, true, nil
 			}
 			if result.input.edit {

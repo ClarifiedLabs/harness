@@ -7251,6 +7251,31 @@ func TestREPLDuringPromptHistoryRecall(t *testing.T) {
 	}
 }
 
+// A submitted during-prompt line is committed to canonical history before the
+// next active read. That read must refresh its navigation snapshot so Up recalls
+// the just-submitted steer rather than the prompt that preceded it.
+func TestREPLDuringPromptSubmissionRefreshesHistoryRecall(t *testing.T) {
+	rr := newDuringPromptTestReader("steer\r\x1b[A\r")
+	rr.editor.SetInitialHistory([]string{"prompt-before-steer"})
+	rr.beginPromptCapture()
+
+	first, ok, err := rr.readDuringPrompt()
+	if err != nil || !ok || first.text != "steer" {
+		t.Fatalf("first submission = %+v ok=%v err=%v, want steer", first, ok, err)
+	}
+	if got := rr.editor.history; len(got) != 2 || got[1] != "steer" {
+		t.Fatalf("canonical history = %v, want prompt-before-steer then steer", got)
+	}
+
+	recalled, ok, err := rr.readDuringPrompt()
+	if err != nil || !ok {
+		t.Fatalf("history recall submission = %+v ok=%v err=%v", recalled, ok, err)
+	}
+	if recalled.text != "steer" {
+		t.Fatalf("Up recalled %q, want just-submitted steer", recalled.text)
+	}
+}
+
 // Ctrl-G during a prompt returns an edit request (done) carrying the typed buffer
 // so the run loop can open $EDITOR on it; the during-prompt state is cleared.
 func TestREPLDuringPromptCtrlGRequestsEdit(t *testing.T) {
