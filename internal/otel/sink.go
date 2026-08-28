@@ -148,7 +148,7 @@ func sanitizeToolName(name string) string {
 		return "unknown"
 	}
 	known := map[string]bool{
-		"read": true, "view_image": true, "edit": true, "write": true, "shell": true, "git": true, "web_fetch": true, "git_readonly": true, "write_tmp_file": true, "delegate": true, "background_jobs": true, "update_todos": true, "record_plan": true, "handoff": true,
+		"read": true, "view_image": true, "edit": true, "write": true, "shell": true, "web_fetch": true, "delegate": true, "background_jobs": true, "update_todos": true, "record_plan": true,
 	}
 	if known[name] {
 		return truncate(name, 64)
@@ -197,7 +197,7 @@ func isSingleInspectTurn(toolNames []string) bool {
 		return false
 	}
 	switch normalized[0] {
-	case "read", "view_image", "web_fetch", "git_readonly":
+	case "read", "view_image", "web_fetch":
 		return true
 	default:
 		return false

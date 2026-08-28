@@ -48,33 +48,26 @@ func metricIntTotal(t *testing.T, exp *Exporter, name string) int64 {
 	return total
 }
 
-func TestSanitizeToolNameUsesCurrentToolNamesOnly(t *testing.T) {
+func TestSanitizeToolNamePreservesCurrentToolNames(t *testing.T) {
 	current := []string{
-		"read", "view_image", "edit", "write", "shell", "git", "web_fetch",
-		"git_readonly", "write_tmp_file", "delegate", "background_jobs",
-		"update_todos", "record_plan", "handoff",
+		"read", "view_image", "edit", "write", "shell", "web_fetch",
+		"delegate", "background_jobs",
+		"update_todos", "record_plan",
 	}
 	for _, name := range current {
 		if got := sanitizeToolName(name); got != name {
 			t.Errorf("sanitizeToolName(%q) = %q, want current name preserved", name, got)
 		}
 	}
-
-	removed := []string{"read_file", "write_file", "apply_patch", "rg", "grep", "glob", "list_dir"}
-	for _, name := range removed {
-		if got := sanitizeToolName(name); got != "other" {
-			t.Errorf("sanitizeToolName(%q) = %q, want removed tool bucketed as other", name, got)
-		}
-	}
 }
 
-func TestSingleInspectTurnUsesCurrentToolNamesOnly(t *testing.T) {
-	for _, name := range []string{"read", "view_image", "web_fetch", "git_readonly"} {
+func TestSingleInspectTurnClassifiesCurrentToolNames(t *testing.T) {
+	for _, name := range []string{"read", "view_image", "web_fetch"} {
 		if !isSingleInspectTurn([]string{name}) {
 			t.Errorf("isSingleInspectTurn(%q) = false, want true", name)
 		}
 	}
-	for _, name := range []string{"read_file", "rg", "grep", "glob", "list_dir", "write"} {
+	for _, name := range []string{"write", "edit"} {
 		if isSingleInspectTurn([]string{name}) {
 			t.Errorf("isSingleInspectTurn(%q) = true, want false", name)
 		}

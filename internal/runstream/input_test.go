@@ -33,26 +33,21 @@ func decodeAll(t *testing.T, input string) (inputs []Input, errs []*LineError) {
 func TestDecoderRoundTrip(t *testing.T) {
 	inputs, errs := decodeAll(t,
 		`{"type":"prompt","id":"p1","text":"hello","images":[{"path":"/tmp/a.png","detail":"high"}]}`+"\n"+
-			`{"type":"approval_response","id":"h1","approve":true}`+"\n"+
 			`{"type":"interrupt"}`+"\n"+
 			`{"type":"shutdown"}`+"\n")
 	if len(errs) != 0 {
 		t.Fatalf("errors = %v", errs)
 	}
-	if len(inputs) != 4 {
-		t.Fatalf("decoded %d messages, want 4", len(inputs))
+	if len(inputs) != 3 {
+		t.Fatalf("decoded %d messages, want 3", len(inputs))
 	}
 	p := inputs[0]
 	if p.Type != InputPrompt || p.ID != "p1" || p.Text != "hello" ||
 		len(p.Images) != 1 || p.Images[0].Path != "/tmp/a.png" || p.Images[0].Detail != "high" {
 		t.Fatalf("prompt message = %+v", p)
 	}
-	a := inputs[1]
-	if a.Type != InputApprovalResponse || a.ID != "h1" || a.Approve == nil || !*a.Approve {
-		t.Fatalf("approval message = %+v", a)
-	}
-	if inputs[2].Type != InputInterrupt || inputs[3].Type != InputShutdown {
-		t.Fatalf("control messages = %+v %+v", inputs[2], inputs[3])
+	if inputs[1].Type != InputInterrupt || inputs[2].Type != InputShutdown {
+		t.Fatalf("control messages = %+v %+v", inputs[1], inputs[2])
 	}
 }
 
@@ -77,12 +72,11 @@ func TestDecoderUnknownTypeAndFieldValidation(t *testing.T) {
 	inputs, errs := decodeAll(t,
 		`{"type":"bogus","id":"b1"}`+"\n"+
 			`{"type":"prompt","id":"p1"}`+"\n"+ // no text, no images
-			`{"type":"approval_response","approve":true}`+"\n"+ // no id
-			`{"type":"approval_response","id":"h1"}`+"\n") // no approve
+			`{"type":"approval_response","id":"h1","approve":true}`+"\n")
 	if len(inputs) != 0 {
 		t.Fatalf("inputs = %+v, want none", inputs)
 	}
-	kinds := []LineErrorKind{LineUnknownType, LineInvalidFields, LineInvalidFields, LineInvalidFields}
+	kinds := []LineErrorKind{LineUnknownType, LineInvalidFields, LineUnknownType}
 	if len(errs) != len(kinds) {
 		t.Fatalf("errors = %v", errs)
 	}
@@ -91,7 +85,7 @@ func TestDecoderUnknownTypeAndFieldValidation(t *testing.T) {
 			t.Fatalf("error %d kind = %q, want %q", i, errs[i].Kind, want)
 		}
 	}
-	wantIDs := []string{"b1", "p1", "", "h1"}
+	wantIDs := []string{"b1", "p1", "h1"}
 	for i, want := range wantIDs {
 		if errs[i].ID != want {
 			t.Fatalf("error %d ID = %q, want %q", i, errs[i].ID, want)

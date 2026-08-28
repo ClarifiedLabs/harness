@@ -22,24 +22,19 @@ import (
 )
 
 // Version is the JSON run-stream protocol version, published as run_start.v.
-const Version = 4
+const Version = 5
 
 // Envelope type names. Mirrored session events between run_start and run_end
 // keep their raw.ndjson type names ("user", "assistant_delta", "tool_start",
 // ...), which never collide with these envelope names.
 const (
-	TypeStartupError    = "startup_error"
-	TypeRunStart        = "run_start"
-	TypeRunEnd          = "run_end"
-	TypePromptStart     = "prompt_start"
-	TypePromptEnd       = "prompt_end"
-	TypeApprovalRequest = "approval_request"
-	TypeInputError      = "input_error"
+	TypeStartupError = "startup_error"
+	TypeRunStart     = "run_start"
+	TypeRunEnd       = "run_end"
+	TypePromptStart  = "prompt_start"
+	TypePromptEnd    = "prompt_end"
+	TypeInputError   = "input_error"
 )
-
-// ApprovalKindImplementationHandoff marks an approval_request asking whether
-// to execute a handoff tool handoff.
-const ApprovalKindImplementationHandoff = "implementation_handoff"
 
 // Run modes published as run_start.mode.
 const (
@@ -186,19 +181,6 @@ type PromptEnd struct {
 	FinalText           string                          `json:"final_text"`
 	DurationMS          int64                           `json:"duration_ms,omitempty"`
 	Time                time.Time                       `json:"time"`
-}
-
-// ApprovalRequest asks the client to approve or deny a pending action. The
-// client answers with an approval_response input message carrying the same
-// ID; the prompt boundary waits (interrupt/shutdown still work).
-type ApprovalRequest struct {
-	Type     string    `json:"type"`
-	ID       string    `json:"id"`
-	Kind     string    `json:"kind"`
-	PlanPath string    `json:"plan_path"`
-	Agent    string    `json:"agent,omitempty"`
-	Model    string    `json:"model,omitempty"`
-	Time     time.Time `json:"time"`
 }
 
 // InputError reports one rejected input line or message; the session keeps
@@ -418,17 +400,6 @@ func (w *Writer) PromptEnd(end PromptEnd) {
 	if w.sendLocked(end) {
 		w.lastPrompt = end
 	}
-}
-
-// RequestApproval emits an approval_request envelope for a pending action.
-func (w *Writer) RequestApproval(req ApprovalRequest) {
-	if req.Type == "" {
-		req.Type = TypeApprovalRequest
-	}
-	if req.Time.IsZero() {
-		req.Time = time.Now()
-	}
-	w.send(req)
 }
 
 // InputError reports one rejected input line or message; the session keeps

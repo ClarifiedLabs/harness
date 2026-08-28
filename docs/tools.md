@@ -13,20 +13,15 @@ This page is the operational overview.
 | `edit` | edit existing files with exact-text replacements; optional `replaceAll` |
 | `write` | create or overwrite a file, creating parent directories |
 | `shell` | run a shell command or direct argv program; co-issued calls may run concurrently (best-effort) |
-| `git` | run host git with `--no-pager`, including a compact `workspace_summary` workflow |
-| `git_readonly` | restricted git subcommands for read-only agents |
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
-| `write_tmp_file` | write scratch files under a private temp directory |
 | `update_todos` | replace the current advisory TODO list for multi-step work |
 | `delegate` | run a configured child agent and return its final report |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `tool_catalog` | conditionally list, describe, and activate optional MCP/LSP tools |
-| `record_plan` | Record a complete implementation plan for handoff to an implementation agent |
-| `handoff` | Handoff the recorded plan to an implementation agent (interactive plan agent; `agent` enum = exclusive agents `auto`, `independent`, plus custom `workspace_access: exclusive`; omit for default `auto`) |
+| `record_plan` | Record a complete implementation plan |
 
 The default registry is `read`, `view_image`, `edit`, `write`, `shell`, and
-`web_fetch`, in that order. The complete constructible catalog adds `git` and
-`git_readonly` when the host `git` binary is available, plus `write_tmp_file`.
+`web_fetch`, in that order; the constructible catalog is the same set.
 Coordination tools and discovered MCP/LSP tools are registered separately for
 the agents that expose them.
 
@@ -244,28 +239,8 @@ and starts an interactive continuation only after already-delivered user work,
 drafts, approvals, EOF, shutdown, and interrupts have priority. Do not replace
 one dependency wait with `get`/`list` polling.
 
-For repository orientation, `git {"workflow":"workspace_summary"}` combines
-branch/porcelain status, HEAD, staged and unstaged diff stats, and both whitespace
-checks into one read-only result. Use ordinary `git {"args":[...]}` afterward
-when the actual patch or another native subcommand is needed. To record finished
-work, `git {"workflow":"commit","paths":[...],"message":"type: subject"}` stages
-only the exact repository-relative file or directory paths (a directory
-includes everything beneath it), runs the staged whitespace check,
-commits only those paths, and returns the new commit plus remaining workspace
-status. It rejects `.`, `..`, globs, and pathspec magic. A failed whitespace
-check rejects with the offending lines plus a corrective sentence (strip the
-trailing whitespace and re-stage before retrying).
-
-`git_readonly` exposes an audited query-only allowlist for restricted agents:
-`blame`, `cat-file`, `check-attr`, `check-ignore`, `check-mailmap`,
-`check-ref-format`, `cherry`, `count-objects`, `describe`, `diff`,
-`diff-files`, `diff-index`, `diff-tree`, `for-each-ref`, `grep`, `log`,
-`ls-files`, `ls-tree`, `merge-base`, `name-rev`, `range-diff`, `rev-list`,
-`rev-parse`, `shortlog`, `show`, `show-branch`, `show-ref`, and `status`.
-Mixed read/write commands such as `branch`, `config`, `remote`, `reflog`,
-`submodule`, `tag`, and `worktree` are intentionally excluded. The runner
-disables pagers, optional locks, filesystem monitors, external diff/textconv
-helpers, prompts, output-file flags, and signature helpers.
+For repository orientation, run git through `shell` (for example
+`{"argv":["git","--no-pager","status","--short"]}` or `git --no-pager diff`).
 
 `update_todos` is available to every built-in agent, including `plan`. Use it as
 an advisory checklist for meaningful multi-step work, update it at phase
@@ -289,13 +264,9 @@ session can capture a durable implementation plan and later run `/handoff`
 without switching agents first. `record_plan` writes a
 self-contained Markdown artifact to `<session>/plans/NNNN-<slug>.plan.md` with
 temp-file-then-rename durability and makes that artifact the session's latest
-plan. Older plan files remain immutable. In an interactive root session, the
-plan agent may call `handoff`; Harness displays the full latest
-plan, asks for approval, archives the planning transcript, and seeds the
-implementation agent with the complete plan. Delegated plan agents may record
-private child plans but cannot request an interactive handoff. Agents with
-`record_plan` but not `handoff` (`auto`, `independent`, default-inheriting
-custom) can record plans; use `/handoff` to review and approve one.
+plan. Older plan files remain immutable. Delegated plan agents record private
+child plans. `/handoff` is the user command that reviews and approves a
+recorded plan for implementation.
 
 ## File Mutation
 
@@ -566,10 +537,10 @@ stages:
 
 Harness does not start a stage until all earlier stages have returned results.
 Within one stage, co-issued registered calls are parallel-eligible by default,
-including mutating `shell`, git, MCP/LSP, `write_tmp_file`, and background
+including mutating `shell`, MCP/LSP, and background
 delegate launches. A tool may implement an input-aware sequential opt-out for
 concrete shared-state ordering; built-in examples include `update_todos`,
-`record_plan`, `handoff`, foreground delegates, and `background_jobs`
+`record_plan`, foreground delegates, and `background_jobs`
 cancellation. Such calls are barriers inside their stage. A matching
 `PreToolUse` or `PostToolUse` hook also makes its target call a barrier.
 

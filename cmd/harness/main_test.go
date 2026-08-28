@@ -4062,7 +4062,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
-func TestRunInteractiveDefaultExposesTodosAndPlanButNotHandoffOrGoalTools(t *testing.T) {
+func TestRunInteractiveDefaultExposesTodosAndPlan(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
 
@@ -4073,11 +4073,6 @@ func TestRunInteractiveDefaultExposesTodosAndPlanButNotHandoffOrGoalTools(t *tes
 	for _, name := range []string{"update_todos", "record_plan"} {
 		if !slices.Contains(names, name) {
 			t.Fatalf("interactive default tools missing %s: %v", name, names)
-		}
-	}
-	for _, name := range []string{"handoff", "create_goal", "update_goal"} {
-		if slices.Contains(names, name) {
-			t.Fatalf("interactive default tools unexpectedly include removed %s: %v", name, names)
 		}
 	}
 }
@@ -4766,7 +4761,7 @@ func TestRunDelegateSchemaDefaultListsOnlyCompatibleAgents(t *testing.T) {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	got := delegateAgentEnum(t, fp.Requests[0])
-	want := []string{"auto", "explore", "independent", "review", "style"}
+	want := []string{"auto", "explore", "independent", "plan", "review", "style"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("delegate agent enum = %v, want %v", got, want)
 	}
@@ -4898,45 +4893,19 @@ func TestRunDelegateUsesSwitchedModelAndAgent(t *testing.T) {
 	}
 }
 
-func TestRunLogsUnavailableToolsAtLaunch(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	fp := llmtest.New("fake", okStepWithUsage(1, 1))
-	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
-
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	got := errw.String()
-	for _, want := range []string{
-		`[warn] [cli_tools] Tool "git" is disabled. Reason: "git" binary not found.`,
-		`[warn] [cli_tools] Tool "git_readonly" is disabled. Reason: "git" binary not found.`,
-	} {
-		if !strings.Contains(got, want) {
-			t.Fatalf("stderr missing %q:\n%s", want, got)
-		}
-	}
-	for _, name := range []string{"git", "git_readonly"} {
-		if slices.Contains(toolNames(fp.Requests[0]), name) {
-			t.Fatalf("request advertised unavailable tool %q: %v", name, toolNames(fp.Requests[0]))
-		}
-	}
-	for _, removed := range []string{"rg", "grep", "glob", "search"} {
-		if slices.Contains(toolNames(fp.Requests[0]), removed) {
-			t.Fatalf("default advertised removed search wrapper %q: %v", removed, toolNames(fp.Requests[0]))
-		}
-	}
-}
-
 func TestRunQuietSuppressesBracketedStatusButNotDiagnostics(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"mcp":{"enable":true,"proxy":"localhost:1"}}`), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
-	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "--quiet", "-p", "hi"}, fp, "")
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-config", cfgPath, "-model", "claude-opus-4-8", "--quiet", "-p", "hi"}, fp, "")
 
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
 	}
 	got := errw.String()
-	if !strings.Contains(got, "[cli_tools]") {
+	if !strings.Contains(got, "[mcp]") {
 		t.Fatalf("quiet should not suppress slog diagnostics; stderr=%q", got)
 	}
 	for _, notWant := range []string{"[turn:", "[prompt:", "[tool-call:", "[tool:"} {
@@ -5333,7 +5302,7 @@ func TestRunREPLModeAliasSwitchesTools(t *testing.T) {
 	if len(fp.Requests) != 1 {
 		t.Fatalf("want 1 post-switch request, got %d", len(fp.Requests))
 	}
-	want := append(expectedPlanToolNames(), "handoff")
+	want := expectedPlanToolNames()
 	if got := toolNames(fp.Requests[0]); !slices.Equal(got, want) {
 		t.Errorf("post-/mode tools = %v, want plan set %v", got, want)
 	}
@@ -5489,7 +5458,7 @@ func expectedPlanToolNames() []string {
 	// plan's realized tool list is the shared inspection set (which now includes
 	// shell) followed by the main-registered coordination tools in catalog
 	// order. Like every built-in, plan keeps update_todos.
-	return append(names, "write_tmp_file", "delegate", "background_jobs", "update_todos", "record_plan")
+	return append(names, "delegate", "background_jobs", "update_todos", "record_plan")
 }
 
 func expectedDefaultToolNames() []string {
@@ -5514,30 +5483,6 @@ func TestAgentSummariesHideNonInteractiveAgentsWithoutAffectingDelegation(t *tes
 	}
 	if !slices.Equal(candidateNames, agentdef.Names(agents)) {
 		t.Fatalf("delegate candidates = %v, want all agents %v", candidateNames, agentdef.Names(agents))
-	}
-}
-
-func TestEnableInteractivePlanHandoff(t *testing.T) {
-	agents := agentdef.Builtins()
-	enableInteractivePlanHandoff(agents)
-	if !slices.Contains(agents["plan"].AllowedTools, "handoff") {
-		t.Fatalf("interactive plan tools missing handoff: %v", agents["plan"].AllowedTools)
-	}
-	if slices.Contains(agents["auto"].AllowedTools, "handoff") {
-		t.Fatalf("interactive auto tools unexpectedly include handoff: %v", agents["auto"].AllowedTools)
-	}
-	enableInteractivePlanHandoff(agents)
-	count := 0
-	for _, name := range agents["plan"].AllowedTools {
-		if name == "handoff" {
-			count++
-		}
-	}
-	if count != 1 {
-		t.Fatalf("handoff count = %d, want 1", count)
-	}
-	if slices.Contains(agents["independent"].AllowedTools, "handoff") {
-		t.Fatalf("interactive handoff leaked to independent: %v", agents["independent"].AllowedTools)
 	}
 }
 

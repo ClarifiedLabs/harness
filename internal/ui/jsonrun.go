@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"harness/internal/agent"
-	"harness/internal/handoff"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/runstream"
@@ -17,9 +16,9 @@ import (
 
 // RunJSON drives an interactive session from NDJSON input messages (design
 // §10: `harness -format json` with no -p and piped stdin). Prompts, mid-prompt
-// steering, handoff approvals, interrupt, and shutdown arrive as input
-// messages; the JSON run stream on app.RunStream carries prompts, mirrored
-// session events, approvals, and input errors. Logical UI diagnostics write to
+// steering, interrupt, and shutdown arrive as input messages; the JSON run
+// stream on app.RunStream carries prompts, mirrored session events, and input
+// errors. Logical UI diagnostics write to
 // app.Errw; root JSON-mode wiring supplies the capture-then-discard writer that
 // mutes physical stderr. Stdin EOF means shutdown. The return value is the
 // process exit code: 0 graceful shutdown, 130 interrupted.
@@ -28,10 +27,9 @@ func RunJSON(r io.Reader, app *App) int {
 	return d.run()
 }
 
-// jsonDriver is the interactive-JSON state machine: idle, prompt-running, or
-// approval-pending. One reader goroutine decodes input; prompt execution runs
-// on its own goroutine, so steering, interrupt, and shutdown stay live
-// mid-prompt.
+// jsonDriver is the interactive-JSON state machine: idle or prompt-running.
+// One reader goroutine decodes input; prompt execution runs on its own
+// goroutine, so steering, interrupt, and shutdown stay live mid-prompt.
 type jsonDriver struct {
 	app *App
 	w   *runstream.Writer
@@ -41,8 +39,6 @@ type jsonDriver struct {
 	done               chan jsonPromptDone
 	active             *jsonActivePrompt
 	queued             []jsonPromptRequest
-	approval           *jsonPendingApproval
-	approvalSeq        int
 	shutdownRequested  bool
 	eofSeen            bool
 	forceExitRequested bool
@@ -80,11 +76,6 @@ type jsonActivePrompt struct {
 	sink     *accumulatingSink
 }
 
-type jsonPendingApproval struct {
-	id  string
-	req handoff.Request
-}
-
 func (d *jsonDriver) run() int {
 	defer func() {
 		// Forced exit deliberately leaves a possibly stuck prompt goroutine behind;
@@ -101,8 +92,8 @@ func (d *jsonDriver) run() int {
 	}
 	d.msgs = make(chan jsonInputMsg, 16)
 	d.done = make(chan jsonPromptDone, 1)
-	// Match the TTY REPL's first idle boundary: refresh dynamic tools and surface
-	// any resumed handoff before admitting the first protocol prompt.
+	// Match the TTY REPL's first idle boundary: refresh dynamic tools before
+	// admitting the first protocol prompt.
 	if d.boundary() {
 		return ExitInterrupt
 	}
@@ -126,15 +117,7 @@ func (d *jsonDriver) run() int {
 				// active prompt and queue to finish, then exits 0.
 				d.eofSeen = true
 				d.msgs = nil // closed channel would busy-select
-				if d.active == nil && d.approval != nil {
-					// EOF with a pending handoff approval declines it (never
-					// auto-approves): the completed prompt was already saved
-					// by finishPrompt; any queued prompts drain below.
-					d.approval = nil
-					fmt.Fprintln(d.app.Errw, "[handoff cancelled]")
-					d.startNextQueued()
-				}
-				if d.active == nil && len(d.queued) == 0 && d.approval == nil {
+				if d.active == nil && len(d.queued) == 0 {
 					return ExitOK
 				}
 				continue
@@ -187,7 +170,7 @@ func (d *jsonDriver) detachedContinuationEligible() bool {
 	// manager returns an open channel that closes when a detached wait resolves.
 	// Requiring DetachedWaitPending here would miss that future transition and
 	// leave an otherwise idle session asleep forever.
-	return d.active == nil && d.approval == nil && !d.shutdownRequested && !d.eofSeen && len(d.queued) == 0 && d.app.Background != nil
+	return d.active == nil && !d.shutdownRequested && !d.eofSeen && len(d.queued) == 0 && d.app.Background != nil
 }
 
 func (d *jsonDriver) readInput() {
@@ -228,9 +211,9 @@ func (d *jsonDriver) send(m jsonInputMsg) bool {
 // behind) the next prompt. The buffer length is snapshotted once so a fast
 // producer cannot keep the drain alive indefinitely. Prompt messages queue
 // behind recovered steer input instead of starting directly: the boundary's
-// approval check and startNextQueued own prompt start order. A drained
-// interrupt stops the run with ExitInterrupt: the prompt it targeted already
-// finished, so it must not cancel or no-op against the next prompt.
+// startNextQueued owns prompt start order. A drained interrupt stops the run
+// with ExitInterrupt: the prompt it targeted already finished, so it must not
+// cancel or no-op against the next prompt.
 func (d *jsonDriver) drainBufferedControls() (int, bool) {
 	n := len(d.msgs)
 	for i := 0; i < n; i++ {
@@ -305,19 +288,9 @@ func (d *jsonDriver) handle(in runstream.Input) (int, bool) {
 		d.handlePrompt(in)
 	case runstream.InputInterrupt:
 		// Same as ^C in the TTY REPL; a no-op when truly idle.
-		switch {
-		case d.active != nil:
+		if d.active != nil {
 			d.active.cancel()
-		case d.approval != nil:
-			// Interrupt with a pending handoff approval cancels the
-			// handoff and exits 130, mirroring the TTY approval Ctrl-C
-			// path; it never auto-approves.
-			d.approval = nil
-			fmt.Fprintln(d.app.Errw, "[handoff cancelled]")
-			return ExitInterrupt, true
 		}
-	case runstream.InputApprovalResponse:
-		d.handleApproval(in)
 	case runstream.InputShutdown:
 		d.requestShutdown()
 		if d.active == nil {
@@ -332,8 +305,6 @@ func (d *jsonDriver) handle(in runstream.Input) (int, bool) {
 func (d *jsonDriver) handlePrompt(in runstream.Input) {
 	req := jsonPromptRequest{id: in.ID, text: in.Text, agent: in.Agent, model: in.Model, images: in.Images}
 	switch {
-	case d.approval != nil:
-		d.w.InputError(in.ID, "handoff approval pending; answer it with approval_response first")
 	case d.active != nil:
 		switch {
 		case len(d.queued) > 0:
@@ -382,29 +353,6 @@ func (d *jsonDriver) steer(req jsonPromptRequest) {
 		req.steer = &steered
 		d.queued = append(d.queued, req)
 	}
-}
-
-func (d *jsonDriver) handleApproval(in runstream.Input) {
-	switch {
-	case d.approval == nil:
-		d.w.InputError(in.ID, "no approval request pending")
-		return
-	case in.ID != d.approval.id:
-		d.w.InputError(in.ID, fmt.Sprintf("unknown approval id; want %q", d.approval.id))
-		return
-	}
-	req := d.approval.req
-	d.approval = nil
-	if in.Approve == nil || !*in.Approve {
-		fmt.Fprintln(d.app.Errw, "[handoff cancelled]")
-		d.startNextQueued()
-		return
-	}
-	if d.app.handoffToImplementation(req) {
-		d.startPrompt(jsonPromptRequest{text: implementationStartPrompt})
-		return
-	}
-	d.startNextQueued()
 }
 
 // startPrompt runs one accepted prompt message to completion on its own
@@ -626,8 +574,8 @@ func (d *jsonDriver) requestShutdown() {
 }
 
 // boundary does the idle-prompt-boundary work the REPL does: background
-// notices, MCP tool-list refresh, and the pending-handoff approval check. It
-// reports whether force-exit interrupted the refresh.
+// notices and MCP tool-list refresh. It reports whether force-exit interrupted
+// the refresh.
 func (d *jsonDriver) boundary() bool {
 	app := d.app
 	app.pollBackgroundNotices()
@@ -636,29 +584,12 @@ func (d *jsonDriver) boundary() bool {
 	if preflight.Finish() {
 		return true
 	}
-	if !d.eofSeen && app.hasPendingHandoffRequest() {
-		req, ok := app.prepareHandoff("")
-		if ok {
-			d.approvalSeq++
-			id := fmt.Sprintf("h%d", d.approvalSeq)
-			d.approval = &jsonPendingApproval{id: id, req: req}
-			approval := runstream.ApprovalRequest{
-				ID:       id,
-				Kind:     runstream.ApprovalKindImplementationHandoff,
-				PlanPath: req.PlanPath,
-				Agent:    req.Agent,
-				Model:    req.Model,
-			}
-			d.w.RequestApproval(approval)
-			return false // queued prompts wait for the approval decision
-		}
-	}
 	d.startNextQueued()
 	return false
 }
 
 func (d *jsonDriver) startNextQueued() {
-	if d.active != nil || d.approval != nil || d.shutdownRequested {
+	if d.active != nil || d.shutdownRequested {
 		return
 	}
 	if len(d.queued) > 0 {

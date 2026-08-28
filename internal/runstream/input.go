@@ -15,10 +15,9 @@ const MaxInputLine = 16 << 20
 
 // Input message type names (app → harness).
 const (
-	InputPrompt           = "prompt"
-	InputInterrupt        = "interrupt"
-	InputApprovalResponse = "approval_response"
-	InputShutdown         = "shutdown"
+	InputPrompt    = "prompt"
+	InputInterrupt = "interrupt"
+	InputShutdown  = "shutdown"
 )
 
 // InputImage attaches a local image file to a prompt, mirroring the -image
@@ -30,16 +29,15 @@ type InputImage struct {
 
 // Input is one decoded NDJSON input message. Which fields are meaningful
 // depends on Type: prompt uses Text (required, or Images), ID, Agent, Model,
-// Images; approval_response uses ID and Approve (both required); interrupt
-// and shutdown carry no fields. Unknown JSON keys are tolerated.
+// and Images; interrupt and shutdown carry no fields. Unknown JSON keys are
+// tolerated.
 type Input struct {
-	Type    string       `json:"type"`
-	Text    string       `json:"text,omitempty"`
-	ID      string       `json:"id,omitempty"`
-	Agent   string       `json:"agent,omitempty"`
-	Model   string       `json:"model,omitempty"`
-	Images  []InputImage `json:"images,omitempty"`
-	Approve *bool        `json:"approve,omitempty"`
+	Type   string       `json:"type"`
+	Text   string       `json:"text,omitempty"`
+	ID     string       `json:"id,omitempty"`
+	Agent  string       `json:"agent,omitempty"`
+	Model  string       `json:"model,omitempty"`
+	Images []InputImage `json:"images,omitempty"`
 }
 
 // LineErrorKind classifies a rejected input line.
@@ -97,13 +95,6 @@ func (d *Decoder) Decode() (Input, error) {
 				return Input{}, &LineError{Kind: LineInvalidFields, Message: "prompt requires text", ID: in.ID}
 			}
 		case InputInterrupt, InputShutdown:
-		case InputApprovalResponse:
-			if in.ID == "" {
-				return Input{}, &LineError{Kind: LineInvalidFields, Message: "approval_response requires id"}
-			}
-			if in.Approve == nil {
-				return Input{}, &LineError{Kind: LineInvalidFields, Message: "approval_response requires approve", ID: in.ID}
-			}
 		default:
 			return Input{}, &LineError{Kind: LineUnknownType, Message: fmt.Sprintf("unknown input type %q", in.Type), ID: in.ID}
 		}

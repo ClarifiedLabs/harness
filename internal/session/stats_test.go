@@ -236,13 +236,7 @@ func TestSkillReadPathHashesIgnoreRemovedArrayArguments(t *testing.T) {
 func TestCollectToolStatsUsesCurrentInspectionSurface(t *testing.T) {
 	events := []Event{
 		{Type: EventToolStart, Prompt: 1, Turn: 1, Tool: "read", Input: json.RawMessage(`{"path":"SKILL.md"}`)},
-		{Type: EventToolStart, Prompt: 1, Turn: 2, Tool: "git_readonly", Input: json.RawMessage(`{}`)},
-	}
-	for i, name := range []string{"read_file", "search", "rg", "grep", "glob", "list_dir"} {
-		events = append(events, Event{
-			Type: EventToolStart, Prompt: 1, Turn: i + 3, Tool: name,
-			Input: json.RawMessage(`{"path":"legacy/SKILL.md"}`),
-		})
+		{Type: EventToolStart, Prompt: 1, Turn: 2, Tool: "read", Input: json.RawMessage(`{}`)},
 	}
 	stats, err := collectToolStats(events)
 	if err != nil {
@@ -251,11 +245,6 @@ func TestCollectToolStatsUsesCurrentInspectionSurface(t *testing.T) {
 	if stats.singleInspectTurns != 2 || stats.skillReads != 1 {
 		t.Fatalf("current inspection stats = single turns %d skill reads %d, want 2/1: %+v",
 			stats.singleInspectTurns, stats.skillReads, stats)
-	}
-	for _, name := range []string{"read_file", "search", "rg", "grep", "glob", "list_dir"} {
-		if stats.byName[name] != 1 {
-			t.Errorf("legacy tool %q generic call count = %d, want 1", name, stats.byName[name])
-		}
 	}
 }
 

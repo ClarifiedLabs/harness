@@ -147,19 +147,6 @@ func TestResolveNilKeepsBuiltins(t *testing.T) {
 	}
 }
 
-func TestBuiltinsUseOnlyCurrentInspectionTools(t *testing.T) {
-	for name, agent := range Builtins() {
-		if !slices.Contains(agent.AllowedTools, "read") {
-			t.Fatalf("%s agent tools missing read: %v", name, agent.AllowedTools)
-		}
-		for _, forbidden := range []string{"read_file", "write_file", "apply_patch", "list_dir", "glob", "search", "git", "git_readonly", "grep", "rg"} {
-			if slices.Contains(agent.AllowedTools, forbidden) {
-				t.Fatalf("%s agent tools unexpectedly include %s: %v", name, forbidden, agent.AllowedTools)
-			}
-		}
-	}
-}
-
 // Field-level merge: overriding only the prompt keeps the built-in tool list.
 func TestResolvePromptOnlyOverrideKeepsTools(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"plan": {Prompt: "custom plan prompt"}})
@@ -441,40 +428,5 @@ func TestNamesSorted(t *testing.T) {
 	m := Resolve(map[string]FileDefinition{"zz": {}, "aa": {}})
 	if got := Names(m); !slices.Equal(got, []string{"aa", "auto", "explore", "independent", "plan", "review", "zz"}) {
 		t.Errorf("Names = %v", got)
-	}
-}
-
-func TestImplementationAgentNamesExcludesReadOnly(t *testing.T) {
-	m := Builtins()
-	if got := ImplementationAgentNames(m); !slices.Equal(got, []string{"auto", "independent"}) {
-		t.Fatalf("Builtins exclusive = %v, want [auto independent]", got)
-	}
-	// custom exclusive (defaults to exclusive) is included
-	m2 := Resolve(map[string]FileDefinition{
-		"my-impl": {Description: "custom impl", Prompt: "impl"},
-		"my-read": {Description: "custom read", WorkspaceAccess: "read_only", Prompt: "read"},
-	})
-	got := ImplementationAgentNames(m2)
-	if !slices.Contains(got, "my-impl") {
-		t.Fatalf("my-impl missing from exclusive names: %v", got)
-	}
-	if slices.Contains(got, "my-read") {
-		t.Fatalf("my-read (read_only) leaked into exclusive names: %v", got)
-	}
-	if !slices.Contains(got, "auto") || !slices.Contains(got, "independent") {
-		t.Fatalf("exclusive names missing builtins: %v", got)
-	}
-	for _, name := range []string{"explore", "plan", "review"} {
-		if slices.Contains(got, name) {
-			t.Fatalf("read-only builtin %q leaked into exclusive names: %v", name, got)
-		}
-	}
-	wantSorted := slices.Clone(got)
-	slices.Sort(wantSorted)
-	if !slices.Equal(got, wantSorted) {
-		t.Fatalf("ImplementationAgentNames not sorted: %v", got)
-	}
-	if len(ImplementationAgentNames(map[string]Definition{})) != 0 {
-		t.Fatal("empty input should yield empty slice")
 	}
 }

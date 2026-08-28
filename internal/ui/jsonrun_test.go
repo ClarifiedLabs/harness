@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -15,7 +14,6 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/background"
-	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
@@ -441,7 +439,6 @@ func TestRunJSONBadInputNeverKillsSession(t *testing.T) {
 		"garbage\n"+
 			"{\"type\":\"bogus\",\"id\":\"badtype\"}\n"+
 			"{\"type\":\"prompt\",\"id\":\"empty\"}\n"+
-			"{\"type\":\"approval_response\",\"id\":\"h9\"}\n"+
 			"{\"type\":\"approval_response\",\"id\":\"h9\",\"approve\":true}\n"+
 			"{\"type\":\"prompt\",\"id\":\"ok1\",\"text\":\"hi\"}\n"+
 			"{\"type\":\"shutdown\"}\n"), app)
@@ -451,11 +448,11 @@ func TestRunJSONBadInputNeverKillsSession(t *testing.T) {
 	w.Close(runstream.RunEnd{ExitCode: code})
 	lines := decodeRunStreamLines(t, stream.String())
 	errs := linesOfType(lines, "input_error")
-	if len(errs) != 5 {
-		t.Fatalf("input_error count = %d, want 5 (malformed, unknown type, missing text, missing approve, no pending approval); lines=%v",
+	if len(errs) != 4 {
+		t.Fatalf("input_error count = %d, want 4 (malformed, unknown type, missing text, unknown approval_response); lines=%v",
 			len(errs), streamTypes(lines))
 	}
-	wantIDs := []any{nil, "badtype", "empty", "h9", "h9"}
+	wantIDs := []any{nil, "badtype", "empty", "h9"}
 	for i, want := range wantIDs {
 		if errs[i]["id"] != want {
 			t.Fatalf("input_error %d ID = %v, want %v; errors=%v", i, errs[i]["id"], want, errs)
@@ -896,29 +893,6 @@ func TestRunJSONPromptPreparationRejectionReturnsCorrelatedInputError(t *testing
 	}
 }
 
-// newHandoffJSONApp wires the handoff machinery: a shared Pending holder, a
-// successful agent-switch stub, and the JSON run stream.
-func newHandoffJSONApp(t *testing.T, fp *llmtest.FakeProvider, pending *handoff.Pending) (*App, *lockedBuffer, *lockedBuffer, *runstream.Writer) {
-	t.Helper()
-	app, stream, errw, w := newJSONRunApp(t, fp)
-	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = pending
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
-	}
-	return app, stream, errw, w
-}
-
-func handoffPlanStep(pending *handoff.Pending) llmtest.Step {
-	return llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("plan ready")},
-		Stop:   llm.StopEndTurn,
-		Block: func(context.Context) {
-			pending.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
-		},
-	}
-}
-
 func TestRunJSONPromptWithUnknownAgentRejected(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{textDelta("still here")},
@@ -946,175 +920,6 @@ func TestRunJSONPromptWithUnknownAgentRejected(t *testing.T) {
 	}
 	if fp.RequestCount() != 1 {
 		t.Fatalf("model requests = %d, want 1 (bogus agent made no request)", fp.RequestCount())
-	}
-}
-
-func TestRunJSONHandoffApprovalStartsImplementation(t *testing.T) {
-	pending := handoff.NewPending()
-	fp := llmtest.New("fake",
-		handoffPlanStep(pending),
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("implemented")}, Stop: llm.StopEndTurn},
-	)
-	app, stream, _, w := newHandoffJSONApp(t, fp, pending)
-
-	pw, codeCh := runJSONPipe(t, app)
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"make a plan\"}\n")
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
-
-	lines := decodeRunStreamLines(t, stream.String())
-	types := streamTypes(lines)
-	if types[len(types)-1] != "approval_request" {
-		t.Fatalf("approval_request should follow the first prompt_end: %v", types)
-	}
-	approvals := linesOfType(lines, "approval_request")
-	if len(approvals) != 1 {
-		t.Fatalf("approval_request count = %d, want 1", len(approvals))
-	}
-	approval := approvals[0]
-	latest, ok := app.Plans.Latest()
-	if !ok {
-		t.Fatal("test app has no recorded plan")
-	}
-	if approval["kind"] != "implementation_handoff" ||
-		approval["plan_path"] != latest.Path || approval["agent"] != "auto" || approval["id"] == nil || approval["work_id"] != nil || approval["revision_id"] != nil {
-		t.Fatalf("approval_request = %v", approval)
-	}
-	id, _ := approval["id"].(string)
-	writePipe(t, pw, "{\"type\":\"approval_response\",\"id\":\""+id+"\",\"approve\":true}\n")
-	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 2 }, "implementation prompt_end")
-	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
-	code := <-codeCh
-	if code != ExitOK {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	w.Close(runstream.RunEnd{ExitCode: code})
-
-	if got := transcriptPrompts(app); !strings.Contains(got, implementationStartPrompt) {
-		t.Fatalf("implementation prompt missing from transcript prompts %q", got)
-	}
-	if fp.RequestCount() != 2 {
-		t.Fatalf("model requests = %d, want plan + implementation", fp.RequestCount())
-	}
-	lines = decodeRunStreamLines(t, stream.String())
-	var sawImplStart bool
-	for _, line := range linesOfType(lines, "prompt_start") {
-		if line["text"] == implementationStartPrompt {
-			sawImplStart = true
-		}
-	}
-	if !sawImplStart {
-		t.Fatalf("no prompt_start for the implementation prompt: %v", streamTypes(lines))
-	}
-}
-
-func TestRunJSONHandoffApprovalDeclined(t *testing.T) {
-	pending := handoff.NewPending()
-	fp := llmtest.New("fake",
-		handoffPlanStep(pending),
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("later answer")}, Stop: llm.StopEndTurn},
-	)
-	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
-
-	pw, codeCh := runJSONPipe(t, app)
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"make a plan\"}\n")
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
-	// A prompt while approval is pending is rejected.
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"wait\"}\n")
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "approval pending") }, "pending-approval input error")
-	writePipe(t, pw, "{\"type\":\"approval_response\",\"id\":\"h1\",\"approve\":false}\n")
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "[handoff cancelled]") }, "cancellation notice")
-	if strings.Contains(stream.String(), implementationStartPrompt) {
-		t.Fatal("declined handoff should not start the implementation prompt")
-	}
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"after decline\"}\n")
-	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 2 }, "post-decline prompt_end")
-	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
-	code := <-codeCh
-	if code != ExitOK {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	w.Close(runstream.RunEnd{ExitCode: code})
-	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
-		t.Fatalf("declined handoff should not submit implementation prompt: %q", transcriptPrompts(app))
-	}
-}
-
-func TestRunJSONInterruptDuringApprovalCancelsHandoff(t *testing.T) {
-	pending := handoff.NewPending()
-	fp := llmtest.New("fake", handoffPlanStep(pending))
-	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
-
-	pw, codeCh := runJSONPipe(t, app)
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"make a plan\"}\n")
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
-
-	// Interrupt with a pending approval cancels the handoff and exits 130,
-	// mirroring the TTY approval Ctrl-C path; it never auto-approves.
-	writePipe(t, pw, "{\"type\":\"interrupt\"}\n")
-	if code := waitRun(t, codeCh); code != ExitInterrupt {
-		t.Fatalf("exit code = %d, want %d (130)", code, ExitInterrupt)
-	}
-	w.Close(runstream.RunEnd{ExitCode: ExitInterrupt})
-	if !strings.Contains(errw.String(), "[handoff cancelled]") {
-		t.Fatalf("missing cancellation notice: %q", errw.String())
-	}
-	if fp.RequestCount() != 1 {
-		t.Fatalf("model requests = %d, want plan only (no auto-approved implementation)", fp.RequestCount())
-	}
-	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
-		t.Fatalf("interrupted handoff should not submit implementation prompt: %q", transcriptPrompts(app))
-	}
-}
-
-func TestRunJSONEOFAfterCompletionDeclinesPendingApprovalAndDrainsQueue(t *testing.T) {
-	pending := handoff.NewPending()
-	fp := llmtest.New("fake",
-		handoffPlanStep(pending),
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("second answer")}, Stop: llm.StopEndTurn},
-	)
-	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
-	// Hold the first prompt's completion so the second prompt message is
-	// buffered at the completion boundary and queues behind the approval.
-	finishing := make(chan struct{})
-	proceed := make(chan struct{})
-	var once sync.Once
-	app.OnPromptFinished = func() { once.Do(func() { close(finishing); <-proceed }) }
-
-	pr, pw := io.Pipe()
-	defer pr.Close()
-	d := &jsonDriver{app: app, w: app.RunStream, dec: runstream.NewDecoder(pr)}
-	codeCh := make(chan int, 1)
-	go func() { codeCh <- d.run() }()
-
-	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p1\",\"text\":\"make a plan\"}\n")
-	<-finishing
-	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"p2\",\"text\":\"second\"}\n")
-	waitFor(t, func() bool { return len(d.msgs) >= 1 }, "second prompt buffered at completion")
-	close(proceed)
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
-
-	// Stdin EOF with a pending approval declines the handoff (never
-	// auto-approves) and drains the queued prompt before exiting 0.
-	if err := pw.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if code := waitRun(t, codeCh); code != ExitOK {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	w.Close(runstream.RunEnd{ExitCode: ExitOK})
-	if !strings.Contains(errw.String(), "[handoff cancelled]") {
-		t.Fatalf("missing decline notice: %q", errw.String())
-	}
-	lines := decodeRunStreamLines(t, stream.String())
-	starts := linesOfType(lines, "prompt_start")
-	if len(starts) != 2 || starts[0]["id"] != "p1" || starts[1]["id"] != "p2" {
-		t.Fatalf("prompt starts = %v, want p1 then the drained p2", starts)
-	}
-	if fp.RequestCount() != 2 {
-		t.Fatalf("model requests = %d, want plan + drained prompt (no implementation)", fp.RequestCount())
-	}
-	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
-		t.Fatalf("EOF-declined handoff should not submit implementation prompt: %q", transcriptPrompts(app))
 	}
 }
 
@@ -1301,54 +1106,4 @@ func TestRunJSONForceExitAbortsBlockedInputReader(t *testing.T) {
 			return false
 		}
 	}, "input reader aborted after force-exit")
-}
-
-func TestRunJSONUnknownApprovalIDRejected(t *testing.T) {
-	pending := handoff.NewPending()
-	fp := llmtest.New("fake", handoffPlanStep(pending))
-	app, stream, errw, w := newHandoffJSONApp(t, fp, pending)
-
-	pw, codeCh := runJSONPipe(t, app)
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"make a plan\"}\n")
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
-	writePipe(t, pw, "{\"type\":\"approval_response\",\"id\":\"nope\",\"approve\":true}\n")
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "unknown approval id") }, "unknown-id input error")
-	// The pending approval survives a wrong id.
-	writePipe(t, pw, "{\"type\":\"approval_response\",\"id\":\"h1\",\"approve\":false}\n")
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "[handoff cancelled]") }, "cancellation notice")
-	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
-	code := <-codeCh
-	if code != ExitOK {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	w.Close(runstream.RunEnd{ExitCode: code})
-	if got := countType(decodeRunStreamLines(t, stream.String()), "prompt_start"); got != 1 {
-		t.Fatalf("prompt_start count = %d, want 1 (no implementation prompt)", got)
-	}
-}
-
-func TestRunJSONHandoffSwitchFailureSurfaces(t *testing.T) {
-	pending := handoff.NewPending()
-	fp := llmtest.New("fake", handoffPlanStep(pending))
-	app, stream, errw, w := newJSONRunApp(t, fp)
-	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = pending
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{}, errors.New("no such agent")
-	}
-
-	pw, codeCh := runJSONPipe(t, app)
-	writePipe(t, pw, "{\"type\":\"prompt\",\"text\":\"make a plan\"}\n")
-	waitFor(t, func() bool { return strings.Contains(stream.String(), "\"type\":\"approval_request\"") }, "approval request")
-	writePipe(t, pw, "{\"type\":\"approval_response\",\"id\":\"h1\",\"approve\":true}\n")
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "[handoff failed:") }, "handoff failure notice")
-	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
-	code := <-codeCh
-	if code != ExitOK {
-		t.Fatalf("exit code = %d, want 0", code)
-	}
-	w.Close(runstream.RunEnd{ExitCode: code})
-	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
-		t.Fatal("failed handoff must not start the implementation prompt")
-	}
 }

@@ -230,15 +230,12 @@ type App struct {
 	// goal; 0 means unlimited. Reaching the cap auto-pauses the goal.
 	GoalMaxContinuations int
 	// GoalAutoContinue enables the REPL idle-boundary continuation loop. It is
-	// wired from the same interactive-session condition as handoff.
+	// wired from the same interactive-session condition as /handoff.
 	GoalAutoContinue bool
 	// WorkflowStatusFunc optionally exposes authoritative bounded workflow state
 	// supplied by an embedding orchestrator. Harness does not infer it from text.
 	WorkflowStatusFunc func() agent.WorkflowStatus
-	// Handoff carries a pending plan->implementation handoff requested by the
-	// handoff tool, consumed at the prompt boundary. nil disables.
-	Handoff *handoff.Pending
-	// HandoffAgent is the default agent a handoff switches to when the request
+	// HandoffAgent is the default agent /handoff switches to when the command
 	// names none. Empty falls back to the built-in default agent.
 	HandoffAgent string
 
@@ -329,10 +326,6 @@ type App struct {
 	// SkillDirs is the list of scanned skill directories with their scopes,
 	// used by /skills to group output by source location.
 	SkillDirs []skills.Dir
-
-	// DisabledTools lists optional built-in tools that could not be registered
-	// (e.g., rg when ripgrep is not installed). Used by /tools.
-	DisabledTools []tools.DisabledTool
 
 	// SummaryWidth returns the terminal width for command summaries. nil or a
 	// non-positive value disables forced wrapping.
@@ -1353,49 +1346,6 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				if leftover := app.drainLeftoverSteer(); !steerInputEmpty(leftover) {
 					preparedQueued = append([]agent.SteerInput{leftover}, preparedQueued...)
 				}
-				if app.hasPendingHandoffRequest() {
-					approvalInterrupted := false
-					readHandoffLine := readCommandLine
-					if !usePromptEditor && readPending {
-						readHandoffLine = func(label string) (string, error) {
-							if _, err := fmt.Fprint(app.Errw, label); err != nil {
-								return "", err
-							}
-							select {
-							case <-exit:
-								approvalInterrupted = true
-								return "", context.Canceled
-							case res := <-inputs:
-								readPending = false
-								if res.input.ended {
-									inputEnded = true
-									return "", io.EOF
-								}
-								if !res.ok {
-									setInputEnded(res.err)
-									if res.err != nil {
-										return "", res.err
-									}
-									return "", io.EOF
-								}
-								if res.input.interrupt {
-									approvalInterrupted = true
-									return "", context.Canceled
-								}
-								return strings.TrimSpace(res.input.text), nil
-							}
-						}
-					}
-					if app.handoffCommand("", readHandoffLine) {
-						if exit, code := startPromptInteraction(implementationStartPrompt, true, false, false, false, 0); exit {
-							return finish(code)
-						}
-						continue
-					}
-					if approvalInterrupted {
-						return finish(ExitInterrupt)
-					}
-				}
 				// Prefer a line the user submitted while the prompt was finishing
 				// over autonomous continuation, even when promptDone won the select
 				// race. A still-blocked read does not suppress goal work.
@@ -1426,9 +1376,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					enableIdlePromptTerm()
 				}
 				// A resolved detached wait gets the first autonomous slot after all
-				// user input, recovered steer, drafts, and handoff work. Its outcome is
+				// user input, recovered steer, and drafts. Its outcome is
 				// still consumed only by the next model request's request-context drain.
-				if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && !app.hasPendingHandoffRequest() && app.Background != nil && app.Background.DetachedWaitPending() {
+				if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && app.Background != nil && app.Background.DetachedWaitPending() {
 					if exit, code := startDetachedWaitContinuation(); exit {
 						return finish(code)
 					}
@@ -1530,7 +1480,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		// Detached wait outcomes outrank goal auto-continuation but remain below all
 		// already-delivered user work. Reclaim a raw editor read exactly as goal work
 		// does, preserving any non-empty draft for the user.
-		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && !app.hasPendingHandoffRequest() && app.Background != nil && app.Background.DetachedWaitPending() {
+		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && app.Background != nil && app.Background.DetachedWaitPending() {
 			retry, exit, code := reclaimIdleEditorForAutonomous()
 			if exit {
 				return finish(code)
@@ -1609,7 +1559,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			pendingPrefillPasteSummaries = nil
 		}
 		var detachedWaitReady <-chan struct{}
-		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && !app.hasPendingHandoffRequest() && app.Background != nil {
+		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && app.Background != nil {
 			// Subscribe before an observer publishes an outcome. The manager closes
 			// this open channel when a detached wait resolves; checking pending here
 			// would miss that transition while the REPL is otherwise idle.
@@ -3913,14 +3863,6 @@ func (app *App) applyAgentSwitchUsing(name string, prewarm bool, switchAgent fun
 	return nil
 }
 
-func (app *App) hasPendingHandoffRequest() bool {
-	if app.Handoff == nil {
-		return false
-	}
-	_, ok := app.Handoff.Peek()
-	return ok
-}
-
 const handoffCommandUsage = "/handoff [-a agent] [-m model] [message]"
 
 type handoffCommandOptions struct {
@@ -3971,11 +3913,9 @@ func splitHandoffCommandToken(s string) (token, rest string) {
 	return s, ""
 }
 
-// prepareHandoff assembles a handoff request from any pending
-// handoff tool request plus the given /handoff options: it
-// validates the latest recorded plan and resolves the target agent. Failures are
-// reported on app.Errw. handoffCommand (TTY
-// approval) and the JSON run driver (protocol approval) share it.
+// prepareHandoff assembles a /handoff request from the given options: it
+// validates the latest recorded plan and resolves the target agent. Failures
+// are reported on app.Errw.
 func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 	if app.SwitchAgent == nil {
 		fmt.Fprintln(app.Errw, "[handoff unavailable]")
@@ -3987,11 +3927,6 @@ func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 		return handoff.Request{}, false
 	}
 	var req handoff.Request
-	if app.Handoff != nil {
-		if pending, ok := app.Handoff.Take(); ok {
-			req = pending
-		}
-	}
 	if opts.Agent != "" {
 		req.Agent = opts.Agent
 	}
@@ -4010,10 +3945,6 @@ func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 		fmt.Fprintln(app.Errw, "[handoff: record_plan must record a plan first]")
 		return handoff.Request{}, false
 	}
-	if req.PlanPath != "" && req.PlanPath != latest.Path {
-		fmt.Fprintln(app.Errw, "[handoff: the recorded plan changed; request implementation again]")
-		return handoff.Request{}, false
-	}
 	req.PlanPath = latest.Path
 	target := req.Agent
 	if target == "" {
@@ -4028,9 +3959,8 @@ func (app *App) prepareHandoff(arg string) (handoff.Request, bool) {
 
 // handoffCommand handles /handoff [-a agent] [-m model] [message]: hand off to
 // an implementation agent to carry out the most recently recorded plan, after
-// interactive approval. It consumes any request the handoff tool
-// recorded, applies manual overrides and guidance, and
-// switches with a clean, plan-seeded context.
+// interactive approval. It applies optional agent/model overrides and user
+// guidance, then switches with a clean, plan-seeded context.
 func (app *App) handoffCommand(arg string, readLine func(string) (string, error)) bool {
 	req, ok := app.prepareHandoff(arg)
 	if !ok {
@@ -5471,17 +5401,6 @@ func (app *App) toolsSummary() string {
 				rows = append(rows, NameDescription{Name: name, Description: descriptions[name]})
 			}
 			WriteNameDescriptionList(&b, rows, NameDescriptionListOptions{Indent: "    ", Width: app.summaryWidth()})
-		}
-	}
-
-	// Disabled tools
-	if len(app.DisabledTools) > 0 {
-		if b.Len() > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString("disabled tools:\n")
-		for _, d := range app.DisabledTools {
-			fmt.Fprintf(&b, "  %s  (%s)\n", d.Name, d.Reason)
 		}
 	}
 

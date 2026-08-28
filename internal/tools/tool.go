@@ -279,21 +279,6 @@ type SelfTimeouter interface {
 	SelfTimeout(input json.RawMessage) (timeout time.Duration, ok bool)
 }
 
-// DisabledTool describes an optional built-in tool that was not registered.
-type DisabledTool struct {
-	Name   string
-	Reason string
-}
-
-// Message renders a concise user-facing disabled-tool diagnostic.
-func (d DisabledTool) Message() string {
-	return fmt.Sprintf("Tool %q is disabled. Reason: %s.", d.Name, d.Reason)
-}
-
-func missingBinaryTool(name, binary string) DisabledTool {
-	return DisabledTool{Name: name, Reason: fmt.Sprintf("%q binary not found", binary)}
-}
-
 // SetDispatchTimeout overrides the optional per-call ceiling applied by Dispatch.
 // Non-positive values disable the dispatch-level timeout.
 func (r *Registry) SetDispatchTimeout(d time.Duration) { r.dispatchTimeout = d }
@@ -383,32 +368,14 @@ func defaultToolResultLines(configLines, globalLines, defaultLines int) int {
 	return defaultLines
 }
 
-func registerExecTools(r *Registry, disabled *[]DisabledTool, opts Options) {
-	r.Register(shell{
-		background:        opts.Background,
-		foregroundTimeout: opts.ShellTimeoutSeconds,
-		backgroundTimeout: opts.ShellBackgroundTimeoutSeconds,
-	})
-	if git, ok := newGitTool(); ok {
-		r.Register(git)
-	} else if disabled != nil {
-		*disabled = append(*disabled, missingBinaryTool("git", "git"))
-	}
-	r.Register(webFetch{background: opts.Background})
-	r.SetToolResultLimits("web_fetch",
-		defaultToolResultBytes(0, opts.MaxResultBytes, defaultSearchResultBytes),
-		defaultToolResultLines(0, opts.MaxResultLines, defaultSearchResultLines))
-}
-
 // Default returns the built-in tools exposed to default-inheriting agents.
 func Default() *Registry {
-	r, _ := DefaultWithOptions(Options{})
-	return r
+	return DefaultWithOptions(Options{})
 }
 
 // DefaultWithOptions returns the default tool registry with configurable result
 // and read limits.
-func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
+func DefaultWithOptions(opts Options) *Registry {
 	r := &Registry{}
 	r.SetResultLimits(opts.MaxResultBytes, opts.MaxResultLines)
 	r.SetDispatchTimeout(opts.DispatchTimeout)
@@ -422,7 +389,7 @@ func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 	r.SetToolResultLimits("web_fetch",
 		defaultToolResultBytes(0, opts.MaxResultBytes, defaultSearchResultBytes),
 		defaultToolResultLines(0, opts.MaxResultLines, defaultSearchResultLines))
-	return r, nil
+	return r
 }
 
 // DefaultNames returns the names of the Default tool set in registration
@@ -430,40 +397,20 @@ func DefaultWithOptions(opts Options) (*Registry, []DisabledTool) {
 func DefaultNames() []string { return Default().Names() }
 
 func DefaultNamesWithOptions(opts Options) []string {
-	r, _ := DefaultWithOptions(opts)
-	return r.Names()
+	return DefaultWithOptions(opts).Names()
 }
 
-// Catalog returns a Registry with every constructible tool: the Default set
-// plus optional Git tools and write_tmp_file. Build it once per process because
-// write_tmp_file holds the per-run temp directory.
+// Catalog returns the process-wide registry that agents select subsets from.
+// It currently matches the Default set; coordination and discovered MCP/LSP
+// tools are registered on top of it at runtime.
 func Catalog() *Registry {
-	r, _ := CatalogWithDiagnostics()
-	return r
-}
-
-// CatalogWithDiagnostics returns the complete constructible tool catalog plus
-// diagnostics for optional tools that were not registered.
-func CatalogWithDiagnostics() (*Registry, []DisabledTool) {
 	return CatalogWithOptions(Options{})
 }
 
-// CatalogWithOptions returns the complete constructible tool catalog with
-// configurable limits. Git tools are included when the git binary is available.
-func CatalogWithOptions(opts Options) (*Registry, []DisabledTool) {
-	r := &Registry{}
-	r.SetResultLimits(opts.MaxResultBytes, opts.MaxResultLines)
-	r.SetDispatchTimeout(opts.DispatchTimeout)
-	var disabled []DisabledTool
-	registerFileTools(r, opts)
-	registerExecTools(r, &disabled, opts)
-	if git, ok := newGitReadonly(); ok {
-		r.Register(git)
-	} else {
-		disabled = append(disabled, missingBinaryTool("git_readonly", "git"))
-	}
-	r.Register(newWriteTmpFile())
-	return r, disabled
+// CatalogWithOptions returns the process-wide tool catalog with configurable
+// limits.
+func CatalogWithOptions(opts Options) *Registry {
+	return DefaultWithOptions(opts)
 }
 
 // Names returns the registered tool names in registration order.

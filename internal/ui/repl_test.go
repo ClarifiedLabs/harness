@@ -2053,7 +2053,7 @@ func TestREPLExitPrintsUsageSummary(t *testing.T) {
 	}
 }
 
-func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
+func TestREPLToolsCommandListsBuiltInAndMCPTools(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
@@ -2061,9 +2061,6 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 	reg.Register(mcpRefreshTool{name: "mcp__search__lookup"})
 	reg.Register(mcpRefreshTool{name: "mcp__files__read"})
 	app.Agent.SetTools(reg)
-	app.DisabledTools = []tools.DisabledTool{
-		{Name: "git", Reason: `"git" binary not found`},
-	}
 
 	in := strings.NewReader("/tools\n/exit\n")
 	if code := Run(in, app, nil); code != 0 {
@@ -2080,8 +2077,6 @@ func TestREPLToolsCommandListsBuiltInMCPAndDisabledTools(t *testing.T) {
 		"    mcp__files__read  refreshed tool",
 		"  [search]",
 		"    mcp__search__lookup  refreshed tool",
-		"disabled tools:",
-		`  git  ("git" binary not found)`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/tools output missing %q:\n%s", want, got)
@@ -3323,7 +3318,7 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 	})
 	app.Reasoning = llm.ReasoningConfig{Profile: "max"}
 	app.Agent.SetReasoning(app.Reasoning)
-	catalog, _ := tools.CatalogWithOptions(tools.Options{})
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	planTools, err := catalog.Subset([]string{"read", "shell"})
 	if err != nil {
 		t.Fatalf("subset: %v", err)
@@ -3565,7 +3560,7 @@ func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
 
-	catalog, _ := tools.CatalogWithOptions(tools.Options{})
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	toolSets := make(map[string]*tools.Registry)
 	for name, names := range map[string][]string{
 		"auto":    {"read"},
@@ -5432,8 +5427,6 @@ func TestHandoffCommandCancelledOnNo(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	switched := false
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		switched = true
@@ -5455,8 +5448,6 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
-	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	var agentTarget, modelTarget, approval string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		agentTarget = name
@@ -5500,8 +5491,6 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 		Width:    func() int { return 24 },
 	})
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("design it")})
-	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
 	}
@@ -5531,8 +5520,6 @@ func TestHandoffCommandDisplaysRawBriefWithoutRenderer(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.Renderer = nil
 	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default()}, nil
 	}
@@ -5544,7 +5531,7 @@ func TestHandoffCommandDisplaysRawBriefWithoutRenderer(t *testing.T) {
 	}
 }
 
-func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
+func TestHandoffCommandApproveUsesDefaultAgent(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
@@ -5552,8 +5539,6 @@ func TestHandoffCommandApproveUsesPendingAndDefaultAgent(t *testing.T) {
 	app.HandoffAgent = "auto"
 	readyPlanForApp(t, app, "Implement structured handoff")
 	app.Agent.SetTranscript([]llm.Message{uiUserMsg("x")})
-	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	var target string
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		target = name
@@ -5575,8 +5560,6 @@ func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.SessionPath = filepath.Join(t.TempDir(), "session")
 	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
 	}
@@ -5595,100 +5578,11 @@ func TestREPLHandoffCommandApprovalStartsImplementationTurn(t *testing.T) {
 	}
 }
 
-func TestREPLAutoHandoffApprovalStartsImplementationAfterPlanTurn(t *testing.T) {
-	var out, errw lockedBuffer
-	pending := handoff.NewPending()
-	inPrompt := make(chan struct{})
-	releaseTurn := make(chan struct{})
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("plan ready")},
-			Stop:   llm.StopEndTurn,
-			Block: func(ctx context.Context) {
-				pending.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
-				close(inPrompt)
-				<-releaseTurn
-			},
-		},
-		llmtest.Step{Events: []llm.StreamEvent{textDelta("implemented")}, Stop: llm.StopEndTurn},
-	)
-	app := newTestApp(t, &out, &errw, fp)
-	app.SessionPath = filepath.Join(t.TempDir(), "session")
-	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = pending
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
-	}
-
-	pr, pw := io.Pipe()
-	defer pr.Close()
-	codeCh := make(chan int, 1)
-	go func() { codeCh <- run(pr, app, nil, false) }()
-
-	writePipe(t, pw, "make a plan\n")
-	select {
-	case <-inPrompt:
-	case <-time.After(time.Second):
-		t.Fatal("plan turn did not start")
-	}
-	close(releaseTurn)
-	waitFor(t, func() bool { return strings.Contains(errw.String(), "Hand off to") }, "handoff approval prompt")
-	writePipe(t, pw, "y\n/exit\n")
-
-	if code := waitRun(t, codeCh); code != ExitOK {
-		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
-	}
-	if fp.RequestCount() != 2 {
-		t.Fatalf("model requests = %d, want plan + implementation", fp.RequestCount())
-	}
-	if got := transcriptPrompts(app); !strings.Contains(got, implementationStartPrompt) {
-		t.Fatalf("implementation prompt missing from transcript prompts %q", got)
-	}
-	if got := errw.String(); strings.Contains(got, "Supplementary context:") {
-		t.Fatalf("supplementary context should not be displayed after brief removal: %q", got)
-	}
-}
-
-func TestREPLAutoHandoffDeclineDoesNotStartImplementation(t *testing.T) {
-	var out, errw bytes.Buffer
-	pending := handoff.NewPending()
-	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("plan ready")},
-		Stop:   llm.StopEndTurn,
-		Block: func(ctx context.Context) {
-			pending.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
-		},
-	})
-	app := newTestApp(t, &out, &errw, fp)
-	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = pending
-	switched := false
-	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		switched = true
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "impl"}, nil
-	}
-
-	if code := Run(strings.NewReader("make a plan\nn\n/exit\n"), app, nil); code != ExitOK {
-		t.Fatalf("exit code = %d, want %d; errw=%q", code, ExitOK, errw.String())
-	}
-	if fp.RequestCount() != 1 {
-		t.Fatalf("model requests = %d, want only the plan turn", fp.RequestCount())
-	}
-	if switched {
-		t.Fatal("declined handoff should not switch agents")
-	}
-	if strings.Contains(transcriptPrompts(app), implementationStartPrompt) {
-		t.Fatalf("declined handoff should not submit implementation prompt: %q", transcriptPrompts(app))
-	}
-}
-
 func TestREPLHandoffFailureDoesNotStartImplementationTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("should not run")}, Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
 	readyPlanForApp(t, app, "Implement structured handoff")
-	app.Handoff = handoff.NewPending()
-	app.Handoff.Request(handoff.Request{PlanPath: "/p/0001.plan.md"})
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{}, errors.New("no such agent")
 	}

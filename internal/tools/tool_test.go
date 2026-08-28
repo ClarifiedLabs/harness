@@ -490,8 +490,7 @@ func TestRegistrySpecsPreserverStillDropsOtherAnnotations(t *testing.T) {
 }
 
 func TestBuiltInToolDescriptionsFitBudget(t *testing.T) {
-	catalog, _ := CatalogWithOptions(Options{})
-	catalog.Register(NewHandoff(nil, nil, true, nil))
+	catalog := CatalogWithOptions(Options{})
 	for _, spec := range catalog.Specs() {
 		if len(spec.Description) > 80 {
 			t.Errorf("%s description = %d bytes, budget 80: %q", spec.Name, len(spec.Description), spec.Description)
@@ -503,8 +502,7 @@ func TestBuiltInToolDescriptionsFitBudget(t *testing.T) {
 }
 
 func TestFirstPartySchemasPreserveConciseDescriptions(t *testing.T) {
-	catalog, _ := CatalogWithOptions(Options{Background: &fakeBackgroundStarter{}})
-	catalog.Register(NewHandoff(nil, nil, true, nil))
+	catalog := CatalogWithOptions(Options{Background: &fakeBackgroundStarter{}})
 	specs := make(map[string]llm.ToolSchema)
 	for _, spec := range catalog.Specs() {
 		specs[spec.Name] = spec
@@ -1079,7 +1077,7 @@ func TestDispatchPaginatedReadKeepsFileAwareNoticeWhenCentrallyTruncated(t *test
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, _ := DefaultWithOptions(tt.opts)
+			r := DefaultWithOptions(tt.opts)
 			res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
 			if res.IsError || !res.Truncated {
 				t.Fatalf("read result = %+v, want successful central truncation", res)
@@ -1141,7 +1139,7 @@ func TestDispatchPaginatedReadWithSHAKeepsFileAwareNotice(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r, _ := DefaultWithOptions(tt.opts)
+			r := DefaultWithOptions(tt.opts)
 			res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
 			if res.IsError || !res.Truncated {
 				t.Fatalf("read result = %+v, want successful central truncation", res)
@@ -1176,7 +1174,7 @@ func TestDispatchPaginatedReadWithNoCompleteLineUsesFileAwareNotice(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, _ := DefaultWithOptions(Options{})
+		r := DefaultWithOptions(Options{})
 		res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
 		if res.IsError || !res.Truncated {
 			t.Fatalf("read result = %+v, want successful central truncation", res)
@@ -1198,7 +1196,7 @@ func TestDispatchPaginatedReadWithNoCompleteLineUsesFileAwareNotice(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, _ := DefaultWithOptions(Options{ReadResultBytes: 100, ReadResultLines: 1})
+		r := DefaultWithOptions(Options{ReadResultBytes: 100, ReadResultLines: 1})
 		res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
 		if res.IsError || !res.Truncated {
 			t.Fatalf("read result = %+v, want successful central truncation", res)
@@ -1220,7 +1218,7 @@ func TestDispatchPaginatedReadWithNoCompleteLineUsesFileAwareNotice(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		r, _ := DefaultWithOptions(Options{ReadResultBytes: 150, ReadResultLines: 2})
+		r := DefaultWithOptions(Options{ReadResultBytes: 150, ReadResultLines: 2})
 		res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
 		if res.IsError || !res.Truncated {
 			t.Fatalf("read result = %+v, want successful central truncation", res)
@@ -1242,7 +1240,7 @@ func TestDispatchUnpaginatedReadStillUsesGenericTruncationNotice(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r, _ := DefaultWithOptions(Options{ReadResultBytes: 240, ReadResultLines: 20})
+	r := DefaultWithOptions(Options{ReadResultBytes: 240, ReadResultLines: 20})
 	res := r.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: "read", Input: input})
 	if res.IsError || !res.Truncated {
 		t.Fatalf("read result = %+v, want successful central truncation", res)
@@ -1256,12 +1254,12 @@ func TestDispatchUnpaginatedReadStillUsesGenericTruncationNotice(t *testing.T) {
 }
 
 func TestToolResultLimits(t *testing.T) {
-	r, _ := DefaultWithOptions(Options{})
+	r := DefaultWithOptions(Options{})
 	readLimits := r.resultLimitsFor("read")
 	if readLimits.maxBytes != defaultReadResultBytes || readLimits.maxLines != defaultReadResultLines {
 		t.Fatalf("read limits = %d/%d, want %d/%d", readLimits.maxBytes, readLimits.maxLines, defaultReadResultBytes, defaultReadResultLines)
 	}
-	configured, _ := DefaultWithOptions(Options{MaxResultBytes: 1000, MaxResultLines: 200, ReadResultLines: 40})
+	configured := DefaultWithOptions(Options{MaxResultBytes: 1000, MaxResultLines: 200, ReadResultLines: 40})
 	readLimits = configured.resultLimitsFor("read")
 	if readLimits.maxBytes != 1000 || readLimits.maxLines != 40 {
 		t.Fatalf("configured read limits = %d/%d, want 1000/40", readLimits.maxBytes, readLimits.maxLines)
@@ -1279,7 +1277,7 @@ func TestToolResultLimits(t *testing.T) {
 		{name: "global lines only", opts: Options{MaxResultLines: 750}, wantBytes: defaultReadResultBytes, wantLines: 750},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			r, _ := DefaultWithOptions(tt.opts)
+			r := DefaultWithOptions(tt.opts)
 			limits := r.resultLimitsFor("read")
 			if limits.maxBytes != tt.wantBytes || limits.maxLines != tt.wantLines {
 				t.Fatalf("read limits = %d/%d, want %d/%d", limits.maxBytes, limits.maxLines, tt.wantBytes, tt.wantLines)
@@ -1312,49 +1310,9 @@ func TestDefaultAndCatalogNames(t *testing.T) {
 	if got := DefaultNames(); !slices.Equal(got, expectedDefaultNames()) {
 		t.Fatalf("DefaultNames() = %v, want %v", got, expectedDefaultNames())
 	}
-	wantCatalog := []string{"read", "view_image", "edit", "write", "shell"}
-	if GitAvailable() {
-		wantCatalog = append(wantCatalog, "git")
+	if got := Catalog().Names(); !slices.Equal(got, expectedDefaultNames()) {
+		t.Fatalf("Catalog().Names() = %v, want %v", got, expectedDefaultNames())
 	}
-	wantCatalog = append(wantCatalog, "web_fetch")
-	if GitAvailable() {
-		wantCatalog = append(wantCatalog, "git_readonly")
-	}
-	wantCatalog = append(wantCatalog, "write_tmp_file")
-	if got := Catalog().Names(); !slices.Equal(got, wantCatalog) {
-		t.Fatalf("Catalog().Names() = %v, want %v", got, wantCatalog)
-	}
-}
-
-func TestCatalogRejectsRemovedToolNames(t *testing.T) {
-	catalog := Catalog()
-	for _, name := range []string{"read_file", "write_file", "apply_patch", "rg", "grep", "list_dir", "glob"} {
-		if _, ok := catalog.Lookup(name); ok {
-			t.Errorf("removed tool %q remains registered", name)
-		}
-		if _, err := catalog.Subset([]string{name}); err == nil {
-			t.Errorf("Subset accepted removed tool %q", name)
-		}
-	}
-}
-
-func TestCatalogDiagnosticsForMissingGit(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	r, disabled := CatalogWithDiagnostics()
-	for _, name := range []string{"git", "git_readonly"} {
-		if slices.Contains(r.Names(), name) || !disabledContains(disabled, name) {
-			t.Fatalf("missing git diagnostic for %q: names=%v disabled=%+v", name, r.Names(), disabled)
-		}
-	}
-}
-
-func disabledContains(disabled []DisabledTool, name string) bool {
-	for _, item := range disabled {
-		if item.Name == name {
-			return true
-		}
-	}
-	return false
 }
 
 func TestSubsetFiltersSpecsAndDispatch(t *testing.T) {
@@ -1372,7 +1330,7 @@ func TestSubsetFiltersSpecsAndDispatch(t *testing.T) {
 }
 
 func TestSubsetPreservesReadResultLimitsDuringDispatch(t *testing.T) {
-	catalog, _ := CatalogWithOptions(Options{ReadResultBytes: 96 * 1024, ReadResultLines: 2500})
+	catalog := CatalogWithOptions(Options{ReadResultBytes: 96 * 1024, ReadResultLines: 2500})
 	sub, err := catalog.Subset([]string{"read"})
 	if err != nil {
 		t.Fatal(err)

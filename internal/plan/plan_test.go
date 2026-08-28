@@ -18,6 +18,20 @@ func runRecord(t *testing.T, tool *Tool, args map[string]any) (string, error) {
 	return tool.Run(context.Background(), input)
 }
 
+func TestRecordPlanEmptyCallIsRejected(t *testing.T) {
+	tool := NewTool(NewStore(), func() string { return t.TempDir() })
+	if _, err := runRecord(t, tool, map[string]any{}); err == nil {
+		t.Fatal("empty call should fail")
+	}
+}
+
+func TestRecordPlanSchemaOmitsHandoff(t *testing.T) {
+	tool := NewTool(NewStore(), nil)
+	if strings.Contains(string(tool.Schema()), "handoff") {
+		t.Fatal("record_plan schema should not advertise handoff")
+	}
+}
+
 func TestRecordPlanRequiresSequentialDispatch(t *testing.T) {
 	tool := NewTool(NewStore(), func() string { return t.TempDir() })
 	if !tool.RequiresSequential(json.RawMessage(`{}`)) {

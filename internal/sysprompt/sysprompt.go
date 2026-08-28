@@ -104,7 +104,7 @@ func EnvContext(opts EnvOptions) string {
 // It deliberately omits modified/untracked counts: those are baked once into the
 // cache-anchored system prefix and go stale the moment the agent edits a file,
 // misleading about repo cleanliness for the rest of the session. The model can
-// run git_readonly status on demand for a live count. Keeping only the stable
+// run `git status` via the shell on demand for a live count. Keeping only the stable
 // branch name preserves the prompt-cache anchor.
 func gitSummary(dir string) string {
 	branch, ok := gitBranch(dir)

@@ -91,7 +91,7 @@ func TestDispatchSelfTimeoutInertWhenCeilingDisabled(t *testing.T) {
 }
 
 func TestDefaultWithOptionsWiresDispatchTimeout(t *testing.T) {
-	r, _ := DefaultWithOptions(Options{DispatchTimeout: 42 * time.Second})
+	r := DefaultWithOptions(Options{DispatchTimeout: 42 * time.Second})
 	if r.dispatchTimeout != 42*time.Second {
 		t.Fatalf("DefaultWithOptions dispatchTimeout = %s, want 42s", r.dispatchTimeout)
 	}

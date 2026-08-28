@@ -59,7 +59,7 @@ func NewTool(store *Store, sessionDir func() string) *Tool {
 func (*Tool) Name() string { return "record_plan" }
 
 func (*Tool) Description() string {
-	return "Record a complete implementation plan for handoff to an implementation agent."
+	return "Record a complete implementation plan."
 }
 
 func (*Tool) PreserveSchemaDescriptions() bool { return true }
@@ -88,12 +88,9 @@ func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
 	}
-	p := Plan{Title: strings.TrimSpace(args.Title), Body: strings.TrimSpace(args.Plan)}
-	if p.Title == "" {
-		return "", fmt.Errorf("title is required")
-	}
-	if p.Body == "" {
-		return "", fmt.Errorf("plan is required")
+	title, body := strings.TrimSpace(args.Title), strings.TrimSpace(args.Plan)
+	if title == "" || body == "" {
+		return "", fmt.Errorf("title and plan are both required to record a plan")
 	}
 	dir := ""
 	if t.sessionDir != nil {
@@ -102,13 +99,14 @@ func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 	if dir == "" {
 		return "", fmt.Errorf("record_plan requires a session directory")
 	}
+	p := Plan{Title: title, Body: body}
 	path, err := writeFile(dir, p)
 	if err != nil {
 		return "", err
 	}
 	p.Path = path
 	t.store.Replace(&p)
-	return fmt.Sprintf("recorded plan: %s", path), nil
+	return "recorded plan: " + path, nil
 }
 
 func writeFile(dir string, p Plan) (string, error) {

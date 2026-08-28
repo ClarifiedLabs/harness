@@ -40,7 +40,6 @@ const maxAgentDescriptionBytes = 160
 const delegateToolName = "delegate"
 const updateTodosToolName = "update_todos"
 const recordPlanToolName = "record_plan"
-const handoffToolName = "handoff"
 
 const ModeImplementation = "implementation"
 const continuationContextPercent = 60
@@ -635,9 +634,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	progress.SetAgent(launch.Agent)
 
 	toolNames := launch.Tools.Names()
-	// Implementation approval belongs to the interactive root. A delegated plan
-	// agent records its artifact in its own child session and reports it upward.
-	toolNames = withoutTool(toolNames, handoffToolName)
 	if runtime.Depth+1 >= maxDepth {
 		toolNames = withoutTool(toolNames, delegateToolName)
 	}
@@ -1658,13 +1654,8 @@ func withoutTool(names []string, excluded string) []string {
 }
 
 // MissingTools returns required tool names that are not available, preserving
-// the required order and de-duplicating repeated names. An available git tool
-// satisfies a required git_readonly: git is a strict superset of the read-only
-// subcommands, so a parent with git can delegate to a read-only agent that needs
-// only git_readonly. The reverse does not hold — git_readonly does not satisfy a
-// required git. Agent-local coordination tools are exempt: a child receives
-// private plan/TODO stores, while root-only implementation approval is removed
-// before the child starts.
+// the required order and de-duplicating repeated names. Agent-local
+// coordination tools are exempt: a child receives private plan/TODO stores.
 func MissingTools(required, available []string) []string {
 	have := make(map[string]bool, len(available))
 	for _, name := range available {
@@ -1678,10 +1669,7 @@ func MissingTools(required, available []string) []string {
 		}
 		// These are agent-local coordination capabilities, not authority
 		// inherited from the parent.
-		if name == updateTodosToolName || name == recordPlanToolName || name == handoffToolName {
-			continue
-		}
-		if name == "git_readonly" && have["git"] {
+		if name == updateTodosToolName || name == recordPlanToolName {
 			continue
 		}
 		seen[name] = true

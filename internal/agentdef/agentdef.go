@@ -44,7 +44,7 @@ type Definition struct {
 	Reasoning string
 	// InteractiveSelectable controls whether a root interactive session may
 	// start with or switch to this agent. It does not affect one-shot runs,
-	// delegation, child continuation, or plan handoffs.
+	// delegation, child continuation, or user /handoff targets.
 	InteractiveSelectable bool
 }
 
@@ -152,7 +152,7 @@ func planTools() []string {
 	// project" stays a prompt-level contract (prompts/agents/plan.txt). Like
 	// every built-in, plan keeps update_todos for its working checklist.
 	names := inspectionTools()
-	return append(names, "write_tmp_file", "record_plan", "delegate", "background_jobs")
+	return append(names, "record_plan", "delegate", "background_jobs")
 }
 
 func defaultTools() []string {
@@ -281,21 +281,6 @@ func InteractiveNames(agents map[string]Definition) []string {
 	var out []string
 	for name, definition := range agents {
 		if definition.InteractiveSelectable {
-			out = append(out, name)
-		}
-	}
-	slices.Sort(out)
-	return out
-}
-
-// ImplementationAgentNames returns sorted names of agents whose WorkspaceAccess is exclusive.
-// Used for handoff targets: auto, independent and custom exclusive agents. Read-only
-// builtins (explore, plan, review) are excluded. If none (defensive), callers
-// fall back to Default.
-func ImplementationAgentNames(agents map[string]Definition) []string {
-	var out []string
-	for name, def := range agents {
-		if def.WorkspaceAccess == WorkspaceAccessExclusive {
 			out = append(out, name)
 		}
 	}

@@ -1,7 +1,7 @@
 # harness — architecture and design
 
 A minimal agentic coding harness in Go: a plain-text, line-oriented CLI that drives a
-tool-using LLM loop against local files, shell commands, and git.
+tool-using LLM loop against local files and shell commands.
 
 This is a living architecture document for the current system. It records how the
 codebase works today and evolves as harness gains capabilities.
@@ -14,8 +14,8 @@ codebase works today and evolves as harness gains capabilities.
   stripping, and retries are all small enough to own.
 - **Unix philosophy for tools.** When the job is already owned by a mature host
   CLI, run it through `shell` instead of reimplementing optimized search or
-  command semantics. Keep a dedicated argv wrapper only where Harness owns a
-  distinct workflow contract, such as `git`.
+  command semantics. Keep a dedicated wrapper only where Harness owns a
+  distinct workflow contract.
 - **Provider and MCP access are isolated.** `harness` uses one provider-neutral
   message/streaming model and talks to `harness-model-proxy` over HTTP. The model
   proxy owns API keys, provider configs, model metadata, and concrete provider
@@ -24,7 +24,8 @@ codebase works today and evolves as harness gains capabilities.
   process.
 - **No sandboxing or permission prompts.** The harness assumes it is launched inside an
   already-sandboxed environment. Tools run with the process's privileges, immediately.
-- **First-class git.** A dedicated `git` tool plus git context in the system prompt.
+- **First-class git.** Git branch context in the system prompt; git itself runs
+  through `shell`.
 
 ## 2. Constraints
 
@@ -121,7 +122,7 @@ internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSu
 internal/skills          skill discovery + `$skillName` prompt expansion
 internal/todo            advisory update_todos store and renderer (§9.13)
 internal/plan            immutable record_plan artifact and latest-plan store (§9.17)
-internal/handoff         pending implementation-approval request holder (§9.17, §14)
+internal/handoff         /handoff request DTO shared by the interactive drivers (§14)
 internal/goal            `/goal` session state, prompt binding, and continuation rendering (§10)
 internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the model proxy
 cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with generated command dispatch
@@ -2004,9 +2005,8 @@ assertion at dispatch:
   honest about its no-sandbox assumption.
 - **Registry surfaces are explicit.** `DefaultWithOptions` registers `read`,
   `view_image`, `edit`, `write`, `shell`, and `web_fetch`, in that order.
-  `CatalogWithOptions` adds host-backed `git` and `git_readonly` when available
-  plus `write_tmp_file`; agent coordination and discovered MCP/LSP tools are
-  layered on separately. The removed names `read_file`, `write_file`,
+  `CatalogWithOptions` currently returns the same set; agent coordination and
+  discovered MCP/LSP tools are layered on separately. The removed names `read_file`, `write_file`,
   `list_dir`, `glob`, `grep`, `rg`, and `apply_patch` are not constructible and
   an `allowed_tools` entry naming one fails validation.
 - **Large optional surfaces are lazy.** When the aggregate name, description, and
@@ -2218,7 +2218,7 @@ assertion at dispatch:
 
 ### 9.7 `shell`
 
-> Run a command or ordered steps; prefer argv; git tool for git.
+> Run a command or ordered steps; prefer argv.
 
 | param | type | notes |
 |---|---|---|
@@ -2257,8 +2257,8 @@ assertion at dispatch:
   Diagnostics metrics record outcome, exit code, timeout, cancellation, wait
   completion, and step aggregates for session error analysis.
 - Process semantics (own process group/session, group kill on timeout/^C,
-  descendant cleanup, incomplete-reap snapshots) are shared with
-  `git`/`git_readonly`; see §9.8. Foreground calls finish when the direct
+  descendant cleanup, incomplete-reap snapshots) are documented in §9.8.
+  Foreground calls finish when the direct
   program exits; long-lived commands should use `background:true`.
 - Receipt policy: `output_mode:"auto"` preserves successful output through
   8 KiB, then returns a compact `PASS` receipt and archives the complete
@@ -2296,9 +2296,9 @@ assertion at dispatch:
 
 ### 9.8 Shared process execution (`runProcess`)
 
-`shell` (§9.7) and `git`/`git_readonly` (§9.9, §9.11) run their subprocesses
-through one shared `runProcess` helper, so they share identical process semantics. The §9.7 schema/description above describe `shell`'s surface;
-this subsection records the common runner those argv tools point at.
+`shell` (§9.7) runs its subprocesses through the shared `runProcess` helper.
+The §9.7 schema/description above describes `shell`'s surface;
+this subsection records the runner that surface points at.
 
 - **Own process group/session, no controlling TTY.** The child leads its own group, so
   a timeout or `^C` can signal the whole group (negative-pid `SIGKILL`) and reap
@@ -2315,44 +2315,6 @@ this subsection records the common runner those argv tools point at.
   returns the captured snapshot and the status line notes the wait did not finish.
 - After the direct process exits, any remaining same-group descendants are killed so a
   foreground call does not leak backgrounded children.
-
-### 9.9 `git`
-
-> Run git without a shell or pager; args[] or a workflow.
-
-| param | type | notes |
-|---|---|---|
-| `args` | array of strings | argv after `git`; mutually exclusive with `workflow`; must not be a string or JSON-encoded array |
-| `workflow` | string | `workspace_summary` or `commit`; mutually exclusive with `args` |
-| `cwd` | string | default process cwd |
-| `paths` | array of strings | required for `commit`; exact repository-relative files or directories (max 100); a directory includes everything beneath it; `.` rejected |
-| `message` | string | required for `commit`; conventional commit message |
-
-- `git` is registered only when `exec.LookPath("git")` succeeds at registry
-  construction time; without git the model never sees the tool name. The runner
-  prepends `--no-pager` and sets `GIT_TERMINAL_PROMPT=0` so interactive flows
-  fail fast rather than hang.
-- The advertised shape is `{"args":[...]}` — a JSON array of strings, not a
-  string or JSON-encoded array (a bare string array is also accepted for
-  compatibility). Process semantics and output conventions are shared with
-  `shell` (§9.7/§9.8).
-- **One argv tool, not narrow per-subcommand tools:** a single stable schema
-  covers the entire git surface the model already knows from training;
-  enumerating subcommands multiplies schemas and still misses the long tail.
-- `workspace_summary` is a read-only deterministic survey: porcelain
-  branch/status, the latest oneline commit, staged and unstaged diff stats, and
-  staged and unstaged `diff --check`, with empty sections omitted and an unborn
-  repository handled explicitly. It does not include the full patch; the model
-  uses a subsequent raw `git diff` when patch inspection is needed.
-- `commit` validates an explicit list of repository-relative files and
-  directories (a directory stages and commits everything beneath it), rejects
-  `.`, `..`, trailing slashes, globs, pathspec magic, duplicates, and absolute
-  paths, then runs `git add`, staged `diff --check`, a staged-change check, and
-  `git commit` scoped by `--` to those paths. Unrelated staged changes remain
-  staged. A failed whitespace check rejects with a corrective sentence naming
-  the offending lines; failures leave the staging area recoverable. The compact
-  receipt reports the new short hash/subject, committed files, and remaining
-  status.
 
 ### 9.10 `web_fetch`
 
@@ -2379,48 +2341,6 @@ this subsection records the common runner those argv tools point at.
   `max_bytes` to distinguish a capped response and appends an explicit
   truncation marker. Model-visible output has a 32 KB/500-line default cap; the
   standard artifact path preserves omitted text.
-
-### 9.11 `git_readonly`
-
-> Read-only git queries only; no shell or pager.
-
-| param | type | notes |
-|---|---|---|
-| `args` | array of strings, required | argv after `git`, starting with the subcommand; must not be a string or JSON-encoded array |
-| `cwd` | string | default process cwd |
-
-- A restricted sibling of `git` (§9.9) used by restricted agents (§14),
-  registered only when git is installed. Its runner injects `--no-pager`,
-  `--no-optional-locks`, and `-c core.fsmonitor=false`, plus
-  `GIT_TERMINAL_PROMPT=0` and `GIT_OPTIONAL_LOCKS=0`; diff-capable commands
-  additionally disable external diff and text-conversion helpers. Input shape
-  and argv decoding match `git`.
-- **Audited allowlist by bare subcommand:** only query-only verbs (`blame`,
-  `cat-file`, `diff*`, `grep`, `log`, `ls-*`, `rev-*`, `show*`, `status`, and
-  similar; the full list is maintained in [tools.md](tools.md#command-execution)).
-  Mixed read/write verbs such as `branch`, `config`, `remote`, `reflog`,
-  `submodule`, `tag`, and `worktree` stay excluded even when some invocations
-  are observational; `bisect` is excluded because it mutates repository state.
-- `args[0]` must be a bare allowlisted subcommand and cannot start with `-`,
-  which blocks all global option injection. Subcommand flags that can write a
-  file or launch configured programs are rejected: output-file flags, pager
-  flags (including clustered `grep -O`), external diff/textconv/filter flags,
-  signature display, and `%G` pretty/format placeholders.
-
-### 9.12 `write_tmp_file`
-
-> Write a scratch file in this run's temp dir; returns its path.
-
-| param | type | notes |
-|---|---|---|
-| `name` | string, required | relative file name (subdirectories allowed) |
-| `content` | string, required | full file content (empty allowed) |
-
-- Gives read-only agents (§14, `plan`) a place to draft notes without project
-  write access. Files are written under one `os.MkdirTemp` directory created lazily on
-  first use and shared across calls; they are kept after exit.
-- `name` must be relative and stay inside the temp directory: absolute paths and any
-  `..` escape (after `filepath.Clean`) are rejected. Returns the absolute path written.
 
 ### 9.13 `update_todos` (`internal/todo`)
 
@@ -2551,7 +2471,7 @@ this subsection records the common runner those argv tools point at.
   before its registry/specs are built. Root `max_prompt_tokens` and
   `max_prompt_cost_usd` are copied into every child as per-prompt ceilings, not
   a hierarchy-wide budget. Children receive private TODO and plan stores;
-  `handoff` is always removed from child agents. Foreground delegates remain
+  child `record_plan` instances carry no handoff capability. Foreground delegates remain
   serialized because children share the checkout and may write.
 - The parent transcript records only the normal `delegate` call and compact
   result; child transcripts are saved under `children/<child-id>/` for
@@ -2710,29 +2630,17 @@ The LSP block therefore stays adjacent to file inspection in both the default
 and complete catalogs; a missing anchor falls back to append. LSP tools keep
 their concise operation descriptions without adding cross-tool search steering.
 
-### 9.17 `record_plan` and `handoff`
+### 9.17 `record_plan`
 
 `record_plan` (`internal/plan`) accepts `{title, plan}`, both required after
-trimming, renders `# <title>` plus the self-contained Markdown body, and writes
-`<session>/plans/NNNN-<slug>.plan.md` via temp-file-then-rename (0644). Each
-call creates a new immutable artifact; the synchronized store keeps only the
-latest `plan.Plan` pointer for persistence, display, and handoff. It is part of
-the default coordination tool set (`auto`, `independent`, default-inheriting
-custom agents, and `plan`), requires a live session directory, and is private
-per delegate child.
-
-`handoff` (`internal/tools` + `internal/handoff`) accepts an optional `{agent}`
-and is enabled only for the interactive root `plan` agent. It rejects one-shot
-mode, a missing plan, and unknown explicit agents. Only exclusive agents
-populate the `agent` enum (`auto`, `independent`, custom agents with
-`workspace_access: exclusive`); an omitted `agent` defaults to `auto`. The tool
-records a synchronized pending `handoff.Request`; tools never prompt or switch
-agents themselves. At the interactive boundary, Harness renders the complete
-latest plan, asks for approval, and on approval switches agent/model, archives
-the planning transcript, resets the conversation tree to one user message
-containing the absolute plan path and body, appends optional `/handoff`
-context, clears the implementation agent's TODO list, and starts the
-implementation prompt.
+trimming, renders `# <title>` plus the self-contained Markdown body, and
+writes `<session>/plans/NNNN-<slug>.plan.md` via temp-file-then-rename (0644).
+Each recording call creates a new immutable artifact; the synchronized store
+keeps only the latest `plan.Plan` pointer for persistence, display, and user
+`/handoff`. It is part of the default coordination tool set (`auto`,
+`independent`, default-inheriting custom agents, and `plan`), requires a live
+session directory, and is private per delegate child. The tool does not
+request implementation; `/handoff` is a user command (§10, §14).
 
 ## 10. CLI / REPL (`internal/ui`)
 
@@ -3344,7 +3252,7 @@ projection over one physical session's events, exposed via `/evidence` and
 JSON-mode selection but before stream construction emits exactly one versioned
 `startup_error` object (`type`, `v`, `mode`, `exit_code`, `error`, `time`). A
 successfully started run is a versioned NDJSON stream (`run_start.v`, currently
-`4`): line 1 is a `run_start` envelope, the last line is a best-effort
+`5`): line 1 is a `run_start` envelope, the last line is a best-effort
 `run_end` envelope (`exit_code` mirrors the process exit code), and each prompt
 is bracketed by `prompt_start`/`prompt_end` (`prompt_end` carries `exit_code`,
 `termination_reason`, a usage summary, and `final_text` — the last assistant
@@ -3370,12 +3278,12 @@ Two run modes share the stream:
 - **Interactive** (`-format json`, no `-p`, piped stdin, `"mode":"interactive"`):
   `ui.RunJSON` (`internal/ui/jsonrun.go`, package `ui`) is an alternative
   front end for the REPL's `App` machinery. A decoder goroutine feeds a
-  driver state machine (idle / prompt-running / approval-pending); each
+  driver state machine (idle / prompt-running); each
   prompt mirrors the REPL's sequence — optional agent/model switch,
   prompt-submit hooks, `beginPrompt`, `newREPLSink` with the recorder mirror
   set, `Agent.RunPromptContentWithContext` on a goroutine with a driver-owned
   ctx+cancel, `FlushEvents`, `prompt_end`, save, boundary work (background
-  notices, MCP refresh, pending-handoff check). In-band control replaces
+  notices, MCP refresh). In-band control replaces
   keystrokes: a bare `prompt` message mid-run steers like Enter-during-prompt
   (late steers are recovered as the next prompt), `interrupt` is the in-band
   ^C, `shutdown` cancels and exits 0, and stdin EOF drains the active/queued
@@ -3383,19 +3291,14 @@ Two run modes share the stream:
   never lost behind prompt completion: messages buffered when a prompt
   finishes are handled before the boundary can start the next queued prompt —
   a raced `shutdown` exits 0 and a raced `interrupt` exits 130 instead of
-  cancelling the next prompt. `interrupt` with a pending handoff approval
-  cancels the handoff and exits 130 (the TTY approval Ctrl-C path); stdin EOF
-  with a pending approval declines the handoff (never auto-approves) and
-  drains the queue. Steering is attempted only while no earlier input is
+  cancelling the next prompt. Steering is attempted only while no earlier input is
   queued, which keeps queued and recovered input in submission order without
   sequence numbers. A resolved detached background wait wakes an otherwise idle
   JSON driver and starts a `cause:"detached_background_wait"` continuation only
-  when no client input, approval, or EOF is pending; its aggregate is drained as
+  when no client input or EOF is pending; its aggregate is drained as
   request-only context by that continuation's first model request. The input-reader
-  goroutine aborts blocked sends on force-exit so it cannot leak. Handoff approval uses
-  the protocol (`approval_request`/`approval_response`) with the same
-  post-approval helper the TTY `/handoff` flow calls. TTY-coupled behaviors
-  (goals, slash commands, idle compaction, pickers, history) stay off: main
+  goroutine aborts blocked sends on force-exit so it cannot leak. TTY-coupled behaviors
+  (goals, slash commands including `/handoff`, idle compaction, pickers, history) stay off: main
   wires the mode through an explicit `machineInteractive` predicate, and bad
   input lines surface as `input_error` events without killing the session.
 
@@ -3458,7 +3361,7 @@ injectable), the retry clock, and `ValidateTranscript`.
 | `internal/sse` | frame parsing tables; huge frames; truncated input |
 | providers | `httptest.Server` replaying `.sse` golden fixtures per dialect → assert ordered events; golden request-JSON tests (Responses input items, Chat role:tool hoisting, args-string vs object, system placement, `stream_options`, cache_control); tool-call reassembly tables (fragment splits, empty args → `{}`, interleaved parallel calls, invalid tail → invalid `Done` diagnostic); truncated stream; mid-stream cancellation; retry loop via injected sleeper (429-then-200, 400 immediate failure, budget exhaustion) |
 | `internal/retry` | `Next`: jitter bounds, 30s cap, Retry-After floor |
-| tools | table-driven against `t.TempDir()` for `read`, directory reads, `edit`, and `write`; `git` against a scratch `git init` repo (skipped if git is absent); host discovery commands and timeout/cancellation through `shell` |
+| tools | table-driven against `t.TempDir()` for `read`, directory reads, `edit`, and `write`; host discovery commands and timeout/cancellation through `shell` |
 | agent loop | `FakeProvider` scripts: multi-tool batches, error-result feedback (next request carries the error), max-turns stop, cancellation → transcript still re-sendable |
 | delegate | child-agent request shape and child-only prompt suffix, model-visible compatible-agent enum/catalog (ordering, normalization, caps), parent-tool subset rejection, depth transitions/deepest-child removal, recursive runtime rebinding, inherited token/cost budgets, private child TODO/plan stores, child transcript persistence, metered usage folded into parent prompt totals |
 | background | job start/completion, one-shot context delivery, notices, cancellation/errors, child transcript path preservation |
@@ -3491,12 +3394,8 @@ reviewer, or a general-purpose agent without separate binaries.
   the same full runtime selection path as `/agent`, recomposing prompt, tools,
   model/reasoning selection, and continuation state. The operational guide,
   including the built-in agent table, is [usage.md "Agents"](usage.md#agents).
-- **Built-in contract details:** `auto` and `independent` advertise `git`
-  rather than the redundant `git_readonly`; delegation treats `git` as
-  satisfying a child's `git_readonly` requirement. Child-local `update_todos`
+- **Built-in contract details:** Child-local `update_todos`
   and `record_plan` are exempt from parent capability-subset matching.
-  Interactive root `plan` sessions additionally expose `handoff`; delegated and
-  one-shot plan agents do not.
 - **Descriptions are required selection metadata:** after resolution, every agent
   must have a nonblank trimmed `description` stating when a parent should use it.
   A new custom name without one is a fail-fast startup/`--agents`/`harness config
@@ -3530,10 +3429,9 @@ reviewer, or a general-purpose agent without separate binaries.
   model-compatible and validated like any effort. This lets a cheap implementation
   agent pair a smaller `model` with a lower `reasoning`.
 - **Plan → implementation handoff:** the `plan` agent writes a self-contained
-  artifact with `record_plan` (`Record a complete implementation plan for handoff to an implementation agent.`, §9.17) and requests a handoff with
-  `handoff` (`Handoff the recorded plan to an implementation agent.`, §9.17). The `handoff` `agent` enum contains only exclusive agents (`auto`, `independent`, plus custom `workspace_access: exclusive`; `explore`/`plan`/`review` excluded); omit for default `auto`.
-  At the next prompt boundary, or on manual `/handoff` (§10), the REPL prompts for
-  approval, archives the planning transcript via `SaveCompaction`, switches to
+  artifact with `record_plan` (`Record a complete implementation plan.`, §9.17).
+  Implementation is a user command: `/handoff` (§10) prompts for approval,
+  archives the planning transcript via `SaveCompaction`, switches to
   the target agent — default `auto`, overridable by
   `--handoff-agent`/`HARNESS_HANDOFF_AGENT`/`handoff_agent` or `/handoff -a
   <agent>` — optionally swaps the model for a manual `/handoff -m <model>`, then

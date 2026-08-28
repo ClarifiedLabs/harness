@@ -730,7 +730,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 			stats.soloTodoTurns++
 		}
 		switch names[0] {
-		case "read", "git_readonly":
+		case "read":
 			stats.singleInspectTurns++
 		}
 	}

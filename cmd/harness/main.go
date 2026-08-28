@@ -34,7 +34,6 @@ import (
 	"harness/internal/configmeta"
 	"harness/internal/delegate"
 	"harness/internal/goal"
-	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
@@ -581,9 +580,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		fmt.Fprintf(stderr, "harness: %v\n", err)
 		return ui.ExitUsage
 	}
-	if interactiveSession || machineInteractive {
-		enableInteractivePlanHandoff(agents)
-	}
 	agentName := cfg.Agent
 	agentSource := result.Sources["agent"]
 	agentExplicit := agentSource.Kind != configmeta.SourceDefault && agentSource.Kind != configmeta.SourceDerived
@@ -799,8 +795,8 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// Agent definitions (tool-gating layer). The tool catalog holds every
 	// constructible tool; each agent selects a subset, realized by Subset so the
 	// runtime advertises and dispatches only that agent's tools. Built once and
-	// shared with /agent and the /mode alias (write_tmp_file holds a per-run temp dir).
-	toolCatalog, disabledTools := tools.CatalogWithOptions(tools.Options{
+	// shared with /agent and the /mode alias.
+	toolCatalog := tools.CatalogWithOptions(tools.Options{
 		MaxResultBytes:                cfg.ToolResultMaxBytes,
 		MaxResultLines:                cfg.ToolResultMaxLines,
 		ReadDefaultLimit:              cfg.ReadDefaultLimit,
@@ -813,9 +809,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		ShellBackgroundTimeoutSeconds: cfg.ShellBackgroundTimeoutSeconds,
 	})
 	backgroundManager.SetResultPreparer(toolCatalog.PrepareResultWithOriginal)
-	for _, disabled := range disabledTools {
-		logger.Warn(disabled.Message(), logging.Category("cli_tools"))
-	}
 	build := buildinfo.Current()
 	sessionBuild := session.BuildMetadata{
 		Version:  build.Version,
@@ -924,14 +917,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	delegateRunner := delegate.NewRunner(delegateState.Snapshot, resolveDelegate, delegateOpts)
 	toolCatalog.Register(delegate.NewTool(delegateRunner, backgroundManager))
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
-	handoffPending := handoff.NewPending()
 	toolCatalog.Register(todo.NewTool(todoStore))
-	toolCatalog.Register(plan.NewTool(planStore, func() string { return delegateState.Snapshot().SessionPath }))
-	names := agentdef.ImplementationAgentNames(agents)
-	if len(names) == 0 {
-		names = []string{"auto"}
-	}
-	toolCatalog.Register(tools.NewHandoff(handoffPending, planStore, interactiveSession || machineInteractive, names))
+	planSessionDir := func() string { return delegateState.Snapshot().SessionPath }
+	toolCatalog.Register(plan.NewTool(planStore, planSessionDir))
 	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
@@ -1482,7 +1470,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Trajectory:                   trajectoryTracker,
 		GoalMaxContinuations:         cfg.GoalMaxContinuations,
 		GoalAutoContinue:             interactiveSession,
-		Handoff:                      handoffPending,
 		HandoffAgent:                 cfg.HandoffAgent,
 		IdleCompactionAfter:          time.Duration(cfg.CompactIdleAfterSeconds) * time.Second,
 		IdleCompactionTriggerPercent: cfg.CompactIdleTriggerPercent,
@@ -1517,7 +1504,6 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		HistSize:         cfg.HistSize,
 		Skills:           discoveredSkills,
 		SkillDirs:        skillDirs,
-		DisabledTools:    disabledTools,
 		SummaryWidth:     env.terminalCols,
 	}
 	// If HistFile was not explicitly configured, derive it from StateDir.
@@ -1977,20 +1963,6 @@ func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition,
 		return nil, err
 	}
 	return agents, nil
-}
-
-func enableInteractivePlanHandoff(agents map[string]agentdef.Definition) {
-	planning, ok := agents["plan"]
-	if !ok {
-		return
-	}
-	for _, name := range planning.AllowedTools {
-		if name == "handoff" {
-			return
-		}
-	}
-	planning.AllowedTools = append(planning.AllowedTools, "handoff")
-	agents["plan"] = planning
 }
 
 func ripgrepAvailable() bool {
