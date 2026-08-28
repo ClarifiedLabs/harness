@@ -59,8 +59,11 @@ const (
 	CommandOutcomeNotRun
 )
 
-// CommandResultOutcome decodes shell's diagnostics-only outcome. It
-// returns false for tools and legacy results that do not carry the contract.
+// CommandResultOutcome decodes shell's diagnostics-only outcome. Every
+// non-error shell result carries the contract — background launch receipts
+// report the launch itself as CommandOutcomePassed, and the detached
+// command's outcome arrives with the job's completion result — so it returns
+// false only for foreign tools and legacy results recorded before it.
 func CommandResultOutcome(result llm.ToolResult) (CommandOutcome, bool) {
 	metrics := result.Metrics
 	if metrics[CommandMetricOutcomeAvailable] == 0 {
@@ -332,6 +335,14 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 				resourceKey,
 				access,
 			),
+			// Launch receipts carry the outcome contract too: the launch
+			// itself succeeded, and the detached command's own outcome
+			// arrives with the job's completion result. Observers can rely
+			// on every non-error shell result carrying the contract.
+			Metrics: map[string]int{
+				CommandMetricOutcomeAvailable: 1,
+				CommandMetricSucceeded:        1,
+			},
 			BackgroundJobID: info.ID,
 		}, nil
 	}

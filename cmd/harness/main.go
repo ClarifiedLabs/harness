@@ -1402,6 +1402,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Markdown:     env.colorTTY,
 		Verbose:      cfg.Verbose,
 		ConciseReads: interactiveSession,
+		ConciseShell: interactiveSession,
 		ToolStream:   cfg.ToolStream,
 		Quiet:        runOptions.Quiet,
 		// -quiet still prints the single per-prompt cost line on a TTY (r25);

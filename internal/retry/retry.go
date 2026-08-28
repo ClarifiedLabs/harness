@@ -21,7 +21,7 @@ const (
 	// three attempts back-to-back within a second. Transport failures have no
 	// server-supplied Retry-After, so the floor is the only pacing.
 	minConnectDelay = 750 * time.Millisecond
-	cap30s           = 30 * time.Second
+	cap30s          = 30 * time.Second
 	// cap60s is the higher jitter ceiling for the rate-limit class (429/529),
 	// which recovers over minutes rather than the seconds typical of a transient
 	// 500/502/503, so a longer backoff between attempts wastes fewer requests.

@@ -2900,8 +2900,21 @@ implementation prompt.
   conversational turn, so repeated offset/limit windows of one file do not
   repeat progress. Deduplication uses the full cwd-relative path before display
   clipping. Read failures, centrally truncated results, and inputs whose path
-  cannot be decoded safely retain the detailed per-call summary. `-v` restores
-  every detailed read summary, adds the first ~5 result lines (dimmed), and
+  cannot be decoded safely retain the detailed per-call summary. Built-in
+  `shell` results get the same interactive projection: non-verbose live text
+  shows the name or command (steps as `steps=N name: label; label; label`, at
+  most three labels then `+N more`; labels are whitespace-collapsed and
+  clipped), the outcome (`ok`, `failed (exit N)` for positive exit codes, bare
+  `failed` for signal-killed or unclassified exits, `cancelled`, `timed out`),
+  partial-run progress (`ran x/y, skipped m`), and background launches as
+  `background job <id> (<access> @ <resource>) → started`; command failures
+  keep the projection because the status segment is the point, while
+  tool/dispatch errors (`IsError`) and undecodable inputs fall back to the
+  detailed form. The outcome segment reads the diagnostics command-outcome
+  metrics: every non-error `shell` result carries `command_outcome_available`
+  (background launch receipts report the launch itself as `command_succeeded`),
+  and results missing it fall back to the detailed form as well. `-v` restores
+  every detailed read and shell summary, adds the first ~5 result lines (dimmed), and
   enables progress details. Absolute file-path argument values (`path`, `file`,
   `cwd`, and read's path aliases) are displayed relative to the session working
   directory when the path lies under it; paths outside it remain absolute. This

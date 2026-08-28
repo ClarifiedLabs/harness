@@ -22,21 +22,21 @@ const gitTimeout = 250 * time.Millisecond
 type field string
 
 const (
-	fieldAgent                field = "agent"
-	fieldCWD                  field = "cwd"
-	fieldHostname             field = "hostname"
-	fieldHostnameLong         field = "hostname:long"
-	fieldHostnameShort        field = "hostname:short"
-	fieldGitBranch            field = "git_branch"
-	fieldModel                field = "model"
-	fieldReasoning            field = "reasoning"
-	fieldViMode               field = "vimode"
-	fieldViModeLong           field = "vimode:long"
-	fieldViModeShort          field = "vimode:short"
-	fieldContext              field = "context"
-	fieldContextPctUsed       field = "context_pct_used"
-	fieldContextTokensUsed    field = "context_tokens_used"
-	fieldContextTokensTotal   field = "context_tokens_total"
+	fieldAgent              field = "agent"
+	fieldCWD                field = "cwd"
+	fieldHostname           field = "hostname"
+	fieldHostnameLong       field = "hostname:long"
+	fieldHostnameShort      field = "hostname:short"
+	fieldGitBranch          field = "git_branch"
+	fieldModel              field = "model"
+	fieldReasoning          field = "reasoning"
+	fieldViMode             field = "vimode"
+	fieldViModeLong         field = "vimode:long"
+	fieldViModeShort        field = "vimode:short"
+	fieldContext            field = "context"
+	fieldContextPctUsed     field = "context_pct_used"
+	fieldContextTokensUsed  field = "context_tokens_used"
+	fieldContextTokensTotal field = "context_tokens_total"
 )
 
 // Values carries the runtime values available to a REPL prompt template.

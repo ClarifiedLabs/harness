@@ -50,7 +50,12 @@ type RenderOptions struct {
 	// ConciseReads projects successful built-in reads as one path-only line per
 	// effective path in a conversational turn. The CLI enables it only for
 	// interactive text sessions.
-	ConciseReads            bool
+	ConciseReads bool
+	// ConciseShell projects built-in shell results as one human line carrying
+	// the name/command, outcome, step progress, and background-job identity
+	// instead of the detailed key=value audit form. The CLI enables it only for
+	// interactive text sessions; -v restores detail.
+	ConciseShell            bool
 	ToolStream              bool
 	Quiet                   bool
 	SuppressReasoningOutput bool
@@ -89,6 +94,7 @@ type Renderer struct {
 	markdown                bool
 	verbose                 bool
 	conciseReads            bool
+	conciseShell            bool
 	toolStream              bool
 	quiet                   bool
 	suppressUsage           bool
@@ -196,6 +202,7 @@ func NewRenderer(out, errw io.Writer, opts RenderOptions) *Renderer {
 		markdown:                opts.Markdown,
 		verbose:                 opts.Verbose,
 		conciseReads:            opts.ConciseReads,
+		conciseShell:            opts.ConciseShell,
 		toolStream:              opts.ToolStream,
 		quiet:                   opts.Quiet,
 		suppressReasoningOutput: opts.SuppressReasoningOutput,
@@ -576,6 +583,8 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 		} else {
 			r.dimLine(line)
 		}
+	} else if line, concise := r.conciseShellResultLine(call, result); concise {
+		r.dimLine(line)
 	} else {
 		r.dimLine(ToolResultLine(call, result, r.cwd))
 	}

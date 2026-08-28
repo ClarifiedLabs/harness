@@ -659,6 +659,12 @@ func TestShellBackgroundStartsJob(t *testing.T) {
 	if started.BackgroundJobID != "bg_test" {
 		t.Fatalf("background job ID = %q, want bg_test", started.BackgroundJobID)
 	}
+	if got := started.Metrics[CommandMetricOutcomeAvailable]; got != 1 {
+		t.Fatalf("launch receipt metrics[%q] = %d, want 1", CommandMetricOutcomeAvailable, got)
+	}
+	if got := started.Metrics[CommandMetricSucceeded]; got != 1 {
+		t.Fatalf("launch receipt metrics[%q] = %d, want 1 (launch succeeded)", CommandMetricSucceeded, got)
+	}
 	if !strings.HasPrefix(out, "background job bg_test started (resource: ") ||
 		!strings.HasSuffix(out, ", access: exclusive)") {
 		t.Fatalf("start output = %q", out)
