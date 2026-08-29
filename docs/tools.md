@@ -142,12 +142,13 @@ decide regex syntax, ignore behavior, limits, output shape, and exit status.
   login PATH a login shell would have added is resolved once at startup and merged
   into the command environment, so build/test toolchains are still found without
   paying the login-profile cost on every call.
-- `name`: optional command or step-batch label
 - `output_mode`: `auto` (default), `receipt`, or `full`; with `steps`, `auto`
   and `receipt` return compact receipts while `full` returns the combined step transcript
-- `steps`: up to 16 named `command`/`argv` entries, run serially in either
+- `steps`: up to 16 `command`/`argv` entries, run serially in either
   foreground or background mode. Top-level `cwd` and `timeout_seconds` are
-  inherited unless a step overrides them.
+  inherited unless a step overrides them. Steps are identified by position
+  (`step 1`, `step 2`, …) in receipts and transcripts; there is no name
+  parameter.
 
 Shell calls capture combined stdout/stderr and append `[exit code: N]`.
 Non-zero exit is not a tool error; it is returned as ordinary command output so
@@ -173,7 +174,7 @@ apply to background command completion and explicit `background_jobs` get/wait
 results.
 
 Steps stop on the first failure by default (`stop_on_failure:false` continues).
-Successful output is replaced with one `PASS <name> (<duration>)` receipt per
+Successful output is replaced with one `PASS step N (<duration>)` receipt per
 step. Failures include status plus an output excerpt capped at 4 KiB, and the
 remaining-step skip count. Any suppressed
 successful output or clipped failure output is archived through the normal

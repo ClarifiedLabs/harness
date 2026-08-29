@@ -110,7 +110,6 @@ const shellSchemaFmt = `{
       "items": {
         "type": "object",
         "properties": {
-          "name": {"type": "string", "description": "Default: step N."},
           "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Direct exec with literal arguments."},
           "command": {"type": "string", "description": "Use only when shell syntax is needed."},
           "stdin": {"type": "string"},
@@ -120,7 +119,6 @@ const shellSchemaFmt = `{
       }
     },
     "stop_on_failure": {"type": "boolean", "description": "Default: true."},
-    "name": {"type": "string"},
     "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "auto/receipt are compact; full returns complete step output."},
     "stdin": {"type": "string"},
     "cwd": {"type": "string", "description": "Default: process cwd."},
@@ -146,7 +144,6 @@ const shellBackgroundSchemaFmt = `{
       "items": {
         "type": "object",
         "properties": {
-          "name": {"type": "string", "description": "Default: step N."},
           "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Direct exec with literal arguments."},
           "command": {"type": "string", "description": "Use only when shell syntax is needed."},
           "stdin": {"type": "string"},
@@ -156,7 +153,6 @@ const shellBackgroundSchemaFmt = `{
       }
     },
     "stop_on_failure": {"type": "boolean", "description": "Default: true."},
-    "name": {"type": "string"},
     "output_mode": {"type": "string", "enum": ["auto", "receipt", "full"], "description": "auto/receipt are compact; full returns complete step output."},
     "stdin": {"type": "string"},
     "cwd": {"type": "string", "description": "Default: process cwd."},
@@ -208,7 +204,6 @@ type shellArgs struct {
 	Argv            []string    `json:"argv"`
 	Steps           []shellStep `json:"steps"`
 	StopOnFailure   *bool       `json:"stop_on_failure"`
-	Name            string      `json:"name"`
 	OutputMode      string      `json:"output_mode"`
 	Stdin           string      `json:"stdin"`
 	Cwd             string      `json:"cwd"`
@@ -229,7 +224,6 @@ type shellLease struct {
 }
 
 type shellStep struct {
-	Name           string   `json:"name"`
 	Command        string   `json:"command"`
 	Argv           []string `json:"argv"`
 	Stdin          string   `json:"stdin"`
@@ -250,7 +244,6 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 	if err := validateShellArgs(args); err != nil {
 		return RunResult{}, err
 	}
-	args.Name = strings.TrimSpace(args.Name)
 	outputMode, err := normalizeShellOutputMode(args.OutputMode)
 	if err != nil {
 		return RunResult{}, err
@@ -381,7 +374,9 @@ func decodeShellArgs(input json.RawMessage) (shellArgs, error) {
 		}
 		delete(raw, "command")
 	}
-	// Decode remainder strictly so unknown top-level keys still fail.
+	// Unknown top-level keys are ignored: decoding into a struct drops fields
+	// with no destination, matching the repo-wide tolerate-unknown-keys pattern
+	// (a stale `name` from an older schema is simply dropped).
 	remainder, err := json.Marshal(raw)
 	if err != nil {
 		return shellArgs{}, err
@@ -472,9 +467,6 @@ func validateShellArgs(args shellArgs) error {
 			Cwd:            step.Cwd,
 			TimeoutSeconds: step.TimeoutSeconds,
 		}
-		if strings.TrimSpace(step.Name) == "" {
-			step.Name = fmt.Sprintf("step %d", i+1)
-		}
 		if err := validateShellArgs(stepArgs); err != nil {
 			return badArgs("steps[%d]: %v", i, err)
 		}
@@ -490,9 +482,6 @@ func validateShellArgs(args shellArgs) error {
 
 func shellDescription(args shellArgs) string {
 	if len(args.Steps) > 0 {
-		if name := strings.TrimSpace(args.Name); name != "" {
-			return name
-		}
 		return fmt.Sprintf("%d shell steps", len(args.Steps))
 	}
 	if len(args.Argv) > 0 {
@@ -616,10 +605,7 @@ func formatShellReceipt(args shellArgs, result processResult, elapsed string, ta
 }
 
 func shellReceiptLabel(args shellArgs) string {
-	label := strings.TrimSpace(args.Name)
-	if label == "" {
-		label = shellDescription(args)
-	}
+	label := shellDescription(args)
 	label = strings.Join(strings.Fields(label), " ")
 	if label == "" {
 		label = "command"
@@ -707,10 +693,7 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 	}
 	incompleteWait := false
 	for i, step := range args.Steps {
-		name := strings.TrimSpace(step.Name)
-		if name == "" {
-			name = fmt.Sprintf("step %d", i+1)
-		}
+		name := fmt.Sprintf("step %d", i+1)
 		resolved := shellArgs{
 			Command:        step.Command,
 			Argv:           append([]string(nil), step.Argv...),
@@ -790,10 +773,6 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 	}
 	text := strings.TrimRight(receipt.String(), "\n")
 	full := strings.TrimRight(transcript.String(), "\n")
-	if name := strings.TrimSpace(args.Name); name != "" {
-		text = fmt.Sprintf("Batch %s\n%s", name, text)
-		full = fmt.Sprintf("== %s ==\n%s", name, full)
-	}
 	if args.OutputMode == shellOutputFull {
 		return RunResult{Text: full, Metrics: metrics}, nil
 	}

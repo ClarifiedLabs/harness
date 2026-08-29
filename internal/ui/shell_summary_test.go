@@ -65,30 +65,30 @@ func TestConciseShellResultLineForms(t *testing.T) {
 		want   string
 	}{
 		{
-			name:   "top-level argv with name",
-			input:  `{"name":"Unit tests","argv":["make","test"]}`,
+			name:   "top-level argv",
+			input:  `{"argv":["make","test"]}`,
 			result: llm.ToolResult{ForID: "c", Text: "PASS\nok\n", Metrics: shellResultMetrics("ok", 0)},
-			want:   "[shell] Unit tests · ok → 2 lines, 8B",
+			want:   "[shell] make test · ok → 2 lines, 8B",
 		},
 		{
-			name:   "top-level command without name",
+			name:   "top-level command",
 			input:  `{"command":"make test"}`,
 			result: llm.ToolResult{ForID: "c", Text: "x\n", Metrics: shellResultMetrics("failed", 2)},
 			want:   "[shell] make test · failed (exit 2) → 2B",
 		},
 		{
-			name: "steps with name",
-			input: `{"name":"Final diff whitespace","steps":[` +
-				`{"name":"git diff --check","argv":["git","diff","--check"]},` +
+			name: "steps",
+			input: `{"steps":[` +
+				`{"argv":["git","diff","--check"]},` +
 				`{"argv":["go","build","./..."]}],"output_mode":"full","cwd":"."}`,
 			result: llm.ToolResult{
 				ForID: "c", Text: "a\nb\n",
 				Metrics: stepResultMetrics("ok", 0, 2, 2),
 			},
-			want: "[shell] steps=2 Final diff whitespace: git diff --check; go build ./... · ok → 2 lines, 4B",
+			want: "[shell] steps=2 git diff --check; go build ./... · ok → 2 lines, 4B",
 		},
 		{
-			name: "steps without name",
+			name: "steps without names",
 			input: `{"steps":[` +
 				`{"argv":["make","build"]},{"argv":["make","test"]},{"argv":["git","status"]}]}`,
 			result: llm.ToolResult{
@@ -108,17 +108,17 @@ func TestConciseShellResultLineForms(t *testing.T) {
 			want: "[shell] steps=5 cmd1; cmd2; cmd3; +2 more · ok → 5B",
 		},
 		{
-			name: "comma inside a step label stays unsplit",
+			name: "comma inside a step command stays unsplit",
 			input: `{"steps":[` +
-				`{"name":"rg -n \"a,b\" file","argv":["rg","-n","a,b","file"]},{"argv":["true"]}]}`,
+				`{"argv":["rg","-n","a,b","file"]},{"argv":["true"]}]}`,
 			result: llm.ToolResult{
 				ForID: "c", Text: "no match\n",
 				Metrics: stepResultMetrics("ok", 0, 2, 2),
 			},
-			want: `[shell] steps=2 rg -n "a,b" file; true · ok → 9B`,
+			want: `[shell] steps=2 rg -n a,b file; true · ok → 9B`,
 		},
 		{
-			name: "step label falls back to command text",
+			name: "step command renders directly",
 			input: `{"steps":[` +
 				`{"command":"make install && make test"}]}`,
 			result: llm.ToolResult{
@@ -177,14 +177,20 @@ func TestConciseShellResultLineForms(t *testing.T) {
 			want: "[shell] sleep 10 · timed out → 12B",
 		},
 		{
-			name:   "name with embedded newline collapses to spaces",
-			input:  `{"name":"Line one\nLine two","argv":["make","test"]}`,
+			name:   "stale legacy name key is ignored",
+			input:  `{"name":"Legacy label","argv":["make","test"]}`,
+			result: llm.ToolResult{ForID: "c", Text: "ok\n", Metrics: shellResultMetrics("ok", 0)},
+			want:   "[shell] make test · ok → 3B",
+		},
+		{
+			name:   "command with embedded newline collapses to spaces",
+			input:  `{"command":"Line one\nLine two"}`,
 			result: llm.ToolResult{ForID: "c", Text: "ok\n", Metrics: shellResultMetrics("ok", 0)},
 			want:   "[shell] Line one Line two · ok → 3B",
 		},
 		{
-			name:   "long name is clipped like a command",
-			input:  `{"name":"` + strings.Repeat("a", 100) + `","argv":["true"]}`,
+			name:   "long command is clipped",
+			input:  `{"command":"` + strings.Repeat("a", 100) + `"}`,
 			result: llm.ToolResult{ForID: "c", Text: "ok\n", Metrics: shellResultMetrics("ok", 0)},
 			want:   "[shell] " + strings.Repeat("a", 79) + "… · ok → 3B",
 		},
@@ -253,9 +259,9 @@ func TestConciseShellBackgroundLaunch(t *testing.T) {
 	}{
 		{
 			name:  "lease with resource under cwd is relativized",
-			input: `{"name":"Final full root test gate","argv":["make","test"],"background":true,"background_lease":{"access":"read_only","resource_key":"` + dir + `/monorepo"}}`,
+			input: `{"argv":["make","test"],"background":true,"background_lease":{"access":"read_only","resource_key":"` + dir + `/monorepo"}}`,
 			jobID: "j3",
-			want:  "[shell] Final full root test gate · background job j3 (read_only @ monorepo) → started",
+			want:  "[shell] make test · background job j3 (read_only @ monorepo) → started",
 		},
 		{
 			name:  "lease resource outside cwd stays absolute",
@@ -309,7 +315,7 @@ func TestConciseShellBackgroundLaunchRequiresContract(t *testing.T) {
 }
 
 func TestConciseShellDisabledOrVerboseKeepsDetailedLine(t *testing.T) {
-	input := json.RawMessage(`{"name":"Unit tests","argv":["make","test"]}`)
+	input := json.RawMessage(`{"argv":["make","test"]}`)
 	result := llm.ToolResult{ForID: "c", Text: "ok\n", Metrics: shellResultMetrics("ok", 0)}
 	for _, tc := range []struct {
 		name string
@@ -324,9 +330,9 @@ func TestConciseShellDisabledOrVerboseKeepsDetailedLine(t *testing.T) {
 			r.ToolStart(llm.ToolCall{ID: "c", Name: "shell", Input: input})
 			r.ToolResult(result)
 			got := strings.TrimSuffix(errw.String(), "\n")
-			want := `[shell] argv=["make","test"] name="Unit tests" → 3B`
+			want := `[shell] argv=["make","test"] → 3B`
 			if tc.name == "verbose" {
-				want = "[tool: shell started argv=[\"make\",\"test\"] name=\"Unit tests\"]\n" + want + "\n  ok"
+				want = "[tool: shell started argv=[\"make\",\"test\"]]\n" + want + "\n  ok"
 			}
 			if got != want {
 				t.Fatalf("detailed line =\n  %q\nwant\n  %q", got, want)
@@ -364,8 +370,8 @@ func TestConciseShellReportExamples(t *testing.T) {
 	stepsCall := llm.ToolCall{
 		ID:   "s1",
 		Name: "shell",
-		Input: json.RawMessage(`{"name":"Final diff whitespace","steps":[` +
-			`{"name":"git diff --check","argv":["git","diff","--check"]},` +
+		Input: json.RawMessage(`{"steps":[` +
+			`{"argv":["git","diff","--check"]},` +
 			`{"argv":["go","build","./..."]}],` +
 			`"output_mode":"full","cwd":".","stop_on_failure":true}`),
 	}
@@ -379,7 +385,7 @@ func TestConciseShellReportExamples(t *testing.T) {
 	bgCall := llm.ToolCall{
 		ID:   "s2",
 		Name: "shell",
-		Input: json.RawMessage(`{"name":"Final full root test gate","argv":["make","test"],` +
+		Input: json.RawMessage(`{"argv":["make","test"],` +
 			`"background":true,"background_lease":{"access":"read_only","resource_key":"` + dir + `/nb/monorepo"}}`),
 	}
 	r.ToolStart(bgCall)
@@ -392,8 +398,8 @@ func TestConciseShellReportExamples(t *testing.T) {
 	})
 
 	got := errw.String()
-	want := "[shell] steps=2 Final diff whitespace: git diff --check; go build ./... · ok → 13 lines, 26B\n" +
-		"[shell] Final full root test gate · background job j3 (read_only @ nb/monorepo) → started\n"
+	want := "[shell] steps=2 git diff --check; go build ./... · ok → 13 lines, 26B\n" +
+		"[shell] make test · background job j3 (read_only @ nb/monorepo) → started\n"
 	if got != want {
 		t.Fatalf("concise shell lines =\n  %q\nwant\n  %q", got, want)
 	}
@@ -406,10 +412,10 @@ func TestConciseShellPreservesDetailedRecordingForm(t *testing.T) {
 	call := llm.ToolCall{
 		ID:    "c",
 		Name:  "shell",
-		Input: json.RawMessage(`{"name":"Unit tests","argv":["make","test"],"cwd":".","output_mode":"receipt"}`),
+		Input: json.RawMessage(`{"argv":["make","test"],"cwd":".","output_mode":"receipt"}`),
 	}
 	result := llm.ToolResult{ForID: "c", Text: "ok\n", Metrics: shellResultMetrics("ok", 0)}
-	want := `[shell] argv=["make","test"] cwd=. name="Unit tests" output_mode=receipt → 3B`
+	want := `[shell] argv=["make","test"] cwd=. output_mode=receipt → 3B`
 	if got := ToolResultLine(call, result, ""); got != want {
 		t.Fatalf("canonical detailed line changed:\n  got  %q\n  want %q", got, want)
 	}

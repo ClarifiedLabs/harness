@@ -239,7 +239,7 @@ func TestShellModelSchemaAvoidsTopLevelComposition(t *testing.T) {
 			if !ok {
 				t.Fatalf("schema properties missing: %s", modelRaw)
 			}
-			for _, property := range []string{"command", "argv", "steps", "name", "output_mode"} {
+			for _, property := range []string{"command", "argv", "steps", "output_mode"} {
 				if _, ok := props[property]; !ok {
 					t.Fatalf("schema missing %s property: %s", property, modelRaw)
 				}
@@ -276,7 +276,6 @@ func TestShellTopLevelOutputModes(t *testing.T) {
 	largeArgs := map[string]any{
 		"argv":  []string{"sh", "-c", "cat; printf '\\nSUMMARY ok\\n'"},
 		"stdin": largeOutput,
-		"name":  "go test",
 	}
 
 	t.Run("auto compacts large success", func(t *testing.T) {
@@ -284,7 +283,7 @@ func TestShellTopLevelOutputModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, want := range []string{"PASS go test", "SUMMARY ok", "output)", "[exit code: 0]"} {
+		for _, want := range []string{"PASS sh -c", "SUMMARY ok", "output)", "[exit code: 0]"} {
 			if !strings.Contains(result.Text, want) {
 				t.Fatalf("receipt missing %q:\n%s", want, result.Text)
 			}
@@ -312,7 +311,6 @@ func TestShellTopLevelOutputModes(t *testing.T) {
 	t.Run("receipt compacts small success", func(t *testing.T) {
 		result, err := runShellResult(t, map[string]any{
 			"argv":        []string{"printf", "small output"},
-			"name":        "small check",
 			"output_mode": "receipt",
 		})
 		if err != nil {
@@ -320,7 +318,7 @@ func TestShellTopLevelOutputModes(t *testing.T) {
 		}
 		// A small unclipped success is fully shown in the receipt, so nothing is
 		// archived and the result is not marked truncated.
-		if !strings.Contains(result.Text, "PASS small check") ||
+		if !strings.Contains(result.Text, "PASS printf") ||
 			!strings.Contains(result.Text, "small output") {
 			t.Fatalf("receipt result = %+v", result)
 		}
@@ -372,12 +370,11 @@ func TestShellAutoBoundsFailureAndPreservesClippedOriginal(t *testing.T) {
 	result, err := runShellResult(t, map[string]any{
 		"command": "cat; printf '\\nfailure-tail\\n'; exit 7",
 		"stdin":   largeOutput,
-		"name":    "failing test",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"FAIL failing test", "failure-tail", "[showing output tail]", "[exit code: 7]"} {
+	for _, want := range []string{"FAIL cat; printf", "failure-tail", "[showing output tail]", "[exit code: 7]"} {
 		if !strings.Contains(result.Text, want) {
 			t.Fatalf("failure receipt missing %q:\n%s", want, result.Text)
 		}
@@ -405,15 +402,15 @@ func TestShellStepsReturnCompactReceiptsAndOriginal(t *testing.T) {
 	tool := shell{}
 	input := json.RawMessage(`{
 		"steps": [
-			{"name":"first check","command":"printf 'verbose first output'"},
-			{"name":"second check","argv":["printf","verbose second output"]}
+			{"command":"printf 'verbose first output'"},
+			{"argv":["printf","verbose second output"]}
 		]
 	}`)
 	result, err := tool.RunResult(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"PASS first check", "PASS second check"} {
+	for _, want := range []string{"PASS step 1", "PASS step 2"} {
 		if !strings.Contains(result.Text, want) {
 			t.Errorf("receipt missing %q:\n%s", want, result.Text)
 		}
@@ -434,8 +431,8 @@ func TestShellStepsStopOnFailure(t *testing.T) {
 	tool := shell{}
 	input, err := json.Marshal(map[string]any{
 		"steps": []map[string]any{
-			{"name": "fails", "command": "printf 'bad output'; exit 7"},
-			{"name": "skipped", "argv": []string{"touch", marker}},
+			{"command": "printf 'bad output'; exit 7"},
+			{"argv": []string{"touch", marker}},
 		},
 	})
 	if err != nil {
@@ -445,7 +442,7 @@ func TestShellStepsStopOnFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"FAIL fails", "exit 7", "bad output", "SKIP 1 remaining step"} {
+	for _, want := range []string{"FAIL step 1", "exit 7", "bad output", "SKIP 1 remaining step"} {
 		if !strings.Contains(result.Text, want) {
 			t.Errorf("receipt missing %q:\n%s", want, result.Text)
 		}
@@ -465,8 +462,8 @@ func TestShellStepsCancellationStopsEvenWhenFailuresContinue(t *testing.T) {
 	input, err := json.Marshal(map[string]any{
 		"stop_on_failure": false,
 		"steps": []map[string]any{
-			{"name": "cancelled", "command": "printf should-not-start"},
-			{"name": "later", "argv": []string{"touch", marker}},
+			{"command": "printf should-not-start"},
+			{"argv": []string{"touch", marker}},
 		},
 	})
 	if err != nil {
@@ -478,7 +475,7 @@ func TestShellStepsCancellationStopsEvenWhenFailuresContinue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cancelled batch must report a result: %v", err)
 	}
-	if !strings.Contains(result.Text, "FAIL cancelled") || !strings.Contains(result.Text, "cancelled") ||
+	if !strings.Contains(result.Text, "FAIL step 1") || !strings.Contains(result.Text, "cancelled") ||
 		!strings.Contains(result.Text, "SKIP 1 remaining step") {
 		t.Fatalf("cancelled receipt:\n%s", result.Text)
 	}
@@ -498,8 +495,8 @@ func TestShellStepsCanContinueAfterFailure(t *testing.T) {
 	input, err := json.Marshal(map[string]any{
 		"stop_on_failure": false,
 		"steps": []map[string]any{
-			{"name": "fails", "command": "exit 3"},
-			{"name": "continues", "argv": []string{"touch", marker}},
+			{"command": "exit 3"},
+			{"argv": []string{"touch", marker}},
 		},
 	})
 	if err != nil {
@@ -509,7 +506,7 @@ func TestShellStepsCanContinueAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Text, "FAIL fails") || !strings.Contains(result.Text, "PASS continues") {
+	if !strings.Contains(result.Text, "FAIL step 1") || !strings.Contains(result.Text, "PASS step 2") {
 		t.Fatalf("continue receipt:\n%s", result.Text)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -524,7 +521,7 @@ func TestShellStepsInheritCwdAndTimeout(t *testing.T) {
 		"cwd":             dir,
 		"timeout_seconds": 7,
 		"steps": []map[string]any{
-			{"name": "cwd", "command": "pwd"},
+			{"command": "pwd"},
 		},
 	})
 	if err != nil {
@@ -551,7 +548,7 @@ func TestShellStepsValidation(t *testing.T) {
 		{"top level command", map[string]any{"command": "true", "steps": []map[string]any{{"command": "true"}}}, "steps or a top-level"},
 		{"top level stdin", map[string]any{"stdin": "x", "steps": []map[string]any{{"command": "true"}}}, "top-level stdin"},
 		{"background", map[string]any{"background": true, "steps": []map[string]any{{"command": "true"}}}, "background"},
-		{"missing step command", map[string]any{"steps": []map[string]any{{"name": "empty"}}}, "steps[0]"},
+		{"missing step command", map[string]any{"steps": []map[string]any{{}}}, "steps[0]"},
 		{"step command and argv", map[string]any{"steps": []map[string]any{{"command": "true", "argv": []string{"true"}}}}, "steps[0]"},
 		{"bad step timeout", map[string]any{"steps": []map[string]any{{"command": "true", "timeout_seconds": -1}}}, "timeout_seconds"},
 	}
@@ -565,15 +562,15 @@ func TestShellStepsValidation(t *testing.T) {
 	}
 }
 
-func TestShellStepsSupportsBatchNameAndFullOutput(t *testing.T) {
+func TestShellStepsSupportsFullOutput(t *testing.T) {
 	result, err := runShellResult(t, map[string]any{
-		"name": "checks", "output_mode": "full",
-		"steps": []map[string]any{{"name": "one", "argv": []string{"printf", "STEP_ONE"}}, {"name": "two", "argv": []string{"printf", "STEP_TWO"}}},
+		"output_mode": "full",
+		"steps":       []map[string]any{{"argv": []string{"printf", "STEP_ONE"}}, {"argv": []string{"printf", "STEP_TWO"}}},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"== checks ==", "==> one <==", "STEP_ONE", "==> two <==", "STEP_TWO"} {
+	for _, want := range []string{"==> step 1 <==", "STEP_ONE", "==> step 2 <==", "STEP_TWO"} {
 		if !strings.Contains(result.Text, want) {
 			t.Fatalf("full step output missing %q:\n%s", want, result.Text)
 		}
@@ -599,12 +596,12 @@ func TestShellStepsDispatchArchivesSuppressedOutput(t *testing.T) {
 	res := r.Dispatch(context.Background(), llm.ToolCall{
 		ID:    "steps",
 		Name:  "shell",
-		Input: json.RawMessage(`{"steps":[{"name":"test","command":"printf verbose-success"}]}`),
+		Input: json.RawMessage(`{"steps":[{"command":"printf verbose-success"}]}`),
 	})
 	if res.IsError || !res.Truncated {
 		t.Fatalf("dispatch result = %+v", res)
 	}
-	if strings.Contains(res.Text, "verbose-success") || !strings.Contains(res.Text, "PASS test") {
+	if strings.Contains(res.Text, "verbose-success") || !strings.Contains(res.Text, "PASS step 1") {
 		t.Fatalf("model receipt = %q", res.Text)
 	}
 	if !strings.Contains(res.OriginalText, "verbose-success") {
@@ -618,14 +615,14 @@ func TestShellTopLevelDispatchArchivesReceiptOriginal(t *testing.T) {
 	res := r.Dispatch(context.Background(), llm.ToolCall{
 		ID:    "top-level",
 		Name:  "shell",
-		Input: json.RawMessage(`{"argv":["printf","verbose-success"],"name":"check","output_mode":"receipt"}`),
+		Input: json.RawMessage(`{"argv":["printf","verbose-success"],"output_mode":"receipt"}`),
 	})
 	// A small unclipped success is fully shown in the receipt, so dispatch does
 	// not archive or truncate.
 	if res.IsError || res.Truncated {
 		t.Fatalf("dispatch result = %+v", res)
 	}
-	if !strings.Contains(res.Text, "PASS check") || !strings.Contains(res.Text, "verbose-success") {
+	if !strings.Contains(res.Text, "PASS printf verbose-success") || !strings.Contains(res.Text, "verbose-success") {
 		t.Fatalf("receipt dispatch result = %+v", res)
 	}
 	if res.OriginalText != "" {
@@ -721,15 +718,14 @@ func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
 	dir := t.TempDir()
 	marker := filepath.Join(dir, "continued")
 	out, err := runTool(t, shell{background: starter, backgroundTimeout: 7}, map[string]any{
-		"name":            "background checks",
 		"background":      true,
 		"output_mode":     "receipt",
 		"stop_on_failure": false,
 		"cwd":             dir,
 		"steps": []map[string]any{
-			{"name": "stdin and cwd", "command": "cat; pwd", "stdin": "background batch input\n"},
-			{"name": "expected failure", "command": "printf 'bad step output'; exit 7"},
-			{"name": "continues", "argv": []string{"touch", marker}},
+			{"command": "cat; pwd", "stdin": "background batch input\n"},
+			{"command": "printf 'bad step output'; exit 7"},
+			{"argv": []string{"touch", marker}},
 		},
 	})
 	if err != nil {
@@ -738,8 +734,8 @@ func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
 	if !strings.HasPrefix(out, "background job bg_test started") {
 		t.Fatalf("start output = %q", out)
 	}
-	if starter.req.Description != "background checks" {
-		t.Fatalf("job description = %q, want batch name", starter.req.Description)
+	if starter.req.Description != "3 shell steps" {
+		t.Fatalf("job description = %q, want positional step count", starter.req.Description)
 	}
 
 	result, err := starter.req.Run(context.Background(), "bg_test")
@@ -747,10 +743,9 @@ func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
 		t.Fatalf("background steps: %v", err)
 	}
 	for _, want := range []string{
-		"Batch background checks",
-		"PASS stdin and cwd",
-		"FAIL expected failure",
-		"PASS continues",
+		"PASS step 1",
+		"FAIL step 2",
+		"PASS step 3",
 	} {
 		if !strings.Contains(result.Text, want) {
 			t.Errorf("background receipt missing %q:\n%s", want, result.Text)
@@ -777,7 +772,6 @@ func TestShellBackgroundPreservesReceiptOriginal(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	_, err := runTool(t, shell{background: starter}, map[string]any{
 		"argv":        []string{"printf", "background output"},
-		"name":        "background check",
 		"output_mode": "receipt",
 		"background":  true,
 	})
@@ -788,7 +782,7 @@ func TestShellBackgroundPreservesReceiptOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("background run: %v", err)
 	}
-	if !strings.Contains(result.Text, "PASS background check") ||
+	if !strings.Contains(result.Text, "PASS printf background output") ||
 		!strings.Contains(result.Text, "background output") {
 		t.Fatalf("background receipt result = %+v", result)
 	}
@@ -957,7 +951,7 @@ func TestShellStepsReceiptPreservesOriginalWhenWaitIncomplete(t *testing.T) {
 
 	result, err := runShellResult(t, map[string]any{
 		"steps": []map[string]any{
-			{"name": "slow", "command": `echo started; sleep 5`, "timeout_seconds": 1},
+			{"command": `echo started; sleep 5`, "timeout_seconds": 1},
 		},
 		"output_mode": "receipt",
 	})
@@ -1080,5 +1074,45 @@ func TestProcessTimeoutHasNoMaximumCap(t *testing.T) {
 	}
 	if got := resolveProcessTimeoutSeconds(3600); got != 3600 {
 		t.Fatalf("resolveProcessTimeoutSeconds(3600) = %d, want 3600", got)
+	}
+}
+
+// TestShellToleratesRemovedNameKey pins the removal of the `name` parameter
+// (top-level and per-step): calls from models or replayed transcripts that
+// still send it are accepted, the stale key is dropped, and steps are labeled
+// by position.
+func TestShellToleratesRemovedNameKey(t *testing.T) {
+	result, err := runShellResult(t, map[string]any{
+		"name":        "stale top-level name",
+		"argv":        []string{"printf", "ok"},
+		"output_mode": "receipt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Text, "stale top-level name") {
+		t.Fatalf("removed top-level name leaked into result: %q", result.Text)
+	}
+	if !strings.Contains(result.Text, "PASS printf ok") {
+		t.Fatalf("receipt missing positional label: %q", result.Text)
+	}
+
+	steps, err := runShellResult(t, map[string]any{
+		"name": "stale batch name",
+		"steps": []map[string]any{
+			{"name": "stale step name", "command": "printf step-one"},
+			{"command": "printf step-two"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(steps.Text, "stale batch name") || strings.Contains(steps.Text, "stale step name") {
+		t.Fatalf("removed step name leaked into receipt: %q", steps.Text)
+	}
+	for _, want := range []string{"PASS step 1", "PASS step 2"} {
+		if !strings.Contains(steps.Text, want) {
+			t.Fatalf("steps receipt missing %q: %q", want, steps.Text)
+		}
 	}
 }

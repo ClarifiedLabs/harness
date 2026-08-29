@@ -2225,13 +2225,11 @@ assertion at dispatch:
 | `argv` | array of strings | program + literal arguments; mutually exclusive with `command`; must not be a shell string or JSON-encoded array |
 | `command` | string | shell command line; mutually exclusive with `argv`; use only when shell syntax is required |
 | `steps` | array | 1–16 ordered entries, mutually exclusive with top-level `command`/`argv`/`stdin`; supported in foreground and background |
-| `steps[].name` | string | receipt label; omitted means `step N` |
 | `steps[].command` / `steps[].argv` | string / array | exactly one per step |
 | `steps[].stdin` | string | step-specific stdin |
 | `steps[].cwd` | string | overrides the inherited top-level cwd |
 | `steps[].timeout_seconds` | int | overrides the inherited top-level timeout |
 | `stop_on_failure` | bool | default true |
-| `name` | string | optional command or step-batch label |
 | `output_mode` | string | `auto` (default), `receipt`, or `full`; for steps, `full` returns the combined transcript and the others return compact receipts |
 | `stdin` | string | written to the command's standard input |
 | `cwd` | string | default process cwd |
@@ -2273,9 +2271,10 @@ assertion at dispatch:
   background. Top-level `cwd` and `timeout_seconds` are inherited defaults each
   step may override; top-level stdin is rejected (use `steps[].stdin`). The
   first non-zero, timed-out, cancelled, or unstartable step stops the batch
-  unless `stop_on_failure:false`; cancellation always stops it. Each
-  successful step returns only `PASS <name> (<duration>)`; suppressed success
-  output and clipped failure output are combined and archived via
+  unless `stop_on_failure:false`; cancellation always stops it. Steps are
+  identified by position, not name: each successful step returns only
+  `PASS step N (<duration>)`; suppressed success output and clipped failure
+  output are combined and archived via
   `ResultTool.OriginalText`. A foreground steps call reports the sum of its
   resolved per-step timeouts through `SelfTimeouter`, so the dispatch backstop
   never cuts below it; background batches apply the 1200-second background
@@ -2810,8 +2809,8 @@ request implementation; `/handoff` is a user command (§10, §14).
   clipping. Read failures, centrally truncated results, and inputs whose path
   cannot be decoded safely retain the detailed per-call summary. Built-in
   `shell` results get the same interactive projection: non-verbose live text
-  shows the name or command (steps as `steps=N name: label; label; label`, at
-  most three labels then `+N more`; labels are whitespace-collapsed and
+  shows the command (steps as `steps=N command; command; command`, at
+  most three commands then `+N more`; labels are whitespace-collapsed and
   clipped), the outcome (`ok`, `failed (exit N)` for positive exit codes, bare
   `failed` for signal-killed or unclassified exits, `cancelled`, `timed out`),
   partial-run progress (`ran x/y, skipped m`), and background launches as

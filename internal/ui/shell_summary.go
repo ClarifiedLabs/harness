@@ -12,15 +12,15 @@ import (
 )
 
 // Concise shell result lines (design §10) project the interactive one-line shell
-// summary a human actually reads: the name/command, success or failure with the
-// exit code, step progress, and background-job identity. It is a live-only
-// projection gated like ConciseReads; sessionrec.ToolResultLine stays the
+// summary a human actually reads: the command (or per-step commands), success or
+// failure with the exit code, step progress, and background-job identity. It is a
+// live-only projection gated like ConciseReads; sessionrec.ToolResultLine stays the
 // canonical detailed form used by recording, replay, and verbose display, so
 // raw.ndjson and ordinary replay are unchanged.
 
 const (
-	// shellStepLabelLimit bounds one inline step label; step names and commands
-	// are authored text and can be arbitrarily long.
+	// shellStepLabelLimit bounds one inline step label; step commands are
+	// authored text and can be arbitrarily long.
 	shellStepLabelLimit = 40
 	// shellCommandLineLimit bounds the single top-level command/argv label.
 	shellCommandLineLimit = 80
@@ -33,8 +33,6 @@ const (
 // Unknown keys are ignored; anything that fails to decode fails closed so the
 // canonical detailed summary is retained.
 type shellCallView struct {
-	name       string
-	hasName    bool
 	command    string
 	hasCommand bool
 	steps      []shellStepView
@@ -46,7 +44,6 @@ type shellCallView struct {
 }
 
 type shellStepView struct {
-	name    string
 	command string
 }
 
@@ -55,7 +52,6 @@ type shellStepView struct {
 // caller falls back to the detailed summary rather than guessing.
 func decodeShellCallView(input json.RawMessage) (shellCallView, bool) {
 	var raw struct {
-		Name       string          `json:"name"`
 		Argv       json.RawMessage `json:"argv"`
 		Command    json.RawMessage `json:"command"`
 		Steps      []shellRawStep  `json:"steps"`
@@ -68,11 +64,7 @@ func decodeShellCallView(input json.RawMessage) (shellCallView, bool) {
 	if err := json.Unmarshal(input, &raw); err != nil {
 		return shellCallView{}, false
 	}
-	view := shellCallView{
-		name:       strings.TrimSpace(raw.Name),
-		hasName:    strings.TrimSpace(raw.Name) != "",
-		background: raw.Background,
-	}
+	view := shellCallView{background: raw.Background}
 	if view.hasLease = raw.Lease != nil; view.hasLease {
 		view.leaseAccess = strings.TrimSpace(raw.Lease.Access)
 		view.leaseResource = strings.TrimSpace(raw.Lease.ResourceKey)
@@ -114,7 +106,6 @@ func decodeShellCallView(input json.RawMessage) (shellCallView, bool) {
 	if len(raw.Steps) > 0 {
 		view.steps = make([]shellStepView, 0, len(raw.Steps))
 		for _, step := range raw.Steps {
-			label := strings.TrimSpace(step.Name)
 			command := ""
 			switch {
 			case len(step.Argv) > 0:
@@ -122,58 +113,40 @@ func decodeShellCallView(input json.RawMessage) (shellCallView, bool) {
 			case strings.TrimSpace(step.Command) != "":
 				command = strings.TrimSpace(step.Command)
 			}
-			if label == "" {
-				label = command
-			}
-			if label == "" && command == "" {
+			if command == "" {
 				return shellCallView{}, false
 			}
-			view.steps = append(view.steps, shellStepView{name: label, command: command})
+			view.steps = append(view.steps, shellStepView{command: command})
 		}
 	}
-	if !view.hasName && !view.hasCommand && len(view.steps) == 0 {
+	if !view.hasCommand && len(view.steps) == 0 {
 		return shellCallView{}, false
 	}
 	return view, true
 }
 
 type shellRawStep struct {
-	Name    string   `json:"name"`
 	Command string   `json:"command"`
 	Argv    []string `json:"argv"`
 }
 
 // shellLabel renders the human label for a decoded shell call. Steps are
-// prefixed with their authored count and their labels joined by "; " so
-// multi-word commands and flag lists stay visually distinct per step. Names
-// pass through shellClipLabel like commands: model-authored text can carry
-// newlines or run long, and the projected line must stay single and bounded.
+// prefixed with their authored count and their commands joined by "; " so
+// multi-word commands and flag lists stay visually distinct per step. Commands
+// pass through shellClipLabel: model-authored text can carry newlines or run
+// long, and the projected line must stay single and bounded.
 func shellLabel(view shellCallView) string {
 	if len(view.steps) > 0 {
 		labels := make([]string, 0, min(len(view.steps), shellInlineStepLabels)+1)
 		for _, step := range view.steps[:min(len(view.steps), shellInlineStepLabels)] {
-			labels = append(labels, shellClipLabel(step.label(), shellStepLabelLimit))
+			labels = append(labels, shellClipLabel(step.command, shellStepLabelLimit))
 		}
 		if rest := len(view.steps) - shellInlineStepLabels; rest > 0 {
 			labels = append(labels, fmt.Sprintf("+%d more", rest))
 		}
-		joined := strings.Join(labels, "; ")
-		if view.hasName {
-			return fmt.Sprintf("steps=%d %s: %s", len(view.steps), shellClipLabel(view.name, shellCommandLineLimit), joined)
-		}
-		return fmt.Sprintf("steps=%d %s", len(view.steps), joined)
-	}
-	if view.hasName {
-		return shellClipLabel(view.name, shellCommandLineLimit)
+		return fmt.Sprintf("steps=%d %s", len(view.steps), strings.Join(labels, "; "))
 	}
 	return shellClipLabel(view.command, shellCommandLineLimit)
-}
-
-func (s shellStepView) label() string {
-	if s.name != "" {
-		return s.name
-	}
-	return s.command
 }
 
 // shellClipLabel truncates a human label on a rune boundary. Unlike
