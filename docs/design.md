@@ -1806,25 +1806,48 @@ not a dispatch timeout.
 `Dispatch` applies per-result caps. The global defaults are **64 KB or 1000
 lines**, configurable with `tool_result_max_bytes` and `tool_result_max_lines`,
 or env `HARNESS_TOOL_RESULT_MAX_BYTES` and `HARNESS_TOOL_RESULT_MAX_LINES`;
-per-tool settings may replace either default. On each result-limit axis where the
-corresponding global cap is not configured, the `read` tool installs its own
-default: a 1000-line window plus 64 KB and 2000-line result caps. Its per-tool settings are
-`read_default_limit`, `read_result_max_bytes`, and `read_result_max_lines`; the
-bounded exact-line-count scan used by its pagination notice is configured with
-`read_total_lines_max_bytes`. The first cap hit
-adds a teaching marker:
+per-tool settings may replace either default. `read` applies an input-aware
+allowance of `max(64 KiB, requested source lines × 512 bytes)` under a resolved
+hard byte ceiling (256 KiB by default). It installs no independent default
+result-line cap: the source-window `limit` (1000 by default) remains the line
+bound unless a global or read-specific result-line cap is configured. Its
+per-tool settings are `read_default_limit`, `read_result_max_bytes`, and
+`read_result_max_lines`; each axis independently inherits an explicitly
+configured global cap. The bounded exact-line-count scan used by its pagination
+notice is configured with `read_total_lines_max_bytes`.
+
+The agent tightens the byte ceiling per tool turn from live context accounting.
+After appending the assistant tool-call message, it reserves the next response's
+resolved output allowance and computes
+`min(48,000 tokens, 20% × remaining context)`. Using the same coarse four bytes
+per token as the context estimator, it divides that single byte allowance across
+all unsuppressed `read` calls in the turn, including calls in separate stages.
+This is a dispatch-local tightening only: it cannot raise configured limits, and
+parallel reads do not each receive 20%. Each share reserves bounded space for
+hook context and an archive-recovery hint, and the agent reapplies the total
+share after final composition. A 64-byte minimum preserves an exact-offset
+protocol receipt when the calculated content share is smaller. The first generic
+cap hit adds a teaching marker:
 
 ```
 [truncated: showing first 1000 of 4213 lines; use read with offset/limit or shell to narrow]
 ```
 
-Individual tools may also apply their own natural limits. The resolved global or
-per-tool Dispatch cap remains the output backstop for each result. When that cap
-further clips a `read` result already carrying a file-pagination notice, Dispatch
-preserves its optional SHA header when it fits, keeps complete numbered lines,
-and rewrites the file-aware notice to the actual continuation offset instead of
-adding the generic marker. If no complete line fits, it emits a file-aware
-`before line` notice with targeted-shell guidance. Truncated results still carry
+Individual tools may also apply their own natural limits. The resolved global,
+per-tool, and dispatch-local caps remain output backstops. `read` enforces its
+resolved byte allowance while streaming: numbered content is accumulated only as
+complete physical lines up to the allowance. If the next line cannot fit, its
+remaining fragments are consumed without retention and a file-aware notice gives
+the exact continuation offset. This prevents a two-line, 100 MB text file from
+allocating a 100 MB line or `OriginalText` before clipping. The read-aware
+truncator can still tighten a bounded result (for example, to preserve marker or
+SHA-header space); it retains complete numbered lines, preserves the optional SHA
+header when it fits, and rewrites or synthesizes the exact continuation notice.
+If no complete line fits, it emits a file-aware `before line` notice with
+file-size and targeted-shell guidance, falling back to `[read offset=N]`; an
+explicitly configured byte ceiling smaller than that receipt necessarily clips
+it. Deliberately unretained oversized line content is not archived. Other
+truncated results still carry
 metadata so the UI can warn and write
 the full output to the session's `artifacts/tool-results/` directory. When an artifact
 is written, the model-visible result includes the absolute artifact path and advises

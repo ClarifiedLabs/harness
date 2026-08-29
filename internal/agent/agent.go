@@ -18,6 +18,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"harness/internal/diff"
 	"harness/internal/hooks"
@@ -2337,7 +2338,9 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 
 		checkpoint(PromptCheckpointToolDispatch)
 		executionCalls := executionToolCalls(res.toolCalls)
-		results, parallelBatches, toolUsage := a.dispatchCalls(ctx, res.toolCalls, promptID, turns, sink)
+		liveInputTokens := a.toolDispatchLiveInputTokens(lastInput, appendBoundary, lastContext)
+		dispatchCtx := withReadResultBatchBudget(ctx, a.readResultBatchByteBudget(liveInputTokens))
+		results, parallelBatches, toolUsage := a.dispatchCalls(dispatchCtx, res.toolCalls, promptID, turns, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
 			Role:                llm.RoleUser,
@@ -2872,6 +2875,59 @@ func invalidStagePlanText(err error) string {
 	return "invalid tool stage plan: " + err.Error() + ". _stage must be an integer greater than or equal to 1, and explicit stages must be non-decreasing"
 }
 
+const (
+	readResultContextPercent          = 20
+	readResultContextTokenCap         = 48_000
+	readResultMinimumReceiptBytes     = 64
+	readResultHookReserveBytes        = 8 * 1024
+	readResultArchiveHintReserveBytes = 8 * 1024
+)
+
+type readResultBatchBudget struct{ maxBytes int }
+type readResultBatchBudgetContextKey struct{}
+type toolResultByteLimit struct {
+	maxBytes      int
+	dispatchBytes int
+}
+type toolResultByteLimitsContextKey struct{}
+
+func withReadResultBatchBudget(ctx context.Context, maxBytes int) context.Context {
+	return context.WithValue(ctx, readResultBatchBudgetContextKey{}, readResultBatchBudget{maxBytes: maxBytes})
+}
+
+// toolDispatchLiveInputTokens combines the current request's full estimate with
+// the assistant message appended after it when provider usage is unavailable.
+// With measured usage, triggerTokens keeps the actual-input-plus-delta path.
+func (a *Agent) toolDispatchLiveInputTokens(lastInput, boundary int, requestEstimate ContextEstimate) int {
+	if lastInput > 0 {
+		return a.triggerTokens(lastInput, boundary)
+	}
+	if boundary < 0 {
+		boundary = 0
+	}
+	if boundary > len(a.transcript) {
+		boundary = len(a.transcript)
+	}
+	return requestEstimate.Total + estimateTokens(a.providerVisibleMessages(a.transcript[boundary:]))
+}
+
+// readResultBatchByteBudget reserves the next response's resolved output
+// allowance, then gives all reads in this tool turn one shared fraction of the
+// remaining context. bytesPerToken matches the agent's coarse context estimate.
+func (a *Agent) readResultBatchByteBudget(liveInputTokens int) int {
+	window := a.window()
+	outputTokens := llm.ResolveMaxTokens(llm.Request{
+		MaxTokens:            a.maxOutputTokens,
+		EstimatedInputTokens: liveInputTokens,
+	}, window, a.registry.OutputLimit(a.model))
+	remaining := window - liveInputTokens - outputTokens
+	if remaining <= 0 {
+		return 0
+	}
+	budgetTokens := min(readResultContextTokenCap, remaining*readResultContextPercent/100)
+	return budgetTokens * bytesPerToken
+}
+
 // dispatchCalls runs one turn's tool calls. It preflights Harness-owned stage
 // metadata, executes stages serially, and retains the existing default-parallel,
 // hook-barrier, and mutation-dependency scheduler within each stage. Sink events
@@ -2893,6 +2949,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 	if len(suppressed) > 0 {
 		sink.Notice(suppressionNotice(duplicates, overLimit))
 	}
+	ctx = withPerReadResultLimits(ctx, executionCalls, suppressed)
 
 	var parallelBatches []llm.ParallelToolBatch
 	crossStageDependencies := a.crossStageMutationDependencies(executionCalls, stages, suppressed)
@@ -2910,6 +2967,43 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		total = add(total, usage)
 	}
 	return blocks, parallelBatches, total
+}
+
+func withPerReadResultLimits(ctx context.Context, calls []llm.ToolCall, suppressed map[int]string) context.Context {
+	budget, ok := ctx.Value(readResultBatchBudgetContextKey{}).(readResultBatchBudget)
+	if !ok {
+		return ctx
+	}
+	readCalls := 0
+	for i, call := range calls {
+		if call.Name == "read" {
+			if _, blocked := suppressed[i]; !blocked {
+				readCalls++
+			}
+		}
+	}
+	if readCalls == 0 {
+		return ctx
+	}
+	share := budget.maxBytes / readCalls
+	if share < readResultMinimumReceiptBytes {
+		// An exact continuation receipt is fixed protocol overhead. Preserve it even
+		// when the estimated content allowance is exhausted.
+		share = readResultMinimumReceiptBytes
+	}
+	dispatchShare := share - readResultHookReserveBytes - readResultArchiveHintReserveBytes
+	if dispatchShare < readResultMinimumReceiptBytes {
+		dispatchShare = min(share, readResultMinimumReceiptBytes)
+	}
+	limits := make(map[string]toolResultByteLimit, readCalls)
+	for i, call := range calls {
+		if call.Name == "read" {
+			if _, blocked := suppressed[i]; !blocked {
+				limits[call.ID] = toolResultByteLimit{maxBytes: share, dispatchBytes: dispatchShare}
+			}
+		}
+	}
+	return context.WithValue(ctx, toolResultByteLimitsContextKey{}, limits)
 }
 
 func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, stage callStage, promptID, turnID int, sink EventSink, blocks []llm.ContentBlock, richEncodedBytes *int, crossStageDependencies [][]int, actualCompletions []<-chan struct{}, suppressed map[int]string) ([]llm.ParallelToolBatch, llm.Usage) {
@@ -3085,7 +3179,7 @@ func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, p
 	}
 	diffEvents := a.captureToolDiff(diffState)
 	r = acceptRichResult(r, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
-	block, usage := a.finishToolResult(r, call.Name, sink)
+	block, usage := a.finishToolResultWithLimit(r, call.Name, sink, toolResultTextLimit(ctx, call.ID))
 	clearToolProgress(call, sink)
 	reportToolMutation(a.tools, call, r, sink)
 	emitToolDiff(call, diffEvents, sink)
@@ -3157,7 +3251,7 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 	for i, scheduled := range results {
 		actualCompletions[globalStart+i] = scheduled.actualCompletion
 		r := acceptRichResult(scheduled.result, richEncodedBytes, a.registry.SupportsInputModality(a.model, "image"))
-		block, usage := a.finishToolResult(r, calls[i].Name, sink)
+		block, usage := a.finishToolResultWithLimit(r, calls[i].Name, sink, toolResultTextLimit(ctx, calls[i].ID))
 		blocks[i] = block
 		clearToolProgress(calls[i], sink)
 		reportToolMutation(a.tools, calls[i], r, sink)
@@ -3226,7 +3320,11 @@ func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) (llm.ToolRe
 			return res, nil, false
 		}
 	}
-	res, completion := a.tools.DispatchWithCompletion(ctx, call)
+	dispatchLimits := tools.DispatchLimits{}
+	if limits, ok := ctx.Value(toolResultByteLimitsContextKey{}).(map[string]toolResultByteLimit); ok {
+		dispatchLimits.MaxResultBytes = limits[call.ID].dispatchBytes
+	}
+	res, completion := a.tools.DispatchWithCompletionLimits(ctx, call, dispatchLimits)
 	return res, completion, true
 }
 
@@ -3266,8 +3364,15 @@ func acceptRichResult(r llm.ToolResult, encodedTotal *int, imageSupported bool) 
 }
 
 func (a *Agent) finishToolResult(r llm.ToolResult, toolName string, sink EventSink) (llm.ContentBlock, llm.Usage) {
+	return a.finishToolResultWithLimit(r, toolName, sink, 0)
+}
+
+func (a *Agent) finishToolResultWithLimit(r llm.ToolResult, toolName string, sink EventSink, maxBytes int) (llm.ContentBlock, llm.Usage) {
 	var notice string
 	r, notice = a.prepareToolResult(r, sink)
+	if maxBytes > 0 && len(r.Text) > maxBytes {
+		r.Text = utf8Prefix(r.Text, maxBytes)
+	}
 	sink.ToolResult(safeToolResultForSink(r))
 	if notice != "" {
 		sink.Notice(notice)
@@ -3414,7 +3519,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 		r = a.failGuard.afterCall(a.tools, call, r)
 	}
 	if len(preContext) > 0 {
-		appendHookContext(&r, preContext)
+		appendHookContext(&r, preContext, toolResultHookTextLimit(ctx, call.ID))
 	}
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PostToolUse) {
 		res := a.hooks.Run(ctx, hooks.PostToolUse, call.Name, hooks.Payload{
@@ -3430,7 +3535,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			sink.Notice(notice)
 		}
 		if len(res.AdditionalContext) > 0 {
-			appendHookContext(&r, res.AdditionalContext)
+			appendHookContext(&r, res.AdditionalContext, toolResultHookTextLimit(ctx, call.ID))
 		}
 		if res.Block {
 			reason := res.Reason()
@@ -3591,15 +3696,66 @@ func rawJSONValue(raw []byte) any {
 	return v
 }
 
-func appendHookContext(r *llm.ToolResult, ctx []string) {
+func toolResultTextLimit(ctx context.Context, callID string) int {
+	limits, ok := ctx.Value(toolResultByteLimitsContextKey{}).(map[string]toolResultByteLimit)
+	if !ok {
+		return 0
+	}
+	return limits[callID].maxBytes
+}
+
+func toolResultHookTextLimit(ctx context.Context, callID string) int {
+	limits, ok := ctx.Value(toolResultByteLimitsContextKey{}).(map[string]toolResultByteLimit)
+	if !ok {
+		return 0
+	}
+	limit, ok := limits[callID]
+	if !ok {
+		return 0
+	}
+	return max(limit.maxBytes-readResultArchiveHintReserveBytes, readResultMinimumReceiptBytes)
+}
+
+func appendHookContext(r *llm.ToolResult, ctx []string, maxBytes int) {
 	text := llm.RequestContextText(ctx)
 	if text == "" {
 		return
 	}
+	separator := ""
 	if r.Text != "" {
-		r.Text += "\n\n"
+		separator = "\n\n"
 	}
-	r.Text += text
+	addition := separator + text
+	if maxBytes > 0 && len(r.Text)+len(addition) > maxBytes {
+		available := maxBytes - len(r.Text)
+		if available <= 0 {
+			return
+		}
+		const marker = "\n[hook context truncated]"
+		if available <= len(marker) {
+			addition = marker[:available]
+		} else {
+			keep := available - len(marker)
+			if keep > len(addition) {
+				keep = len(addition)
+			}
+			addition = utf8Prefix(addition, keep) + marker
+		}
+	}
+	r.Text += addition
+}
+
+func utf8Prefix(s string, maxBytes int) string {
+	if maxBytes >= len(s) {
+		return s
+	}
+	if maxBytes <= 0 {
+		return ""
+	}
+	for maxBytes > 0 && maxBytes < len(s) && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes]
 }
 
 func toolResponsePayload(r llm.ToolResult) map[string]any {

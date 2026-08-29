@@ -579,26 +579,49 @@ meaning.
 
 ## Truncation And Artifacts
 
-Tool results are centrally capped at 64 KB or 1000 lines by default. Configure
+Tool results are centrally capped at 64 KiB or 1000 lines by default. Configure
 this with `tool_result_max_bytes` / `tool_result_max_lines`, or
 `HARNESS_TOOL_RESULT_MAX_BYTES` / `HARNESS_TOOL_RESULT_MAX_LINES`. `read` uses a
-1000-line default window plus 64 KB and 2000-line result caps, with each result
-cap inherited independently when its corresponding global cap is configured.
-Override these with `read_default_limit`,
-`read_result_max_bytes`, and `read_result_max_lines`, or
-`HARNESS_READ_DEFAULT_LIMIT`, `HARNESS_READ_RESULT_MAX_BYTES`, and
-`HARNESS_READ_RESULT_MAX_LINES`. Exact total lines in pagination notices are
-counted only for regular files no larger than 1 MiB by default; configure that
-threshold with `read_total_lines_max_bytes` or
+1000-line default source window and an input-aware byte allowance of
+`max(64 KiB, requested source lines × 512 bytes)`, bounded by a configurable
+hard ceiling (256 KiB by default). There is no separate default result-line cap:
+the source `limit` is the line bound unless `tool_result_max_lines` or
+`read_result_max_lines` explicitly supplies another one. Each configured read
+cap inherits independently from its corresponding global cap. Configure these
+with `read_default_limit`, `read_result_max_bytes`, and
+`read_result_max_lines`, or `HARNESS_READ_DEFAULT_LIMIT`,
+`HARNESS_READ_RESULT_MAX_BYTES`, and `HARNESS_READ_RESULT_MAX_LINES`.
+
+During an agent turn, all unsuppressed `read` calls share one additional context
+allowance: `min(48,000 estimated tokens, 20% of the context remaining after the
+next response's output allowance is reserved)`. Harness uses the same coarse
+four-bytes-per-token estimate as its context accounting and divides this one
+allowance across concurrent or staged reads, so parallel calls cannot each claim
+the full percentage. The smallest of the scaled byte allowance, resolved hard
+ceiling, and per-call context share wins. Harness reserves space inside each share
+for bounded hook context and an artifact-recovery hint, then reapplies the total
+share after final composition. A compact exact-offset receipt may use up to 64
+bytes of fixed protocol overhead when the calculated share is smaller. Exact
+total lines in pagination notices
+are counted only for regular files no larger than 1 MiB by default; configure
+that threshold with `read_total_lines_max_bytes` or
 `HARNESS_READ_TOTAL_LINES_MAX_BYTES`.
 
 Truncated results include a marker in the model-visible text, a warning in the
 UI, and the full output is archived under the session directory when available.
-If the central cap further clips a naturally paginated `read`, it preserves an
-optional SHA header when it fits, retains complete numbered lines, and replaces
-the generic marker with an adjusted file-aware continuation notice. If no
-complete source line fits, it emits a file-aware `before line` notice with
-shell-targeting guidance. Archival and truncation metadata still apply.
+If the scaled allowance, hard ceiling, context share, or an explicit result-line
+cap clips a numbered `read`, Harness retains only complete source lines and emits
+a file-aware notice with the exact next offset; an optional SHA header is kept
+when it fits. This also applies when the requested window reached EOF and
+therefore had no natural pagination notice. Reading is bounded while physical
+lines are streamed, so a file containing a very large line is not first copied
+into a full tool result. If no complete line fits, Harness discards the buffered
+line fragments and emits a file-aware `before line` receipt with the file size
+when known and targeted-shell guidance. An explicit byte ceiling too small for
+the compact `[read offset=N]` fallback necessarily clips the receipt itself.
+Archival and truncation metadata apply when a larger bounded original was
+actually produced; deliberately unretained oversized line content is not copied
+to an artifact.
 The model-visible tool result includes the absolute artifact path so the next
 turn can inspect it with `read` or a targeted `shell` command. When live retention later
 removes an old read-only result body, Harness leaves a typed receipt with the

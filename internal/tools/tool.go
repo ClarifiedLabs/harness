@@ -269,6 +269,13 @@ type Options struct {
 	ShellBackgroundTimeoutSeconds int // 0 = tool default (1200)
 }
 
+// DispatchLimits optionally tightens one dispatched result below the registry's
+// configured cap. Zero fields leave the corresponding configured limit intact.
+type DispatchLimits struct {
+	MaxResultBytes int
+	MaxResultLines int
+}
+
 // SelfTimeouter is an optional Tool extension. A tool that enforces its own
 // per-call deadline reports it here so the Dispatch-level ceiling only ever
 // RAISES to that deadline, never lowers it. This preserves shell's
@@ -341,7 +348,7 @@ func registerFileTools(r *Registry, opts Options) {
 		globalLines = r.resultLimits.maxLines
 	}
 	r.SetToolResultLimits("read",
-		defaultToolResultBytes(opts.ReadResultBytes, globalBytes, defaultReadResultBytes),
+		defaultToolResultBytes(opts.ReadResultBytes, globalBytes, defaultReadResultHardBytes),
 		defaultToolResultLines(opts.ReadResultLines, globalLines, defaultReadResultLines))
 	r.Register(viewImage{})
 	r.Register(edit{})
@@ -832,7 +839,13 @@ func (r *Registry) Dispatch(parent context.Context, call llm.ToolCall) llm.ToolR
 // goroutine has actually returned. The result may arrive first after timeout or
 // cancellation; conflict-aware schedulers use the signal only when a later
 // mutation must not overtake a context-ignoring predecessor.
-func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolCall) (res llm.ToolResult, completion <-chan struct{}) {
+func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolCall) (llm.ToolResult, <-chan struct{}) {
+	return r.DispatchWithCompletionLimits(parent, call, DispatchLimits{})
+}
+
+// DispatchWithCompletionLimits is DispatchWithCompletion with an optional
+// per-call result allowance. It can only tighten configured registry limits.
+func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm.ToolCall, dispatchLimits DispatchLimits) (res llm.ToolResult, completion <-chan struct{}) {
 	completed := make(chan struct{})
 	close(completed)
 	completion = completed
@@ -853,6 +866,14 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 		res.IsError = true
 		res.ErrorKind = llm.ToolErrorUnknownTool
 		return res, completion
+	}
+
+	resolvedLimits := r.resultLimitsFor(call.Name)
+	if dispatchLimits.MaxResultBytes > 0 && dispatchLimits.MaxResultBytes < resolvedLimits.maxBytes {
+		resolvedLimits.maxBytes = dispatchLimits.MaxResultBytes
+	}
+	if dispatchLimits.MaxResultLines > 0 && dispatchLimits.MaxResultLines < resolvedLimits.maxLines {
+		resolvedLimits.maxLines = dispatchLimits.MaxResultLines
 	}
 
 	if r.dispatchGuard != nil {
@@ -883,6 +904,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 	} else {
 		ctx, cancel = context.WithCancel(parent)
 	}
+	ctx = context.WithValue(ctx, dispatchResultLimitsContextKey{}, resolvedLimits)
 	defer cancel()
 
 	type outcome struct {
@@ -993,7 +1015,7 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 		res.ErrorKind = llm.ToolErrorInvalidResult
 		return res, completion
 	}
-	prepared := r.PrepareResultWithOriginal(call.Name, call.ID, out, original)
+	prepared := r.prepareResultWithOriginalLimits(call.Name, call.ID, out, original, resolvedLimits)
 	prepared.Content = append([]llm.ContentBlock(nil), content...)
 	prepared.Usage = usage
 	prepared.Metrics = maps.Clone(metrics)
@@ -1006,9 +1028,13 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 // output metadata needed for archival. Background jobs use the same method so
 // their truncation behavior cannot drift from ordinary dispatched tools.
 func (r *Registry) PrepareResult(toolName, resultID, out string) llm.ToolResult {
+	return r.prepareResultWithLimits(toolName, resultID, out, r.resultLimitsFor(toolName))
+}
+
+func (r *Registry) prepareResultWithLimits(toolName, resultID, out string, limits resultLimits) llm.ToolResult {
 	res := llm.ToolResult{ForID: resultID}
 	var info truncationInfo
-	res.Text, info = truncateToolResult(toolName, out, r.resultLimitsFor(toolName))
+	res.Text, info = truncateToolResult(toolName, out, limits)
 	if info.truncated {
 		res.Truncated = true
 		res.OriginalText = out
@@ -1021,7 +1047,11 @@ func (r *Registry) PrepareResult(toolName, resultID, out string) llm.ToolResult 
 // PrepareResultWithOriginal applies the model-facing cap to out while retaining
 // an explicitly supplied full result for the existing artifact pipeline.
 func (r *Registry) PrepareResultWithOriginal(toolName, resultID, out, original string) llm.ToolResult {
-	res := r.PrepareResult(toolName, resultID, out)
+	return r.prepareResultWithOriginalLimits(toolName, resultID, out, original, r.resultLimitsFor(toolName))
+}
+
+func (r *Registry) prepareResultWithOriginalLimits(toolName, resultID, out, original string, limits resultLimits) llm.ToolResult {
+	res := r.prepareResultWithLimits(toolName, resultID, out, limits)
 	if original == "" || original == out {
 		return res
 	}

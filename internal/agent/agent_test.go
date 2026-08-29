@@ -20,6 +20,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/sse"
+	"harness/internal/toolresult"
 	"harness/internal/tools"
 )
 
@@ -4118,6 +4119,139 @@ func TestZeroedFinalUsageFrameDoesNotEraseEarlier(t *testing.T) {
 	u := sink.promptUsage[0].Usage
 	if u.InputTokens != 100 || u.OutputTokens != 10 || u.CacheReadTokens != 7 {
 		t.Errorf("usage = %+v, want the mid-stream snapshot preserved", u)
+	}
+}
+
+func TestReadResultBatchByteBudget(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		window    int
+		liveInput int
+		wantBytes int
+	}{
+		{name: "reported session scale", window: 272_000, liveInput: 23_000, wantBytes: 144_800},
+		{name: "large window token cap", window: 1_000_000, liveInput: 23_000, wantBytes: 192_000},
+		{name: "near-full window", window: 272_000, liveInput: 260_000, wantBytes: 6_528},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			a := newAgent(llmtest.New("fake"), tools.Default(), Options{ContextWindow: tt.window})
+			if got := a.readResultBatchByteBudget(tt.liveInput); got != tt.wantBytes {
+				t.Fatalf("read result budget = %d bytes, want %d", got, tt.wantBytes)
+			}
+		})
+	}
+}
+
+func TestRunPromptReadContextBudgetAllowsReportedWindow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "reported-window.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat(strings.Repeat("x", 80)+"\n", 4409)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(map[string]any{"path": path, "offset": 3210, "limit": 1300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{toolDone(0, "read-1", "read", string(input))},
+			Stop:   llm.StopToolUse,
+			Usage:  llm.Usage{InputTokens: 23_000, OutputTokens: 100},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{ContextWindow: 272_000})
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "inspect", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.results) != 1 {
+		t.Fatalf("read results = %d, want 1", len(sink.results))
+	}
+	result := sink.results[0]
+	if result.IsError || result.Truncated || !strings.Contains(result.Text, "\n4409\t") {
+		t.Fatalf("reported read window = error %v, truncated %v, %d bytes", result.IsError, result.Truncated, len(result.Text))
+	}
+}
+
+func TestRunPromptReadBudgetIncludesFullRequestWhenUsageMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.txt")
+	if err := os.WriteFile(path, []byte(strings.Repeat(strings.Repeat("x", 80)+"\n", 1500)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	input, err := json.Marshal(map[string]any{"path": path, "limit": 1500})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "read-1", "read", string(input))}, Stop: llm.StopToolUse},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{ContextWindow: 272_000})
+	a.SetSystem(strings.Repeat("s", 400_000))
+	sink := &recordSink{}
+	if err := a.RunPrompt(context.Background(), "inspect", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.results) != 1 {
+		t.Fatalf("read results = %d, want 1", len(sink.results))
+	}
+	result := sink.results[0]
+	if result.IsError || !strings.Contains(result.Text, "continue with offset=") || strings.Contains(result.Text, "\n1500\t") {
+		t.Fatalf("zero-usage read budget = error %v, %d bytes, continuation %v", result.IsError, len(result.Text), strings.Contains(result.Text, "continue with offset="))
+	}
+}
+
+func TestRunPromptParallelReadsShareOneContextBudget(t *testing.T) {
+	dir := t.TempDir()
+	inputs := make([]string, 2)
+	for i := range inputs {
+		path := filepath.Join(dir, fmt.Sprintf("large-%d.txt", i))
+		if err := os.WriteFile(path, []byte(strings.Repeat("x\n", 20_000)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		input, err := json.Marshal(map[string]any{"path": path, "limit": 20_000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inputs[i] = string(input)
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				toolDone(0, "read-1", "read", inputs[0]),
+				toolDone(1, "read-2", "read", inputs[1]),
+			},
+			Stop:  llm.StopToolUse,
+			Usage: llm.Usage{InputTokens: 1_000, OutputTokens: 100},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	a := newAgent(fp, tools.Default(), Options{ContextWindow: 1_000_000})
+	sink := &archiveSink{archive: ToolResultArchive{DisplayPath: "artifact", ModelPath: "/tmp/read-artifact.txt"}}
+	if err := a.RunPrompt(context.Background(), "inspect", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.results) != 2 {
+		t.Fatalf("read results = %d, want 2", len(sink.results))
+	}
+	share := readResultContextTokenCap * bytesPerToken / 2
+	total := 0
+	for i, result := range sink.results {
+		total += len(result.Text)
+		if result.IsError || len(result.Text) > share || !strings.Contains(result.Text, "continue with offset=") || result.OriginalBytes > share+512 {
+			t.Fatalf("read %d = error %v, centrally truncated %v, %d visible/%d original bytes (share %d)", i, result.IsError, result.Truncated, len(result.Text), result.OriginalBytes, share)
+		}
+	}
+	if total > readResultContextTokenCap*bytesPerToken {
+		t.Fatalf("parallel read results total %d bytes, shared cap %d", total, readResultContextTokenCap*bytesPerToken)
+	}
+	if len(sink.archived) != 2 {
+		t.Fatalf("archived read results = %d, want 2", len(sink.archived))
+	}
+	for i, result := range sink.results {
+		if !strings.Contains(result.Text, toolresult.ArchivedHintMarker) {
+			t.Fatalf("read %d lost bounded artifact hint", i)
+		}
 	}
 }
 

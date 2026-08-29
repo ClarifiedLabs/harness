@@ -33,7 +33,7 @@ const readFileSchema = `{
 	"properties": {
 		"path": {"type": "string", "description": "File or directory."},
 		"offset": {"type": "integer", "description": "First line; 1-based."},
-		"limit": {"type": "integer", "description": "Maximum lines; default 1000."},
+		"limit": {"type": "integer", "description": "Maximum source lines; default 1000. Byte allowance scales with this value."},
 		"include_sha256": {"type": "boolean", "description": "Prepend full-file SHA-256 for an edit/write precondition."}
   },
   "required": ["path"]
@@ -137,25 +137,31 @@ func (r readFile) Run(ctx context.Context, input json.RawMessage) (string, error
 	if err != nil {
 		return "", err
 	}
+	requestedLines := r.requestedLines(args)
+	limits := readExecutionResultLimits(ctx, requestedLines)
+	return r.runDecoded(ctx, args, requestedLines, limits.maxBytes)
+}
 
-	defaultLimit := r.defaultLimit
-	if defaultLimit == 0 {
-		defaultLimit = defaultReadLimit
+func (r readFile) requestedLines(args readFileArgs) int {
+	if args.Limit > 0 {
+		return args.Limit
 	}
+	if r.defaultLimit > 0 {
+		return r.defaultLimit
+	}
+	return defaultReadLimit
+}
 
+func (r readFile) runDecoded(ctx context.Context, args readFileArgs, limit, maxResultBytes int) (string, error) {
 	offset := args.Offset
 	if offset == 0 {
 		offset = 1
-	}
-	limit := args.Limit
-	if limit == 0 {
-		limit = defaultLimit
 	}
 	totalLinesMaxBytes := r.totalLinesMaxBytes
 	if totalLinesMaxBytes == 0 {
 		totalLinesMaxBytes = defaultReadTotalLinesMaxBytes
 	}
-	out, err := readOneFile(ctx, args.Path, offset, limit, totalLinesMaxBytes)
+	out, err := readOneFile(ctx, args.Path, offset, limit, totalLinesMaxBytes, maxResultBytes)
 	if err != nil {
 		return "", notExistingPathError(args.Path, err)
 	}
@@ -231,7 +237,7 @@ func boundedRegularFileReader(r io.Reader, regular bool, size int64) (io.Reader,
 // readOneFile reads the [offset, offset+limit) window of a single file and
 // returns its line-numbered body, including the truncation notice (r14) when the
 // file continues past the window.
-func readOneFile(ctx context.Context, path string, offset, limit, totalLinesMaxBytes int) (string, error) {
+func readOneFile(ctx context.Context, path string, offset, limit, totalLinesMaxBytes, maxResultBytes int) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -267,7 +273,7 @@ func readOneFile(ctx context.Context, path string, offset, limit, totalLinesMaxB
 	// the default line cap) of a huge file never loads the whole thing
 	// into memory. This subsumes the design's >10MB guard: an unwindowed read
 	// returns at most the configured default limit regardless of file size.
-	lines, total, truncated, err := readWindowLines(br, offset, limit)
+	lines, total, truncated, budgetLimited, err := readWindowLinesBounded(ctx, br, offset, limit, maxResultBytes)
 	if err != nil {
 		return "", err
 	}
@@ -290,16 +296,19 @@ func readOneFile(ctx context.Context, path string, offset, limit, totalLinesMaxB
 	if offset > total {
 		return "", fmt.Errorf("offset %d is past end of file (%s has %d lines)", offset, path, total)
 	}
+	notice := readPaginationNotice{
+		totalLines:    countedTotalLines,
+		fileSize:      info.Size(),
+		fileSizeKnown: snapshot != nil,
+	}
+	if budgetLimited && len(lines) == 0 {
+		return notice.formatBefore(offset), nil
+	}
 	out := numberLines(lines, offset)
 	if truncated {
 		// Emit a truncation notice so the model knows line N is not EOF
 		// and can resume from the next line instead of assuming it read the whole file.
 		last := offset + len(lines) - 1
-		notice := readPaginationNotice{
-			totalLines:    countedTotalLines,
-			fileSize:      info.Size(),
-			fileSizeKnown: snapshot != nil,
-		}
 		out += "\n" + notice.format(last)
 	}
 	return out, nil
@@ -351,40 +360,106 @@ func numberLines(lines []string, startLine int) string {
 	return b.String()
 }
 
-// readWindowLines streams r line by line, returning the lines in
-// [offset, offset+limit), the count of lines seen, and whether the file
-// continues past the window (so the caller can flag truncation). It stops as
-// soon as the window is fully collected — after peeking one byte to detect
-// trailing content — and reads to EOF only when the window starts past the end
-// of input (so the caller can report the true line count). Memory use is bounded
-// by the window size and the longest line, never the whole file.
+// readWindowLines preserves the legacy helper shape for focused tests. Runtime
+// reads use readWindowLinesBounded so one physical line cannot allocate without
+// bound before result truncation runs.
 func readWindowLines(r io.Reader, offset, limit int) ([]string, int, bool, error) {
+	lines, total, truncated, _, err := readWindowLinesBounded(context.Background(), r, offset, limit, int(^uint(0)>>1))
+	return lines, total, truncated, err
+}
+
+// readWindowLinesBounded streams [offset, offset+limit) while retaining no more
+// than maxBytes of rendered numbered lines. If the next complete line cannot
+// fit, it consumes that physical line without retaining it and reports a budget
+// boundary before the line, allowing the caller to emit an exact continuation.
+func readWindowLinesBounded(ctx context.Context, r io.Reader, offset, limit, maxBytes int) ([]string, int, bool, bool, error) {
 	br, ok := r.(*bufio.Reader)
 	if !ok {
 		br = bufio.NewReader(r)
 	}
 	var window []string
 	lineno := 0
+	renderedBytes := 0
 	end := offset + limit // first line number past the window (1-based exclusive)
+	if end < offset {     // saturate pathological integer overflow
+		end = int(^uint(0) >> 1)
+	}
 	for {
-		line, err := br.ReadString('\n')
-		if len(line) > 0 || err == nil {
-			lineno++
-			if lineno >= offset && lineno < end {
-				window = append(window, strings.TrimSuffix(line, "\n"))
+		nextLine := lineno + 1
+		selected := nextLine >= offset && nextLine < end
+		contentLimit := 0
+		if selected {
+			separatorBytes := 0
+			if len(window) > 0 {
+				separatorBytes = 1
 			}
-			// Stop once the window is filled. Peek one byte (without consuming) to
-			// learn whether more content follows, so Run can emit a truncation notice.
-			if lineno >= end-1 && len(window) == limit {
+			contentLimit = maxBytes - renderedBytes - separatorBytes - len(strconv.Itoa(nextLine)) - 1
+		}
+		line, present, tooLarge, readErr := readPhysicalLineBounded(ctx, br, selected, contentLimit)
+		if present {
+			lineno++
+		}
+		if selected && present {
+			if tooLarge {
+				return window, lineno, true, true, nil
+			}
+			if len(window) > 0 {
+				renderedBytes++
+			}
+			renderedBytes += len(strconv.Itoa(lineno)) + 1 + len(line)
+			window = append(window, line)
+			// Stop once the source-line window is filled. Peek without consuming to
+			// distinguish exact EOF from natural pagination.
+			if len(window) == limit {
 				_, peekErr := br.Peek(1)
-				return window, lineno, peekErr == nil, nil
+				return window, lineno, peekErr == nil, false, nil
 			}
 		}
-		if err != nil {
-			if err == io.EOF {
-				return window, lineno, false, nil
+		if readErr != nil {
+			if readErr == io.EOF {
+				return window, lineno, false, false, nil
 			}
-			return nil, lineno, false, err
+			return nil, lineno, false, false, readErr
+		}
+	}
+}
+
+// readPhysicalLineBounded reads through one physical line using bufio's fixed
+// buffer. Selected content is retained only while it fits maxContentBytes; once
+// it does not fit, the remainder is discarded through the line boundary.
+func readPhysicalLineBounded(ctx context.Context, br *bufio.Reader, capture bool, maxContentBytes int) (string, bool, bool, error) {
+	var b strings.Builder
+	present := false
+	tooLarge := capture && maxContentBytes < 0
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", present, tooLarge, err
+		}
+		fragment, err := br.ReadSlice('\n')
+		if len(fragment) > 0 {
+			present = true
+			content := fragment
+			if content[len(content)-1] == '\n' {
+				content = content[:len(content)-1]
+			}
+			if capture && !tooLarge {
+				if b.Len()+len(content) > maxContentBytes {
+					tooLarge = true
+					b.Reset()
+				} else {
+					_, _ = b.Write(content)
+				}
+			}
+		}
+		switch err {
+		case nil:
+			return b.String(), present, tooLarge, nil
+		case bufio.ErrBufferFull:
+			continue
+		case io.EOF:
+			return b.String(), present, tooLarge, io.EOF
+		default:
+			return "", present, tooLarge, err
 		}
 	}
 }

@@ -404,6 +404,38 @@ func TestReadWindowLinesStopsEarly(t *testing.T) {
 	}
 }
 
+func TestReadWindowLinesBoundedDoesNotRetainOversizedPhysicalLine(t *testing.T) {
+	const oversized = 2 * 1024 * 1024
+	source := io.MultiReader(
+		&repeatedByteReader{remaining: oversized, value: 'x'},
+		strings.NewReader("\nsecond\n"),
+	)
+	lines, total, truncated, budgetLimited, err := readWindowLinesBounded(context.Background(), source, 1, 2, 64*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 0 || total != 1 || !truncated || !budgetLimited {
+		t.Fatalf("bounded oversized read = lines %d, total %d, truncated %v, budget-limited %v", len(lines), total, truncated, budgetLimited)
+	}
+}
+
+type repeatedByteReader struct {
+	remaining int
+	value     byte
+}
+
+func (r *repeatedByteReader) Read(p []byte) (int, error) {
+	if r.remaining == 0 {
+		return 0, io.EOF
+	}
+	n := min(len(p), r.remaining)
+	for i := range p[:n] {
+		p[i] = r.value
+	}
+	r.remaining -= n
+	return n, nil
+}
+
 type countingReader struct {
 	r io.Reader
 	n int

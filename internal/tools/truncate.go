@@ -9,13 +9,17 @@ import (
 // Central output caps, applied in Dispatch as a backstop for every tool by
 // default. A Registry can override these limits.
 const (
-	defaultMaxResultBytes    = 64 * 1024
-	defaultMaxResultLines    = 1000
-	defaultSearchResultBytes = 32 * 1024
-	defaultSearchResultLines = 500
-	defaultReadResultBytes   = 64 * 1024
-	defaultReadResultLines   = 2000
+	defaultMaxResultBytes      = 64 * 1024
+	defaultMaxResultLines      = 1000
+	defaultSearchResultBytes   = 32 * 1024
+	defaultSearchResultLines   = 500
+	defaultReadResultBytes     = 64 * 1024
+	defaultReadResultHardBytes = 256 * 1024
 )
+
+// read's source-window limit is its default line bound. Keep the central result
+// line axis effectively unbounded unless the user configures one explicitly.
+var defaultReadResultLines = int(^uint(0) >> 1)
 
 type resultLimits struct {
 	maxBytes int
@@ -28,17 +32,88 @@ type truncationInfo struct {
 	shownBytes    int
 }
 
-// truncateToolResult applies the generic result cap except when a read result
-// already ends in its file-aware pagination notice. In that case, central
-// clipping keeps complete numbered lines and updates that notice to the actual
-// continuation offset instead of adding a second, generic truncation marker.
+// truncateToolResult applies the generic result cap except for numbered read
+// results. Read clipping keeps complete source lines and reports the exact next
+// offset, including when the requested window originally reached EOF and had no
+// pagination notice of its own.
 func truncateToolResult(toolName, s string, limits resultLimits) (string, truncationInfo) {
-	if toolName == "read" {
-		if out, info, ok := truncatePaginatedRead(s, limits); ok {
-			return out, info
+	if toolName != "read" {
+		return truncate(s, limits)
+	}
+	if out, info, ok := truncatePaginatedRead(s, limits); ok {
+		return out, info
+	}
+	if out, info, ok := truncateStandaloneReadBeforeLine(s, limits); ok {
+		return out, info
+	}
+	genericOut, genericInfo := truncate(s, limits)
+	if !genericInfo.truncated {
+		return genericOut, genericInfo
+	}
+	if out, info, ok := truncateUnpaginatedRead(s, limits); ok {
+		return out, info
+	}
+	return genericOut, genericInfo
+}
+
+// truncateStandaloneReadBeforeLine recognizes the receipt emitted when bounded
+// streaming cannot retain even the first requested line. If a smaller cap is
+// applied later, prefer an actionable exact-offset receipt over a generic marker.
+func truncateStandaloneReadBeforeLine(s string, limits resultLimits) (string, truncationInfo, bool) {
+	header, marker := splitReadResultHeader(s)
+	if !strings.HasPrefix(marker, "[file truncated before line ") {
+		return "", truncationInfo{}, false
+	}
+	offsetText := ""
+	if _, after, found := strings.Cut(marker, "next offset="); found {
+		offsetText, _, _ = strings.Cut(after, ";")
+		offsetText = strings.TrimSuffix(offsetText, "]")
+	} else if _, after, found := strings.Cut(marker, "continue with offset="); found {
+		offsetText = strings.TrimSuffix(after, "]")
+	}
+	nextLine, err := strconv.Atoi(offsetText)
+	if err != nil || nextLine <= 0 {
+		return "", truncationInfo{}, false
+	}
+
+	limits = limits.withDefaults()
+	info := truncationInfo{originalBytes: len(s), shownBytes: len(s)}
+	lines := 1
+	if header != "" {
+		lines++
+	}
+	if len(s) <= limits.maxBytes && lines <= limits.maxLines {
+		return s, info, true
+	}
+
+	candidates := []string{
+		marker,
+		(readPaginationNotice{}).formatCompactBefore(nextLine),
+		fmt.Sprintf("[read offset=%d]", nextLine),
+	}
+	budget := min(limits.maxBytes, len(s))
+	out := candidates[len(candidates)-1]
+	for _, candidate := range candidates {
+		if len(candidate) <= budget {
+			out = candidate
+			break
 		}
 	}
-	return truncate(s, limits)
+	if header != "" && limits.maxLines >= 2 {
+		for _, candidate := range candidates {
+			withHeader := header + "\n" + candidate
+			if len(withHeader) <= budget {
+				out = withHeader
+				break
+			}
+		}
+	}
+	if len(out) > budget {
+		out = out[:budget]
+	}
+	info.truncated = true
+	info.shownBytes = len(out)
+	return out, info, true
 }
 
 func (l resultLimits) withDefaults() resultLimits {
@@ -109,12 +184,16 @@ func truncate(s string, limits resultLimits) (string, truncationInfo) {
 // the output is not a well-formed paginated read; callers then use the generic
 // truncator.
 func truncatePaginatedRead(s string, limits resultLimits) (out string, info truncationInfo, ok bool) {
+	return truncatePaginatedReadWithOriginalBytes(s, limits, len(s))
+}
+
+func truncatePaginatedReadWithOriginalBytes(s string, limits resultLimits, originalBytes int) (out string, info truncationInfo, ok bool) {
 	body, notice, ok := splitReadPaginationNotice(s)
 	if !ok {
 		return "", truncationInfo{}, false
 	}
 	limits = limits.withDefaults()
-	info = truncationInfo{originalBytes: len(s), shownBytes: len(s)}
+	info = truncationInfo{originalBytes: originalBytes, shownBytes: len(s)}
 	totalOutputLines := strings.Count(s, "\n")
 	if !strings.HasSuffix(s, "\n") && s != "" {
 		totalOutputLines++
@@ -310,6 +389,37 @@ func numberedReadResultLine(line string) (int, bool) {
 	return lineNumber, err == nil && lineNumber > 0
 }
 
+// truncateUnpaginatedRead adds an internal EOF notice long enough for the
+// paginated read truncator to preserve only complete numbered lines. The
+// synthetic notice is emitted only when truncation is already required.
+func truncateUnpaginatedRead(s string, limits resultLimits) (string, truncationInfo, bool) {
+	_, numberedBody := splitReadResultHeader(s)
+	lines := strings.Split(numberedBody, "\n")
+	if len(lines) == 0 {
+		return "", truncationInfo{}, false
+	}
+	firstLine, valid := numberedReadResultLine(lines[0])
+	if !valid {
+		return "", truncationInfo{}, false
+	}
+	lastLine := firstLine
+	for _, line := range lines[1:] {
+		lineNumber, valid := numberedReadResultLine(line)
+		if !valid || lineNumber != lastLine+1 {
+			return "", truncationInfo{}, false
+		}
+		lastLine = lineNumber
+	}
+
+	notice := readPaginationNotice{}
+	candidate := s + "\n" + notice.format(lastLine)
+	out, info, ok := truncatePaginatedReadWithOriginalBytes(candidate, limits, len(s))
+	if !ok {
+		return "", truncationInfo{}, false
+	}
+	return out, info, true
+}
+
 // capBytes enforces maxBytes on s, appending a marker that reports the
 // original byte size (origBytes) when it trims. If s already carries a
 // line-truncation marker, capBytes trims the kept body, not the marker tail.
@@ -324,6 +434,7 @@ func capBytes(s string, origBytes, maxBytes int) (string, truncationInfo) {
 	marker := fmt.Sprintf("\n[truncated: showing first %s of %s; use read offset/limit or a targeted shell command to narrow]", HumanBytes(maxBytes), HumanBytes(origBytes))
 	keep := maxBytes - len(marker)
 	if keep < 0 {
+		marker = marker[:max(maxBytes, 0)]
 		keep = 0
 	}
 	out := s[:keep] + marker

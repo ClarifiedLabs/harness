@@ -666,13 +666,28 @@ environment variables, JSON paths, types, and defaults. The concise
   `compact_tool_result_max_bytes`, and `retention_floor_tokens`.
   Tool-result truncation is controlled by config `tool_result_max_bytes` /
   `tool_result_max_lines` or env `HARNESS_TOOL_RESULT_MAX_BYTES` /
-  `HARNESS_TOOL_RESULT_MAX_LINES`. `read` defaults to a 1000-line window with
-  64 KB and 2000-line result caps; each result cap inherits independently when
-  its corresponding global cap is configured. Configure `read_default_limit`,
-  `read_result_max_bytes`, and `read_result_max_lines`, or
-  `HARNESS_READ_DEFAULT_LIMIT`, `HARNESS_READ_RESULT_MAX_BYTES`, and
-  `HARNESS_READ_RESULT_MAX_LINES`. Truncated reads always report exact file
-  bytes. Regular files no larger than 1 MiB also report exact total lines;
+  `HARNESS_TOOL_RESULT_MAX_LINES`. `read` defaults to a 1000-line source window
+  and a byte allowance of `max(64 KiB, limit × 512 bytes)`, bounded by a
+  configurable 256 KiB hard ceiling. It has no independent default result-line
+  cap: `limit` is the line bound unless a global or read-specific result-line cap
+  is configured. Each read cap inherits independently when its corresponding
+  global cap is configured. Configure `read_default_limit`,
+  `read_result_max_bytes` (the hard byte ceiling), and `read_result_max_lines`,
+  or `HARNESS_READ_DEFAULT_LIMIT`, `HARNESS_READ_RESULT_MAX_BYTES`, and
+  `HARNESS_READ_RESULT_MAX_LINES`. In an agent turn, all reads additionally share
+  `min(48,000 estimated tokens, 20% of context remaining after reserving the next
+  output allowance)`; Harness uses its coarse four-bytes-per-token context
+  estimate and divides the allowance across parallel or staged read calls. Each
+  share includes bounded hook/artifact suffixes; an actionable continuation
+  receipt has a 64-byte minimum when the calculated share is smaller.
+  Result-limited reads stream bounded physical lines, keep complete source lines,
+  and report the exact next offset, including reads that reached EOF before
+  result limiting. If one physical line cannot fit, its buffered fragments are
+  discarded and the receipt gives targeted-shell guidance instead of retaining
+  the whole line. An explicit byte ceiling too small for the compact
+  `[read offset=N]` fallback necessarily clips that receipt. Natural pagination
+  notices report exact file bytes. Regular files no larger than
+  1 MiB also report exact total lines;
   configure that threshold with `read_total_lines_max_bytes` or
   `HARNESS_READ_TOTAL_LINES_MAX_BYTES`. The former
   `read_file_*`, `rg_result_*`, and `grep_result_*` settings are removed; strict
