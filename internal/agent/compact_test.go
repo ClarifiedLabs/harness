@@ -495,7 +495,7 @@ func TestNondefaultCompactionPercentagesMoveTriggerAndBudget(t *testing.T) {
 }
 
 func TestCompactionFileActivityIsCumulativeAndModifiedWins(t *testing.T) {
-	reg := tools.Catalog()
+	reg := tools.CatalogWithOptions(tools.Options{})
 	a := newAgent(llmtest.New("fake"), reg, Options{})
 	failed := toolResult("r2", "missing")
 	failed.Content[0].ResultError = true

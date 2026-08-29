@@ -23,12 +23,6 @@ type DiffState struct {
 	palette     palette
 }
 
-// NewDiff resolves lang like New ("go", ".py", "Makefile") using the dark
-// theme. Empty or unknown languages keep plain content under tinted sigils.
-func NewDiff(lang string) *DiffState {
-	return NewDiffWithTheme(lang, ThemeDark)
-}
-
 // NewDiffWithTheme resolves lang like NewWithTheme. A nil *DiffState is valid
 // and highlights nothing.
 func NewDiffWithTheme(lang string, theme Theme) *DiffState {
@@ -71,11 +65,6 @@ func (d *DiffState) Line(line string) string {
 		return " " + d.newContent.Line(content)
 	}
 	return line
-}
-
-// ColorizeDiff syntax-highlights a complete unified diff using the dark theme.
-func ColorizeDiff(path, text string) string {
-	return ColorizeDiffWithTheme(path, text, ThemeDark)
 }
 
 // ColorizeDiffWithTheme syntax-highlights a complete unified diff for path.

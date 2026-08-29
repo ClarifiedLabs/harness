@@ -125,7 +125,7 @@ func TestDaemonRequiresAPIKey(t *testing.T) {
 	store := apikey.NewDynamicStore([]apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmcpp_secret")}}, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	d := NewDaemonWithAPIKeys(cfg, slog.New(slog.DiscardHandler), store)
+	d := NewDaemonWithOptions(cfg, slog.New(slog.DiscardHandler), DaemonOptions{APIKeys: store})
 	d.spawn = spawn
 	d.sleep = func(context.Context, time.Duration) {}
 	errCh := make(chan error, 1)

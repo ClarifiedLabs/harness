@@ -89,18 +89,6 @@ func InspectionBoundaryBlocked(call llm.ToolCall, activity Activity) bool {
 	return activity.Class == ActivityInspect || call.Name == "shell" && activity.Class == ActivityOther
 }
 
-// InspectionToolVisibleAtBoundary keeps tools that can still make a valid
-// transition visible while suppressing obvious typed inspection surfaces.
-// shell stays visible because argv-classified verification remains legal.
-func InspectionToolVisibleAtBoundary(name string) bool {
-	switch name {
-	case "read", "view_image", "web_fetch":
-		return false
-	default:
-		return true
-	}
-}
-
 func (shell) Activity(input json.RawMessage) Activity {
 	var args shellArgs
 	if err := json.Unmarshal(input, &args); err != nil || args.Background {

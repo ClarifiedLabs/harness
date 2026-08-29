@@ -1883,16 +1883,6 @@ func ReasoningSummaryLines(text string, format ReasoningSummaryFormat) []string 
 	return out
 }
 
-// ReasoningSummaryDisplay returns the replay-safe plain-text form for a
-// semantic reasoning summary event.
-func ReasoningSummaryDisplay(text string) string {
-	lines := ReasoningSummaryLines(text, ReasoningSummaryFormat{})
-	if len(lines) == 0 {
-		return ""
-	}
-	return strings.Join(lines, "\n")
-}
-
 func firstVisibleDuration(events []Event, start time.Time) time.Duration {
 	if start.IsZero() {
 		return 0

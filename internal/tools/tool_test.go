@@ -1310,13 +1310,13 @@ func TestDefaultAndCatalogNames(t *testing.T) {
 	if got := DefaultNames(); !slices.Equal(got, expectedDefaultNames()) {
 		t.Fatalf("DefaultNames() = %v, want %v", got, expectedDefaultNames())
 	}
-	if got := Catalog().Names(); !slices.Equal(got, expectedDefaultNames()) {
-		t.Fatalf("Catalog().Names() = %v, want %v", got, expectedDefaultNames())
+	if got := CatalogWithOptions(Options{}).Names(); !slices.Equal(got, expectedDefaultNames()) {
+		t.Fatalf("CatalogWithOptions(Options{}).Names() = %v, want %v", got, expectedDefaultNames())
 	}
 }
 
 func TestSubsetFiltersSpecsAndDispatch(t *testing.T) {
-	sub, err := Catalog().Subset([]string{"shell", "read"})
+	sub, err := CatalogWithOptions(Options{}).Subset([]string{"shell", "read"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1361,7 +1361,7 @@ func TestSubsetPreservesReadResultLimitsDuringDispatch(t *testing.T) {
 }
 
 func TestSubsetOfDefaultNamesEqualsDefault(t *testing.T) {
-	sub, err := Catalog().Subset(DefaultNames())
+	sub, err := CatalogWithOptions(Options{}).Subset(DefaultNames())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1371,7 +1371,7 @@ func TestSubsetOfDefaultNamesEqualsDefault(t *testing.T) {
 }
 
 func TestSubsetUnknownNameErrors(t *testing.T) {
-	_, err := Catalog().Subset([]string{"read", "bogus"})
+	_, err := CatalogWithOptions(Options{}).Subset([]string{"read", "bogus"})
 	if err == nil || !strings.Contains(err.Error(), "bogus") {
 		t.Fatalf("unknown subset error = %v", err)
 	}

@@ -6,7 +6,7 @@ import (
 
 func TestJSONIndentDoesNotPreserveTrailingWhitespace(t *testing.T) {
 	input := []byte("{\"models\":[]}\n\n")
-	out, err := formatJSON(input)
+	out, err := formatCatalogJSON(input, "")
 	if err != nil {
 		t.Fatal(err)
 	}

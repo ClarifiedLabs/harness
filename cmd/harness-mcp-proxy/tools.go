@@ -16,15 +16,10 @@ import (
 
 var toolsCommandTimeout = 10 * time.Second
 
-// runTools connects to a running proxy as an MCP client and prints the
+// handleTools connects to a running proxy as an MCP client and prints the
 // aggregated tool table. It is a debug/status command: if it connects and
 // lists, the proxy is up. It targets the HTTP proxy URL from -proxy,
 // config proxy.listen, or the default listener.
-func runTools(env environment, args []string) int {
-	env.args = append([]string{"tools"}, args...)
-	return run(env)
-}
-
 func handleTools(env environment, invocation cli.Invocation) int {
 	proxyURL, code := resolveToolsProxy(env, invocation.Flags)
 	if code != exitOK {

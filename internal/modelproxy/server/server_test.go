@@ -3243,7 +3243,7 @@ func TestCostBudgetWindowResetAndUsageOmitWhenDisabled(t *testing.T) {
 	}
 
 	h := &Handler{}
-	if report := h.usageSnapshot(); report.Budget != nil {
+	if report := h.usageSnapshotForRequest(nil); report.Budget != nil {
 		t.Fatalf("disabled budget report = %+v, want nil", report.Budget)
 	}
 }

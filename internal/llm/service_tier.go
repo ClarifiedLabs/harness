@@ -73,22 +73,6 @@ func ResolveServiceTier(selector string, supported []ServiceTier) (ServiceTier, 
 	return ServiceTier{}, false
 }
 
-// ServiceTierSupported reports whether selector resolves against supported.
-func ServiceTierSupported(selector string, supported []ServiceTier) bool {
-	_, ok := ResolveServiceTier(selector, supported)
-	return ok
-}
-
-// ServiceTierIDs returns canonical selector IDs in advertised order.
-func ServiceTierIDs(tiers []ServiceTier) []string {
-	normalized := NormalizeServiceTiers(tiers)
-	out := make([]string, 0, len(normalized))
-	for _, tier := range normalized {
-		out = append(out, tier.ID)
-	}
-	return out
-}
-
 // MatchServiceTierRequest finds the catalog tier whose bounded request mapping
 // matches the values sent to (or reported by) a provider.
 func MatchServiceTierRequest(tiers []ServiceTier, serviceTier, speed string) (ServiceTier, bool) {

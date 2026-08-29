@@ -139,9 +139,3 @@ func standardServiceMode(value string) bool {
 		return false
 	}
 }
-
-// PriceZero reports whether a flat price has no configured components.
-// Deprecated: use llm.Price.IsZero.
-func PriceZero(p llm.Price) bool {
-	return p.IsZero()
-}

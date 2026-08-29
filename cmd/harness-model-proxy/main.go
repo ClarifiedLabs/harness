@@ -53,7 +53,6 @@ type environment struct {
 	getenv                 func(string) string
 	sigCh                  chan os.Signal
 	modelsDevCatalog       func(context.Context) (*modelcatalog.Catalog, error)
-	codexModelsData        func(context.Context) ([]byte, error)
 	terminalRows           func() int
 	modelsDevCacheTTL      *time.Duration
 	providerModelsCacheTTL *time.Duration
@@ -523,44 +522,6 @@ func setupProviderModelsCacheTTL(env environment, flagValue string, flagSet bool
 		return 0, fmt.Errorf("invalid -provider-models-cache-ttl %q: %w", value, err)
 	}
 	return parsed, nil
-}
-
-func resolveServeDuration(name, flagValue string, flagSet bool, envValue string, configured server.Duration, fallback time.Duration) (time.Duration, error) {
-	if flagSet {
-		return parseServeDuration(name, flagValue)
-	}
-	if strings.TrimSpace(envValue) != "" {
-		return parseServeDuration(name, envValue)
-	}
-	if configured.Set {
-		return configured.Duration, nil
-	}
-	return fallback, nil
-}
-
-func parseServeDuration(name, value string) (time.Duration, error) {
-	value = strings.TrimSpace(value)
-	if value == "0" {
-		return 0, nil
-	}
-	duration, err := time.ParseDuration(value)
-	if err != nil {
-		return 0, fmt.Errorf("invalid -%s %q: %w", name, value, err)
-	}
-	if duration < 0 {
-		return 0, fmt.Errorf("invalid -%s %q: duration must be non-negative", name, value)
-	}
-	return duration, nil
-}
-
-func resolveServeInstanceID(flagValue string, flagSet bool, envValue, configured string) string {
-	if flagSet {
-		return strings.TrimSpace(flagValue)
-	}
-	if value := strings.TrimSpace(envValue); value != "" {
-		return value
-	}
-	return strings.TrimSpace(configured)
 }
 
 // newMetricsRegistry returns a registry seeded with the build-info gauge when

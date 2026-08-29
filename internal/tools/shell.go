@@ -203,16 +203,6 @@ func (t shell) Schema() json.RawMessage {
 
 func (shell) ReadOnly(json.RawMessage) bool { return false }
 
-// hasBackgroundFlag reports whether the tool input JSON contains
-// "background": true, without decoding the rest of the tool-specific args.
-func hasBackgroundFlag(input json.RawMessage) bool {
-	var v struct {
-		Background bool `json:"background"`
-	}
-	json.Unmarshal(input, &v)
-	return v.Background
-}
-
 type shellArgs struct {
 	Command         string      `json:"command"`
 	Argv            []string    `json:"argv"`
@@ -836,60 +826,6 @@ func clipCommandOutput(out string, limit int) (string, bool) {
 		clipped = clipped[:len(clipped)-1]
 	}
 	return clipped, true
-}
-
-type programArgs struct {
-	Args           []string
-	Stdin          string
-	Cwd            string
-	TimeoutSeconds int
-}
-
-func decodeProgramArgs(input json.RawMessage, field string) (programArgs, error) {
-	var bare []string
-	if err := json.Unmarshal(input, &bare); err == nil && bare != nil {
-		return programArgs{Args: bare}, nil
-	}
-
-	var raw struct {
-		Args           []string `json:"args"`
-		Argv           []string `json:"argv"`
-		Stdin          string   `json:"stdin"`
-		Cwd            string   `json:"cwd"`
-		TimeoutSeconds int      `json:"timeout_seconds"`
-	}
-	if err := json.Unmarshal(input, &raw); err != nil {
-		return programArgs{}, err
-	}
-	args := raw.Args
-	if field == "argv" {
-		args = raw.Argv
-	}
-	return programArgs{Args: args, Stdin: raw.Stdin, Cwd: raw.Cwd, TimeoutSeconds: raw.TimeoutSeconds}, nil
-}
-
-func runProgram(ctx context.Context, program string, args programArgs, displayName string, requireArgs bool) (string, error) {
-	if requireArgs && len(args.Args) == 0 {
-		return "", badArgs("args is required and must be a non-empty array")
-	}
-	if args.TimeoutSeconds < 0 {
-		return "", badArgs("timeout_seconds must be >= 0")
-	}
-	if err := validateCwd(args.Cwd); err != nil {
-		return "", err
-	}
-
-	cmd := exec.Command(program, args.Args...) // nosemgrep: dangerous-exec-command
-	cmd.Dir = args.Cwd
-	if args.Stdin != "" {
-		cmd.Stdin = strings.NewReader(args.Stdin)
-	}
-
-	out, err := runProcess(ctx, cmd, args.TimeoutSeconds)
-	if err != nil {
-		return "", fmt.Errorf("%s: %w", displayName, err)
-	}
-	return out, nil
 }
 
 // validateCwd checks the optional cwd argument the exec-style tools share: an

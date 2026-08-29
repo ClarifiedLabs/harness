@@ -73,7 +73,3 @@ func formatCatalogJSON(data []byte, catalog string) ([]byte, error) {
 	out.WriteByte('\n')
 	return out.Bytes(), nil
 }
-
-func formatJSON(data []byte) ([]byte, error) {
-	return formatCatalogJSON(data, "")
-}

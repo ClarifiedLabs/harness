@@ -1069,9 +1069,6 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
 			return testSetupCatalogWithOpenAI(), nil
 		},
-		codexModelsData: func(context.Context) ([]byte, error) {
-			return []byte(testCodexModelsCatalogJSON()), nil
-		},
 	}
 
 	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
@@ -1883,47 +1880,6 @@ func TestSetupProviderPreservesExplicitCodexCompactionOptOut(t *testing.T) {
 	if next.AnthropicToolSearch != llm.AnthropicToolSearchRegex {
 		t.Fatalf("anthropic_tool_search = %q, want preserved regex", next.AnthropicToolSearch)
 	}
-}
-
-func testCodexModelsCatalogJSON() string {
-	return `{
-  "models": [
-    {
-      "slug": "gpt-5.5",
-      "display_name": "GPT-5.5",
-      "context_window": 272000,
-      "max_context_window": 272000,
-      "input_modalities": ["text", "image"],
-      "supported_reasoning_levels": [
-        {"effort": "low"},
-        {"effort": "medium"},
-        {"effort": "high"},
-        {"effort": "xhigh"}
-      ],
-      "visibility": "list",
-      "supported_in_api": true,
-      "service_tiers": [{"id":"priority","name":"Fast","description":"Lower latency"}],
-      "default_service_tier": null,
-      "additional_speed_tiers": ["fast"]
-    },
-    {
-      "slug": "codex-auto-review",
-      "display_name": "Codex Auto Review",
-      "context_window": 272000,
-      "input_modalities": ["text", "image"],
-      "visibility": "hide",
-      "supported_in_api": true
-    },
-    {
-      "slug": "unsupported",
-      "display_name": "Unsupported",
-      "context_window": 128000,
-      "input_modalities": ["text"],
-      "visibility": "list",
-      "supported_in_api": false
-    }
-  ]
-}`
 }
 
 func testSetupCatalogWithSakana() *modelcatalog.Catalog {

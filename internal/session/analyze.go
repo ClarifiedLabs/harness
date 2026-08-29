@@ -1487,13 +1487,6 @@ func deriveProgress(events []Event, completed map[int]bool, schemaAvailable bool
 	return out
 }
 
-func normalizedLabel(value string) string {
-	if value = strings.TrimSpace(value); value != "" {
-		return value
-	}
-	return "unknown"
-}
-
 func negativeCompatibleContextArithmetic(context *ContextSnapshot) bool {
 	switch normalizedProviderCountScope(context.ProviderInputScope) {
 	case string(llm.InputTokenCountScopeRequestPayload):

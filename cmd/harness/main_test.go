@@ -5267,7 +5267,7 @@ func TestRunDelegateNamedAgentUsesDefinition(t *testing.T) {
 // through the same pending filter as startup, so the not-yet-registered tool is
 // dropped rather than erroring catalog.Subset.
 func TestResolveDelegateLaunchToleratesPendingMCPTool(t *testing.T) {
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	agents := map[string]agentdef.Definition{
 		"worker": {Name: "worker", AllowedTools: []string{"read", "mcp__remote__do"}},
 	}

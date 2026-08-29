@@ -249,7 +249,7 @@ func TestSetupMCPRegistersToolsAndOneShotCalls(t *testing.T) {
 // proxy value. Startup must proceed, emit a single [warn] [mcp] line naming
 // the bad proxy, register zero mcp__ tools, and return a no-op cleanup.
 func TestSetupMCPRejectsNonHTTPProxyAndContinues(t *testing.T) {
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	before := len(catalog.Names())
 
 	var errw strings.Builder
@@ -396,7 +396,7 @@ func TestSetupMCPHTTPProxyRoundTrip(t *testing.T) {
 func TestSetupMCPTrustsRemoteReadOnlyHint(t *testing.T) {
 	url, _ := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{readOnlyMCPTool("mcp__test__inspect")}})
 
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	var errw strings.Builder
 	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
 	if err != nil {
@@ -433,7 +433,7 @@ func TestSetupMCPHTTPUnreachableWarnsAndContinues(t *testing.T) {
 	deadURL := "http://" + ln.Addr().String()
 	_ = ln.Close()
 
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	before := len(catalog.Names())
 
 	var errw strings.Builder
@@ -505,7 +505,7 @@ func (t asyncMCPTestTool) Run(context.Context, json.RawMessage) (string, error) 
 }
 
 func TestMCPRefresherAppliesAsyncRegistration(t *testing.T) {
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	discovered := &tools.Registry{}
 	discovered.Register(asyncMCPTestTool{name: "mcp__test__async"})
 	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
@@ -556,7 +556,7 @@ func TestMCPRefresherAppliesAsyncRegistration(t *testing.T) {
 }
 
 func TestAsyncMCPRegistrationRestoresExplicitWhitelistTool(t *testing.T) {
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	agents := map[string]agentdef.Definition{
 		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__async"}},
 	}
@@ -602,7 +602,7 @@ func TestAsyncMCPRegistrationRestoresExplicitWhitelistTool(t *testing.T) {
 // catalog and every MCP-exposing agent must still be re-derived regardless of which
 // agent is current.
 func TestAsyncMCPRegistrationRegistersToolsForUnknownAgent(t *testing.T) {
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	discovered := &tools.Registry{}
 	discovered.Register(asyncMCPTestTool{name: "mcp__test__async"})
 	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
@@ -644,7 +644,7 @@ func TestAsyncMCPRegistrationRegistersToolsForUnknownAgent(t *testing.T) {
 // later /agent switch does not fail catalog.Subset on a name the catalog will never
 // have. This restores parity with the one-shot path, which fails fast on the typo.
 func TestAsyncMCPRegistrationPrunesUnknownWhitelistTool(t *testing.T) {
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	agents := map[string]agentdef.Definition{
 		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__async", "mcp__typo__missing"}},
 	}
@@ -776,7 +776,7 @@ func TestMCPRefresherAddsAndRemovesTools(t *testing.T) {
 	provider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__test__alpha"), mcpTool("mcp__test__beta")}}
 	g := startFakeProxy(t, provider)
 
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	conn := mcptools.NewConn(mcptools.Options{Dial: g.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	defer conn.Close()
 
@@ -840,7 +840,7 @@ func TestMCPRefresherSkipsUnaffectedWhitelistAgent(t *testing.T) {
 	provider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__test__alpha"), mcpTool("mcp__test__beta")}}
 	g := startFakeProxy(t, provider)
 
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	conn := mcptools.NewConn(mcptools.Options{Dial: g.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	defer conn.Close()
 	initial, err := mcptools.Register(context.Background(), catalog, conn)
@@ -881,7 +881,7 @@ func TestMCPRefresherSwapsWhitelistAgentLosingTool(t *testing.T) {
 	provider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__test__alpha"), mcpTool("mcp__test__beta")}}
 	g := startFakeProxy(t, provider)
 
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	conn := mcptools.NewConn(mcptools.Options{Dial: g.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	defer conn.Close()
 	initial, err := mcptools.Register(context.Background(), catalog, conn)
@@ -917,7 +917,7 @@ func TestMCPRefresherFailedRefreshKeepsDirtyForRetry(t *testing.T) {
 	provider := &flakyListProvider{tools: []mcp.Tool{mcpTool("mcp__test__alpha")}}
 	g := startFakeProxy(t, provider)
 
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	conn := mcptools.NewConn(mcptools.Options{Dial: g.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	defer conn.Close()
 	initial, err := mcptools.Register(context.Background(), catalog, conn)
@@ -961,7 +961,7 @@ func TestMCPRefresherFailedRefreshKeepsDirtyForRetry(t *testing.T) {
 // re-listing.
 func TestMCPRefresherNotDirtyFastPath(t *testing.T) {
 	g := startFakeProxy(t, &echoProvider{tools: []mcp.Tool{echoTool()}})
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	conn := mcptools.NewConn(mcptools.Options{Dial: g.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
 	defer conn.Close()
 	sum, err := mcptools.Register(context.Background(), catalog, conn)
@@ -978,7 +978,7 @@ func TestMCPRefresherNotDirtyFastPath(t *testing.T) {
 // TestAugmentAgentsWithMCP confirms agents gain MCP tool names according to their
 // mcp_tools mode.
 func TestAugmentAgentsWithMCP(t *testing.T) {
-	def := agentdef.DefaultTools()
+	def := agentdef.Builtins()["auto"].AllowedTools
 	agents := map[string]agentdef.Definition{
 		"auto":   {Name: "auto", AllowedTools: slices.Clone(def), MCPTools: agentdef.MCPToolsAll},
 		"plan":   {Name: "plan", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsReadOnly},
@@ -1066,7 +1066,7 @@ func TestMCPLimitsFromConfig(t *testing.T) {
 // refresh path: every discovered tool lands in the catalog, but an mcp_tools=all
 // agent auto-exposes at most max_tools of them.
 func TestMCPRefresherAppliesToolCap(t *testing.T) {
-	catalog := tools.Catalog()
+	catalog := tools.CatalogWithOptions(tools.Options{})
 	discovered := &tools.Registry{}
 	discovered.Register(asyncMCPTestTool{name: "mcp__test__one"})
 	discovered.Register(asyncMCPTestTool{name: "mcp__test__two"})

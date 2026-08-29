@@ -442,22 +442,6 @@ func numberedFixturePaths(subdir, nameFormat string, count int) []string {
 	return paths
 }
 
-func sameFixturePaths(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	counts := make(map[string]int, len(got))
-	for _, path := range got {
-		counts[normalizeFixturePath(path)]++
-	}
-	for _, path := range want {
-		if counts[path] != 1 {
-			return false
-		}
-	}
-	return true
-}
-
 func coversFixturePaths(got, want []string) bool {
 	seen := make(map[string]bool, len(got))
 	for _, path := range got {

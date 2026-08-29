@@ -164,10 +164,6 @@ const (
 	DisplayUpdated
 )
 
-func RenderLatest(p *Plan) string {
-	return RenderLatestWithState(p, DisplayRecorded)
-}
-
 // RenderLatestWithState renders a short user-facing status line naming the most
 // recently recorded plan's file, or "" when no plan with a path has been
 // recorded. The label reflects whether the current prompt left the plan

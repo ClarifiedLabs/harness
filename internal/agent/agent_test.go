@@ -4158,7 +4158,7 @@ func TestKimiWebSearchToolCallPassesThroughArguments(t *testing.T) {
 			Stop:   llm.StopEndTurn,
 		},
 	)
-	a := newAgent(fp, tools.Catalog(), Options{
+	a := newAgent(fp, tools.CatalogWithOptions(tools.Options{}), Options{
 		ServerTools: []llm.ServerTool{{Name: llm.ServerToolWebSearch}},
 	})
 	sink := &recordSink{}
@@ -4196,7 +4196,7 @@ func TestIsKimiWebSearchCall(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{ServerTools: tc.serverTools})
+			a := newAgent(llmtest.New("fake"), tools.CatalogWithOptions(tools.Options{}), Options{ServerTools: tc.serverTools})
 			if got := a.isKimiWebSearchCall(llm.ToolCall{ID: "c", Name: tc.callName}); got != tc.want {
 				t.Fatalf("isKimiWebSearchCall(%q) = %v, want %v", tc.callName, got, tc.want)
 			}
@@ -5676,7 +5676,7 @@ func TestSteerDeliveredNotCalledWhenSteeringDisabled(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
-	a := newAgent(fp, tools.Catalog(), Options{})
+	a := newAgent(fp, tools.CatalogWithOptions(tools.Options{}), Options{})
 	sink := &steerDeliverySink{recordSink: &recordSink{}}
 	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
 		t.Fatalf("RunPrompt: %v", err)
@@ -5760,7 +5760,7 @@ func TestSteerResetsLoopGuard(t *testing.T) {
 // TestSteerDisabledNoChannel confirms Steer() is a no-op when Options.Steer is
 // false: the channel is nil and the loop never drains.
 func TestSteerDisabledNoChannel(t *testing.T) {
-	a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{})
+	a := newAgent(llmtest.New("fake"), tools.CatalogWithOptions(tools.Options{}), Options{})
 	if a.Steer("ignored") { // must not panic on a nil channel
 		t.Fatal("Steer accepted input while disabled")
 	}
@@ -5773,7 +5773,7 @@ func TestSteerDisabledNoChannel(t *testing.T) {
 }
 
 func TestSteerContentReportsFullBufferAndPreservesDrainMetadata(t *testing.T) {
-	a := newAgent(llmtest.New("fake"), tools.Catalog(), Options{Steer: true})
+	a := newAgent(llmtest.New("fake"), tools.CatalogWithOptions(tools.Options{}), Options{Steer: true})
 	for i := 0; i < cap(a.steer); i++ {
 		input := SteerInput{Text: fmt.Sprintf("steer %d", i), CorrelationID: fmt.Sprintf("p%d", i)}
 		if !a.SteerContent(input) {
@@ -5858,7 +5858,7 @@ func TestDrainSteerRecoversUnconsumed(t *testing.T) {
 			Block:  func(context.Context) { close(steered) },
 		},
 	)
-	a := newAgent(fp, tools.Catalog(), Options{Steer: true})
+	a := newAgent(fp, tools.CatalogWithOptions(tools.Options{}), Options{Steer: true})
 	sink := &recordSink{}
 
 	errCh := make(chan error, 1)
@@ -6031,7 +6031,7 @@ func TestSkillReadResultPassesThroughWithoutRequestContextPinning(t *testing.T) 
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
 	)
-	a := newAgent(fp, tools.Catalog(), Options{})
+	a := newAgent(fp, tools.CatalogWithOptions(tools.Options{}), Options{})
 
 	if err := a.RunPrompt(context.Background(), "use the skill", &recordSink{}); err != nil {
 		t.Fatalf("RunPrompt: %v", err)

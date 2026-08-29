@@ -168,7 +168,7 @@ func TestConciseShellResultLineForms(t *testing.T) {
 			want:   "[shell] make test · failed → 5B",
 		},
 		{
-			name: "cancelled result carrying the timed-out flag renders timed out",
+			name:  "cancelled result carrying the timed-out flag renders timed out",
 			input: `{"argv":["sleep","10"]}`,
 			result: llm.ToolResult{
 				ForID: "c", Text: "[cancelled]\n",

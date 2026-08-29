@@ -67,14 +67,6 @@ func scaledFloor(value, numerator, denominator int) int {
 	return value/denominator*numerator + value%denominator*numerator/denominator
 }
 
-func atOrAbovePercent(value, total, pct int) bool {
-	return value >= percentCeil(total, pct)
-}
-
-func atOrBelowPercent(value, total, pct int) bool {
-	return value <= percentFloor(total, pct)
-}
-
 // retentionTrimMarker is the idempotency sentinel left in a tool result the
 // retention pass has already shrunk, so repeated passes never re-trim it.
 const retentionTrimMarker = "[older tool output trimmed"

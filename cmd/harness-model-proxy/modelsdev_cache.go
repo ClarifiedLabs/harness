@@ -117,7 +117,7 @@ func backupExistingModelsDevCache(path string) error {
 	if err != nil {
 		return fmt.Errorf("read previous models.dev cache for backup: %w", err)
 	}
-	backupPath := filepath.Join(filepath.Dir(path), modelsDevCacheBackupFilename)
+	backupPath := modelsDevCacheBackupPath(filepath.Dir(path))
 	if err := writeBytesAtomic(backupPath, data, false); err != nil {
 		return fmt.Errorf("write previous models.dev cache backup: %w", err)
 	}

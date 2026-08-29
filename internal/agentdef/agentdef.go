@@ -160,12 +160,6 @@ func defaultTools() []string {
 	return append(names, "update_todos", "record_plan", "delegate", "background_jobs")
 }
 
-// DefaultTools returns the default allowed-tool set that auto/independent and
-// any config agent without an explicit allowed_tools list inherit. main uses it
-// to detect default-inheriting agents when extending them with discovered MCP
-// tools.
-func DefaultTools() []string { return defaultTools() }
-
 // Resolve merges config-file agent entries onto the built-ins and returns the
 // full agent set. Merge is field-level: a non-empty field replaces, an empty
 // field inherits (from the built-in of the same name, or from the defaults for

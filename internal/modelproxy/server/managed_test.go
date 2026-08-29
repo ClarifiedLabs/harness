@@ -814,19 +814,3 @@ func TestUpdateModelsDevCatalogConcurrentWithRequests(t *testing.T) {
 	}
 	close(done)
 }
-
-func TestModelsDevPriceLookup(t *testing.T) {
-	md := modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 3, Output: 5})
-	if price, ok := modelsDevPrice(md, "testai", "alpha"); !ok || !price.Equal(llm.Price{Input: 3, Output: 5}) {
-		t.Fatalf("modelsDevPrice(testai/alpha) = %+v, %v; want {3,5}, true", price, ok)
-	}
-	if _, ok := modelsDevPrice(md, "testai", "missing"); ok {
-		t.Fatalf("modelsDevPrice for unknown model = ok, want not ok")
-	}
-	if _, ok := modelsDevPrice(md, "other", "alpha"); ok {
-		t.Fatalf("modelsDevPrice for unknown provider = ok, want not ok")
-	}
-	if _, ok := modelsDevPrice(nil, "testai", "alpha"); ok {
-		t.Fatalf("modelsDevPrice with nil catalog = ok, want not ok")
-	}
-}

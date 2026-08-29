@@ -396,17 +396,6 @@ func DefaultWithOptions(opts Options) *Registry {
 // order. Agent definitions use it as the baseline allowed-tool list.
 func DefaultNames() []string { return Default().Names() }
 
-func DefaultNamesWithOptions(opts Options) []string {
-	return DefaultWithOptions(opts).Names()
-}
-
-// Catalog returns the process-wide registry that agents select subsets from.
-// It currently matches the Default set; coordination and discovered MCP/LSP
-// tools are registered on top of it at runtime.
-func Catalog() *Registry {
-	return CatalogWithOptions(Options{})
-}
-
 // CatalogWithOptions returns the process-wide tool catalog with configurable
 // limits.
 func CatalogWithOptions(opts Options) *Registry {

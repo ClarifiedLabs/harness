@@ -299,7 +299,3 @@ func sortProviders(providers []Provider) {
 		return providers[i].ID < providers[j].ID
 	})
 }
-
-func normalizeURL(s string) string {
-	return strings.TrimRight(strings.ToLower(strings.TrimSpace(s)), "/")
-}

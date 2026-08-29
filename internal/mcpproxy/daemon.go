@@ -51,12 +51,6 @@ func NewDaemon(cfg Config, logger *slog.Logger) *Daemon {
 	return NewDaemonWithOptions(cfg, logger, DaemonOptions{})
 }
 
-// NewDaemonWithAPIKeys builds a daemon using the supplied dynamic API-key store
-// for HTTP authentication. A nil store disables auth until the caller updates it.
-func NewDaemonWithAPIKeys(cfg Config, logger *slog.Logger, apiKeys *apikey.DynamicStore) *Daemon {
-	return NewDaemonWithOptions(cfg, logger, DaemonOptions{APIKeys: apiKeys})
-}
-
 // NewDaemonWithOptions builds a daemon and pre-registers the MCP tool-call metric
 // families when a metrics registry is supplied. RunStdio intentionally ignores
 // the collectors even when options include them.

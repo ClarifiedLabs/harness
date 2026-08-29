@@ -559,19 +559,11 @@ func (e *promptLineEditor) viApplyRange(s *lineEditState, op viOperator, start, 
 	}
 }
 
-func (e *promptLineEditor) viDeleteChar(s *lineEditState) {
-	e.viDeleteChars(s, 1)
-}
-
 func (e *promptLineEditor) viDeleteChars(s *lineEditState, count int) {
 	if len(s.buf) == 0 || count <= 0 {
 		return
 	}
 	e.viApplyRange(s, viOpDelete, s.cursor, s.cursor+count)
-}
-
-func (e *promptLineEditor) viDeleteBefore(s *lineEditState) {
-	e.viDeleteBeforeCount(s, 1)
 }
 
 func (e *promptLineEditor) viDeleteBeforeCount(s *lineEditState, count int) {

@@ -5740,13 +5740,6 @@ type pendingOTelTool struct {
 	input    json.RawMessage
 }
 
-func (s *accumulatingSink) pendingToolInputs(id string) json.RawMessage {
-	if p, ok := s.pendingOTel[id]; ok {
-		return p.input
-	}
-	return nil
-}
-
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := &accumulatingSink{
 		r: r, app: app, prompt: prompt,

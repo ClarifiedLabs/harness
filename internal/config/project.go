@@ -68,16 +68,6 @@ func findProjectConfig(startDir string) (string, error) {
 	return "", nil
 }
 
-// findProjectConfigFromWD is the production entry point that uses the
-// process working directory. It is separated for testability.
-func findProjectConfigFromWD() (string, error) {
-	wd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	return findProjectConfig(wd)
-}
-
 func isExplicitConfig(flags *flagState, lookup func(string) (string, bool)) bool {
 	if flags != nil {
 		if vals := flags.invocation["config"]; len(vals) > 0 {

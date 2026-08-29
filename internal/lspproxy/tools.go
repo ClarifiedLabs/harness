@@ -21,27 +21,6 @@ var CoreTools = []string{
 	"implementation",
 }
 
-var coreToolSet = map[string]bool{
-	"definition":        true,
-	"references":        true,
-	"diagnostics":       true,
-	"document_symbols":  true,
-	"workspace_symbols": true,
-	"implementation":    true,
-}
-
-// IsCoreTool reports whether name (bare, without lsp_ prefix) is in the core set.
-func IsCoreTool(name string) bool { return coreToolSet[name] }
-
-// AllToolNames returns the bare names of all registered LSP tools in stable order.
-func AllToolNames() []string {
-	out := make([]string, 0, len(toolSpecs))
-	for _, s := range toolSpecs {
-		out = append(out, s.name)
-	}
-	return out
-}
-
 // toolSpec is the static definition of one exposed tool.
 type toolSpec struct {
 	name        string

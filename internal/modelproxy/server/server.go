@@ -862,29 +862,6 @@ func configuredTargetCount(providers []llm.ProviderConfig) int {
 	return count
 }
 
-// modelsDevPrice bridges a models.dev catalog price into an llm.Price for one
-// provider/model. This is the single point where the proxy crosses from
-// modelsdev to llm pricing, keeping internal/llm free of a modelsdev import.
-func modelsDevPrice(md *modelcatalog.Catalog, providerID, modelID string) (llm.Price, bool) {
-	info, ok := modelsDevModelInfo(md, providerID, modelID)
-	return info.Price, ok
-}
-
-func modelsDevModelInfo(md *modelcatalog.Catalog, providerID, modelID string) (llm.ModelInfo, bool) {
-	if md == nil {
-		return llm.ModelInfo{}, false
-	}
-	provider, ok := md.Provider(providerID)
-	if !ok {
-		return llm.ModelInfo{}, false
-	}
-	info, ok := provider.ModelInfo(modelID)
-	if !ok {
-		return llm.ModelInfo{}, false
-	}
-	return info, true
-}
-
 // providerConfigSourceDate returns the newest modification time among the
 // configured provider files. It dates manual prices (which live in those files)
 // and returns the zero time when no file can be stat'd. Managed prices are dated
@@ -999,13 +976,6 @@ func (h *Handler) recordUsage(targetID string, u llm.Usage, cost float64) {
 	acc.CacheWrite1hTokens += int64(u.CacheWrite1hTokens)
 	acc.ReasoningTokens += int64(u.ReasoningTokens)
 	acc.CostUSD += cost
-}
-
-// usageSnapshot returns a copy of the accumulated usage, sorted by
-// provider:model for deterministic output. It omits per-key budget state because
-// no authenticated request is available.
-func (h *Handler) usageSnapshot() protocol.UsageReport {
-	return h.usageSnapshotForRequest(nil)
 }
 
 func (h *Handler) usageSnapshotForRequest(r *http.Request) protocol.UsageReport {

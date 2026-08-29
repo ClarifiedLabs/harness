@@ -101,32 +101,6 @@ func runLSPServe(env environment, invocation cli.Invocation) int {
 	return ui.ExitOK
 }
 
-func lspUsage(w io.Writer, getenv func(string) string) {
-	if getenv == nil {
-		getenv = os.Getenv
-	}
-	fmt.Fprint(w, `harness lsp - generic LSP-to-MCP shim
-
-Usage:
-  harness lsp serve   [-config path] [-namespace ns] [-log path] [-log-level level] [-log-format format]
-  harness lsp version
-  harness lsp --version
-
-Subcommands:
-	  serve     Run the shim: launch configured language servers on demand and serve
-	            their code-intelligence tools over MCP on stdin/stdout. Logs go to stderr
-            (or -log); stdout carries the MCP protocol.
-  version   Print the release version and MCP protocol revision.
-
-serve flags:
-  -config path      config file (default: `+lspproxy.DefaultConfigPath(getenv)+`)
-  -namespace ns     tools are exposed as mcp__<ns>__<tool> (default: lsp; empty for bare names behind a proxy)
-  -log path         log file (default: stderr)
-  -log-level level  debug|info|warn|error (default: info)
-  -log-format fmt   json|text (default: json)
-`)
-}
-
 func resolveLSPConfigPath(flagValue string, explicit bool, getenv func(string) string) string {
 	if getenv == nil {
 		getenv = os.Getenv

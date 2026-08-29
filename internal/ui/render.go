@@ -1689,9 +1689,6 @@ func contextPercent(ctx agent.ContextEstimate) int { return sessionrec.ContextPe
 
 func contextUsed(ctx agent.ContextEstimate) int { return sessionrec.ContextUsed(ctx) }
 
-// cacheHitRatio is the percentage of input tokens served from cache (r15).
-func cacheHitRatio(u llm.Usage) float64 { return sessionrec.CacheHitRatio(u) }
-
 // delegateProgressSnapshot type-asserts an opaque `any` to the concrete
 // func() agent.DelegateProgressSnapshot closure carried through tools/background
 // (which cannot import agent) and invokes it. ok is false when the value is nil
@@ -1969,7 +1966,6 @@ func (r *Renderer) markAssistantTextVisibleLocked() {
 func formatToolArgs(name string, input json.RawMessage, cwd string) string {
 	return sessionrec.FormatToolArgs(name, input, cwd)
 }
-func resultSummary(result llm.ToolResult) string { return sessionrec.ResultSummary(result) }
 func richImageMetadata(image llm.ContentBlock) string {
 	return sessionrec.RichImageMetadata(image)
 }
@@ -1993,6 +1989,25 @@ func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKno
 func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {
 	return sessionrec.TurnUsageLine(u, elapsed, promptElapsed)
 }
+
+// snippet returns the first snippetLines lines of s for the verbose preview.
+func snippet(s string) []string {
+	if s == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
+	if len(lines) > snippetLines {
+		lines = lines[:snippetLines]
+	}
+	return lines
+}
+
+func firstLine(s string) string { return sessionrec.FirstLine(s) }
+
+func clip(s string, max int) string { return sessionrec.Clip(s, max) }
+
+// humanTokens renders a token count compactly: 12400 -> "12.4k".
+func humanTokens(n int) string { return sessionrec.HumanTokens(n) }
 
 func largeRequestWarning(ctx agent.ContextEstimate) string {
 	if ctx.Total == 0 && ctx.PayloadTotal == 0 && ctx.Tools == 0 {
@@ -2022,30 +2037,3 @@ func largeRequestWarning(ctx agent.ContextEstimate) string {
 		humanTokens(ctx.Total), humanTokens(ctx.Window), humanTokens(payload),
 		humanTokens(ctx.System), humanTokens(ctx.Tools), humanTokens(ctx.Messages), note)
 }
-
-func turnPhrase(n int) string { return sessionrec.TurnPhrase(n) }
-
-// snippet returns the first snippetLines lines of s for the verbose preview.
-func snippet(s string) []string {
-	if s == "" {
-		return nil
-	}
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(lines) > snippetLines {
-		lines = lines[:snippetLines]
-	}
-	return lines
-}
-
-func firstLine(s string) string { return sessionrec.FirstLine(s) }
-
-// countLines counts text lines: a trailing newline does not add an empty line.
-func countLines(s string) int { return sessionrec.CountLines(s) }
-
-func clip(s string, max int) string { return sessionrec.Clip(s, max) }
-
-// humanTokens renders a token count compactly: 12400 -> "12.4k".
-func humanTokens(n int) string { return sessionrec.HumanTokens(n) }
-
-// humanDuration renders an elapsed turn duration: "4.3s" or "850ms".
-func humanDuration(d time.Duration) string { return sessionrec.HumanDuration(d) }

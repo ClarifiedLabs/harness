@@ -30,7 +30,7 @@ func TestResolveServiceTierAliasAndModelOverride(t *testing.T) {
 	if !ok || got.ID != "priority" {
 		t.Fatalf("ResolveServiceTier(fast) = %+v, %v", got, ok)
 	}
-	if ServiceTierSupported("flex", tiers) {
+	if _, ok := ResolveServiceTier("flex", tiers); ok {
 		t.Fatal("provider tier should be replaced by model override")
 	}
 }

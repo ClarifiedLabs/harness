@@ -2,11 +2,9 @@ package modelcatalog
 
 import (
 	"bytes"
-	"context"
 	_ "embed"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 
 	"harness/internal/llm"
@@ -111,15 +109,6 @@ func DecodeCodexReleaseVersion(data []byte) (string, error) {
 // Codex release as CodexClientVersion.
 func CodexModelsURL() string {
 	return codexRepositoryRawURL + "/rust-v" + CodexClientVersion() + "/" + codexModelsPath
-}
-
-// FetchCodexModelsData downloads the OpenAI Codex model catalog and returns its
-// raw JSON body. A nil client uses the default HTTP client.
-func FetchCodexModelsData(ctx context.Context, client *http.Client, url string) ([]byte, error) {
-	if url == "" {
-		url = CodexModelsURL()
-	}
-	return fetchCatalogData(ctx, client, url, "OpenAI Codex model catalog")
 }
 
 // DecodeCodexModels parses an OpenAI Codex model catalog and converts its

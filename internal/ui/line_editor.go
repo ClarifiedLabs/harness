@@ -346,11 +346,7 @@ func (e *promptLineEditor) resetPromptCursorShape(w io.Writer) error {
 // where the text typed while the model ran is handed back for review/edit before
 // the user submits it manually (during-prompt input).
 func (e *promptLineEditor) readPrefilled(prompt, prefill string) (replInput, bool, error) {
-	return e.readPrefilledClassified(prompt, prefill, false)
-}
-
-func (e *promptLineEditor) readPrefilledClassified(prompt, prefill string, purePaste bool) (replInput, bool, error) {
-	return e.readPrefilledWithPasteState(prompt, prefill, purePaste, nil)
+	return e.readPrefilledWithPasteState(prompt, prefill, false, nil)
 }
 
 func (e *promptLineEditor) readPrefilledWithPasteState(prompt, prefill string, purePaste bool, summaries []pasteSummary) (replInput, bool, error) {

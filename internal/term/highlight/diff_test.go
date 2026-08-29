@@ -6,7 +6,7 @@ import (
 )
 
 func TestDiffAddedLineGoContent(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	line := `+func main() { println("hi") }`
 	got := d.Line(line)
 
@@ -39,7 +39,7 @@ func TestDiffBackgroundsAreCodexPalette(t *testing.T) {
 }
 
 func TestDiffRemovedLineTint(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	got := d.Line(`-return "x"`)
 	if !strings.HasPrefix(got, bgRemoved) {
 		t.Errorf("removed line missing background prefix: %q", got)
@@ -54,7 +54,7 @@ func TestDiffRemovedLineTint(t *testing.T) {
 // erase-to-EOL (emitted under the still-active background) plus a reset, so
 // the tint spans the full row and no color bleeds into the next line.
 func TestDiffBackgroundIntegrity(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	for _, tc := range []struct{ line, bg string }{
 		{`+func f() string { return "x" } // done`, bgAdded},
 		{`-func f() string { return "x" } // done`, bgRemoved},
@@ -79,7 +79,7 @@ func TestDiffBackgroundIntegrity(t *testing.T) {
 // background, not via padding spaces, so the emitted bytes carry no trailing
 // blanks and window-shrink reflow has nothing to wrap.
 func TestDiffTintErasesToEndOfLine(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	got := d.Line("+")
 	want := bgAdded + styleAdded + "+" + styleReset + bgAdded + eraseToEOL + styleReset
 	if got != want {
@@ -91,7 +91,7 @@ func TestDiffTintErasesToEndOfLine(t *testing.T) {
 }
 
 func TestDiffHeadersAndContextHaveNoBackground(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	headers := []string{
 		"--- a/main.go",
 		"+++ b/main.go",
@@ -145,7 +145,7 @@ func TestDiffBodyLinesThatResembleFileHeaders(t *testing.T) {
 	}
 
 	t.Run("displayed diff", func(t *testing.T) {
-		d := NewDiff("cpp")
+		d := NewDiffWithTheme("cpp", ThemeDark)
 		for _, line := range headers {
 			d.Line(line)
 		}
@@ -198,7 +198,7 @@ func TestDiffFenceRecognizesHeadersAfterCompletedHunk(t *testing.T) {
 }
 
 func TestDiffResetsSyntaxStateBetweenFiles(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	for _, line := range []string{
 		"--- a/one.go",
 		"+++ b/one.go",
@@ -221,7 +221,7 @@ func TestDiffResetsSyntaxStateBetweenFiles(t *testing.T) {
 }
 
 func TestDiffKeepsOldAndNewMultiLineStateSeparate(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	for _, line := range []string{
 		"--- a/state.go",
 		"+++ b/state.go",
@@ -249,7 +249,7 @@ func TestDiffKeepsOldAndNewMultiLineStateSeparate(t *testing.T) {
 }
 
 func TestDiffMultiLineCommentState(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	d.Line(" /*")
 	got := d.Line("+still comment */")
 	if !strings.Contains(got, styleComment+"still comment */") {
@@ -263,7 +263,7 @@ func TestDiffMultiLineCommentState(t *testing.T) {
 // Non-content lines (hunk metadata, "\ No newline at end of file") must not
 // disturb a pending multi-line construct.
 func TestDiffNonContentLinesDoNotDisturbState(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	d.Line("+/* open")
 	if got := d.Line(`\ No newline at end of file`); got != `\ No newline at end of file` {
 		t.Errorf("non-content line should pass through plain: %q", got)
@@ -276,7 +276,7 @@ func TestDiffNonContentLinesDoNotDisturbState(t *testing.T) {
 }
 
 func TestDiffUnknownLanguage(t *testing.T) {
-	d := NewDiff("definitely-not-a-language")
+	d := NewDiffWithTheme("definitely-not-a-language", ThemeDark)
 	got := d.Line("+plain func text")
 
 	if !strings.HasPrefix(got, bgAdded) {
@@ -296,7 +296,7 @@ func TestDiffUnknownLanguage(t *testing.T) {
 }
 
 func TestDiffEmptyLanguage(t *testing.T) {
-	d := NewDiff("")
+	d := NewDiffWithTheme("", ThemeDark)
 	got := d.Line("-gone")
 	if !strings.HasPrefix(got, bgRemoved) || !strings.Contains(got, bgRemoved+"gone"+eraseToEOL+styleReset) {
 		t.Errorf("empty language should tint with plain content: %q", got)
@@ -313,7 +313,7 @@ func TestDiffNilState(t *testing.T) {
 }
 
 func TestDiffSigilOnlyLines(t *testing.T) {
-	d := NewDiff("go")
+	d := NewDiffWithTheme("go", ThemeDark)
 	if got := d.Line("+"); !strings.Contains(got, bgAdded) || stripANSI(got) != "+" {
 		t.Errorf("lone + should be tinted and byte-preserving: %q", got)
 	}

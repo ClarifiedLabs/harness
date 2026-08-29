@@ -17,12 +17,6 @@ type PickerEntry interface {
 	PickerName() string
 }
 
-// ProviderPickerEntry is a PickerEntry that can render a provider model count.
-type ProviderPickerEntry interface {
-	PickerEntry
-	PickerModelCount() int
-}
-
 // ModelPickerEntry is a PickerEntry that can render model pricing.
 type ModelPickerEntry interface {
 	PickerEntry
@@ -166,21 +160,6 @@ func ResolvePickerSelection[T PickerEntry](items []T, input string) (selected T,
 	}
 	var zero T
 	return zero, prefix, false
-}
-
-// PrintProviderPickerPage renders the provider picker rows used by setup and
-// the REPL /model command.
-func PrintProviderPickerPage[T ProviderPickerEntry](w io.Writer, providers []T, page, pageSize int, filter string) {
-	start, end := PickerPageBounds(page, pageSize, len(providers))
-	title := fmt.Sprintf("Providers %d-%d of %d", start+1, end, len(providers))
-	if filter != "" {
-		title += fmt.Sprintf(" matching %q", filter)
-	}
-	fmt.Fprintln(w, title)
-	for i := start; i < end; i++ {
-		provider := providers[i]
-		fmt.Fprintf(w, "%4d. %-28s %5d models  %s\n", i+1, provider.PickerID(), provider.PickerModelCount(), provider.PickerName())
-	}
 }
 
 // PrintModelPickerPage renders the model target picker rows used at startup and
