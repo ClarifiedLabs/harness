@@ -108,6 +108,16 @@ func TestDefaultToolTimeout(t *testing.T) {
 	}
 }
 
+func TestDefaultDelegateMaxActive(t *testing.T) {
+	result := load(t, nil, nil, filepath.Join(t.TempDir(), "missing.json"))
+	if got := result.Config.DelegateMaxActive; got != 8 {
+		t.Fatalf("DelegateMaxActive = %d, want 8", got)
+	}
+	if got := result.Sources["delegate_max_active"].Kind; got != configmeta.SourceDefault {
+		t.Fatalf("delegate_max_active source = %v, want default", got)
+	}
+}
+
 func TestRootMetaFlagsShortCircuitConfigResolution(t *testing.T) {
 	invalidConfig := writeConfig(t, `{"unknown_setting":true}`)
 	tests := []struct {
@@ -303,6 +313,7 @@ func TestReadLimitsPrecedence(t *testing.T) {
 func TestRemovedParametersAreUnavailable(t *testing.T) {
 	oldKeys := []string{
 		"trajectory_context",
+		"delegate_max_descendants",
 		"read_file_default_limit",
 		"read_file_result_max_bytes",
 		"read_file_result_max_lines",

@@ -2439,9 +2439,7 @@ this subsection records the runner that surface points at.
   cancellation receive host/unavailable provenance. `ChildMeta.Completion`
   stores outcome, optional blockers, contract/source provenance, and validation
   status beside lifecycle status. Each continuation writes an independent
-  report. Receipts also report the root descendant budget (e.g. `3 of 16
-  descendant slots remaining`); non-positive settings select the default
-  4-active/16-total limits.
+  report.
 - `continue_child_id` names an already-terminal child of the same immediate
   parent. Continuation never appends to or overwrites the source directory: the
   Runner creates a fresh child seeded with the source transcript, private TODO
@@ -2469,9 +2467,9 @@ this subsection records the runner that surface points at.
   the before/after/window estimates. Foreground and background paths apply the
   same contract.
 - The runner owns one root-shared budget coordinator that atomically enforces
-  `delegate_max_active` and `delegate_max_descendants` across recursive and
-  background launches; a continuation reuses its logical descendant slot and
-  all terminal paths release active capacity.
+  `delegate_max_active` across direct, recursive, and background launches
+  (default `8`). All terminal paths release active capacity; completed
+  descendants have no lifetime cap.
 - Background launches resolve scope before scheduling: built-in
   `explore`/`plan`/`review` default to shared `read_only` access,
   `auto`/`independent` to `exclusive`, `mode:"implementation"` is always

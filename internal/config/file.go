@@ -77,7 +77,6 @@ type fileConfig struct {
 	DelegateMaxTurns              optional[int]                        `json:"delegate_max_turns"`
 	DelegateMaxDepth              optional[int]                        `json:"delegate_max_depth"`
 	DelegateMaxActive             optional[int]                        `json:"delegate_max_active"`
-	DelegateMaxDescendants        optional[int]                        `json:"delegate_max_descendants"`
 	DelegateOutput                optional[string]                     `json:"delegate_output"`
 	DelegateTmux                  optional[bool]                       `json:"delegate_tmux"`
 	DelegateTmuxMaxWindows        optional[int]                        `json:"delegate_tmux_max_windows"`

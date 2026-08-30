@@ -1184,10 +1184,9 @@ func writeSessionStats(w io.Writer, report statsReport) {
 		fmt.Fprintln(w)
 	}
 	if state.Runtime.SearchBackend != "" {
-		fmt.Fprintf(w, "  runtime: retention=%s context=%d search=%s delegate-max=%d active=%d descendants=%d prewarm=%t\n",
+		fmt.Fprintf(w, "  runtime: retention=%s context=%d search=%s delegate-max=%d active=%d prewarm=%t\n",
 			state.Runtime.RetentionPolicy, state.Runtime.ContextWindow, state.Runtime.SearchBackend,
-			state.Runtime.DelegateMaxTurns, state.Runtime.DelegateMaxActive, state.Runtime.DelegateMaxDescendants,
-			state.Runtime.Prewarm)
+			state.Runtime.DelegateMaxTurns, state.Runtime.DelegateMaxActive, state.Runtime.Prewarm)
 	}
 }
 

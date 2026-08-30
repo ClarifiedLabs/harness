@@ -590,8 +590,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `compact_tool_result_max_bytes` | `integer` | - | - | - | `compact_tool_result_max_bytes` | 0 (automatic; negative disables truncation) | no | Harness compact tool result max bytes setting. |
 | `delegate_max_turns` | `integer` | - | - | - | `delegate_max_turns` | 20 | no | Harness delegate max turns setting. |
 | `delegate_max_depth` | `integer` | - | - | - | `delegate_max_depth` | 3 | no | Harness delegate max depth setting. |
-| `delegate_max_active` | `integer` | - | - | - | `delegate_max_active` | 4 | no | Harness delegate max active setting. |
-| `delegate_max_descendants` | `integer` | - | - | - | `delegate_max_descendants` | 16 | no | Harness delegate max descendants setting. |
+| `delegate_max_active` | `integer` | - | - | - | `delegate_max_active` | 8 | no | Harness delegate max active setting. |
 | `delegate_output` | `string` | `status`, `off`, `lines` | `-delegate-output` | `HARNESS_DELEGATE_OUTPUT` | `delegate_output` | "status" | no | Harness delegate output setting. |
 | `delegate_tmux` | `boolean` | `true`, `false` | `-delegate-tmux` | `HARNESS_DELEGATE_TMUX` | `delegate_tmux` | derived: enabled inside tmux | no | Harness delegate tmux setting. |
 | `delegate_tmux_max_windows` | `integer` | - | - | - | `delegate_tmux_max_windows` | 4 | no | Harness delegate tmux max windows setting. |
@@ -693,10 +692,11 @@ environment variables, JSON paths, types, and defaults. The concise
   `read_file_*`, `rg_result_*`, and `grep_result_*` settings are removed; strict
   config decoding rejects them rather than silently ignoring a stale limit. The delegate
   tool also has config-file-only `delegate_max_turns` (maximum per-child
-  tool-enabled loop budget)
-  `delegate_max_depth` (recursive depth cap, root depth `0`),
-  `delegate_max_active`, and `delegate_max_descendants`. Continuations reuse
-  their existing descendant slot.
+  tool-enabled loop budget), `delegate_max_depth` (recursive depth cap, root
+  depth `0`), and `delegate_max_active` (root-wide simultaneous descendant cap,
+  default `8`). Completed descendants have no lifetime cap. The former
+  `delegate_max_descendants` setting is removed; strict config decoding rejects
+  that obsolete key.
   `delegate_output` / `HARNESS_DELEGATE_OUTPUT` / `-delegate-output` accepts
   `status` (the default one-row TTY display), `off` (no delegate-specific UI),
   and `lines` (the status row on a TTY plus curated scrolling child activity on

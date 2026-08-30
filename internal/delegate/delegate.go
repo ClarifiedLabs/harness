@@ -33,8 +33,7 @@ import (
 const DefaultMaxTurns = 20
 const DefaultForegroundTimeout = 2 * time.Hour
 const DefaultMaxDepth = 3
-const DefaultMaxActiveDescendants = 4
-const DefaultMaxTotalDescendants = 16
+const DefaultMaxActiveDescendants = 8
 const maxAgentDescriptionBytes = 160
 
 const delegateToolName = "delegate"
@@ -134,7 +133,6 @@ type Options struct {
 	MaxTurns                  int
 	MaxDepth                  int
 	MaxActiveDescendants      int
-	MaxTotalDescendants       int
 	CompactKeepTurns          int
 	CompactKeepTokens         int
 	CompactTriggerPercent     int
@@ -251,25 +249,20 @@ func NewRunner(snapshot func() Runtime, resolve func(Runtime, string) (Launch, e
 }
 
 type delegateBudget struct {
-	mu                  sync.Mutex
-	active              int
-	total               int
-	known               map[string]bool
-	maxActive, maxTotal int
+	mu        sync.Mutex
+	active    int
+	maxActive int
 }
 
 func newDelegateBudget(opts Options) *delegateBudget {
-	maxActive, maxTotal := opts.MaxActiveDescendants, opts.MaxTotalDescendants
+	maxActive := opts.MaxActiveDescendants
 	if maxActive <= 0 {
 		maxActive = DefaultMaxActiveDescendants
 	}
-	if maxTotal <= 0 {
-		maxTotal = DefaultMaxTotalDescendants
-	}
-	return &delegateBudget{known: make(map[string]bool), maxActive: maxActive, maxTotal: maxTotal}
+	return &delegateBudget{maxActive: maxActive}
 }
 
-func (b *delegateBudget) acquire(logicalID string, continuation bool) (func(), error) {
+func (b *delegateBudget) acquire() (func(), error) {
 	if b == nil {
 		return func() {}, nil
 	}
@@ -278,29 +271,9 @@ func (b *delegateBudget) acquire(logicalID string, continuation bool) (func(), e
 	if b.active >= b.maxActive {
 		return nil, fmt.Errorf("delegate root active descendant limit %d reached", b.maxActive)
 	}
-	isNew := !continuation && !b.known[logicalID]
-	if isNew && b.total >= b.maxTotal {
-		return nil, fmt.Errorf("delegate root total descendant limit %d reached", b.maxTotal)
-	}
 	b.active++
-	if isNew {
-		b.known[logicalID] = true
-		b.total++
-	}
 	var once sync.Once
 	return func() { once.Do(func() { b.mu.Lock(); b.active--; b.mu.Unlock() }) }, nil
-}
-
-// remaining reports the root descendant slots still available. Runners always
-// have a budget: non-positive settings resolve to the 4-active/16-total defaults.
-// The nil guard only keeps a zero-value or test Runner safe.
-func (b *delegateBudget) remaining() (remaining, total int, ok bool) {
-	if b == nil {
-		return 0, 0, false
-	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.maxTotal - b.total, b.maxTotal, true
 }
 
 func (r *Runner) Rebind(snapshot func() Runtime) *Runner {
@@ -660,11 +633,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if childID == req.ContinueChildID {
 		return RunResult{}, fmt.Errorf("delegate continuation must use a fresh child id, not %q", childID)
 	}
-	logicalID := childID
-	if req.ContinueChildID != "" {
-		logicalID = req.ContinueChildID
-	}
-	releaseBudget, err := r.budget.acquire(logicalID, req.ContinueChildID != "")
+	releaseBudget, err := r.budget.acquire()
 	if err != nil {
 		return RunResult{}, err
 	}
@@ -1022,9 +991,6 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		if usage.WorkflowStatus.ExpectedWait {
 			report += " (expected wait)"
 		}
-	}
-	if remaining, total, ok := r.budget.remaining(); ok {
-		report += fmt.Sprintf(", %d of %d descendant slots remaining", remaining, total)
 	}
 	if childDir != "" {
 		report += fmt.Sprintf(", transcript %s", childDir)

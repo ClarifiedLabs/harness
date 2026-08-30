@@ -124,7 +124,6 @@ type RuntimeProfile struct {
 	NativeCompaction          bool   `json:"native_compaction,omitempty"`
 	DelegateMaxTurns          int    `json:"delegate_max_turns,omitempty"`
 	DelegateMaxActive         int    `json:"delegate_max_active,omitempty"`
-	DelegateMaxDescendants    int    `json:"delegate_max_descendants,omitempty"`
 	Prewarm                   bool   `json:"prewarm,omitempty"`
 	SearchBackend             string `json:"search_backend,omitempty"`
 	StagnationNudge           bool   `json:"stagnation_nudge,omitempty"`
