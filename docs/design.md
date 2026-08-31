@@ -2836,8 +2836,9 @@ request implementation; `/handoff` is a user command (§10, §14).
   `failed` for signal-killed or unclassified exits, `cancelled`, `timed out`),
   partial-run progress (`ran x/y, skipped m`), and background launches as
   `background job <id> (<access> @ <resource>) → started`; command failures
-  keep the projection because the status segment is the point, while
-  tool/dispatch errors (`IsError`) and undecodable inputs fall back to the
+  keep the projection because the status segment is the point. Tool/dispatch
+  errors (`IsError`) retain the same decoded command label followed by the
+  canonical `→ error: ...` summary; only undecodable inputs fall back to the
   detailed form. The outcome segment reads the diagnostics command-outcome
   metrics: every non-error `shell` result carries `command_outcome_available`
   (background launch receipts report the launch itself as `command_succeeded`),

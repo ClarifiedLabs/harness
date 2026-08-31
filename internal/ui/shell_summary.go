@@ -215,12 +215,18 @@ func shellProgressSegment(result llm.ToolResult) string {
 // is true when the projection applies; callers fall back to the canonical
 // detailed line otherwise.
 func (r *Renderer) conciseShellResultLine(call llm.ToolCall, result llm.ToolResult) (string, bool) {
-	if !r.conciseShell || r.verbose || call.Name != "shell" || result.IsError {
+	if !r.conciseShell || r.verbose || call.Name != "shell" {
 		return "", false
 	}
 	view, ok := decodeShellCallView(call.Input)
 	if !ok {
 		return "", false
+	}
+	if result.IsError {
+		// Dispatch errors do not carry shell's command-outcome metrics. Keep the
+		// truthful error summary, but use the same decoded command label as every
+		// other shell result instead of falling back to raw argument JSON.
+		return fmt.Sprintf("[shell] %s → %s", shellLabel(view), sessionrec.ResultSummary(result)), true
 	}
 	if result.BackgroundJobID != "" {
 		// Launch receipts carry the outcome contract like every non-error

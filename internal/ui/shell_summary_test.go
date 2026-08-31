@@ -213,10 +213,20 @@ func TestConciseShellResultLineForms(t *testing.T) {
 			want:   "[shell] → 3B",
 		},
 		{
-			name:   "error result falls back to detailed",
+			name:   "error result keeps concise command label",
 			input:  `{"argv":["make","test"]}`,
 			result: llm.ToolResult{ForID: "c", Text: "boom", IsError: true},
-			want:   `[shell] argv=["make","test"] → error: boom`,
+			want:   `[shell] make test → error: boom`,
+		},
+		{
+			name: "cancelled steps keep concise command labels",
+			input: `{"steps":[` +
+				`{"argv":["sleep","10"]},{"argv":["echo","done"]}],` +
+				`"output_mode":"full","stop_on_failure":true}`,
+			result: llm.ToolResult{
+				ForID: "c", Text: "context canceled", IsError: true, ErrorKind: llm.ToolErrorCancelled,
+			},
+			want: `[shell] steps=2 sleep 10; echo done → error: context canceled`,
 		},
 	}
 
