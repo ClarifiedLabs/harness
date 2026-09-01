@@ -2581,10 +2581,13 @@ delegates.
   completion, including partial usage from failed or canceled runs; child
   compactions remain child-session metadata.
 - Terminal notice delivery, completion context, diagnostics, and usage drains
-  are independent exactly-once channels. The UI applies exit-summary
-  formatting only to delegates (with a `child session` label), then persists
-  and mirrors the text; interactive JSON receives it as a normal `notice`
-  event, and one-shot mode retains only its final aggregate session summary.
+  are independent exactly-once channels. Notices print as jobs finish:
+  immediately above an idle prompt through the manager change signal, or at
+  turn boundaries and prompt completion during a run. They precede the
+  todo/plan/usage prompt-status block. The UI applies exit-summary formatting
+  only to delegates (with a `child session` label), then persists and mirrors
+  the text; interactive JSON receives it as a normal `notice` event, and
+  one-shot mode retains only its final aggregate session summary.
 - Background jobs run in the same cwd/tool policy as ordinary tools. Resource
   leases coordinate opted-in local background work; they do not sandbox paths
   or serialize foreground filesystem edits.

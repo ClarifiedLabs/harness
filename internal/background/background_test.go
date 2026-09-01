@@ -33,6 +33,63 @@ func TestJobsToolOnlyCancelRequiresSequentialDispatch(t *testing.T) {
 	}
 }
 
+func TestManagerChangedSignalsStartAndCompletion(t *testing.T) {
+	m := NewManager(Options{})
+	beforeStart := m.Changed()
+	select {
+	case <-beforeStart:
+		t.Fatal("Changed channel is closed before a job-table change")
+	default:
+	}
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	job, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "done"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	select {
+	case <-beforeStart:
+	case <-time.After(time.Second):
+		t.Fatal("Changed channel did not close on job start")
+	}
+
+	afterStart := m.Changed()
+	select {
+	case <-afterStart:
+		t.Fatal("re-fetched Changed channel is closed before job completion")
+	default:
+	}
+	select {
+	case <-startedRun:
+	case <-time.After(time.Second):
+		t.Fatal("background runner did not start")
+	}
+	close(release)
+	select {
+	case <-afterStart:
+	case <-time.After(time.Second):
+		t.Fatal("Changed channel did not close on job completion")
+	}
+	if done := waitJob(t, m, job.ID); done.Status != StatusCompleted {
+		t.Fatalf("job status = %q, want completed", done.Status)
+	}
+
+	afterCompletion := m.Changed()
+	select {
+	case <-afterCompletion:
+		t.Fatal("re-fetched Changed channel is closed without another change")
+	default:
+	}
+}
+
 func TestManagerStartBackgroundJobCompletesAndDrainsContext(t *testing.T) {
 	m := NewManager(Options{Now: func() time.Time {
 		return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC)

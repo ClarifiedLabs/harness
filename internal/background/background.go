@@ -419,6 +419,19 @@ func (m *Manager) DetachedWaitReady() <-chan struct{} {
 	return m.detachedReady
 }
 
+// Changed returns a channel closed on the next job-table state change
+// (start, finish, cancel, clear). To avoid missing a close-and-replace
+// broadcast, callers must fetch it before checking relevant manager state and
+// re-fetch it after each wake.
+func (m *Manager) Changed() <-chan struct{} {
+	if m == nil {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.changed
+}
+
 // DetachedWaitPending reports whether an unconsumed detached wait outcome is
 // available for request-context delivery.
 func (m *Manager) DetachedWaitPending() bool {

@@ -139,6 +139,35 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+// gatedBuffer blocks the first write containing needle until release closes.
+// Tests use it to force state changes at an exact output boundary without sleeps.
+type gatedBuffer struct {
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	needle  string
+	reached chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (b *gatedBuffer) Write(p []byte) (int, error) {
+	if strings.Contains(string(p), b.needle) {
+		b.once.Do(func() {
+			close(b.reached)
+			<-b.release
+		})
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *gatedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func newTestApp(t *testing.T, out, errw testWriter, fp *llmtest.FakeProvider) *App {
 	t.Helper()
 	stateDir := t.TempDir()
@@ -5132,6 +5161,266 @@ func TestREPLBackgroundDelegateNoticeIncludesChildStatsOnceAndPersists(t *testin
 	}
 	if persisted != 1 {
 		t.Fatalf("persisted enriched notices = %d, want 1; raw:\n%s", persisted, data)
+	}
+}
+
+func TestREPLBackgroundNoticeAppearsWhileIdle(t *testing.T) {
+	var out, errw lockedBuffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Prompt = "ready> "
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "idle completion"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	select {
+	case <-startedRun:
+	case <-time.After(time.Second):
+		t.Fatal("background runner did not start")
+	}
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+
+	close(release)
+	notice := fmt.Sprintf("[background: %s completed]", job.ID)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), notice) }, "background notice without submitted input")
+	if got := strings.Count(errw.String(), notice); got != 1 {
+		t.Fatalf("notice count while idle = %d, want 1; stderr:\n%s", got, errw.String())
+	}
+
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+	if got := strings.Count(errw.String(), notice); got != 1 {
+		t.Fatalf("final notice count = %d, want 1; stderr:\n%s", got, errw.String())
+	}
+}
+
+func TestREPLBackgroundNoticeDoesNotRaceIdleSubscription(t *testing.T) {
+	var out lockedBuffer
+	releasePrompt := make(chan struct{})
+	errw := &gatedBuffer{
+		needle:  "ready> ",
+		reached: make(chan struct{}),
+		release: releasePrompt,
+	}
+	app := newTestApp(t, &out, errw, llmtest.New("fake"))
+	app.Prompt = "ready> "
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	releaseJob := make(chan struct{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			<-releaseJob
+			return tools.BackgroundJobResult{Text: "raced completion"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	select {
+	case <-errw.reached:
+	case <-time.After(time.Second):
+		t.Fatal("REPL did not reach the prompt write")
+	}
+
+	// The old drain-then-subscribe order missed a completion in this exact
+	// window: the prompt boundary drain had run, but Changed had not been fetched.
+	close(releaseJob)
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(job.ID)
+		return ok && snapshot.Status == background.StatusCompleted
+	}, "background completion during prompt write")
+	close(releasePrompt)
+	notice := fmt.Sprintf("[background: %s completed]", job.ID)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), notice) }, "notice after raced idle completion")
+
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+}
+
+func TestREPLBackgroundNoticePrecedesPromptStatusBlock(t *testing.T) {
+	var out, errw lockedBuffer
+	modelBlocked := make(chan struct{})
+	releaseModel := make(chan struct{})
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("done")},
+		Stop:   llm.StopEndTurn,
+		Usage:  llm.Usage{InputTokens: 9, OutputTokens: 3},
+		Block: func(context.Context) {
+			close(modelBlocked)
+			<-releaseModel
+		},
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	registry := tools.Default()
+	registry.Register(todo.NewTool(app.Todos))
+	app.Agent.SetTools(registry)
+	app.Todos.Replace([]todo.Item{{Step: "Verify ordering", Status: todo.StatusInProgress}})
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	releaseJob := make(chan struct{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-releaseJob
+			return tools.BackgroundJobResult{Text: "mid-run completion"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	select {
+	case <-startedRun:
+	case <-time.After(time.Second):
+		t.Fatal("background runner did not start")
+	}
+
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- RunWithInitialPrompt(reader, app, nil, "work") }()
+	select {
+	case <-modelBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("model stream did not block")
+	}
+	close(releaseJob)
+	waitFor(t, func() bool {
+		snapshot, ok := manager.Get(job.ID)
+		return ok && snapshot.Status == background.StatusCompleted
+	}, "background completion during model stream")
+	close(releaseModel)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "[prompt:") }, "prompt usage status")
+
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+
+	stderr := errw.String()
+	noticeIndex := strings.Index(stderr, fmt.Sprintf("[background: %s completed]", job.ID))
+	todoIndex := strings.LastIndex(stderr, "Todos (0/1 done):")
+	usageIndex := strings.LastIndex(stderr, "[prompt:")
+	if noticeIndex < 0 || todoIndex < 0 || usageIndex < 0 {
+		t.Fatalf("missing notice, todo, or usage status; stderr:\n%s", stderr)
+	}
+	if !(noticeIndex < todoIndex && todoIndex < usageIndex) {
+		t.Fatalf("status order = notice %d, todo %d, usage %d; want notice < todo < usage; stderr:\n%s", noticeIndex, todoIndex, usageIndex, stderr)
+	}
+}
+
+func TestREPLBackgroundNoticeRemainsExactlyOnceAcrossDrainPoints(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("ok")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	job, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "done once"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	select {
+	case <-startedRun:
+	case <-time.After(time.Second):
+		t.Fatal("background runner did not start")
+	}
+
+	promptFinished := make(chan struct{}, 1)
+	app.OnPromptFinished = func() { promptFinished <- struct{}{} }
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+
+	close(release)
+	notice := fmt.Sprintf("[background: %s completed]", job.ID)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), notice) }, "idle background notice")
+	writePipe(t, writer, "continue\n")
+	select {
+	case <-promptFinished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("prompt did not finish after background notice")
+	}
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+	if got := strings.Count(errw.String(), notice); got != 1 {
+		t.Fatalf("stderr notice count = %d, want 1; stderr:\n%s", got, errw.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	persisted := 0
+	for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
+		var event session.Event
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatalf("decode event: %v", err)
+		}
+		if event.Type == session.EventNotice && event.Text == notice {
+			persisted++
+		}
+	}
+	if persisted != 1 {
+		t.Fatalf("persisted notice count = %d, want 1; raw:\n%s", persisted, raw)
 	}
 }
 

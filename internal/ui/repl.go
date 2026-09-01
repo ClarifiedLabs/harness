@@ -1546,9 +1546,15 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return finish(ExitOK)
 		}
 		scheduleIdleCompaction()
+		var backgroundChanged <-chan struct{}
+		if app.Background != nil {
+			// Subscribe before draining. signalLocked closes and replaces this
+			// channel, so checking first could miss a completion in between.
+			backgroundChanged = app.Background.Changed()
+		}
+		app.pollBackgroundNotices()
 		if !promptPrinted {
 			prompt = renderPrompt()
-			app.pollBackgroundNotices()
 			if !app.todoPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
 				app.printTodoStatus(false)
 			}
@@ -1585,6 +1591,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			// user/draft priority checks and let the next model request own context
 			// consumption.
 			cancelIdleCompaction()
+		case <-backgroundChanged:
+			// Loop through subscribe-then-drain so a second completion cannot race
+			// this wake. Do not reset the prompt or cancel idle compaction.
 		case <-goalChanges:
 			// Shared child-agent tools can transition the root goal while the
 			// REPL is idle. Persist the transition and wake the idle boundary,
@@ -5646,6 +5655,7 @@ type accumulatingSink struct {
 	prompt                      int
 	printTodoPromptBeforeUsage  bool
 	printPlanPromptBeforeUsage  bool
+	backgroundNoticeDrain       bool
 	planHadPlanAtStart          bool
 	planPathAtStart             string
 	reasoningOutput             bool
@@ -5849,6 +5859,7 @@ func newREPLSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := newAccumulatingSink(r, app, prompt)
 	s.printTodoPromptBeforeUsage = true
 	s.printPlanPromptBeforeUsage = true
+	s.backgroundNoticeDrain = true
 	if app.Plans != nil {
 		if latest, ok := app.Plans.Latest(); ok && latest.Path != "" {
 			s.planHadPlanAtStart = true
@@ -5929,6 +5940,7 @@ func (s *accumulatingSink) CompactionComplete() {
 }
 
 func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
+	s.drainBackgroundNotices()
 	if s.app != nil && s.app.Todos != nil && s.app.agentHasTool("update_todos") {
 		s.app.Todos.CommitModelRound(turn != s.todoTurn)
 		s.todoTurn = turn
@@ -6112,6 +6124,22 @@ func (s *accumulatingSink) drainBackgroundJobDiagnostics() {
 		if err := s.BackgroundJobDiagnostic(diagnostic); err == nil {
 			s.app.Background.AcknowledgeCompletedDiagnostic(diagnostic.ID)
 		}
+	}
+}
+
+func (s *accumulatingSink) drainBackgroundNotices() {
+	if s == nil || s.app == nil || s.app.Background == nil || !s.backgroundNoticeDrain {
+		return
+	}
+	s.drainBackgroundJobDiagnostics()
+	for _, job := range s.app.Background.DrainNoticeSnapshots() {
+		notice := formatBackgroundCompletionNotice(job)
+		if s.r != nil {
+			s.r.Notice(notice)
+		} else {
+			fmt.Fprintln(s.app.Errw, notice)
+		}
+		s.app.recordEvent(session.Event{Type: session.EventNotice, Text: notice, Time: s.app.clock()()})
 	}
 }
 
@@ -6388,6 +6416,7 @@ func (s *accumulatingSink) DrainPromptWorkUsage() llm.Usage {
 }
 
 func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
+	s.drainBackgroundNotices()
 	cost, costKnown := s.app.promptCost(u.Usage)
 	s.promptUsage = u
 	if !s.promptUsage.Usage.CostKnown {
