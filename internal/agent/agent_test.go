@@ -4255,6 +4255,57 @@ func TestRunPromptParallelReadsShareOneContextBudget(t *testing.T) {
 	}
 }
 
+func TestRunPromptManyParallelReadsKeepSourceAllowance(t *testing.T) {
+	const readCalls = 12
+	dir := t.TempDir()
+	events := make([]llm.StreamEvent, 0, readCalls)
+	for i := 0; i < readCalls; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("large-%d.txt", i))
+		if err := os.WriteFile(path, []byte(strings.Repeat("x\n", 20_000)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		input, err := json.Marshal(map[string]any{"path": path, "limit": 20_000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, toolDone(i, fmt.Sprintf("read-%d", i), "read", string(input)))
+	}
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: events,
+			Stop:   llm.StopToolUse,
+			Usage:  llm.Usage{InputTokens: 1_000, OutputTokens: 100},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("done")}, Stop: llm.StopEndTurn},
+	)
+	runner := testHookRunner(t, `{"PreToolUse":[{"hooks":[{"type":"command","command":"printf '{\"hookSpecificOutput\":{\"additionalContext\":\"hook evidence\"}}'"}]}]}`)
+	a := newAgent(fp, tools.Default(), Options{ContextWindow: 1_000_000, Hooks: runner})
+	sink := &archiveSink{archive: ToolResultArchive{DisplayPath: "artifact", ModelPath: "/tmp/read-artifact.txt"}}
+	if err := a.RunPrompt(context.Background(), "inspect", sink); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.results) != readCalls {
+		t.Fatalf("read results = %d, want %d", len(sink.results), readCalls)
+	}
+	if len(sink.archived) != readCalls {
+		t.Fatalf("archived read results = %d, want %d", len(sink.archived), readCalls)
+	}
+	share := readResultContextTokenCap * bytesPerToken / readCalls
+	total := 0
+	for i, result := range sink.results {
+		total += len(result.Text)
+		if result.IsError || !result.Truncated || len(result.Text) <= share/2 || len(result.Text) > share ||
+			!strings.Contains(result.Text, "continue with offset=") ||
+			!strings.Contains(result.Text, "hook evidence") ||
+			!strings.Contains(result.Text, toolresult.ArchivedHintMarker) {
+			t.Fatalf("read %d = error %v, truncated %v, %d visible bytes (share %d), continuation %v, hook context %v, archive hint %v", i, result.IsError, result.Truncated, len(result.Text), share, strings.Contains(result.Text, "continue with offset="), strings.Contains(result.Text, "hook evidence"), strings.Contains(result.Text, toolresult.ArchivedHintMarker))
+		}
+	}
+	if total > readResultContextTokenCap*bytesPerToken {
+		t.Fatalf("parallel read results total %d bytes, shared cap %d", total, readResultContextTokenCap*bytesPerToken)
+	}
+}
+
 func specNames(specs []llm.ToolSchema) []string {
 	names := make([]string, len(specs))
 	for i, s := range specs {

@@ -596,8 +596,10 @@ four-bytes-per-token estimate as its context accounting and divides this one
 allowance across concurrent or staged reads, so parallel calls cannot each claim
 the full percentage. The smallest of the scaled byte allowance, resolved hard
 ceiling, and per-call context share wins. Harness reserves space inside each share
-for bounded hook context and an artifact-recovery hint, then reapplies the total
-share after final composition. A compact exact-offset receipt may use up to 64
+for applicable bounded hook context and an artifact-recovery hint, then reapplies
+the total share after final composition. Each optional reserve is capped at one
+quarter of the share so fixed overhead cannot consume the source allowance in a
+large parallel batch. A compact exact-offset receipt may use up to 64
 bytes of fixed protocol overhead when the calculated share is smaller. Exact
 total lines in pagination notices
 are counted only for regular files no larger than 1 MiB by default; configure

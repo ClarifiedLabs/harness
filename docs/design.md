@@ -1829,8 +1829,10 @@ per token as the context estimator, it divides that single byte allowance across
 all unsuppressed `read` calls in the turn, including calls in separate stages.
 This is a dispatch-local tightening only: it cannot raise configured limits, and
 parallel reads do not each receive 20%. Each share reserves bounded space for
-hook context and an archive-recovery hint, and the agent reapplies the total
-share after final composition. A 64-byte minimum preserves an exact-offset
+applicable hook context and an archive-recovery hint, and the agent reapplies the
+total share after final composition. Each optional reserve is capped at one
+quarter of the share so fixed overhead cannot consume the source allowance in a
+large parallel batch. A 64-byte minimum preserves an exact-offset
 protocol receipt when the calculated content share is smaller. The first generic
 cap hit adds a teaching marker:
 

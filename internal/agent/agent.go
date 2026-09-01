@@ -2339,7 +2339,14 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		checkpoint(PromptCheckpointToolDispatch)
 		executionCalls := executionToolCalls(res.toolCalls)
 		liveInputTokens := a.toolDispatchLiveInputTokens(lastInput, appendBoundary, lastContext)
-		dispatchCtx := withReadResultBatchBudget(ctx, a.readResultBatchByteBudget(liveInputTokens))
+		_, reserveReadArchiveHint := sink.(ToolResultArchiver)
+		reserveReadHookContext := a.hooksHasMatchingHooks("read")
+		dispatchCtx := withReadResultBatchBudget(
+			ctx,
+			a.readResultBatchByteBudget(liveInputTokens),
+			reserveReadHookContext,
+			reserveReadArchiveHint,
+		)
 		results, parallelBatches, toolUsage := a.dispatchCalls(dispatchCtx, res.toolCalls, promptID, turns, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
@@ -2881,18 +2888,28 @@ const (
 	readResultMinimumReceiptBytes     = 64
 	readResultHookReserveBytes        = 8 * 1024
 	readResultArchiveHintReserveBytes = 8 * 1024
+	readResultReserveShareDivisor     = 4
 )
 
-type readResultBatchBudget struct{ maxBytes int }
+type readResultBatchBudget struct {
+	maxBytes           int
+	reserveHookContext bool
+	reserveArchiveHint bool
+}
 type readResultBatchBudgetContextKey struct{}
 type toolResultByteLimit struct {
-	maxBytes      int
-	dispatchBytes int
+	maxBytes                int
+	dispatchBytes           int
+	archiveHintReserveBytes int
 }
 type toolResultByteLimitsContextKey struct{}
 
-func withReadResultBatchBudget(ctx context.Context, maxBytes int) context.Context {
-	return context.WithValue(ctx, readResultBatchBudgetContextKey{}, readResultBatchBudget{maxBytes: maxBytes})
+func withReadResultBatchBudget(ctx context.Context, maxBytes int, reserveHookContext, reserveArchiveHint bool) context.Context {
+	return context.WithValue(ctx, readResultBatchBudgetContextKey{}, readResultBatchBudget{
+		maxBytes:           maxBytes,
+		reserveHookContext: reserveHookContext,
+		reserveArchiveHint: reserveArchiveHint,
+	})
 }
 
 // toolDispatchLiveInputTokens combines the current request's full estimate with
@@ -2991,7 +3008,15 @@ func withPerReadResultLimits(ctx context.Context, calls []llm.ToolCall, suppress
 		// when the estimated content allowance is exhausted.
 		share = readResultMinimumReceiptBytes
 	}
-	dispatchShare := share - readResultHookReserveBytes - readResultArchiveHintReserveBytes
+	hookReserve := 0
+	if budget.reserveHookContext {
+		hookReserve = boundedReadResultReserve(share, readResultHookReserveBytes)
+	}
+	archiveReserve := 0
+	if budget.reserveArchiveHint {
+		archiveReserve = boundedReadResultReserve(share, readResultArchiveHintReserveBytes)
+	}
+	dispatchShare := share - hookReserve - archiveReserve
 	if dispatchShare < readResultMinimumReceiptBytes {
 		dispatchShare = min(share, readResultMinimumReceiptBytes)
 	}
@@ -2999,11 +3024,19 @@ func withPerReadResultLimits(ctx context.Context, calls []llm.ToolCall, suppress
 	for i, call := range calls {
 		if call.Name == "read" {
 			if _, blocked := suppressed[i]; !blocked {
-				limits[call.ID] = toolResultByteLimit{maxBytes: share, dispatchBytes: dispatchShare}
+				limits[call.ID] = toolResultByteLimit{
+					maxBytes:                share,
+					dispatchBytes:           dispatchShare,
+					archiveHintReserveBytes: archiveReserve,
+				}
 			}
 		}
 	}
 	return context.WithValue(ctx, toolResultByteLimitsContextKey{}, limits)
+}
+
+func boundedReadResultReserve(share, maxReserve int) int {
+	return min(maxReserve, share/readResultReserveShareDivisor)
 }
 
 func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, stage callStage, promptID, turnID int, sink EventSink, blocks []llm.ContentBlock, richEncodedBytes *int, crossStageDependencies [][]int, actualCompletions []<-chan struct{}, suppressed map[int]string) ([]llm.ParallelToolBatch, llm.Usage) {
@@ -3713,7 +3746,7 @@ func toolResultHookTextLimit(ctx context.Context, callID string) int {
 	if !ok {
 		return 0
 	}
-	return max(limit.maxBytes-readResultArchiveHintReserveBytes, readResultMinimumReceiptBytes)
+	return max(limit.maxBytes-limit.archiveHintReserveBytes, readResultMinimumReceiptBytes)
 }
 
 func appendHookContext(r *llm.ToolResult, ctx []string, maxBytes int) {
