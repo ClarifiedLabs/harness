@@ -662,7 +662,12 @@ stored Responses objects. If a WebSocket request without a previous response
 fails before output, the provider falls back to stateless HTTP with `store:false`
 and suppresses that HTTP response ID so the next request resends full context and
 can re-establish WebSocket continuation. A request carrying a socket-scoped
-previous response never crosses transports.
+previous response never crosses transports. When the upstream WebSocket reports
+`websocket_connection_limit_reached` before output, the model proxy retries an
+already-full request once after the Responses provider closes the expired socket.
+For a continuation suffix, which the proxy cannot safely replay by itself, it
+returns `previous_response_unavailable`; Harness clears the socket-scoped anchor
+and immediately retries the same logical turn with full transcript context.
 If a provider rejects a request with a parseable
 context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.

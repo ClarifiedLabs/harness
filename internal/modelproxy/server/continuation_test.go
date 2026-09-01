@@ -315,6 +315,144 @@ func TestHandlerUnsupportedContinuationIsRejected(t *testing.T) {
 	}
 }
 
+func testWebSocketConnectionLimitError() *llm.APIError {
+	return &llm.APIError{
+		StatusCode: http.StatusBadRequest,
+		Code:       "websocket_connection_limit_reached",
+		Message:    "Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue.",
+		ResponsePayload: llm.DiagnosticPayload(
+			`{"type":"error","status":400,"error":{"code":"websocket_connection_limit_reached","message":"Responses websocket connection limit reached (60 minutes). Create a new websocket connection to continue."}}`,
+		),
+	}
+}
+
+func TestHandlerWebSocketConnectionLimitRetriesFullRequest(t *testing.T) {
+	fp := llmtest.New("responses",
+		llmtest.Step{Err: testWebSocketConnectionLimitError()},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "recovered"}},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	resp, body := postStreamRequest(t, srv, llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "full context"}}}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	var recovered bool
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for {
+		var envelope protocol.StreamEnvelope
+		if err := dec.Decode(&envelope); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Error != nil {
+			t.Fatalf("connection-limit error reached client: %+v", envelope.Error)
+		}
+		if envelope.Event != nil && envelope.Event.Kind == llm.EventTextDelta && envelope.Event.Text == "recovered" {
+			recovered = true
+		}
+	}
+	if !recovered {
+		t.Fatalf("stream did not recover: %s", body)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want initial request plus one fresh-socket retry", len(fp.Requests))
+	}
+	for i, request := range fp.Requests {
+		if request.PreviousResponseID != "" || len(request.Messages) != 1 || request.Messages[0].Content[0].Text != "full context" {
+			t.Fatalf("provider request %d = %+v, want unchanged full-context request", i+1, request)
+		}
+	}
+}
+
+func TestHandlerWebSocketConnectionLimitRetriesFullRequestOnce(t *testing.T) {
+	fp := llmtest.New("responses",
+		llmtest.Step{Err: testWebSocketConnectionLimitError()},
+		llmtest.Step{Err: testWebSocketConnectionLimitError()},
+		llmtest.Step{
+			Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "unexpected third attempt"}},
+			Stop:   llm.StopEndTurn,
+		},
+	)
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	resp, body := postStreamRequest(t, srv, llm.Request{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "full context"}}}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	var proxyErr *protocol.Error
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for {
+		var envelope protocol.StreamEnvelope
+		if err := dec.Decode(&envelope); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Error != nil {
+			proxyErr = envelope.Error
+		}
+	}
+	if proxyErr == nil || proxyErr.Code != "websocket_connection_limit_reached" {
+		t.Fatalf("stream error = %+v, want final websocket connection-limit error", proxyErr)
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("provider requests = %d, want exactly one reconnect retry", len(fp.Requests))
+	}
+}
+
+func TestHandlerWebSocketConnectionLimitInvalidatesSocketContinuation(t *testing.T) {
+	fp := llmtest.New("responses", llmtest.Step{Err: testWebSocketConnectionLimitError()})
+	srv := newContinuationTestServer(t, fp)
+	defer srv.Close()
+
+	resp, body := postStreamRequest(t, srv, llm.Request{
+		PreviousResponseID: "resp-old",
+		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "suffix"}}}},
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d body=%s", resp.StatusCode, body)
+	}
+	var proxyErr *protocol.Error
+	dec := json.NewDecoder(bytes.NewReader(body))
+	for {
+		var envelope protocol.StreamEnvelope
+		if err := dec.Decode(&envelope); errors.Is(err, io.EOF) {
+			break
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		if envelope.Error != nil {
+			proxyErr = envelope.Error
+		}
+	}
+	if proxyErr == nil {
+		t.Fatalf("stream did not return a continuation reset signal: %s", body)
+	}
+	if proxyErr.StatusCode != http.StatusConflict || proxyErr.Code != protocol.ErrCodePreviousResponseUnavailable || proxyErr.Retryable {
+		t.Fatalf("stream error = %+v, want non-retryable previous-response-unavailable conflict", proxyErr)
+	}
+	if !strings.Contains(string(proxyErr.ResponsePayload), `"code":"websocket_connection_limit_reached"`) {
+		t.Fatalf("stream error lost upstream payload: %+v", proxyErr)
+	}
+	if proxyErr.Diagnostic == nil || proxyErr.Diagnostic.Stage != llm.APIErrorStageUpstreamHTTP {
+		t.Fatalf("stream error diagnostic = %+v, want upstream HTTP stage", proxyErr.Diagnostic)
+	}
+	if len(fp.Requests) != 1 {
+		t.Fatalf("provider requests = %d, want no unsafe retry of socket-scoped continuation", len(fp.Requests))
+	}
+}
+
 func TestHandlerUpstreamPreviousResponseRejectionPassesThrough(t *testing.T) {
 	fp := llmtest.New("responses", llmtest.Step{Err: &llm.APIError{
 		StatusCode: http.StatusBadRequest,

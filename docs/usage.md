@@ -851,17 +851,21 @@ bytes (default 800, `HARNESS_RETENTION_RESULT_HEAD_BYTES`, clamped to the
 archived original.
 
 The model proxy is a stateless continuation pass-through: it never stores,
-reconstructs, trims, resets, or retries a continuation. It forwards the
-CLI-supplied messages, `store`, and previous-response/interaction ID unchanged.
-An unsupported target rejects continuation with
-`continuation_unsupported`. A connection-affine WebSocket provider can reject a
-known-unavailable ID before streaming with
+reconstructs, trims, or resets a continuation, and it never retries a
+continuation suffix. It ordinarily forwards the CLI-supplied messages, `store`,
+and previous-response/interaction ID unchanged. An unsupported target rejects
+continuation with `continuation_unsupported`. A connection-affine WebSocket
+provider can reject a known-unavailable ID before streaming with
 `previous_response_unavailable`; an upstream previous-ID rejection is also
-passed through unchanged. In either case harness clears its local anchor and
-performs one full-context resend. A miss that recovers is retained in proxy
-logs, metrics, and session diagnostics but is not rendered as a terminal model
-error; the normal state-reset notice remains visible unless quiet mode suppresses
-it. If the resend fails, harness still renders the final error normally.
+passed through unchanged. The exception is a Responses WebSocket
+`websocket_connection_limit_reached` error: the proxy normalizes it to
+`previous_response_unavailable` for a socket-scoped continuation, or retries it
+once when the request has no previous ID and already contains full context. In
+the continuation case harness clears its local anchor and performs one
+full-context resend. A miss that recovers is retained in proxy logs, metrics,
+and session diagnostics but is not rendered as a terminal model error; the
+normal state-reset notice remains visible unless quiet mode suppresses it. If
+the resend fails, harness still renders the final error normally.
 
 Retention, compaction, branch navigation, agent changes, and true base-model
 changes reset the CLI-owned anchor. Switching a target between its base and

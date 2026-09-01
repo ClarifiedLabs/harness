@@ -1495,8 +1495,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		streamRetryNone streamRetry = iota
 		streamRetryServerTools
 		streamRetryMinOutputTokens
+		streamRetryWebSocketReconnect
 	)
 	retryMinOutputTokens := 0
+	webSocketConnectionLimitRetried := false
 	streamAttempt := func(request, semanticRequest llm.Request) streamRetry {
 		attemptStart := time.Now()
 		semanticRequest.StoreResponse = request.StoreResponse
@@ -1528,6 +1530,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					flush()
 					return streamRetryNone
 				}
+				webSocketConnectionLimit := !sentEvents && webSocketConnectionLimitReached(rawErr)
 				diagnostic := diagnosticFor(upstreamErrorStage(rawErr))
 				diagnostic.UpstreamRequestID = upstreamRequestIDFromError(rawErr)
 				diagnostic.MultimodalShape = requestShape
@@ -1535,14 +1538,27 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				finalDiagnostic = diagnostic
 				err = redactImageBearingError(rawErr, semanticRequest)
 				err = withAPIErrorDiagnostic(err, diagnostic)
-				streamErr = err.Error()
-				errAttrs = streamErrorLogAttrs(err)
-				if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
+				if webSocketConnectionLimit && request.PreviousResponseID != "" {
+					// The proxy only has the continuation suffix, so it cannot safely
+					// replay this request on a fresh socket. Convert the provider's
+					// lifetime-limit error into the structured signal that makes the
+					// client reset its anchor and resend full context.
+					err = webSocketContinuationUnavailableError(err)
+					continuationResult = "unavailable"
+				} else if !sentEvents && request.PreviousResponseID != "" && previousResponseRejected(err) {
 					continuationResult = "rejected_upstream"
 				}
+				streamErr = err.Error()
+				errAttrs = streamErrorLogAttrs(err)
 
 				retryKind := streamRetryNone
-				if !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
+				if webSocketConnectionLimit && request.PreviousResponseID == "" && !webSocketConnectionLimitRetried {
+					// This request already carries full context. The Responses provider
+					// closes the expired socket before returning, so one unchanged retry
+					// opens a fresh connection without risking duplicate model output.
+					retryKind = streamRetryWebSocketReconnect
+				}
+				if retryKind == streamRetryNone && !sentEvents && len(request.ServerTools) > 0 && serverToolRejected(err) {
 					retryKind = streamRetryServerTools
 				}
 				if retryKind == streamRetryNone && !sentEvents {
@@ -1651,6 +1667,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		case streamRetryMinOutputTokens:
 			attemptRequest.MaxTokens = retryMinOutputTokens
 			semanticRequest.MaxTokens = retryMinOutputTokens
+		case streamRetryWebSocketReconnect:
+			webSocketConnectionLimitRetried = true
 		default:
 			retry = streamRetryNone
 			continue
@@ -2526,6 +2544,25 @@ func prepareProviderRequest(req llm.Request) (sessionKey string, providerReq llm
 func providerPromptCacheKey(sessionID string) string {
 	sum := sha256.Sum256([]byte(sessionID))
 	return hex.EncodeToString(sum[:])
+}
+
+func webSocketConnectionLimitReached(err error) bool {
+	var apiErr *llm.APIError
+	return errors.As(err, &apiErr) && strings.EqualFold(strings.TrimSpace(apiErr.Code), "websocket_connection_limit_reached")
+}
+
+func webSocketContinuationUnavailableError(err error) error {
+	var apiErr *llm.APIError
+	if !errors.As(err, &apiErr) {
+		return err
+	}
+	copyError := *apiErr
+	copyError.StatusCode = http.StatusConflict
+	copyError.Code = protocol.ErrCodePreviousResponseUnavailable
+	copyError.Message = "Responses websocket connection expired; previous response is unavailable on a new connection; resend full context."
+	copyError.Retryable = false
+	copyError.RetryAfter = 0
+	return &copyError
 }
 
 func previousResponseRejected(err error) bool {
