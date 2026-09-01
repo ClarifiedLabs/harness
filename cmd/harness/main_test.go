@@ -5420,11 +5420,11 @@ func TestRunREPLLSPToggleChangesModelToolSurfaceAndHint(t *testing.T) {
 		t.Fatalf("disabled request still exposes LSP tools: %v", secondNames)
 	}
 	firstSystem := fp.Requests[0].System
-	if !strings.Contains(firstSystem, "lsp_* available for:") {
+	if !strings.Contains(firstSystem, "lsp_* server commands found for:") {
 		t.Fatalf("enabled request missing LSP runtime hint: %q", firstSystem)
 	}
 	secondSystem := fp.Requests[1].System
-	if strings.Contains(secondSystem, "lsp_* available for:") {
+	if strings.Contains(secondSystem, "lsp_* server commands found for:") {
 		t.Fatalf("disabled request retained LSP runtime hint: %q", secondSystem)
 	}
 	for _, spec := range fp.Requests[0].Tools {

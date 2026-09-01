@@ -105,17 +105,17 @@ var prewarmSkipDirs = map[string]bool{
 	".venv":        true,
 }
 
-// hasLanguageFiles reports whether root contains at least one regular file
-// whose extension is in exts. The scan is bounded to maxEntries visited entries
-// for evidence collection only; exceeding the cap without a match returns false
-// (inconclusive, treated as no evidence). Unreadable entries are skipped and
-// symlinks are not followed. Noise directories (prewarmSkipDirs) are pruned.
-func hasLanguageFiles(root string, exts map[string]bool, maxEntries int) bool {
+// findLanguageFile returns the first regular file below root whose extension is
+// in exts. The scan is bounded to maxEntries visited entries for evidence
+// collection only; exceeding the cap without a match is inconclusive. Unreadable
+// entries are skipped, symlinks are not followed, and noise directories
+// (prewarmSkipDirs) are pruned.
+func findLanguageFile(root string, exts map[string]bool, maxEntries int) (string, bool) {
 	if len(exts) == 0 {
-		return false
+		return "", false
 	}
 	visited := 0
-	found := false
+	var match string
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip unreadable entries
@@ -137,11 +137,19 @@ func hasLanguageFiles(root string, exts map[string]bool, maxEntries int) bool {
 			return nil
 		}
 		if exts[strings.ToLower(filepath.Ext(d.Name()))] {
-			found = true
+			match = path
 			return fs.SkipAll
 		}
 		return nil
 	})
+	return match, match != ""
+}
+
+// hasLanguageFiles reports whether root contains at least one matching language
+// file. It is the boolean form used by callers that do not need the evidence
+// path itself.
+func hasLanguageFiles(root string, exts map[string]bool, maxEntries int) bool {
+	_, found := findLanguageFile(root, exts, maxEntries)
 	return found
 }
 

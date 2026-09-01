@@ -13,7 +13,7 @@ import (
 
 func TestLSPSystemHint(t *testing.T) {
 	got := lspSystemHint([]string{"go", "rust"})
-	if !strings.HasPrefix(got, "lsp_* available for: go, rust.") {
+	if !strings.HasPrefix(got, "lsp_* server commands found for: go, rust. Servers initialize lazily.") {
 		t.Errorf("hint = %q, want prefix listing languages", got)
 	}
 	if !strings.Contains(got, "Prefer lsp_* over text search") {

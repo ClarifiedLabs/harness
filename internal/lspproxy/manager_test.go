@@ -1,8 +1,11 @@
 package lspproxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -64,14 +67,14 @@ func TestManagerListToolsHasExpectedAnnotations(t *testing.T) {
 	}
 }
 
-func TestManagerReportsAvailableLanguagesOnce(t *testing.T) {
+func TestManagerReportsInstalledLanguagesOnce(t *testing.T) {
 	m := NewManager(goConfig(), "lsp", nil)
 	// Pretend the gopls binary is present.
 	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
 	m.computeAvailable()
 
-	if got := m.AvailableLanguages(); len(got) != 1 || got[0] != "go" {
-		t.Fatalf("AvailableLanguages() = %v, want [go]", got)
+	if got := m.InstalledLanguages(); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("InstalledLanguages() = %v, want [go]", got)
 	}
 	res, _ := m.ListTools(context.Background(), "")
 	if strings.Contains(res.Tools[0].Description, "Langs:") {
@@ -79,17 +82,17 @@ func TestManagerReportsAvailableLanguagesOnce(t *testing.T) {
 	}
 }
 
-func TestManagerStatusDistinguishesAvailableAndLoadedLanguages(t *testing.T) {
+func TestManagerStatusDistinguishesInstalledAndReadyLanguages(t *testing.T) {
 	m := NewManager(goConfig(), "lsp", nil)
 	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
 	m.RefreshAvailability()
 
 	status := m.ServerStatuses()
-	if len(status) != 1 || !status[0].Available || len(status[0].LoadedRoots) != 0 {
-		t.Fatalf("status before load = %+v", status)
+	if len(status) != 1 || !status[0].Installed || len(status[0].Roots) != 0 {
+		t.Fatalf("status before initialization = %+v", status)
 	}
-	if got := m.LoadedLanguages(); len(got) != 0 {
-		t.Fatalf("loaded languages before server acquisition = %v", got)
+	if got := m.ReadyLanguages(); len(got) != 0 {
+		t.Fatalf("ready languages before server initialization = %v", got)
 	}
 
 	cl, _ := didOpenClient(t, "/tmp/project")
@@ -98,11 +101,36 @@ func TestManagerStatusDistinguishesAvailableAndLoadedLanguages(t *testing.T) {
 	m.instances[instanceKey("gopls", "/tmp/project")] = inst
 
 	status = m.ServerStatuses()
-	if len(status[0].LoadedRoots) != 1 || status[0].LoadedRoots[0] != "/tmp/project" {
-		t.Fatalf("status after load = %+v", status)
+	if len(status[0].Roots) != 1 || status[0].Roots[0].Root != "/tmp/project" || !status[0].Roots[0].Ready {
+		t.Fatalf("status after initialization = %+v", status)
 	}
-	if got := m.LoadedLanguages(); len(got) != 1 || got[0] != "go" {
-		t.Fatalf("loaded languages = %v, want [go]", got)
+	if got := m.ReadyLanguages(); len(got) != 1 || got[0] != "go" {
+		t.Fatalf("ready languages = %v, want [go]", got)
+	}
+}
+
+func TestManagerStatusReportsFailedRootAndBackoff(t *testing.T) {
+	m := NewManager(goConfig(), "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
+	m.RefreshAvailability()
+
+	now := time.Unix(1000, 0)
+	inst := newServerInstance(goConfig().Servers[0], "/tmp/broken", nil)
+	inst.clock = func() time.Time { return now }
+	inst.lastErr = errors.New("initialize failed")
+	inst.nextTry = now.Add(time.Minute)
+	m.instances[instanceKey("gopls", "/tmp/broken")] = inst
+
+	status := m.ServerStatuses()
+	if len(status) != 1 || len(status[0].Roots) != 1 {
+		t.Fatalf("status = %+v, want one failed root", status)
+	}
+	root := status[0].Roots[0]
+	if root.Root != "/tmp/broken" || root.Ready || root.Error != "initialize failed" || !root.BackingOff || !root.RetryAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("failed root status = %+v", root)
+	}
+	if got := m.ReadyLanguages(); len(got) != 0 {
+		t.Fatalf("failed root made languages ready: %v", got)
 	}
 }
 
@@ -451,6 +479,122 @@ func TestPrewarmAcquiresServersWithFileEvidence(t *testing.T) {
 	}
 	if len(calls) != 1 || calls[0].server != "gopls" || calls[0].root != root {
 		t.Fatalf("acquire calls = %+v, want one for (gopls, %s)", calls, root)
+	}
+}
+
+func TestPrewarmDerivesRootFromMatchingSource(t *testing.T) {
+	tests := []struct {
+		name        string
+		languages   []string
+		rootMarkers []string
+		marker      string
+		source      string
+	}{
+		{name: "go module", languages: []string{"go"}, rootMarkers: []string{"go.work", "go.mod", ".git"}, marker: "go.mod", source: "main.go"},
+		{name: "rust crate", languages: []string{"rust"}, rootMarkers: []string{"Cargo.toml", ".git"}, marker: "Cargo.toml", source: "src/lib.rs"},
+		{name: "python package", languages: []string{"python"}, rootMarkers: []string{"pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", ".git"}, marker: "pyproject.toml", source: "app.py"},
+		{name: "javascript package", languages: []string{"typescript", "typescriptreact", "javascript", "javascriptreact"}, rootMarkers: []string{"tsconfig.json", "jsconfig.json", "package.json", ".git"}, marker: "package.json", source: "assets/app.js"},
+		{name: "cpp build", languages: []string{"c", "cpp"}, rootMarkers: []string{"compile_commands.json", ".clangd", ".git"}, marker: "compile_commands.json", source: "src/main.cpp"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo := t.TempDir()
+			t.Chdir(repo)
+			if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			project := filepath.Join(repo, "nested", strings.ReplaceAll(tt.name, " ", "-"))
+			if err := os.MkdirAll(filepath.Join(project, filepath.Dir(tt.source)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustWrite(t, filepath.Join(project, tt.marker))
+			mustWrite(t, filepath.Join(project, tt.source))
+
+			cfg := Config{Servers: []ResolvedServer{{
+				Name: tt.name, Languages: tt.languages, RootMarkers: tt.rootMarkers, Command: []string{"installed-lsp"},
+			}}}
+			m := NewManager(cfg, "lsp", nil)
+			m.lookPath = func(string) (string, error) { return "/usr/bin/installed-lsp", nil }
+			m.computeAvailable()
+			var acquiredRoot string
+			m.acquireFn = func(ctx context.Context, s ResolvedServer, root string) (*lspClient, error) {
+				acquiredRoot = root
+				return nil, nil
+			}
+
+			if got := m.Prewarm(context.Background()); len(got) != len(tt.languages) {
+				t.Fatalf("Prewarm = %v, want %d languages", got, len(tt.languages))
+			}
+			if acquiredRoot != project {
+				t.Fatalf("acquired root = %q, want source-derived root %q", acquiredRoot, project)
+			}
+		})
+	}
+}
+
+func TestPrewarmRespectsRootMarkerPriority(t *testing.T) {
+	repo := t.TempDir()
+	t.Chdir(repo)
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(repo, "tsconfig.json"))
+	project := filepath.Join(repo, "nested", "web")
+	if err := os.MkdirAll(project, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(project, "package.json"))
+	mustWrite(t, filepath.Join(project, "app.js"))
+
+	cfg := Config{Servers: []ResolvedServer{{
+		Name:        "typescript-language-server",
+		Languages:   []string{"javascript"},
+		RootMarkers: []string{"tsconfig.json", "package.json", ".git"},
+		Command:     []string{"typescript-language-server"},
+	}}}
+	m := NewManager(cfg, "lsp", nil)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/typescript-language-server", nil }
+	m.computeAvailable()
+	var acquiredRoot string
+	m.acquireFn = func(ctx context.Context, s ResolvedServer, root string) (*lspClient, error) {
+		acquiredRoot = root
+		return nil, nil
+	}
+
+	if got := m.Prewarm(context.Background()); len(got) != 1 || got[0] != "javascript" {
+		t.Fatalf("Prewarm = %v, want [javascript]", got)
+	}
+	if acquiredRoot != repo {
+		t.Fatalf("acquired root = %q, want higher-priority marker root %q", acquiredRoot, repo)
+	}
+}
+
+func TestPrewarmLogsStartFailureOnce(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	if err := os.MkdirAll(filepath.Join(root, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(root, "main.go"))
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, nil))
+	m := NewManager(goConfig(), "lsp", logger)
+	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
+	m.computeAvailable()
+	m.spawn = helperSpawn("crash", nil)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if got := m.Prewarm(ctx); len(got) != 0 {
+		t.Fatalf("Prewarm = %v, want []", got)
+	}
+	if got := strings.Count(logs.String(), "level=WARN"); got != 1 {
+		t.Fatalf("warning count = %d, want 1; logs:\n%s", got, logs.String())
+	}
+	if strings.Contains(logs.String(), "failed to warm server") {
+		t.Fatalf("prewarm duplicated the server launch warning:\n%s", logs.String())
 	}
 }
 

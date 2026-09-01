@@ -230,7 +230,7 @@ func (r *lspRuntime) SystemHint() string {
 	if r == nil || !r.enabled {
 		return ""
 	}
-	return lspSystemHint(r.mgr.AvailableLanguages())
+	return lspSystemHint(r.mgr.InstalledLanguages())
 }
 
 func (r *lspRuntime) Status() ui.LSPStatus {
@@ -240,22 +240,38 @@ func (r *lspRuntime) Status() ui.LSPStatus {
 	r.mgr.RefreshAvailability()
 	servers := r.mgr.ServerStatuses()
 	uiServers := make([]ui.LSPServerStatus, 0, len(servers))
-	loaded := map[string]bool{}
+	installedLanguages := map[string]bool{}
+	readyLanguages := map[string]bool{}
 	for _, server := range servers {
-		if len(server.LoadedRoots) > 0 {
+		if server.Installed {
 			for _, language := range server.Languages {
-				loaded[language] = true
+				installedLanguages[language] = true
+			}
+		}
+		roots := make([]ui.LSPServerRootStatus, 0, len(server.Roots))
+		serverReady := false
+		for _, root := range server.Roots {
+			serverReady = serverReady || root.Ready
+			roots = append(roots, ui.LSPServerRootStatus{
+				Root: root.Root, Initializing: root.Initializing,
+				Ready: root.Ready, Error: root.Error,
+				BackingOff: root.BackingOff, RetryAt: root.RetryAt,
+			})
+		}
+		if serverReady {
+			for _, language := range server.Languages {
+				readyLanguages[language] = true
 			}
 		}
 		uiServers = append(uiServers, ui.LSPServerStatus{
 			Name: server.Name, Languages: server.Languages, Command: server.Command,
-			Available: server.Available, LoadedRoots: server.LoadedRoots,
+			Installed: server.Installed, Roots: roots,
 		})
 	}
 	return ui.LSPStatus{
 		Enabled: r.enabled, Tools: slices.Clone(r.summary.Names),
-		AvailableLanguages: r.mgr.AvailableLanguages(),
-		LoadedLanguages:    slices.Sorted(maps.Keys(loaded)),
+		InstalledLanguages: slices.Sorted(maps.Keys(installedLanguages)),
+		ReadyLanguages:     slices.Sorted(maps.Keys(readyLanguages)),
 		Servers:            uiServers,
 	}
 }
@@ -264,7 +280,7 @@ func lspSystemHint(languages []string) string {
 	if len(languages) == 0 {
 		return "lsp_* tools enabled but no language server on PATH."
 	}
-	return "lsp_* available for: " + strings.Join(languages, ", ") + ". Prefer lsp_* over text search for definitions, references, hover, symbols, diagnostics, and rename."
+	return "lsp_* server commands found for: " + strings.Join(languages, ", ") + ". Servers initialize lazily. Prefer lsp_* over text search for definitions, references, hover, symbols, diagnostics, and rename."
 }
 
 // warnUnknownLSPTools logs a warning for each configured lsp.tools entry that did

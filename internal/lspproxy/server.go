@@ -100,6 +100,8 @@ func (s *serverInstance) ensure(ctx context.Context) (*lspClient, error) {
 	s.cmd = cmd
 	s.done = done
 	s.failures = 0
+	s.lastErr = nil
+	s.nextTry = time.Time{}
 	s.starts++
 	return cl, nil
 }
@@ -228,11 +230,40 @@ func (s *serverInstance) Starts() int {
 	return s.starts
 }
 
-// status returns identity plus whether the current initialized client is alive.
-func (s *serverInstance) status() (name, root string, loaded bool) {
-	s.mu.Lock()
+type serverInstanceStatus struct {
+	name         string
+	root         string
+	initializing bool
+	ready        bool
+	lastError    string
+	backingOff   bool
+	retryAt      time.Time
+}
+
+// status returns a readiness snapshot without launching, retrying, or waiting
+// for an in-flight initialize handshake.
+func (s *serverInstance) status() serverInstanceStatus {
+	status := serverInstanceStatus{name: s.cfg.Name, root: s.root}
+	if !s.mu.TryLock() {
+		status.initializing = true
+		return status
+	}
 	defer s.mu.Unlock()
-	return s.cfg.Name, s.root, s.client != nil && s.alive()
+
+	if s.client != nil && s.alive() {
+		status.ready = true
+		return status
+	}
+	if s.lastErr != nil {
+		status.lastError = s.lastErr.Error()
+	} else if s.client != nil {
+		status.lastError = "language server process exited"
+	}
+	if now := s.now(); !s.nextTry.IsZero() && now.Before(s.nextTry) {
+		status.backingOff = true
+		status.retryAt = s.nextTry
+	}
+	return status
 }
 
 func (s *serverInstance) now() time.Time {

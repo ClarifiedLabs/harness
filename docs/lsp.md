@@ -47,16 +47,18 @@ In an interactive session, `/lsp enable` and `/lsp disable` override the initial
 setting for that process only. `/lsp` and `/lsp status` show:
 
 - whether native LSP tools are currently exposed to the active agent;
-- configured tools and languages whose server commands are currently on `PATH`;
-- languages with a live, initialized server process; and
-- each loaded server's workspace root.
+- installed languages whose configured server commands are currently on `PATH`;
+- ready languages with at least one live, initialized server root; and
+- each server's `missing`, `idle`, `initializing`, `ready`, or `failed` state,
+  including failed roots, initialization errors, and active backoff retry times.
 
 Enabling changes both dispatch and, when the active agent's tool policy permits
 LSP, the tool schemas sent on the next model request. Disabling removes those
 schemas, shuts down loaded language servers, and
 removes the LSP runtime hint. It does not rewrite the config file. Servers remain
-lazy after enabling, so `loaded languages: none` is expected until an LSP tool is
-used successfully.
+lazy after enabling, so `ready languages: none` and an `idle` server state are
+expected until prewarm or an LSP tool initializes a server successfully. A
+command being installed does not by itself make its languages ready.
 
 When the selected agent's combined optional MCP/LSP declarations exceed 32 KiB,
 Harness initially exposes them through `tool_catalog` instead of sending every
@@ -66,18 +68,26 @@ names; their direct schemas appear on the next model turn.
 ### Prewarming
 
 When `lsp.prewarm` is enabled (the default; disable with `lsp.prewarm: false` or
-`HARNESS_LSP_PREWARM=false`), harness scans the detected workspace root and
-background-launches each installed configured server **only for languages with
-files present** — it looks for at least one file whose extension matches the
-server's configured extensions or its languages' built-in extensions. Servers
-whose root markers are not found above the working directory, whose languages
-have no file evidence, or whose binary is not on `PATH` stay lazy. The scan is
-evidence-only and bounded (20000 entries); an inconclusive scan skips prewarming
-rather than guessing, and files that live only under skipped directories are not
-evidence. Skipped directories: `.git`, `node_modules`, `vendor`, `target`,
-`dist`, `build`, `__pycache__`, `.venv`. Prewarm failures are logged only and
-never affect startup or the exit code; ordinary lazy startup remains the
-fallback. Only the root containing the process cwd is prewarmed.
+`HARNESS_LSP_PREWARM=false`), harness scans the workspace surrounding the process
+working directory and background-launches each installed configured server
+**only for languages with files present**. It finds a source file whose extension
+matches the server's configured extensions or its languages' built-in extensions,
+then derives that server's workspace root from the source file using the normal
+configured marker priority. This lets a nested package, crate, module, or build
+root use its own language-server process when its marker wins that selection,
+while higher-priority enclosing markers such as `go.work` continue to take
+precedence.
+
+Servers whose root markers are not found, whose languages have no file evidence,
+or whose binary is not on `PATH` stay lazy. The evidence scan is bounded (20000
+entries); an inconclusive scan skips prewarming rather than guessing, and files
+that live only under skipped directories are not evidence. Skipped directories:
+`.git`, `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__`,
+`.venv`. Prewarm failures are logged by the server instance once per launch
+attempt and never affect startup or the exit code; ordinary lazy startup remains
+the fallback. At most one source-derived root
+per configured server is prewarmed, selected from the first matching source in
+the bounded scan; other roots remain lazy.
 
 ## Enabling Serena
 
@@ -165,8 +175,10 @@ server that does not implement that operation returns a normal tool error. The
 model receives the complete enabled `lsp_*` tool list, capability-specific tool
 descriptions, and the preserved schema descriptions explaining the 1-based
 position/range conventions. A concise system hint separately lists languages
-whose configured command is on `PATH`; `/lsp status` is the authoritative
-human-facing view of availability versus actually loaded processes.
+whose configured server command is on `PATH` and notes that initialization is
+lazy; `/lsp status` is the
+authoritative human-facing view of installed commands versus ready or failed
+workspace roots.
 
 To register only a subset of the native tools, set the config-file-only `lsp.tools`
 allowlist (bare names, with or without the `lsp_` prefix):

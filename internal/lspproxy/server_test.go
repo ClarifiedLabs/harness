@@ -123,6 +123,10 @@ func TestServerInstanceRelaunchesAfterDeath(t *testing.T) {
 	}
 	_ = c1.Close() // simulate the child dying
 	<-c1.Done()
+	status := inst.status()
+	if status.ready || status.lastError != "language server process exited" || status.backingOff {
+		t.Fatalf("status after server exit = %+v", status)
+	}
 
 	c2, err := inst.ensure(ctx)
 	if err != nil {
@@ -133,6 +137,19 @@ func TestServerInstanceRelaunchesAfterDeath(t *testing.T) {
 	}
 	if inst.Starts() != 2 {
 		t.Fatalf("starts = %d, want 2", inst.Starts())
+	}
+	if status := inst.status(); !status.ready || status.lastError != "" || status.backingOff {
+		t.Fatalf("status after relaunch = %+v", status)
+	}
+}
+
+func TestServerInstanceStatusDoesNotWaitForInitialization(t *testing.T) {
+	inst := newServerInstance(ResolvedServer{Name: "fake", Command: []string{"unused"}}, "/tmp/proj", nil)
+	inst.mu.Lock() // ensure holds this lock throughout launch and initialize
+	status := inst.status()
+	inst.mu.Unlock()
+	if !status.initializing || status.ready || status.name != "fake" || status.root != "/tmp/proj" {
+		t.Fatalf("status during initialization = %+v", status)
 	}
 }
 
@@ -178,5 +195,9 @@ func TestServerInstanceBackoffCapAndRevive(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&spawns); got != maxRestarts+1 {
 		t.Fatalf("spawns after revive = %d, want %d", got, maxRestarts+1)
+	}
+	status := inst.status()
+	if status.ready || status.lastError == "" || !status.backingOff || !status.retryAt.After(now) {
+		t.Fatalf("failed instance status = %+v", status)
 	}
 }

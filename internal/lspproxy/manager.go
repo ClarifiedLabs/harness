@@ -133,23 +133,34 @@ func (m *Manager) computeAvailable() {
 // /lsp reflect a binary installed or removed during a long-running session.
 func (m *Manager) RefreshAvailability() { m.computeAvailable() }
 
-// AvailableLanguages returns the sorted languages backed by a server binary
-// currently on PATH.
-func (m *Manager) AvailableLanguages() []string {
+// InstalledLanguages returns the sorted languages backed by a server command
+// currently on PATH. Installation does not imply successful initialization.
+func (m *Manager) InstalledLanguages() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return slices.Clone(m.available)
 }
 
-// ServerStatus is a user-facing snapshot of one configured server. LoadedRoots
-// contains roots whose server process is currently alive; availability only
-// means the configured executable can be found on PATH.
+// ServerRootStatus is the readiness of one initialized-or-attempted workspace
+// root. A non-ready root retains its last launch error and active backoff gate.
+type ServerRootStatus struct {
+	Root         string
+	Initializing bool
+	Ready        bool
+	Error        string
+	BackingOff   bool
+	RetryAt      time.Time
+}
+
+// ServerStatus is a user-facing snapshot of one configured server. Installed
+// only means the configured command is present on PATH; Roots distinguishes
+// successful initialization from failed attempts without launching the server.
 type ServerStatus struct {
-	Name        string
-	Languages   []string
-	Command     string
-	Available   bool
-	LoadedRoots []string
+	Name      string
+	Languages []string
+	Command   string
+	Installed bool
+	Roots     []ServerRootStatus
 }
 
 // ServerStatuses returns configured servers in stable config order with live
@@ -161,7 +172,7 @@ func (m *Manager) ServerStatuses() []ServerStatus {
 	for _, server := range m.cfg.Servers {
 		status := ServerStatus{
 			Name: server.Name, Languages: slices.Clone(server.Languages),
-			Available: m.present[server.Name],
+			Installed: m.present[server.Name],
 		}
 		if len(server.Command) > 0 {
 			status.Command = server.Command[0]
@@ -175,35 +186,44 @@ func (m *Manager) ServerStatuses() []ServerStatus {
 	}
 	m.mu.Unlock()
 	for _, inst := range instances {
-		name, root, loaded := inst.status()
-		if !loaded {
-			continue
-		}
-		if i, ok := index[name]; ok {
-			statuses[i].LoadedRoots = append(statuses[i].LoadedRoots, root)
+		instance := inst.status()
+		if i, ok := index[instance.name]; ok {
+			statuses[i].Roots = append(statuses[i].Roots, ServerRootStatus{
+				Root: instance.root, Initializing: instance.initializing,
+				Ready: instance.ready, Error: instance.lastError,
+				BackingOff: instance.backingOff, RetryAt: instance.retryAt,
+			})
 		}
 	}
 	for i := range statuses {
-		sort.Strings(statuses[i].LoadedRoots)
+		sort.Slice(statuses[i].Roots, func(a, b int) bool {
+			return statuses[i].Roots[a].Root < statuses[i].Roots[b].Root
+		})
 	}
 	return statuses
 }
 
-// LoadedLanguages returns the sorted languages with at least one live server
-// process. It is intentionally distinct from AvailableLanguages, which is only
-// a PATH probe and does not mean the server has been initialized.
-func (m *Manager) LoadedLanguages() []string {
+// ReadyLanguages returns the sorted languages with at least one live,
+// successfully initialized server root. It is intentionally distinct from
+// InstalledLanguages, which is only a PATH probe.
+func (m *Manager) ReadyLanguages() []string {
 	set := map[string]bool{}
 	for _, status := range m.ServerStatuses() {
-		if len(status.LoadedRoots) == 0 {
+		ready := false
+		for _, root := range status.Roots {
+			if root.Ready {
+				ready = true
+				break
+			}
+		}
+		if !ready {
 			continue
 		}
 		for _, language := range status.Languages {
 			set[language] = true
 		}
 	}
-	languages := slices.Sorted(maps.Keys(set))
-	return languages
+	return slices.Sorted(maps.Keys(set))
 }
 
 // ListTools returns the fixed tool surface. The set fits one page; a non-empty
@@ -893,13 +913,13 @@ func (m *Manager) acquire(ctx context.Context, s ResolvedServer, root string) (*
 // reached without a match) skips prewarm; lazy startup remains the fallback.
 const prewarmScanMaxEntries = 20000
 
-// Prewarm background-launches language servers for which there is evidence of
-// their language files in the workspace root containing the process cwd. For
-// each installed configured server it detects the root from the server's root
-// markers and scans (bounded) for a matching file extension before acquiring a
+// Prewarm background-launches language servers for which there is file evidence
+// below the workspace surrounding the process cwd. For each installed configured
+// server it scans (bounded) for a matching file extension, derives the server
+// root from that source file and the server's root markers, then acquires one
 // client. Servers with undetectable languages, no detected root, or no file
-// evidence are skipped. Failures are logged only. It returns the sorted unique
-// languages whose servers were successfully warmed.
+// evidence are skipped. Launch failures are logged by the server instance. It
+// returns the sorted unique languages whose servers were successfully warmed.
 func (m *Manager) Prewarm(ctx context.Context) []string {
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -919,17 +939,24 @@ func (m *Manager) Prewarm(ctx context.Context) []string {
 				slog.String("server", s.Name))
 			continue
 		}
-		root, found := detectRoot(cwd, s.RootMarkers)
+		scanRoot, found := detectRoot(cwd, s.RootMarkers)
 		if !found {
 			continue
 		}
-		if !hasLanguageFiles(root, exts, prewarmScanMaxEntries) {
+		source, found := findLanguageFile(scanRoot, exts, prewarmScanMaxEntries)
+		if !found {
 			m.logger.Debug("lsp prewarm: no language-file evidence (or scan cap reached); skipping",
-				slog.String("server", s.Name), slog.String("root", root))
+				slog.String("server", s.Name), slog.String("root", scanRoot))
+			continue
+		}
+		root, found := detectRoot(filepath.Dir(source), s.RootMarkers)
+		if !found {
 			continue
 		}
 		if _, err := m.acquire(ctx, s, root); err != nil {
-			m.logger.Warn("lsp prewarm: failed to warm server",
+			// serverInstance.ensure owns the user-facing launch warning. Keeping this
+			// context at debug avoids reporting the same prewarm failure twice.
+			m.logger.Debug("lsp prewarm: server unavailable",
 				slog.String("server", s.Name), slog.String("root", root), slog.Any("error", err))
 			continue
 		}

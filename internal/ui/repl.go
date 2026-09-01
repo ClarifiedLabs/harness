@@ -100,22 +100,31 @@ type AgentSelection struct {
 	ReasoningSet          bool
 }
 
-// LSPServerStatus and LSPStatus are UI-neutral snapshots supplied by the
-// harness runtime. LoadedRoots are initialized, currently-live server roots;
-// Available only means the configured command is present on PATH.
+// LSPServerRootStatus, LSPServerStatus, and LSPStatus are UI-neutral snapshots
+// supplied by the harness runtime. Installed only means the configured command
+// is on PATH; root readiness requires successful initialization.
+type LSPServerRootStatus struct {
+	Root         string
+	Initializing bool
+	Ready        bool
+	Error        string
+	BackingOff   bool
+	RetryAt      time.Time
+}
+
 type LSPServerStatus struct {
-	Name        string
-	Languages   []string
-	Command     string
-	Available   bool
-	LoadedRoots []string
+	Name      string
+	Languages []string
+	Command   string
+	Installed bool
+	Roots     []LSPServerRootStatus
 }
 
 type LSPStatus struct {
 	Enabled            bool
 	Tools              []string
-	AvailableLanguages []string
-	LoadedLanguages    []string
+	InstalledLanguages []string
+	ReadyLanguages     []string
 	Servers            []LSPServerStatus
 }
 
@@ -5455,25 +5464,69 @@ func formatLSPStatus(status LSPStatus) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "lsp: %s\n", state)
 	fmt.Fprintf(&b, "  configured tools: %d\n", len(status.Tools))
-	fmt.Fprintf(&b, "  available languages: %s\n", listOrNone(status.AvailableLanguages))
-	fmt.Fprintf(&b, "  loaded languages: %s", listOrNone(status.LoadedLanguages))
+	fmt.Fprintf(&b, "  installed languages: %s\n", listOrNone(status.InstalledLanguages))
+	fmt.Fprintf(&b, "  ready languages: %s", listOrNone(status.ReadyLanguages))
 	if len(status.Servers) == 0 {
 		return b.String()
 	}
 	b.WriteString("\n  servers:")
 	for _, server := range status.Servers {
-		serverState := "missing"
-		if server.Available {
-			serverState = "available"
+		readyRoots := make([]string, 0, len(server.Roots))
+		initializingRoots := make([]string, 0, len(server.Roots))
+		failedRoots := make([]LSPServerRootStatus, 0, len(server.Roots))
+		backingOff := false
+		for _, root := range server.Roots {
+			switch {
+			case root.Ready:
+				readyRoots = append(readyRoots, root.Root)
+			case root.Initializing:
+				initializingRoots = append(initializingRoots, root.Root)
+			default:
+				failedRoots = append(failedRoots, root)
+				backingOff = backingOff || root.BackingOff
+			}
 		}
-		if len(server.LoadedRoots) > 0 {
-			serverState = "loaded"
+
+		serverState := "idle"
+		switch {
+		case len(readyRoots) > 0 && len(failedRoots) > 0:
+			serverState = "ready (some roots failed)"
+		case len(readyRoots) > 0 && len(initializingRoots) > 0:
+			serverState = "ready (some roots initializing)"
+		case len(readyRoots) > 0:
+			serverState = "ready"
+		case len(initializingRoots) > 0 && len(failedRoots) > 0:
+			serverState = "initializing (some roots failed)"
+		case len(initializingRoots) > 0:
+			serverState = "initializing"
+		case !server.Installed:
+			serverState = "missing"
+		case len(failedRoots) > 0 && backingOff:
+			serverState = "failed (backing off)"
+		case len(failedRoots) > 0:
+			serverState = "failed"
 		}
 		fmt.Fprintf(&b, "\n    %s (%s): %s", server.Name, strings.Join(server.Languages, ", "), serverState)
-		if len(server.LoadedRoots) > 0 {
-			fmt.Fprintf(&b, " [%s]", strings.Join(server.LoadedRoots, ", "))
-		} else if server.Command != "" && !server.Available {
+		if len(readyRoots) > 0 {
+			fmt.Fprintf(&b, " [%s]", strings.Join(readyRoots, ", "))
+		}
+		if server.Command != "" && !server.Installed {
 			fmt.Fprintf(&b, " [%s not on PATH]", server.Command)
+		}
+		for _, root := range initializingRoots {
+			fmt.Fprintf(&b, "\n      %s: initializing", root)
+		}
+		for _, root := range failedRoots {
+			fmt.Fprintf(&b, "\n      %s: failed", root.Root)
+			if root.BackingOff {
+				b.WriteString(" (backing off)")
+			}
+			if message := strings.Join(strings.Fields(root.Error), " "); message != "" {
+				fmt.Fprintf(&b, ": %s", message)
+			}
+			if root.BackingOff && !root.RetryAt.IsZero() {
+				fmt.Fprintf(&b, " [retry at %s]", root.RetryAt.Format(time.RFC3339))
+			}
 		}
 	}
 	return b.String()

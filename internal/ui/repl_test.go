@@ -2156,8 +2156,8 @@ func TestREPLLSPCommandShowsStatusAndAppliesRuntimeSelection(t *testing.T) {
 		actions = append(actions, action+":"+agentName)
 		status := LSPStatus{
 			Enabled: action != "disable",
-			Tools:   []string{"lsp_definition"}, AvailableLanguages: []string{"go", "rust"},
-			Servers: []LSPServerStatus{{Name: "gopls", Languages: []string{"go"}, Command: "gopls", Available: true}},
+			Tools:   []string{"lsp_definition"}, InstalledLanguages: []string{"go", "rust"},
+			Servers: []LSPServerStatus{{Name: "gopls", Languages: []string{"go"}, Command: "gopls", Installed: true}},
 		}
 		switch action {
 		case "enable":
@@ -2166,8 +2166,8 @@ func TestREPLLSPCommandShowsStatusAndAppliesRuntimeSelection(t *testing.T) {
 			status.Tools = nil
 			return LSPSelection{Tools: base, System: "lsp disabled", Status: status}, nil
 		default:
-			status.LoadedLanguages = []string{"go"}
-			status.Servers[0].LoadedRoots = []string{"/work"}
+			status.ReadyLanguages = []string{"go"}
+			status.Servers[0].Roots = []LSPServerRootStatus{{Root: "/work", Ready: true}}
 			return LSPSelection{Status: status}, nil
 		}
 	}
@@ -2182,7 +2182,7 @@ func TestREPLLSPCommandShowsStatusAndAppliesRuntimeSelection(t *testing.T) {
 	if want := []string{"status:auto", "enable:auto", "disable:auto"}; !slices.Equal(actions, want) {
 		t.Fatalf("actions = %v, want %v", actions, want)
 	}
-	for _, want := range []string{"lsp: enabled", "available languages: go, rust", "loaded languages: go", "gopls (go): loaded [/work]", "lsp: disabled"} {
+	for _, want := range []string{"lsp: enabled", "installed languages: go, rust", "ready languages: go", "gopls (go): ready [/work]", "lsp: disabled"} {
 		if !strings.Contains(errw.String(), want) {
 			t.Errorf("/lsp output missing %q:\n%s", want, errw.String())
 		}
@@ -2192,6 +2192,40 @@ func TestREPLLSPCommandShowsStatusAndAppliesRuntimeSelection(t *testing.T) {
 	}
 	if app.System != "lsp disabled" {
 		t.Fatalf("system = %q, want disabled selection", app.System)
+	}
+}
+
+func TestFormatLSPStatusShowsReadinessAndFailureDetails(t *testing.T) {
+	retryAt := time.Date(2026, 9, 1, 3, 45, 0, 0, time.UTC)
+	got := formatLSPStatus(LSPStatus{
+		Enabled:            true,
+		Tools:              []string{"lsp_definition"},
+		InstalledLanguages: []string{"go", "javascript", "rust"},
+		ReadyLanguages:     []string{"go"},
+		Servers: []LSPServerStatus{
+			{Name: "missing-lsp", Languages: []string{"python"}, Command: "missing-lsp"},
+			{Name: "rust-analyzer", Languages: []string{"rust"}, Command: "rust-analyzer", Installed: true},
+			{Name: "pyright", Languages: []string{"python"}, Command: "pyright", Installed: true, Roots: []LSPServerRootStatus{{Root: "/python", Initializing: true}}},
+			{Name: "gopls", Languages: []string{"go"}, Command: "gopls", Installed: true, Roots: []LSPServerRootStatus{{Root: "/work", Ready: true}}},
+			{Name: "typescript-language-server", Languages: []string{"javascript"}, Command: "typescript-language-server", Installed: true, Roots: []LSPServerRootStatus{{
+				Root: "/web", Error: "initialize failed\nmissing tsserver", BackingOff: true, RetryAt: retryAt,
+			}}},
+		},
+	})
+	for _, want := range []string{
+		"installed languages: go, javascript, rust",
+		"ready languages: go",
+		"missing-lsp (python): missing [missing-lsp not on PATH]",
+		"rust-analyzer (rust): idle",
+		"pyright (python): initializing",
+		"/python: initializing",
+		"gopls (go): ready [/work]",
+		"typescript-language-server (javascript): failed (backing off)",
+		"/web: failed (backing off): initialize failed missing tsserver [retry at 2026-09-01T03:45:00Z]",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("status missing %q:\n%s", want, got)
+		}
 	}
 }
 
