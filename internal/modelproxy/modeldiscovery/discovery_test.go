@@ -48,6 +48,43 @@ func TestOpenAIDiscoveryUsesAuthAndCapabilityPolicy(t *testing.T) {
 	}
 }
 
+func TestMetaDiscoveryTrustsOnlyResponsesModelIDs(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+		  {"id":"muse-spark-1.3","object":"model","created":0,"owned_by":"meta"},
+		  {"id":"muse-image-1.0","object":"model","created":0,"owned_by":"meta"},
+		  {"id":"muse-voice-transcribe-1.0","object":"model","created":0,"owned_by":"meta"}
+		]}`))
+	}))
+	defer server.Close()
+
+	pc := llm.ProviderConfig{Name: "meta", APIType: "responses", BaseURL: server.URL + "/v1", APIKey: "secret", Managed: true}
+	snapshot, err := (Fetcher{Client: server.Client()}).Fetch(context.Background(), pc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Format != FormatMeta || len(snapshot.Models) != 3 {
+		t.Fatalf("snapshot = %+v", snapshot)
+	}
+	if !snapshot.Models["muse-spark-1.3"].Eligible {
+		t.Fatal("Meta Responses model was not eligible")
+	}
+	if snapshot.Models["muse-image-1.0"].Eligible || snapshot.Models["muse-voice-transcribe-1.0"].Eligible {
+		t.Fatalf("non-Responses Meta models were eligible: %+v", snapshot.Models)
+	}
+	merged := MergeProvider(modelcatalog.Provider{ID: "meta"}, snapshot)
+	if len(merged.Models) != 1 || merged.Models["muse-spark-1.3"].ID != "muse-spark-1.3" {
+		t.Fatalf("merged Meta models = %+v", merged.Models)
+	}
+}
+
 func TestResolveDiscoveryOverride(t *testing.T) {
 	t.Parallel()
 	enabled := true
@@ -59,6 +96,10 @@ func TestResolveDiscoveryOverride(t *testing.T) {
 	spec, ok, err := Resolve(pc)
 	if err != nil || !ok || spec.Endpoint != "https://catalog.example/models" || spec.Format != FormatOpenAI || !spec.IncludeUnknownModels {
 		t.Fatalf("Resolve = %+v, %v, %v", spec, ok, err)
+	}
+	pc.ModelDiscovery.Format = "meta"
+	if spec, ok, err := Resolve(pc); err != nil || !ok || spec.Format != FormatMeta {
+		t.Fatalf("Meta override Resolve = %+v, %v, %v", spec, ok, err)
 	}
 	disabled := false
 	pc.ModelDiscovery.Enabled = &disabled

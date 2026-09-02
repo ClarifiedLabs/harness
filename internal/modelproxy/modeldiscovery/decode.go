@@ -110,7 +110,7 @@ func fetchPage(ctx context.Context, client *http.Client, endpoint string, header
 }
 
 func resolveNext(current *url.URL, next string, format Format) (*url.URL, error) {
-	if format == FormatOpenAI || format == FormatAnthropic {
+	if format == FormatOpenAI || format == FormatMeta || format == FormatAnthropic {
 		q := current.Query()
 		key := "after"
 		if format == FormatAnthropic {
@@ -151,6 +151,8 @@ func decodePage(data []byte, spec Spec) (map[string]Model, string, error) {
 		return decodeAnthropic(data, spec)
 	case FormatGemini:
 		return decodeGemini(data, spec)
+	case FormatMeta:
+		return decodeMeta(data, spec)
 	default:
 		return nil, "", fmt.Errorf("unsupported model discovery format %q", spec.Format)
 	}
@@ -240,6 +242,26 @@ func decodeOpenAIModel(raw json.RawMessage, spec Spec) (Model, bool, error) {
 	}
 	model.Eligible = spec.IncludeUnknownModels || spec.TrustedGenerative || generative
 	return model, true, nil
+}
+
+// decodeMeta accepts Meta's OpenAI-compatible list envelope while, under the
+// default policy, only trusting model families served by the Responses protocol.
+// An explicit include_unknown_models override retains its documented meaning.
+// Meta's endpoint returns
+// language, image-generation, and transcription model IDs without capability
+// fields, so treating every ID as text-generative would advertise unsupported
+// targets. Rich future records can still establish eligibility through the
+// generic OpenAI capability decoder.
+func decodeMeta(data []byte, spec Spec) (map[string]Model, string, error) {
+	models, next, err := decodeOpenAI(data, spec)
+	if err != nil {
+		return nil, "", err
+	}
+	for id, model := range models {
+		model.Eligible = model.Eligible || strings.HasPrefix(strings.ToLower(strings.TrimSpace(id)), "muse-spark-")
+		models[id] = model
+	}
+	return models, next, nil
 }
 
 func decodeOpenRouter(data []byte, spec Spec) (map[string]Model, string, error) {

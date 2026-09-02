@@ -133,6 +133,8 @@ func (p Provider) BaseURL() string {
 		return p.API
 	}
 	switch {
+	case p.ID == "meta":
+		return "https://api.meta.ai/v1"
 	case p.ID == "openai" || npm == npmOpenAI:
 		return "https://api.openai.com/v1"
 	case p.ID == "anthropic" || npm == npmAnthropic:
@@ -160,7 +162,7 @@ func (p Provider) APIType() string {
 	if p.ID == "anthropic" || strings.Contains(npm, "anthropic") || slices.Contains(p.Env, "ANTHROPIC_API_KEY") {
 		return "anthropic"
 	}
-	if p.ID == "openai" {
+	if p.ID == "openai" || p.ID == "meta" {
 		return "responses"
 	}
 	if p.ID == "google" || npm == npmGoogle {

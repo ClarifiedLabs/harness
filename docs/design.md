@@ -938,14 +938,20 @@ vendored fallback snapshots live in `internal/modelcatalog`.
 `internal/modelproxy/modeldiscovery` owns authenticated provider catalogs,
 normalization, capability filtering, ETags, pagination guards, and their
 provider-local cache. Initial adapters cover generic OpenAI-compatible
-`/models` endpoints (including trusted Sakana results), OpenRouter, Anthropic,
-Gemini, and the ChatGPT Codex account catalog.
+`/models` endpoints (including trusted Sakana results), Meta's ID-only
+multi-family model catalog, OpenRouter, Anthropic, Gemini, and the ChatGPT Codex
+account catalog.
 
 Normalized provider models retain field presence separately from zero values so
 merge precedence is deterministic: fields explicitly returned by the provider,
 then models.dev, then configured metadata, then safe runtime defaults. Generic
 OpenAI ID-only results validate baseline/configured IDs; direct-only IDs require
-generative capability evidence unless the endpoint or config is trusted.
+generative capability evidence unless the endpoint or config is trusted. Meta's
+adapter accepts direct-only `muse-spark-*` IDs because its shared model catalog
+also returns image-generation and transcription models without capability
+fields; under the default policy those other families are not valid Responses
+text targets. The existing explicit `include_unknown_models:true` escape hatch
+bypasses this filter.
 models.dev `experimental.modes` entries are projected into bounded service-tier
 request mappings and tier-specific prices.
 The proxy caches a projected catalog as `models.dev.api.json`

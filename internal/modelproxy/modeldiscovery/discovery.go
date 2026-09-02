@@ -25,6 +25,7 @@ const (
 	FormatCodex      Format = "codex"
 	FormatAnthropic  Format = "anthropic"
 	FormatGemini     Format = "gemini"
+	FormatMeta       Format = "meta"
 )
 
 const (
@@ -117,6 +118,8 @@ func Resolve(pc llm.ProviderConfig) (Spec, bool, error) {
 	case name == "openai-codex" || strings.Contains(host, "chatgpt.com") ||
 		(pc.Auth != nil && strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth)):
 		format, trusted = FormatCodex, true
+	case name == "meta" || host == "api.meta.ai":
+		format = FormatMeta
 	case name == "openrouter" || strings.Contains(host, "openrouter.ai"):
 		format = FormatOpenRouter
 	case name == "google" || apiType == "interactions" || strings.Contains(host, "generativelanguage.googleapis.com"):
@@ -162,7 +165,7 @@ func Resolve(pc llm.ProviderConfig) (Spec, bool, error) {
 
 func validFormat(format Format) bool {
 	switch format {
-	case FormatOpenAI, FormatOpenRouter, FormatCodex, FormatAnthropic, FormatGemini:
+	case FormatOpenAI, FormatOpenRouter, FormatCodex, FormatAnthropic, FormatGemini, FormatMeta:
 		return true
 	default:
 		return false
@@ -305,6 +308,8 @@ func fallbackKeyEnvironments(format Format) []string {
 		return []string{"GOOGLE_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GEMINI_API_KEY"}
 	case FormatOpenRouter:
 		return []string{"OPENROUTER_API_KEY"}
+	case FormatMeta:
+		return []string{"META_MODEL_API_KEY"}
 	default:
 		return []string{"RESPONSES_API_KEY", "OPENAI_API_KEY"}
 	}

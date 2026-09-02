@@ -494,6 +494,62 @@ func TestRunSetupOffersAuthenticatedLiveOnlyProviderModels(t *testing.T) {
 	}
 }
 
+func TestRunSetupWritesMetaResponsesProviderFromDirectCatalog(t *testing.T) {
+	home := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+		  {"id":"muse-spark-1.3","object":"model","created":0,"owned_by":"meta"},
+		  {"id":"muse-image-1.0","object":"model","created":0,"owned_by":"meta"},
+		  {"id":"muse-voice-transcribe-1.0","object":"model","created":0,"owned_by":"meta"}
+		]}`))
+	}))
+	defer server.Close()
+
+	catalog := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
+		"meta": {
+			ID: "meta", Name: "Meta", API: server.URL + "/v1", NPM: "@ai-sdk/openai", Env: []string{"META_MODEL_API_KEY"},
+			Models: map[string]modelcatalog.Model{
+				"muse-spark-1.2": {ID: "muse-spark-1.2", Name: "Muse Spark 1.2"},
+			},
+		},
+	}}
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin: strings.NewReader("meta\nsecret\nmuse-spark-1.3\nsave\n"), stdout: &out, stderr: &errw,
+		getenv: func(key string) string {
+			if key == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog:     func(context.Context) (*modelcatalog.Catalog, error) { return catalog, nil },
+		providerModelsClient: server.Client(), terminalRows: func() int { return 12 },
+	}
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+	if strings.Contains(out.String(), "muse-image") || strings.Contains(out.String(), "muse-voice") {
+		t.Fatalf("setup offered non-Responses Meta models: %q", out.String())
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".config", "harness-model-proxy", "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := llm.DecodeProviderConfigs(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || providers[0].APIType != "responses" || len(providers[0].Models) != 1 || providers[0].Models[0].Name != "muse-spark-1.3" {
+		t.Fatalf("Meta provider = %+v; config=%s", providers, data)
+	}
+}
+
 func TestRunSetupWritesSakanaProviderWithoutModelShape(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
@@ -881,6 +937,68 @@ func TestRunRefreshModelsPreservesConfiguredModelAllowlist(t *testing.T) {
 	}
 	if _, ok := cache.Provider("testai"); !ok {
 		t.Fatalf("models.dev cache missing refreshed testai provider")
+	}
+}
+
+func TestRunRefreshModelsQueriesMetaAndMigratesToResponses(t *testing.T) {
+	dir := t.TempDir()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+		  {"id":"muse-spark-1.2","object":"model","created":0,"owned_by":"meta"},
+		  {"id":"muse-spark-1.3","object":"model","created":0,"owned_by":"meta"}
+		]}`))
+	}))
+	defer server.Close()
+
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["meta.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	providerJSON := fmt.Sprintf(`{
+	  "name":"meta","api_type":"openai","base_url":%q,"api_key":"secret","managed":true,
+	  "models":[{"name":"muse-spark-1.2","context_window":1000}]
+	}`, server.URL+"/v1")
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(providerJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	catalog := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
+		"meta": {
+			ID: "meta", Name: "Meta", API: server.URL + "/v1", NPM: "@ai-sdk/openai", Env: []string{"META_MODEL_API_KEY"},
+			Models: map[string]modelcatalog.Model{
+				"muse-spark-1.2": {ID: "muse-spark-1.2", Name: "Muse Spark 1.2", Limit: modelcatalog.Limit{Context: 2000}},
+			},
+		},
+	}}
+	env := environment{
+		stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{}, providerModelsClient: server.Client(),
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) { return catalog, nil },
+	}
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "meta.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	providers, err := llm.DecodeProviderConfigs(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(providers) != 1 || providers[0].APIType != "responses" || len(providers[0].Models) != 1 || providers[0].Models[0].Name != "muse-spark-1.2" {
+		t.Fatalf("refreshed Meta provider = %+v; config=%s", providers, data)
+	}
+	snapshot, err := modeldiscovery.ReadProviderCache(dir, "meta", server.URL+"/v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Format != modeldiscovery.FormatMeta || !snapshot.Models["muse-spark-1.3"].Eligible {
+		t.Fatalf("Meta direct snapshot = %+v", snapshot)
 	}
 }
 

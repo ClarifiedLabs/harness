@@ -958,6 +958,13 @@ first-party OpenAI and Anthropic defaults from exact `@ai-sdk/openai` and
 the native Gemini Interactions endpoint. Managed Google configs use
 `api_type:"interactions"`, explicitly default `interactions_stateful:true`, and
 advertise `web_search`; Vertex Google package variants are not auto-configured.
+Managed Meta configs default to `api_type:"responses"`, following Meta's
+recommended protocol. Setup and refresh query Meta's authenticated
+`GET /v1/models` endpoint directly; its ID-only catalog spans multiple API
+families, so direct-only `muse-spark-*` models are accepted as Responses models
+while image-generation and transcription IDs are not advertised as text targets
+under the default policy. An explicit `include_unknown_models:true` discovery
+override bypasses that conservative family filter.
 Anthropic `base_url` values are versioned API prefixes (normally ending in
 `/v1`); the dialect appends `/messages` or `/messages/count_tokens`.
 
@@ -1031,13 +1038,15 @@ Provider configs also accept an optional model-discovery override:
 
 With no block, managed providers are detected from their name, dialect, and
 base URL. Supported formats are `openai`, `openrouter`, `codex`, `anthropic`,
-and `gemini`; the override URL must be an absolute HTTP(S) URL without userinfo
-or a fragment. Set `enabled:false` to use catalog-only availability. Generic
-OpenAI-compatible ID-only responses validate configured/models.dev models but
-do not introduce unknown models. Rich capability fields can establish that a
+`gemini`, and `meta`; the override URL must be an absolute HTTP(S) URL without
+userinfo or a fragment. Set `enabled:false` to use catalog-only availability.
+Generic OpenAI-compatible ID-only responses validate configured/models.dev models
+but do not introduce unknown models. Rich capability fields can establish that a
 new model is generative; Sakana and the provider-specific adapters trust their
 generative-only results. `include_unknown_models` explicitly overrides that
-policy.
+policy. For Meta, `include_unknown_models:true` also opts image-generation and
+transcription IDs into the local target list; only use it when another layer can
+serve those IDs through the configured dialect.
 
 Provider configs may also set `prompt_cache` to control how the stable harness
 conversation cache key is sent to OpenAI-compatible backends. This cache
@@ -1225,8 +1234,10 @@ only, then refreshes supported authenticated managed providers immediately and
 every `provider_models_cache_ttl` (`1h` by default). Set the value to `0` to
 disable background provider polling; setup, `refresh-models`, and post-login
 refreshes still query providers explicitly. OpenAI-compatible providers use
-`/models`; OpenRouter, Anthropic, Gemini, and ChatGPT Codex use their
-provider-specific authentication, response, and pagination contracts.
+`/models`; Meta uses its bearer-authenticated `/v1/models` catalog and filters
+for Responses-capable model families; OpenRouter, Anthropic, Gemini, and ChatGPT
+Codex use their provider-specific authentication, response, and pagination
+contracts.
 
 Run `harness-model-proxy refresh-models` to fetch models.dev and query every
 supported provider with working credentials before rewriting provider files.

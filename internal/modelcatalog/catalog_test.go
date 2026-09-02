@@ -142,6 +142,16 @@ func TestFirstPartyProviderFallbacks(t *testing.T) {
 	}
 }
 
+func TestMetaDefaultsToResponsesAPI(t *testing.T) {
+	meta := Provider{ID: "meta", NPM: "@ai-sdk/openai"}
+	if got := meta.BaseURL(); got != "https://api.meta.ai/v1" {
+		t.Fatalf("Meta BaseURL = %q", got)
+	}
+	if got := meta.APIType(); got != "responses" {
+		t.Fatalf("Meta APIType = %q, want responses", got)
+	}
+}
+
 func TestDecodeModelsDevServiceTierModes(t *testing.T) {
 	c, err := DecodeModelsDev(strings.NewReader(testCatalog))
 	if err != nil {
