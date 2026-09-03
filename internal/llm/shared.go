@@ -27,6 +27,56 @@ func RawObjectOrNil(raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
+// MaxTokensOptions controls provider wire policy layered on top of the neutral
+// output-token resolution.
+type MaxTokensOptions struct {
+	Omit     bool
+	Minimum  int
+	Required bool
+}
+
+// ResolveMaxTokensWithOptions resolves the output-token cap for a provider
+// wire request. Omit suppresses the field, Minimum applies a provider API floor,
+// and Required supplies a value when the neutral policy would otherwise omit it.
+func ResolveMaxTokensWithOptions(req Request, contextWindow, outputLimit int, opts MaxTokensOptions) int {
+	if opts.Omit {
+		return 0
+	}
+	resolved := ResolveMaxTokens(req, contextWindow, outputLimit)
+	if resolved <= 0 && opts.Required {
+		resolved = DefaultMaxTokensCap
+		if outputLimit > 0 && outputLimit < resolved {
+			resolved = outputLimit
+		}
+	}
+	if resolved > 0 && opts.Minimum > 0 && resolved < opts.Minimum {
+		resolved = opts.Minimum
+	}
+	return resolved
+}
+
+// FilterServerTools retains server tools supported by a dialect. Explicitly
+// typed tools are matched by kind; an untyped tool uses the neutral web-search
+// name as the backward-compatible default. Input order is preserved.
+func FilterServerTools(tools []ServerTool, supportedKinds ...string) []ServerTool {
+	var filtered []ServerTool
+	for _, tool := range tools {
+		if tool.Kind == "" {
+			if tool.Name == ServerToolWebSearch {
+				filtered = append(filtered, tool)
+			}
+			continue
+		}
+		for _, kind := range supportedKinds {
+			if tool.Kind == kind {
+				filtered = append(filtered, tool)
+				break
+			}
+		}
+	}
+	return filtered
+}
+
 // ImageDataURL renders a content block's image as a base64 data URL.
 func ImageDataURL(b ContentBlock) string {
 	return "data:" + b.ImageMediaType + ";base64," + b.ImageData

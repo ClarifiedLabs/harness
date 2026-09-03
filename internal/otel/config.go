@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+const (
+	minExportTimeout       = time.Second
+	maxExportTimeout       = 30 * time.Second
+	DefaultExportTimeout   = 5 * time.Second
+	PeriodicExportInterval = 30 * time.Second
+	ShutdownExportTimeout  = 2 * time.Second
+)
+
 // Config is the exporter configuration derived from config.OTelConfig and runtime resource.
 type Config struct {
 	Enabled            bool
@@ -32,7 +40,7 @@ func (c Config) Validate() error {
 	if c.Protocol != "" && strings.ToLower(strings.TrimSpace(c.Protocol)) != "http/json" {
 		return fmt.Errorf("otel protocol must be http/json")
 	}
-	if c.Timeout != 0 && (c.Timeout < time.Second || c.Timeout > 30*time.Second) {
+	if c.Timeout != 0 && (c.Timeout < minExportTimeout || c.Timeout > maxExportTimeout) {
 		return fmt.Errorf("otel timeout must be between 1s and 30s")
 	}
 	return nil

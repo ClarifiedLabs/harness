@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"harness/internal/reasoningprofile"
+	"harness/scripts/internal/benchutil"
 )
 
 var defaultModels = []string{
@@ -352,13 +353,10 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 	if cfg.Case.RestartBetweenPrompts {
 		stdout, stderr, runErr = runRestartBenchmark(ctx, binary, args, env, cfg.Case, worktree, sessionDir)
 	} else if cfg.Case.SecondPrompt == "" {
-		var stdoutBuffer, stderrBuffer bytes.Buffer
 		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Dir = worktree
 		cmd.Env = env
-		cmd.Stdout, cmd.Stderr = &stdoutBuffer, &stderrBuffer
-		runErr = cmd.Run()
-		stdout, stderr = stdoutBuffer.Bytes(), stderrBuffer.Bytes()
+		stdout, stderr, runErr = benchutil.RunCommand(cmd)
 	} else {
 		cmd := exec.CommandContext(ctx, binary, args...)
 		cmd.Dir = worktree
@@ -367,9 +365,9 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 	}
 	record.Finished = time.Now().UTC()
 	record.WallSeconds = record.Finished.Sub(record.Started).Seconds()
-	record.ExitCode = exitStatus(runErr)
-	_ = os.WriteFile(record.StdoutPath, stdout, 0o644)
-	_ = os.WriteFile(record.StderrPath, stderr, 0o644)
+	record.ExitCode = benchutil.ExitStatus(runErr)
+	outputReasons := benchutil.WriteOutputFiles(record.StdoutPath, record.StderrPath, stdout, stderr)
+	record.Score.Reasons = append(record.Score.Reasons, outputReasons...)
 	if data, err := os.ReadFile(filepath.Join(sessionDir, "raw.ndjson")); err == nil {
 		sum := sha256.Sum256(data)
 		record.EventsSHA256 = hex.EncodeToString(sum[:])
@@ -381,6 +379,10 @@ func executeOne(ctx context.Context, cfg runConfig, binary, variant, model strin
 	if runErr != nil {
 		record.Invalid = runErr.Error()
 		return record, fmt.Errorf("%s %s repetition %d %s: %w", cfg.Case.Name, model, repetition, variant, runErr)
+	}
+	if len(outputReasons) > 0 {
+		record.Invalid = strings.Join(outputReasons, "; ")
+		return record, fmt.Errorf("%s %s repetition %d %s: %s", cfg.Case.Name, model, repetition, variant, record.Invalid)
 	}
 	m, err := collectMetrics(sessionDir)
 	if err != nil {
@@ -1044,16 +1046,6 @@ func fixtureDigest(dir string) (string, error) {
 	}
 	sum := sha256.Sum256([]byte(b.String()))
 	return hex.EncodeToString(sum[:]), nil
-}
-
-func exitStatus(err error) int {
-	if err == nil {
-		return 0
-	}
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		return exitErr.ExitCode()
-	}
-	return -1
 }
 
 func sanitize(value string) string {

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand"
 	"net"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"harness/internal/buildinfo"
+	"harness/internal/logging"
 )
 
 // Exporter collects OTLP metrics and pushes them to the collector. It is safe for
@@ -87,7 +89,7 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 		cfg.ServiceName = "harness"
 	}
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 5 * time.Second
+		cfg.Timeout = DefaultExportTimeout
 	}
 	// Provider, model, agent, and session identity can change inside a long-lived
 	// REPL. Keep the OTLP resource process-stable and put dynamic identity on
@@ -121,9 +123,9 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 	}, nil
 }
 
-// SetPeriodic starts one process-lifetime 30-second export loop. Callers own
-// cancellation and still perform the final synchronous Export during shutdown.
-func (e *Exporter) SetPeriodic(ctx context.Context) {
+// SetPeriodic starts one process-lifetime export loop. Callers own cancellation
+// and still perform the final synchronous Export during shutdown.
+func (e *Exporter) SetPeriodic(ctx context.Context, logger *slog.Logger) {
 	if e == nil {
 		return
 	}
@@ -131,7 +133,7 @@ func (e *Exporter) SetPeriodic(ctx context.Context) {
 		go func() {
 			interval := e.periodicInterval
 			if interval <= 0 {
-				interval = 30 * time.Second
+				interval = PeriodicExportInterval
 			}
 			ticker := time.NewTicker(interval)
 			defer ticker.Stop()
@@ -140,13 +142,12 @@ func (e *Exporter) SetPeriodic(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					timeout := e.cfg.Timeout
-					if timeout <= 0 {
-						timeout = 5 * time.Second
-					}
-					exportCtx, cancel := context.WithTimeout(ctx, timeout)
-					_ = e.Export(exportCtx)
+					exportCtx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
+					err := e.Export(exportCtx)
 					cancel()
+					if err != nil && logger != nil {
+						logger.Warn("periodic OTEL export failed", logging.Category("otel"), "err", err)
+					}
 				}
 			}
 		}()

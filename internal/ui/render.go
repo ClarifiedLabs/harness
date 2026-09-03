@@ -2002,10 +2002,6 @@ func snippet(s string) []string {
 	return lines
 }
 
-func firstLine(s string) string { return sessionrec.FirstLine(s) }
-
-func clip(s string, max int) string { return sessionrec.Clip(s, max) }
-
 // humanTokens renders a token count compactly: 12400 -> "12.4k".
 func humanTokens(n int) string { return sessionrec.HumanTokens(n) }
 

@@ -314,6 +314,18 @@ type analysisMetadata struct {
 	persistedUsage                     *UsageTotals
 }
 
+func newExecutionAnalysis() ExecutionAnalysis {
+	return ExecutionAnalysis{Terminations: make(map[string]int)}
+}
+
+func newCompletionAnalysis() CompletionAnalysis {
+	return CompletionAnalysis{
+		Outcomes:   make(map[string]int),
+		Validation: make(map[string]int),
+		Contracts:  make(map[string]int),
+	}
+}
+
 // AnalyzeCorpus recursively analyzes one session root or a directory of roots.
 // Delegate children are owned by their nearest discovered root, symlinks are
 // never followed, and every physical child directory is counted at most once.
@@ -376,7 +388,7 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 	report := AnalysisReport{
 		Version: AnalysisVersion, Path: path, Roots: len(roots),
 		Completeness: make(map[string]int),
-		Execution:    ExecutionAnalysis{Terminations: make(map[string]int)},
+		Execution:    newExecutionAnalysis(),
 	}
 	if !opts.Before.IsZero() {
 		before := opts.Before.UTC()
@@ -396,84 +408,44 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 		if acc == nil {
 			acc = &cohortAccumulator{analysis: CohortAnalysis{
 				Cohort:     cohort,
-				Execution:  ExecutionAnalysis{Terminations: make(map[string]int)},
+				Execution:  newExecutionAnalysis(),
 				Workflow:   WorkflowAnalysis{Outcomes: make(map[string]int)},
-				Completion: CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int)},
+				Completion: newCompletionAnalysis(),
 			}}
 			cohorts[cohort.Key] = acc
 		}
 		acc.analysis.Roots++
 		hierarchy := UsageAnalysis{}
-		hierarchyExecution := ExecutionAnalysis{Terminations: make(map[string]int)}
+		hierarchyExecution := newExecutionAnalysis()
 		hierarchyWorkflow := WorkflowAnalysis{Outcomes: make(map[string]int)}
-		hierarchyCompletion := CompletionAnalysis{Outcomes: make(map[string]int), Validation: make(map[string]int), Contracts: make(map[string]int)}
+		hierarchyCompletion := newCompletionAnalysis()
 		var hierarchyStorage StorageAnalysis
 		allRawComplete := opts.Before.IsZero()
 		rootItem := -1
 		for _, stream := range streams {
-			events, source, err := readAnalysisEvents(stream.dir, opts.Before)
-			if err != nil {
-				return AnalysisReport{}, fmt.Errorf("session: analyze %s: %w", stream.dir, err)
-			}
-			metadata := readAnalysisMetadata(stream.dir, stream)
-			item := SessionAnalysis{
-				Path: stream.dir, RootPath: root, RootID: rootMeta.id, CohortKey: cohort.Key,
-				Delegate: stream.delegate, Source: source,
-				ID: metadata.id, ParentID: metadata.parent, Agent: metadata.agent,
-				Provider: metadata.provider, Model: metadata.model,
-				BuildAvailable: metadata.buildAvailable, RuntimeAvailable: metadata.runtimeAvailable,
-				Build: metadata.build, Runtime: metadata.runtime,
-			}
-			switch {
-			case stream.delegate && stream.metaBad:
-				item.MetadataStatus = "malformed"
-				report.MalformedChildMetadata++
-			case stream.delegate && stream.metaOK:
-				item.MetadataStatus = "available"
-			case stream.delegate:
-				item.MetadataStatus = "missing"
-			case metadata.buildAvailable || metadata.runtimeAvailable || metadata.persistedUsage != nil:
-				item.MetadataStatus = "available"
-			default:
-				item.MetadataStatus = "missing"
-			}
-			var fallback *ChildMeta
-			if stream.metaOK && opts.Before.IsZero() {
-				fallback = &stream.meta
-			}
-			item.Execution = deriveExecution(events, source.Status)
-			item.ExecutionIdentity = deriveExecutionIdentity(events, source.Status, metadata)
-			item.Telemetry = deriveTelemetry(events, fallback)
-			if stream.delegate {
-				item.Telemetry.Completion = deriveCompletion(fallback, true)
-			}
-			conversation, maintenance := usageFromEvents(events, source.Status)
-			if stream.delegate {
-				item.Usage.DescendantConversational = conversation
-				item.Usage.DescendantMaintenance = maintenance
-			} else {
-				item.Usage.RootConversational = conversation
-				item.Usage.RootMaintenance = maintenance
-				rootItem = len(report.Items)
-			}
-			item.Usage.finish()
-			item.Storage, err = analyzeStorage(stream.dir, source, opts.Before)
+			item, events, err := analyzeStream(root, rootMeta.id, cohort.Key, stream, opts)
 			if err != nil {
 				return AnalysisReport{}, err
+			}
+			if item.MetadataStatus == "malformed" {
+				report.MalformedChildMetadata++
+			}
+			if !item.Delegate {
+				rootItem = len(report.Items)
 			}
 			hierarchy.add(item.Usage)
 			hierarchyExecution.add(item.Execution)
 			hierarchyWorkflow.add(item.Telemetry.Workflow)
 			hierarchyCompletion.add(item.Telemetry.Completion)
 			hierarchyStorage.add(item.Storage)
-			allRawComplete = allRawComplete && source.Status == "complete"
+			allRawComplete = allRawComplete && item.Source.Status == "complete"
 			report.Completeness[item.Execution.Completeness]++
 			report.Execution.add(item.Execution)
 			report.Telemetry.add(item.Telemetry)
 			report.Coverage.add(item.Telemetry, events)
 			report.Storage.add(item.Storage)
 			report.Items = append(report.Items, item)
-			switch source.Status {
+			switch item.Source.Status {
 			case "missing":
 				report.MissingStreams++
 			case "incomplete":
@@ -540,6 +512,58 @@ func analyzeSessionRoots(path string, roots []string, opts AnalyzeOptions) (Anal
 	sort.Slice(report.Hierarchies, func(i, j int) bool { return report.Hierarchies[i].RootPath < report.Hierarchies[j].RootPath })
 	sort.Slice(report.Items, func(i, j int) bool { return report.Items[i].Path < report.Items[j].Path })
 	return report, nil
+}
+
+func analyzeStream(root, rootID, cohortKey string, stream analysisStream, opts AnalyzeOptions) (SessionAnalysis, []Event, error) {
+	events, source, err := readAnalysisEvents(stream.dir, opts.Before)
+	if err != nil {
+		return SessionAnalysis{}, nil, fmt.Errorf("session: analyze %s: %w", stream.dir, err)
+	}
+	metadata := readAnalysisMetadata(stream.dir, stream)
+	item := SessionAnalysis{
+		Path: stream.dir, RootPath: root, RootID: rootID, CohortKey: cohortKey,
+		Delegate: stream.delegate, Source: source,
+		ID: metadata.id, ParentID: metadata.parent, Agent: metadata.agent,
+		Provider: metadata.provider, Model: metadata.model,
+		BuildAvailable: metadata.buildAvailable, RuntimeAvailable: metadata.runtimeAvailable,
+		Build: metadata.build, Runtime: metadata.runtime,
+	}
+	switch {
+	case stream.delegate && stream.metaBad:
+		item.MetadataStatus = "malformed"
+	case stream.delegate && stream.metaOK:
+		item.MetadataStatus = "available"
+	case stream.delegate:
+		item.MetadataStatus = "missing"
+	case metadata.buildAvailable || metadata.runtimeAvailable || metadata.persistedUsage != nil:
+		item.MetadataStatus = "available"
+	default:
+		item.MetadataStatus = "missing"
+	}
+	var fallback *ChildMeta
+	if stream.metaOK && opts.Before.IsZero() {
+		fallback = &stream.meta
+	}
+	item.Execution = deriveExecution(events, source.Status)
+	item.ExecutionIdentity = deriveExecutionIdentity(events, source.Status, metadata)
+	item.Telemetry = deriveTelemetry(events, fallback)
+	if stream.delegate {
+		item.Telemetry.Completion = deriveCompletion(fallback, true)
+	}
+	conversation, maintenance := usageFromEvents(events, source.Status)
+	if stream.delegate {
+		item.Usage.DescendantConversational = conversation
+		item.Usage.DescendantMaintenance = maintenance
+	} else {
+		item.Usage.RootConversational = conversation
+		item.Usage.RootMaintenance = maintenance
+	}
+	item.Usage.finish()
+	item.Storage, err = analyzeStorage(stream.dir, source, opts.Before)
+	if err != nil {
+		return SessionAnalysis{}, nil, err
+	}
+	return item, events, nil
 }
 
 func discoverAnalysisRoots(path string) ([]string, error) {
@@ -957,7 +981,7 @@ func deriveExecutionIdentity(events []Event, sourceStatus string, metadata analy
 }
 
 func deriveExecution(events []Event, sourceStatus string) ExecutionAnalysis {
-	out := ExecutionAnalysis{Terminations: make(map[string]int)}
+	out := newExecutionAnalysis()
 	prompts := make(map[int]struct{})
 	completed := make(map[int]struct{})
 	turns := make(map[[2]int]struct{})
@@ -1324,12 +1348,8 @@ func deriveTrajectory(events []Event) TrajectoryAnalysis {
 }
 
 func deriveCompletion(child *ChildMeta, applicable bool) CompletionAnalysis {
-	out := CompletionAnalysis{
-		Applicable: applicable,
-		Outcomes:   make(map[string]int),
-		Validation: make(map[string]int),
-		Contracts:  make(map[string]int),
-	}
+	out := newCompletionAnalysis()
+	out.Applicable = applicable
 	if !applicable {
 		return out
 	}

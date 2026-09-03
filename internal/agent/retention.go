@@ -71,34 +71,16 @@ func scaledFloor(value, numerator, denominator int) int {
 // retention pass has already shrunk, so repeated passes never re-trim it.
 const retentionTrimMarker = "[older tool output trimmed"
 
-// retentionInputMarker is the reserved JSON field embedded in a write/edit tool
-// input the retention pass has replaced with a path receipt.
-const retentionInputMarker = "_superseded"
-
-// applyRetention shrinks the live transcript in place before a model request so
-// large stale tool outputs and aged images are not re-sent verbatim every turn
-// (design §12, r9+r20). It is a pure local edit — no model round-trip — and only
-// ever shortens text or swaps an image for a text placeholder, so the §4
-// transcript invariant is preserved. The pass is idempotent: already-trimmed or
-// already-archived blocks are skipped.
-func (a *Agent) applyRetention(sink EventSink) bool {
-	return a.applyRetentionPolicy(sink, a.estimateContext(nil).Total).changed
-}
-
 type retentionPass struct {
 	event    RetentionEvent
 	observed bool
 	changed  bool
 }
 
-// applyRetentionPolicy makes auto and pressure epoch-only: eligible history is
-// rewritten only after the context reaches a pressure high-water mark, and
-// hysteresis prevents repeated scans. Explicit age mode alone always uses the
-// turn boundary.
-func (a *Agent) applyRetentionPolicy(sink EventSink, contextTokens int) retentionPass {
-	return a.applyRetentionPolicyWithDecision(sink, ContextEstimate{Total: contextTokens, Source: ContextEstimateSourceBytes})
-}
-
+// applyRetentionPolicyWithDecision makes auto and pressure epoch-only: eligible
+// history is rewritten only after the context reaches a pressure high-water
+// mark, and hysteresis prevents repeated scans. Explicit age mode alone always
+// uses the turn boundary.
 func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision ContextEstimate) retentionPass {
 	policy := a.retentionPolicy
 	if policy == RetentionPolicyDisabled {
@@ -118,8 +100,8 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 
 	localBefore := a.estimateContext(nil).Total
 	event := RetentionEvent{
-		Policy:                    "age",
-		Trigger:                   "turn_age",
+		Policy:                    RetentionEventPolicyAge,
+		Trigger:                   RetentionTriggerTurnAge,
 		ContextTokensBefore:       decision.Total,
 		DecisionContextTokens:     decision.Total,
 		DecisionContextSource:     decision.Source,
@@ -128,8 +110,8 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 	observed := false
 	pressure := policy == RetentionPolicyAuto || policy == RetentionPolicyPressure
 	if pressure {
-		event.Policy = "pressure_epoch"
-		event.Trigger = "context_pressure"
+		event.Policy = RetentionEventPolicyPressureEpoch
+		event.Trigger = RetentionTriggerContextPressure
 		window := a.window()
 		if window <= 0 {
 			return retentionPass{}

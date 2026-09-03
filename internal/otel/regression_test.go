@@ -16,7 +16,18 @@ import (
 	"harness/internal/agent"
 	"harness/internal/buildinfo"
 	"harness/internal/llm"
+	"harness/internal/logging"
 )
+
+type logChannel chan string
+
+func (w logChannel) Write(p []byte) (int, error) {
+	select {
+	case w <- string(p):
+	default:
+	}
+	return len(p), nil
+}
 
 func newTestExporter(t *testing.T, endpoint string) *Exporter {
 	t.Helper()
@@ -161,14 +172,41 @@ func TestExporterPeriodicLoopExportsAndStopsWithContext(t *testing.T) {
 	exp.periodicInterval = time.Millisecond
 	exp.RecordSum("harness.periodic", "{call}", 1, nil)
 	ctx, cancel := context.WithCancel(t.Context())
-	exp.SetPeriodic(ctx)
-	exp.SetPeriodic(ctx)
+	exp.SetPeriodic(ctx, nil)
+	exp.SetPeriodic(ctx, nil)
 	select {
 	case <-requests:
 	case <-time.After(time.Second):
 		t.Fatal("periodic exporter did not run")
 	}
 	cancel()
+}
+
+func TestExporterPeriodicLoopLogsExportErrors(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "reject", http.StatusBadRequest)
+	}))
+	defer srv.Close()
+
+	exp := newTestExporter(t, srv.URL)
+	exp.periodicInterval = time.Millisecond
+	exp.RecordSum("harness.periodic", "{call}", 1, nil)
+	logs := make(logChannel, 1)
+	logger, err := logging.NewLogger(logs, logging.LevelInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	exp.SetPeriodic(ctx, logger)
+	select {
+	case line := <-logs:
+		if !strings.Contains(line, "[otel]") || !strings.Contains(line, "periodic OTEL export failed") {
+			t.Fatalf("log line = %q", line)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("periodic export failure was not logged")
+	}
 }
 
 func TestExporterQueueCountsRetainedPointsAcrossMetricKinds(t *testing.T) {

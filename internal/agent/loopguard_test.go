@@ -66,8 +66,9 @@ func TestOrientationGuardSteersToBatching(t *testing.T) {
 	var guard turnGuard
 	results := []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultText: "ok"}}
 	for i := 0; i < orientationSteerThreshold; i++ {
-		input := json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))
-		guard.recordTools([]llm.ToolCall{{Name: "read", Input: input}}, results)
+		calls := []llm.ToolCall{{Name: "read", Input: json.RawMessage(fmt.Sprintf(`{"path":"file-%d.go"}`, i))}}
+		progress := guard.aggregateTurnProgress(tools.Default(), i+1, calls, results)
+		guard.recordTurn(calls, results, &progress)
 	}
 	if got := guard.steerMessage(); got != orientationSteer {
 		t.Fatalf("orientation steer = %q, want %q", got, orientationSteer)
@@ -375,12 +376,16 @@ func TestCommandPipelineLoopSteersThenHardStops(t *testing.T) {
 func TestCommandPipelineStreakResetsWhenBaseCommandChanges(t *testing.T) {
 	var guard turnGuard
 	result := []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultText: "ok"}}
-	for i := 0; i < commandRepeatSteer-1; i++ {
-		call := llm.ToolCall{Name: "shell", Input: json.RawMessage(fmt.Sprintf(`{"command":"go test ./pkg | head -%d"}`, i+1))}
-		guard.recordTools([]llm.ToolCall{call}, result)
+	registry := tools.Default()
+	record := func(turn int, call llm.ToolCall) {
+		calls := []llm.ToolCall{call}
+		progress := guard.aggregateTurnProgress(registry, turn, calls, result)
+		guard.recordTurn(calls, result, &progress)
 	}
-	changed := llm.ToolCall{Name: "shell", Input: json.RawMessage(`{"command":"go test ./other | head -1"}`)}
-	guard.recordTools([]llm.ToolCall{changed}, result)
+	for i := 0; i < commandRepeatSteer-1; i++ {
+		record(i+1, llm.ToolCall{Name: "shell", Input: json.RawMessage(fmt.Sprintf(`{"command":"go test ./pkg | head -%d"}`, i+1))})
+	}
+	record(commandRepeatSteer, llm.ToolCall{Name: "shell", Input: json.RawMessage(`{"command":"go test ./other | head -1"}`)})
 	if guard.commandRuns != 1 {
 		t.Fatalf("command streak after base change = %d, want 1", guard.commandRuns)
 	}

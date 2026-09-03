@@ -374,19 +374,6 @@ func mcpExposingAgentBases(agents map[string]agentdef.Definition) mcpAgentBases 
 	return bases
 }
 
-// newMCPRefresher returns the prompt-boundary refresh hook for ui.App. It owns
-// the conn, the tool catalog, the resolved agents, and the previous
-// registration's tool names so it can compute which tools vanished. On a
-// list_changed it re-lists, removes departed tools from the catalog, re-derives
-// every MCP-exposing agent's allowed list (so a later /agent switch stays valid),
-// and returns the current agent's subset. It returns a nil registry ("no
-// change") fast when nothing changed, and on a re-discovery error keeps the
-// current tools. Not safe for concurrent use: the REPL calls it only at the
-// idle prompt boundary, between turns.
-func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev, static mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
-	return newMCPRefresherDynamic(conn, catalog, agents, bases, prev, func() mcptools.Summary { return static }, logger, pending, limits...)
-}
-
 // newMCPRefresherDynamic is the runtime-aware form used by main. static is
 // evaluated only when a refresh is applied, allowing session-local LSP toggles
 // to change which first-class tools MCP-exposing agents receive.

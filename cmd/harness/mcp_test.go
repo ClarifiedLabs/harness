@@ -31,6 +31,10 @@ import (
 	"harness/internal/ui"
 )
 
+func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev, static mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
+	return newMCPRefresherDynamic(conn, catalog, agents, bases, prev, func() mcptools.Summary { return static }, logger, pending, limits...)
+}
+
 // echoProvider is an mcp.ToolProvider that advertises a mutable tool list and
 // echoes a tool call's arguments back as a text block.
 type echoProvider struct {

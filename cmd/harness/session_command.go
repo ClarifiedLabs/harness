@@ -20,15 +20,10 @@ const sessionPromptPreviewRunes = 120
 func runSessionList(env environment, invocation cli.Invocation) int {
 	cwd, err := os.Getwd()
 	if err != nil {
-		fmt.Fprintf(env.stderr, "harness: session ls: determine working directory: %v\n", err)
-		return ui.ExitRuntime
-	}
-	getenv := env.getenv
-	if getenv == nil {
-		getenv = func(string) string { return "" }
+		return fail(env.stderr, ui.ExitRuntime, "session ls: determine working directory: %v", err)
 	}
 	long := cliBool(invocation.Flags, "long")
-	summaries, skipped, err := session.List(session.DefaultRoot(stateDir(getenv)), session.ListOptions{
+	summaries, skipped, err := session.List(session.DefaultRoot(stateDir(env.lookup)), session.ListOptions{
 		CWD:           cwd,
 		All:           cliBool(invocation.Flags, "all"),
 		IncludePrompt: long,
@@ -36,8 +31,7 @@ func runSessionList(env environment, invocation cli.Invocation) int {
 	})
 	writeSessionListWarnings(env.stderr, skipped)
 	if err != nil {
-		fmt.Fprintf(env.stderr, "harness: session ls: %v\n", err)
-		return ui.ExitRuntime
+		return fail(env.stderr, ui.ExitRuntime, "session ls: %v", err)
 	}
 	if !long {
 		for _, summary := range summaries {
@@ -58,98 +52,88 @@ func runSessionList(env environment, invocation cli.Invocation) int {
 func runSessionResume(env environment, invocation cli.Invocation) int {
 	if cliBool(invocation.Flags, "help") {
 		if err := commandCatalog(env).WriteHelp(env.stdout, "session.resume"); err != nil {
-			fmt.Fprintf(env.stderr, "harness: session resume help: %v\n", err)
-			return ui.ExitRuntime
+			return fail(env.stderr, ui.ExitRuntime, "session resume help: %v", err)
 		}
 		return ui.ExitOK
 	}
 
-	var source string
 	if len(invocation.Args) == 1 {
-		source = invocation.Args[0]
-	} else {
-		if sessionResumeRootInformational(invocation) {
-			rootInvocation, err := rootInvocationForResume(env, invocation, "")
-			if err != nil {
-				fmt.Fprintf(env.stderr, "harness: session resume: forward root options: %v\n", err)
-				return ui.ExitRuntime
-			}
-			return runRoot(env, rootInvocation)
-		}
-		if env.stdinPiped {
-			fmt.Fprintln(env.stderr, "harness: session resume requires an explicit session path when stdin is piped")
-			return ui.ExitUsage
-		}
-		cwd, err := os.Getwd()
-		if err != nil {
-			fmt.Fprintf(env.stderr, "harness: session resume: determine working directory: %v\n", err)
-			return ui.ExitRuntime
-		}
-		getenv := env.getenv
-		if getenv == nil {
-			getenv = func(string) string { return "" }
-		}
-		summaries, skipped, err := session.List(session.DefaultRoot(stateDir(getenv)), session.ListOptions{
-			CWD:           cwd,
-			IncludePrompt: true,
-			ProbeActivity: true,
-		})
-		writeSessionListWarnings(env.stderr, skipped)
-		if err != nil {
-			fmt.Fprintf(env.stderr, "harness: session resume: %v\n", err)
-			return ui.ExitRuntime
-		}
-		if len(summaries) == 0 {
-			fmt.Fprintf(env.stderr, "harness: no recorded sessions for working directory %s; use `harness session ls -a` or pass an explicit session path\n", cwd)
-			return ui.ExitRuntime
-		}
-		entries := make([]sessionPickerEntry, len(summaries))
-		for i, summary := range summaries {
-			entries[i] = sessionPickerEntry{Summary: summary}
-		}
-		if env.stdin == nil {
-			fmt.Fprintln(env.stderr, "harness: session resume: picker has no input reader")
-			return ui.ExitUsage
-		}
-		reader := bufio.NewReader(&noReadAheadReader{reader: env.stdin})
-		readLine := func(prompt string) (string, error) {
-			if _, err := fmt.Fprint(env.stderr, prompt); err != nil {
-				return "", err
-			}
-			line, err := reader.ReadString('\n')
-			if err != nil {
-				if errors.Is(err, io.EOF) && line != "" {
-					return strings.TrimSuffix(line, "\r"), nil
-				}
-				return "", err
-			}
-			return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
-		}
-		selected, err := ui.Pick(readLine, env.stderr, ui.PickerOptions[sessionPickerEntry]{
-			Items:       entries,
-			PageSize:    sessionPickerPageSize(env),
-			Prompt:      "Session (number/path, /search, n/p, q): ",
-			Kind:        "session",
-			CancelError: ui.ErrPickerCancelled,
-			PrintPage:   printSessionPickerPage,
-		})
-		if err != nil {
-			if errors.Is(err, ui.ErrPickerCancelled) {
-				fmt.Fprintln(env.stderr, "harness: session selection cancelled")
-			} else {
-				fmt.Fprintf(env.stderr, "harness: session selection: %v\n", err)
-			}
-			return ui.ExitUsage
-		}
-		source = selected.Path
+		return runRootForResume(env, invocation, invocation.Args[0])
 	}
+	if sessionResumeRootInformational(invocation) {
+		return runRootForResume(env, invocation, "")
+	}
+	source, code := pickSessionSource(env)
+	if code != ui.ExitOK {
+		return code
+	}
+	return runRootForResume(env, invocation, source)
+}
 
+func runRootForResume(env environment, invocation cli.Invocation, source string) int {
 	rootInvocation, err := rootInvocationForResume(env, invocation, source)
 	if err != nil {
-		fmt.Fprintf(env.stderr, "harness: session resume: forward root options: %v\n", err)
-		return ui.ExitRuntime
+		return fail(env.stderr, ui.ExitRuntime, "session resume: forward root options: %v", err)
 	}
 	return runRoot(env, rootInvocation)
+}
+
+func pickSessionSource(env environment) (string, int) {
+	if env.stdinPiped {
+		return "", fail(env.stderr, ui.ExitUsage, "session resume requires an explicit session path when stdin is piped")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", fail(env.stderr, ui.ExitRuntime, "session resume: determine working directory: %v", err)
+	}
+	summaries, skipped, err := session.List(session.DefaultRoot(stateDir(env.lookup)), session.ListOptions{
+		CWD:           cwd,
+		IncludePrompt: true,
+		ProbeActivity: true,
+	})
+	writeSessionListWarnings(env.stderr, skipped)
+	if err != nil {
+		return "", fail(env.stderr, ui.ExitRuntime, "session resume: %v", err)
+	}
+	if len(summaries) == 0 {
+		return "", fail(env.stderr, ui.ExitRuntime, "no recorded sessions for working directory %s; use `harness session ls -a` or pass an explicit session path", cwd)
+	}
+	entries := make([]sessionPickerEntry, len(summaries))
+	for i, summary := range summaries {
+		entries[i] = sessionPickerEntry{Summary: summary}
+	}
+	if env.stdin == nil {
+		return "", fail(env.stderr, ui.ExitUsage, "session resume: picker has no input reader")
+	}
+	reader := bufio.NewReader(&noReadAheadReader{reader: env.stdin})
+	readLine := func(prompt string) (string, error) {
+		if _, err := fmt.Fprint(env.stderr, prompt); err != nil {
+			return "", err
+		}
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if errors.Is(err, io.EOF) && line != "" {
+				return strings.TrimSuffix(line, "\r"), nil
+			}
+			return "", err
+		}
+		return strings.TrimSuffix(strings.TrimSuffix(line, "\n"), "\r"), nil
+	}
+	selected, err := ui.Pick(readLine, env.stderr, ui.PickerOptions[sessionPickerEntry]{
+		Items:       entries,
+		PageSize:    sessionPickerPageSize(env),
+		Prompt:      "Session (number/path, /search, n/p, q): ",
+		Kind:        "session",
+		CancelError: ui.ErrPickerCancelled,
+		PrintPage:   printSessionPickerPage,
+	})
+	if err != nil {
+		if errors.Is(err, ui.ErrPickerCancelled) {
+			return "", fail(env.stderr, ui.ExitUsage, "session selection cancelled")
+		}
+		return "", fail(env.stderr, ui.ExitUsage, "session selection: %v", err)
+	}
+	return selected.Path, ui.ExitOK
 }
 
 func sessionResumeRootInformational(invocation cli.Invocation) bool {

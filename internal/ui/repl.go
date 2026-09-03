@@ -372,6 +372,37 @@ type idleCompactionFinished struct {
 	err    error
 }
 
+type replLoopState struct {
+	promptPrinted                bool
+	readPending                  bool
+	inputEnded                   bool
+	inputErr                     error
+	active                       bool
+	activeReadPause              bool
+	plainPromptRead              bool
+	prompt                       string
+	pendingPrefill               string
+	pendingPrefillModelPrompt    bool
+	pendingPrefillPasted         bool
+	pendingPrefillPasteSummaries []pasteSummary
+	queued                       []replInput
+	preparedQueued               []agent.SteerInput
+	promptDone                   <-chan struct{}
+	restoreEsc                   func() error
+	escPresses                   escapePresses
+	pendingShiftTabPrewarm       <-chan time.Time
+	pendingIdleCompaction        <-chan time.Time
+	idleCompactionDone           <-chan idleCompactionFinished
+	cancelIdleCompactionWork     context.CancelFunc
+	idleCompactionDiscard        bool
+	idleCompactionModelKey       string
+	idleCompactionStarted        time.Time
+	idleCompactionTrigger        int
+	idleCompactionContext        int
+	idleCompactionMessages       int
+	pendingGoalCheckpoint        bool
+}
+
 // helpText lists the meta-commands (design §10).
 const helpText = `commands:
   /help            list commands
@@ -603,36 +634,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}()
 	defer close(readReq)
 
-	var (
-		promptPrinted                bool
-		readPending                  bool
-		inputEnded                   bool
-		inputErr                     error
-		active                       bool
-		activeReadPause              bool
-		plainPromptRead              bool
-		prompt                       string
-		pendingPrefill               string // text deposited into the next prompt
-		pendingPrefillModelPrompt    bool   // submitted prefill bypasses command/shell dispatch
-		pendingPrefillPasted         bool   // retained pure-paste classification across boundaries
-		pendingPrefillPasteSummaries []pasteSummary
-		queued                       []replInput
-		preparedQueued               []agent.SteerInput
-		promptDone                   <-chan struct{}
-		restoreEsc                   func() error
-		escPresses                   escapePresses
-		pendingShiftTabPrewarm       <-chan time.Time
-		pendingIdleCompaction        <-chan time.Time
-		idleCompactionDone           <-chan idleCompactionFinished
-		cancelIdleCompactionWork     context.CancelFunc
-		idleCompactionDiscard        bool
-		idleCompactionModelKey       string
-		idleCompactionStarted        time.Time
-		idleCompactionTrigger        int
-		idleCompactionContext        int
-		idleCompactionMessages       int
-		pendingGoalCheckpoint        bool
-	)
+	loop := replLoopState{}
 	var goalChanges <-chan struct{}
 	if app.Goal != nil {
 		goalChanges = app.Goal.Changes()
@@ -644,13 +646,13 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	prewarm := app.Prewarm
 	cancelShiftTabPrewarm := func() {
-		pendingShiftTabPrewarm = nil
+		loop.pendingShiftTabPrewarm = nil
 	}
 	scheduleShiftTabPrewarm := func() {
 		if prewarm == nil {
 			return
 		}
-		pendingShiftTabPrewarm = prewarmAfter(shiftTabPrewarmDebounce)
+		loop.pendingShiftTabPrewarm = prewarmAfter(shiftTabPrewarmDebounce)
 	}
 	// Existing immediate prewarm paths remain immediate and also invalidate any
 	// older Shift-Tab timer. Restore the caller's callback when the REPL exits.
@@ -673,20 +675,20 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		idleAfter = time.After
 	}
 	cancelIdleCompaction := func() {
-		pendingIdleCompaction = nil
-		if cancelIdleCompactionWork != nil {
-			idleCompactionDiscard = true
-			cancelIdleCompactionWork()
+		loop.pendingIdleCompaction = nil
+		if loop.cancelIdleCompactionWork != nil {
+			loop.idleCompactionDiscard = true
+			loop.cancelIdleCompactionWork()
 		}
 	}
 	scheduleIdleCompaction := func() {
-		if app.IdleCompactionAfter <= 0 || pendingIdleCompaction != nil || idleCompactionDone != nil {
+		if app.IdleCompactionAfter <= 0 || loop.pendingIdleCompaction != nil || loop.idleCompactionDone != nil {
 			return
 		}
-		pendingIdleCompaction = idleAfter(app.IdleCompactionAfter)
+		loop.pendingIdleCompaction = idleAfter(app.IdleCompactionAfter)
 	}
 	startIdleCompaction := func() {
-		pendingIdleCompaction = nil
+		loop.pendingIdleCompaction = nil
 		trigger := app.IdleCompactionTriggerPercent
 		if trigger == 0 {
 			trigger = 35
@@ -701,37 +703,37 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan idleCompactionFinished, 1)
-		idleCompactionDone = done
-		cancelIdleCompactionWork = cancel
-		idleCompactionDiscard = false
-		idleCompactionModelKey = app.usageKey()
-		idleCompactionStarted = time.Now()
-		idleCompactionTrigger = trigger
-		idleCompactionContext = app.Agent.EstimateContext().Total
-		idleCompactionMessages = len(app.Agent.Transcript())
+		loop.idleCompactionDone = done
+		loop.cancelIdleCompactionWork = cancel
+		loop.idleCompactionDiscard = false
+		loop.idleCompactionModelKey = app.usageKey()
+		loop.idleCompactionStarted = time.Now()
+		loop.idleCompactionTrigger = trigger
+		loop.idleCompactionContext = app.Agent.EstimateContext().Total
+		loop.idleCompactionMessages = len(app.Agent.Transcript())
 		go func() {
 			result, err := work(ctx)
 			done <- idleCompactionFinished{result: result, err: err}
 		}()
 	}
 	finishIdleCompaction := func(finished idleCompactionFinished, allowApply bool) bool {
-		discard := idleCompactionDiscard
-		modelKey := idleCompactionModelKey
-		started := idleCompactionStarted
-		trigger := idleCompactionTrigger
-		contextBefore := idleCompactionContext
-		messagesBefore := idleCompactionMessages
-		if cancelIdleCompactionWork != nil {
-			cancelIdleCompactionWork()
+		discard := loop.idleCompactionDiscard
+		modelKey := loop.idleCompactionModelKey
+		started := loop.idleCompactionStarted
+		trigger := loop.idleCompactionTrigger
+		contextBefore := loop.idleCompactionContext
+		messagesBefore := loop.idleCompactionMessages
+		if loop.cancelIdleCompactionWork != nil {
+			loop.cancelIdleCompactionWork()
 		}
-		idleCompactionDone = nil
-		cancelIdleCompactionWork = nil
-		idleCompactionDiscard = false
-		idleCompactionModelKey = ""
-		idleCompactionStarted = time.Time{}
-		idleCompactionTrigger = 0
-		idleCompactionContext = 0
-		idleCompactionMessages = 0
+		loop.idleCompactionDone = nil
+		loop.cancelIdleCompactionWork = nil
+		loop.idleCompactionDiscard = false
+		loop.idleCompactionModelKey = ""
+		loop.idleCompactionStarted = time.Time{}
+		loop.idleCompactionTrigger = 0
+		loop.idleCompactionContext = 0
+		loop.idleCompactionMessages = 0
 		record := func(outcome string, contextAfter, messagesAfter int) {
 			app.recordEvent(session.Event{
 				Type:       session.EventIdleCompaction,
@@ -790,22 +792,22 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	// branch instead of touching that shared state on the select goroutine.
 	deferredIdleEvents := []session.Event{}
 	deferIdleCompaction := func(finished idleCompactionFinished) {
-		modelKey := idleCompactionModelKey
-		started := idleCompactionStarted
-		trigger := idleCompactionTrigger
-		contextBefore := idleCompactionContext
-		messagesBefore := idleCompactionMessages
-		if cancelIdleCompactionWork != nil {
-			cancelIdleCompactionWork()
+		modelKey := loop.idleCompactionModelKey
+		started := loop.idleCompactionStarted
+		trigger := loop.idleCompactionTrigger
+		contextBefore := loop.idleCompactionContext
+		messagesBefore := loop.idleCompactionMessages
+		if loop.cancelIdleCompactionWork != nil {
+			loop.cancelIdleCompactionWork()
 		}
-		idleCompactionDone = nil
-		cancelIdleCompactionWork = nil
-		idleCompactionDiscard = false
-		idleCompactionModelKey = ""
-		idleCompactionStarted = time.Time{}
-		idleCompactionTrigger = 0
-		idleCompactionContext = 0
-		idleCompactionMessages = 0
+		loop.idleCompactionDone = nil
+		loop.cancelIdleCompactionWork = nil
+		loop.idleCompactionDiscard = false
+		loop.idleCompactionModelKey = ""
+		loop.idleCompactionStarted = time.Time{}
+		loop.idleCompactionTrigger = 0
+		loop.idleCompactionContext = 0
+		loop.idleCompactionMessages = 0
 		if finished.result.Usage != (llm.Usage{}) {
 			app.QueueMaintenanceUsageForModel(modelKey, agent.MaintenanceUsage{Purpose: "idle_compaction", Usage: finished.result.Usage})
 		}
@@ -823,50 +825,50 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	finishOutstandingIdleCompaction := func() {
 		cancelIdleCompaction()
-		if idleCompactionDone == nil {
+		if loop.idleCompactionDone == nil {
 			return
 		}
 		select {
-		case finished := <-idleCompactionDone:
+		case finished := <-loop.idleCompactionDone:
 			finishIdleCompaction(finished, false)
 		default:
 			app.recordEvent(session.Event{
 				Type:       session.EventIdleCompaction,
 				Prompt:     app.PromptNumber,
-				DurationMS: time.Since(idleCompactionStarted).Milliseconds(),
+				DurationMS: time.Since(loop.idleCompactionStarted).Milliseconds(),
 				IdleCompaction: &session.IdleCompactionSnapshot{
 					Outcome:             "discarded",
-					TriggerPercent:      idleCompactionTrigger,
-					ContextTokensBefore: idleCompactionContext,
-					MessagesBefore:      idleCompactionMessages,
+					TriggerPercent:      loop.idleCompactionTrigger,
+					ContextTokensBefore: loop.idleCompactionContext,
+					MessagesBefore:      loop.idleCompactionMessages,
 				},
 			})
-			idleCompactionDone = nil
-			cancelIdleCompactionWork = nil
-			idleCompactionDiscard = false
-			idleCompactionModelKey = ""
-			idleCompactionStarted = time.Time{}
-			idleCompactionTrigger = 0
-			idleCompactionContext = 0
-			idleCompactionMessages = 0
+			loop.idleCompactionDone = nil
+			loop.cancelIdleCompactionWork = nil
+			loop.idleCompactionDiscard = false
+			loop.idleCompactionModelKey = ""
+			loop.idleCompactionStarted = time.Time{}
+			loop.idleCompactionTrigger = 0
+			loop.idleCompactionContext = 0
+			loop.idleCompactionMessages = 0
 		}
 	}
 
 	requestRead := func(req replReadRequest) {
-		if readPending || inputEnded {
+		if loop.readPending || loop.inputEnded {
 			return
 		}
-		readPending = true
+		loop.readPending = true
 		readReq <- req
 	}
 	setInputEnded := func(err error) {
-		inputEnded = true
-		inputErr = err
+		loop.inputEnded = true
+		loop.inputErr = err
 	}
 	warnInputErr := func() {
-		if inputErr != nil {
-			fmt.Fprintf(app.Errw, "[input error: %v]\n", inputErr)
-			inputErr = nil
+		if loop.inputErr != nil {
+			fmt.Fprintf(app.Errw, "[input error: %v]\n", loop.inputErr)
+			loop.inputErr = nil
 		}
 	}
 	finish := func(code int) int {
@@ -884,15 +886,15 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	enableActivePromptTerm := func() {
 		_ = term.SetBracketedPaste(false)
 		if cleanup, err := term.EnableEscLineEnd(); err == nil {
-			restoreEsc = cleanup
+			loop.restoreEsc = cleanup
 		}
 		reader.setEscapeLineEnd(true)
 	}
 	disableActivePromptTerm := func() {
 		reader.setEscapeLineEnd(false)
-		if restoreEsc != nil {
-			_ = restoreEsc()
-			restoreEsc = nil
+		if loop.restoreEsc != nil {
+			_ = loop.restoreEsc()
+			loop.restoreEsc = nil
 		}
 		_ = term.SetBracketedPaste(true)
 	}
@@ -913,11 +915,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		cancelIdleCompaction()
 		done := make(chan struct{}, 1)
 		app.lastPromptInterrupted = false
-		active = true
+		loop.active = true
 		app.promptActive = true
-		plainPromptRead = false
-		promptPrinted = false
-		escPresses.reset()
+		loop.plainPromptRead = false
+		loop.promptPrinted = false
+		loop.escPresses.reset()
 		if usePromptEditor {
 			// Keep the terminal in raw/echo-off mode for the whole prompt so typed
 			// keystrokes feed the live during-prompt input line instead of garbling
@@ -927,13 +929,13 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			if app.Renderer != nil {
 				app.Renderer.SetInputLine("", 0)
 			}
-			activeReadPause = false
+			loop.activeReadPause = false
 		} else {
-			activeReadPause = queuedContainsEditor(queued)
+			loop.activeReadPause = queuedContainsEditor(loop.queued)
 			disableIdlePromptTerm()
 			enableActivePromptTerm()
 		}
-		promptDone = done
+		loop.promptDone = done
 		go func() {
 			run()
 			promptBoundary.Lock()
@@ -982,12 +984,12 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		startRun(run)
 	}
 	readCommandLine := func(label string) (string, error) {
-		if len(queued) > 0 {
+		if len(loop.queued) > 0 {
 			if _, err := fmt.Fprint(app.Errw, label); err != nil {
 				return "", err
 			}
-			input := queued[0]
-			queued = queued[1:]
+			input := loop.queued[0]
+			loop.queued = loop.queued[1:]
 			return strings.TrimSpace(input.text), nil
 		}
 		req := replReadRequest{}
@@ -1113,7 +1115,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		cancelShiftTabPrewarm()
 		if app.Renderer != nil {
-			app.echoEditedPrompt(prompt, input.Text)
+			app.echoEditedPrompt(loop.prompt, input.Text)
 			app.Renderer.SubmittedPromptSeparator()
 			app.Renderer.StartPrompt()
 		}
@@ -1134,18 +1136,18 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 	applyAction := func(input replInput) (exit bool, code int) {
 		if input.cycleAgent {
-			pendingPrefill = input.text
-			pendingPrefillModelPrompt = input.modelPrompt
-			pendingPrefillPasted = input.pasted
-			pendingPrefillPasteSummaries = clonePasteSummaries(input.pasteSummaries)
-			promptPrinted = false
+			loop.pendingPrefill = input.text
+			loop.pendingPrefillModelPrompt = input.modelPrompt
+			loop.pendingPrefillPasted = input.pasted
+			loop.pendingPrefillPasteSummaries = clonePasteSummaries(input.pasteSummaries)
+			loop.promptPrinted = false
 			if app.cycleAgent() {
 				scheduleShiftTabPrewarm()
 			}
 			return false, ExitOK
 		}
 		action := app.handlePromptInput(input, readCommandLine)
-		promptPrinted = false
+		loop.promptPrinted = false
 		if action.exit {
 			return true, ExitOK
 		}
@@ -1155,16 +1157,16 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		if action.prefillSet || action.prefill != "" {
 			if usePromptEditor {
-				pendingPrefill = action.prefill
-				pendingPrefillModelPrompt = action.prefillModelPrompt
-				pendingPrefillPasted = false
-				pendingPrefillPasteSummaries = nil
+				loop.pendingPrefill = action.prefill
+				loop.pendingPrefillModelPrompt = action.prefillModelPrompt
+				loop.pendingPrefillPasted = false
+				loop.pendingPrefillPasteSummaries = nil
 			} else {
 				// Without the prompt editor there is no way to prefill for
 				// review; echo the loaded text and submit it directly,
 				// bypassing command and shell dispatch while preserving normal
 				// prompt enrichment for editor output.
-				app.echoEditedPrompt(prompt, action.prefill)
+				app.echoEditedPrompt(loop.prompt, action.prefill)
 				return startPromptInteraction(action.prefill, true, true, false, false, 0)
 			}
 			return false, ExitOK
@@ -1174,21 +1176,21 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		if action.run {
 			if input.echoWhenDequeued || action.echoEditedPrompt {
-				app.echoEditedPrompt(prompt, action.prompt)
+				app.echoEditedPrompt(loop.prompt, action.prompt)
 			}
 			return startPromptInteraction(action.prompt, action.resolveSkillMentions, action.attachPromptImages, action.goalPrompt, action.goalContinuation, action.goalRevision)
 		}
 		return false, ExitOK
 	}
 	handleIdleReadResult := func(res replReadResult) (exit bool, code int) {
-		readPending = false
+		loop.readPending = false
 		cancelIdleCompaction()
 		if res.input.ended {
-			inputEnded = true
+			loop.inputEnded = true
 			return false, ExitOK
 		}
-		if plainPromptRead {
-			plainPromptRead = false
+		if loop.plainPromptRead {
+			loop.plainPromptRead = false
 			enableIdlePromptTerm()
 		}
 		if !res.ok {
@@ -1204,27 +1206,27 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	// auto-continuation: a delivered line wins, a non-empty draft becomes editable
 	// prefill, and only an empty canceled editor read allows host-created work.
 	reclaimIdleEditorForAutonomous := func() (retry bool, exit bool, code int) {
-		if !usePromptEditor || !readPending {
+		if !usePromptEditor || !loop.readPending {
 			return false, false, ExitOK
 		}
 		reader.cancelPromptRead()
 		res := <-inputs
-		readPending = false
+		loop.readPending = false
 		reader.drainPromptCancel()
 		switch {
 		case res.input.ended:
-			inputEnded = true
+			loop.inputEnded = true
 			return true, false, ExitOK
 		case !res.ok:
 			setInputEnded(res.err)
 			return true, false, ExitOK
 		case res.input.deposit:
-			promptPrinted = false
-			pendingPrefill = res.input.text
-			pendingPrefillModelPrompt = false
-			pendingPrefillPasted = res.input.pasted
-			pendingPrefillPasteSummaries = clonePasteSummaries(res.input.pasteSummaries)
-			return pendingPrefill != "", false, ExitOK
+			loop.promptPrinted = false
+			loop.pendingPrefill = res.input.text
+			loop.pendingPrefillModelPrompt = false
+			loop.pendingPrefillPasted = res.input.pasted
+			loop.pendingPrefillPasteSummaries = clonePasteSummaries(res.input.pasteSummaries)
+			return loop.pendingPrefill != "", false, ExitOK
 		default:
 			if exit, code := handleIdleReadResult(res); exit {
 				return true, true, code
@@ -1267,8 +1269,8 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	}
 
 	for {
-		if active {
-			if !activeReadPause {
+		if loop.active {
+			if !loop.activeReadPause {
 				req := replReadRequest{}
 				if usePromptEditor {
 					req.promptEdit = true
@@ -1278,13 +1280,13 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			select {
 			case <-exit:
 				return forceFinish()
-			case finished := <-idleCompactionDone:
+			case finished := <-loop.idleCompactionDone:
 				deferIdleCompaction(finished)
 			case <-goalChanges:
 				// Prompt execution owns transcript/session state, so defer the
 				// checkpoint until that owner publishes completion.
-				pendingGoalCheckpoint = true
-			case <-promptDone:
+				loop.pendingGoalCheckpoint = true
+			case <-loop.promptDone:
 				if app.Renderer != nil {
 					app.Renderer.StopProgress()
 				}
@@ -1294,26 +1296,26 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					// prefill. A line already submitted with Enter is queued below.
 					// The terminal stays in raw mode and bracketed paste remains enabled
 					// for the line editor.
-					if readPending {
+					if loop.readPending {
 						reader.cancelPromptRead()
 						res := <-inputs
-						readPending = false
+						loop.readPending = false
 						if res.ok && res.input.deposit {
-							pendingPrefill = res.input.text
-							pendingPrefillModelPrompt = false
-							pendingPrefillPasted = res.input.pasted
-							pendingPrefillPasteSummaries = clonePasteSummaries(res.input.pasteSummaries)
+							loop.pendingPrefill = res.input.text
+							loop.pendingPrefillModelPrompt = false
+							loop.pendingPrefillPasted = res.input.pasted
+							loop.pendingPrefillPasteSummaries = clonePasteSummaries(res.input.pasteSummaries)
 						} else if res.ok && !res.input.escape && !res.input.interrupt && (res.input.text != "" || res.input.edit) {
 							res.input = app.markQueuedSubmission(res.input, 0)
-							queued = append(queued, res.input)
+							loop.queued = append(loop.queued, res.input)
 						} else {
 							// The read returned via a keystroke (interrupt/Esc)
 							// rather than the cancel; the typed buffer is intact.
 							buffered := reader.promptBufferInput()
-							pendingPrefill = buffered.text
-							pendingPrefillModelPrompt = false
-							pendingPrefillPasted = buffered.pasted
-							pendingPrefillPasteSummaries = clonePasteSummaries(buffered.pasteSummaries)
+							loop.pendingPrefill = buffered.text
+							loop.pendingPrefillModelPrompt = false
+							loop.pendingPrefillPasted = buffered.pasted
+							loop.pendingPrefillPasteSummaries = clonePasteSummaries(buffered.pasteSummaries)
 						}
 						reader.drainPromptCancel()
 					}
@@ -1323,20 +1325,20 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				} else {
 					disableActivePromptTerm()
 				}
-				active = false
-				activeReadPause = false
-				promptDone = nil
+				loop.active = false
+				loop.activeReadPause = false
+				loop.promptDone = nil
 				app.promptActive = false
-				if pendingGoalCheckpoint {
+				if loop.pendingGoalCheckpoint {
 					app.saveOrWarn(app.SessionPath)
-					pendingGoalCheckpoint = false
+					loop.pendingGoalCheckpoint = false
 				}
 				// A prewarm requested mid-prompt (agent/model switch) fires now,
 				// once, for the settled selection: the prompt kept its own prefix
 				// warm, but the switched-to agent's is genuinely cold — including
 				// after interrupt/error exits.
 				app.releasePendingPrewarm()
-				escPresses.reset()
+				loop.escPresses.reset()
 				// The run no longer owns usage/renderer/session state: flush the
 				// accounting deferred while it was active, exactly once, before the
 				// next beginPrompt or save drains the queue.
@@ -1353,41 +1355,41 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				// was broken by budget/cancel). Run it as the next prompt so the
 				// input is not silently lost, ahead of other queued input.
 				if leftover := app.drainLeftoverSteer(); !steerInputEmpty(leftover) {
-					preparedQueued = append([]agent.SteerInput{leftover}, preparedQueued...)
+					loop.preparedQueued = append([]agent.SteerInput{leftover}, loop.preparedQueued...)
 				}
 				// Prefer a line the user submitted while the prompt was finishing
 				// over autonomous continuation, even when promptDone won the select
 				// race. A still-blocked read does not suppress goal work.
-				if !usePromptEditor && readPending {
+				if !usePromptEditor && loop.readPending {
 					select {
 					case res := <-inputs:
-						readPending = false
+						loop.readPending = false
 						switch {
 						case res.input.ended:
-							inputEnded = true
+							loop.inputEnded = true
 						case !res.ok:
 							setInputEnded(res.err)
 						default:
 							res.input = app.markQueuedSubmission(res.input, 0)
-							queued = append(queued, res.input)
+							loop.queued = append(loop.queued, res.input)
 						}
 					default:
 					}
 				}
-				if !usePromptEditor && readPending {
+				if !usePromptEditor && loop.readPending {
 					// A plain read started during the prompt is still
 					// blocked. Let it collect the next line in canonical mode;
 					// starting the raw prompt editor now would leave no prompt
 					// drawn and no terminal echo until that stale read finishes.
-					plainPromptRead = true
+					loop.plainPromptRead = true
 				} else if !usePromptEditor {
-					plainPromptRead = false
+					loop.plainPromptRead = false
 					enableIdlePromptTerm()
 				}
 				// A resolved detached wait gets the first autonomous slot after all
 				// user input, recovered steer, and drafts. Its outcome is
 				// still consumed only by the next model request's request-context drain.
-				if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && app.Background != nil && app.Background.DetachedWaitPending() {
+				if !app.lastPromptInterrupted && !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" && app.Background != nil && app.Background.DetachedWaitPending() {
 					if exit, code := startDetachedWaitContinuation(); exit {
 						return finish(code)
 					}
@@ -1396,16 +1398,16 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				// Autonomous goal continuation: after a non-interrupted prompt, if
 				// there is no queued user input and an active goal remains, queue the
 				// next continuation prompt to run as a normal user turn.
-				if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
+				if !app.lastPromptInterrupted && !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" {
 					if cont, ok := app.goalContinuationReady(); ok {
-						queued = append(queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
+						loop.queued = append(loop.queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
 						continue
 					}
 				}
 			case res := <-inputs:
-				readPending = false
+				loop.readPending = false
 				if res.input.ended {
-					inputEnded = true
+					loop.inputEnded = true
 					continue
 				}
 				if !res.ok {
@@ -1423,38 +1425,38 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					// Reached only on EOF during a prompt (the cancel-driven deposit is
 					// drained at prompt completion). Stash it and stop reading
 					// until the prompt ends.
-					pendingPrefill = input.text
-					pendingPrefillModelPrompt = false
-					pendingPrefillPasted = input.pasted
-					pendingPrefillPasteSummaries = clonePasteSummaries(input.pasteSummaries)
-					activeReadPause = true
+					loop.pendingPrefill = input.text
+					loop.pendingPrefillModelPrompt = false
+					loop.pendingPrefillPasted = input.pasted
+					loop.pendingPrefillPasteSummaries = clonePasteSummaries(input.pasteSummaries)
+					loop.activeReadPause = true
 					continue
 				}
 				if input.escapeTail {
-					escPresses.reset()
+					loop.escPresses.reset()
 					continue
 				}
 				if input.escape {
 					if input.text != "" {
-						queued = append(queued, app.markQueuedSubmission(replInput{text: input.text}, 0))
+						loop.queued = append(loop.queued, app.markQueuedSubmission(replInput{text: input.text}, 0))
 					}
-					if escPresses.press(app.clock()()) && app.Interrupt != nil {
+					if loop.escPresses.press(app.clock()()) && app.Interrupt != nil {
 						app.Interrupt.CancelPrompt()
 					}
 					continue
 				}
-				escPresses.reset()
+				loop.escPresses.reset()
 				// Steer gate: never steer while earlier input still waits in
 				// either queue, or a later accepted steer would recover ahead
 				// of it at prompt completion. Queueing keeps submission order
 				// by construction.
 				disposition := steerNotModelBound
 				var prepared *agent.SteerInput
-				if len(queued) == 0 && len(preparedQueued) == 0 {
+				if len(loop.queued) == 0 && len(loop.preparedQueued) == 0 {
 					disposition, prepared = app.steerDuringPrompt(input)
 				}
 				if prepared != nil {
-					preparedQueued = append(preparedQueued, *prepared)
+					loop.preparedQueued = append(loop.preparedQueued, *prepared)
 				}
 				switch disposition {
 				case steerAccepted:
@@ -1467,7 +1469,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					continue
 				}
 				input = app.markQueuedSubmission(input, 0)
-				queued = append(queued, input)
+				loop.queued = append(loop.queued, input)
 			}
 			continue
 		}
@@ -1475,7 +1477,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		// Prefer a line that the reader has already delivered over autonomous
 		// continuation at every idle boundary, including one woken by a shared
 		// child-agent goal transition.
-		if !inputEnded && readPending && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
+		if !loop.inputEnded && loop.readPending && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" {
 			select {
 			case res := <-inputs:
 				if exit, code := handleIdleReadResult(res); exit {
@@ -1489,7 +1491,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		// Detached wait outcomes outrank goal auto-continuation but remain below all
 		// already-delivered user work. Reclaim a raw editor read exactly as goal work
 		// does, preserving any non-empty draft for the user.
-		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && app.Background != nil && app.Background.DetachedWaitPending() {
+		if !app.lastPromptInterrupted && !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" && app.Background != nil && app.Background.DetachedWaitPending() {
 			retry, exit, code := reclaimIdleEditorForAutonomous()
 			if exit {
 				return finish(code)
@@ -1508,7 +1510,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		// An active goal continues at every idle boundary before waiting for fresh
 		// input. This starts restored goals. It shares the raw-editor reclaim path
 		// above so delivered input and editable drafts retain their existing priority.
-		if !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" {
+		if !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" {
 			if cont, ok := app.goalContinuationReady(); ok {
 				retry, exit, code := reclaimIdleEditorForAutonomous()
 				if exit {
@@ -1517,22 +1519,22 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				if retry {
 					continue
 				}
-				queued = append(queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
+				loop.queued = append(loop.queued, replInput{text: cont.Text, modelPrompt: true, goalPrompt: true, goalContinuation: true, goalRevision: cont.Revision})
 			}
 		}
 
-		if len(preparedQueued) > 0 {
-			input := preparedQueued[0]
-			preparedQueued = preparedQueued[1:]
+		if len(loop.preparedQueued) > 0 {
+			input := loop.preparedQueued[0]
+			loop.preparedQueued = loop.preparedQueued[1:]
 			if exit, code := startPreparedPromptInteraction(input); exit {
 				return finish(code)
 			}
 			continue
 		}
 
-		if len(queued) > 0 {
-			input := queued[0]
-			queued = queued[1:]
+		if len(loop.queued) > 0 {
+			input := loop.queued[0]
+			loop.queued = loop.queued[1:]
 			if input.interrupt {
 				return finish(ExitInterrupt)
 			}
@@ -1541,7 +1543,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			}
 			continue
 		}
-		if inputEnded {
+		if loop.inputEnded {
 			warnInputErr()
 			return finish(ExitOK)
 		}
@@ -1553,28 +1555,28 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			backgroundChanged = app.Background.Changed()
 		}
 		app.pollBackgroundNotices()
-		if !promptPrinted {
-			prompt = renderPrompt()
+		if !loop.promptPrinted {
+			loop.prompt = renderPrompt()
 			if !app.todoPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
 				app.printTodoStatus(false)
 			}
 			if !app.planPromptStatusPrintedBeforeUsageForPrompt(app.PromptNumber) {
 				app.printPlanStatus(plan.DisplayCurrent)
 			}
-			if !usePromptEditor || plainPromptRead {
-				fmt.Fprint(app.Errw, prompt)
+			if !usePromptEditor || loop.plainPromptRead {
+				fmt.Fprint(app.Errw, loop.prompt)
 			}
-			promptPrinted = true
+			loop.promptPrinted = true
 		}
-		if !plainPromptRead {
-			requestRead(replReadRequest{prompt: prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: pendingPrefill, prefillModelPrompt: pendingPrefillModelPrompt, prefillPasted: pendingPrefillPasted, prefillPasteSummaries: pendingPrefillPasteSummaries})
-			pendingPrefill = ""
-			pendingPrefillModelPrompt = false
-			pendingPrefillPasted = false
-			pendingPrefillPasteSummaries = nil
+		if !loop.plainPromptRead {
+			requestRead(replReadRequest{prompt: loop.prompt, promptEditor: usePromptEditor, replPrompt: true, prefill: loop.pendingPrefill, prefillModelPrompt: loop.pendingPrefillModelPrompt, prefillPasted: loop.pendingPrefillPasted, prefillPasteSummaries: loop.pendingPrefillPasteSummaries})
+			loop.pendingPrefill = ""
+			loop.pendingPrefillModelPrompt = false
+			loop.pendingPrefillPasted = false
+			loop.pendingPrefillPasteSummaries = nil
 		}
 		var detachedWaitReady <-chan struct{}
-		if !app.lastPromptInterrupted && !inputEnded && len(queued) == 0 && len(preparedQueued) == 0 && pendingPrefill == "" && app.Background != nil {
+		if !app.lastPromptInterrupted && !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" && app.Background != nil {
 			// Subscribe before an observer publishes an outcome. The manager closes
 			// this open channel when a detached wait resolves; checking pending here
 			// would miss that transition while the REPL is otherwise idle.
@@ -1584,7 +1586,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		case <-exit:
 			// SIGINT exit request at the idle prompt (design §8.4).
 			return finish(ExitInterrupt)
-		case <-pendingIdleCompaction:
+		case <-loop.pendingIdleCompaction:
 			startIdleCompaction()
 		case <-detachedWaitReady:
 			// The signal is level-triggered. Do not drain here; loop through the
@@ -1606,9 +1608,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					return finish(code)
 				}
 			default:
-				promptPrinted = false
+				loop.promptPrinted = false
 			}
-		case finished := <-idleCompactionDone:
+		case finished := <-loop.idleCompactionDone:
 			// Prefer already-submitted input over applying a candidate that
 			// became ready at the same instant.
 			select {
@@ -1619,11 +1621,11 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				}
 			default:
 				if finishIdleCompaction(finished, true) {
-					promptPrinted = false
+					loop.promptPrinted = false
 				}
 			}
-		case <-pendingShiftTabPrewarm:
-			expired := pendingShiftTabPrewarm
+		case <-loop.pendingShiftTabPrewarm:
+			expired := loop.pendingShiftTabPrewarm
 			// If a submitted line and the debounce become ready together, honor the
 			// input first so a real prompt can cancel the delayed warm-up. Non-model
 			// commands still allow the already-settled warm-up to run.
@@ -1632,14 +1634,14 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 				if exit, code := handleIdleReadResult(res); exit {
 					return finish(code)
 				}
-				if inputEnded {
-					pendingShiftTabPrewarm = nil
-				} else if pendingShiftTabPrewarm == expired {
-					pendingShiftTabPrewarm = nil
+				if loop.inputEnded {
+					loop.pendingShiftTabPrewarm = nil
+				} else if loop.pendingShiftTabPrewarm == expired {
+					loop.pendingShiftTabPrewarm = nil
 					prewarm()
 				}
 			default:
-				pendingShiftTabPrewarm = nil
+				loop.pendingShiftTabPrewarm = nil
 				prewarm()
 			}
 		case res := <-inputs:
@@ -4162,8 +4164,6 @@ func (app *App) clear() {
 	fmt.Fprintf(app.Errw, "[cleared; new session %s]\n", app.SessionPath)
 }
 
-// runPrompt runs one prompt interaction, accumulates usage, and saves the
-// session. An error does not end the REPL (the next prompt may recover).
 type promptOptions struct {
 	resolveSkillMentions bool
 	attachPromptImages   bool
@@ -4217,12 +4217,6 @@ func (app *App) finishPromptRun(err error, requestContext []string) {
 		return
 	}
 	app.clearAPIContinuation()
-}
-
-func (app *App) runPrompt(prompt string) {
-	if run, ok := app.preparePromptRun(prompt, promptOptions{resolveSkillMentions: true, attachPromptImages: true}); ok {
-		run()
-	}
 }
 
 func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), bool) {
@@ -4642,13 +4636,6 @@ func (app *App) addMaintenanceUsageForModel(purpose string, usage llm.Usage, mod
 		Purpose: purpose,
 		Usage:   &usage,
 	})
-}
-
-// QueueMaintenanceUsage accepts accounting from background maintenance work.
-// The REPL drains the queue on its owning goroutine before prompts, usage
-// reports, and saves, so renderer and session state remain single-threaded.
-func (app *App) QueueMaintenanceUsage(usage agent.MaintenanceUsage) {
-	app.QueueMaintenanceUsageForModel(app.usageKey(), usage)
 }
 
 // QueueMaintenanceUsageForModel pins background accounting to the model
@@ -6221,7 +6208,6 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	}
 	if s.otel != nil {
 		s.otel.RecordTurnSummary(s.otelToolNames)
-		s.otel.TurnComplete(u)
 	}
 	s.r.TurnComplete(u)
 	s.rec.TurnComplete(u)

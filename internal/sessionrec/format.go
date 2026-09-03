@@ -708,8 +708,8 @@ func WorkflowStatusSnapshot(status agent.WorkflowStatus) *session.WorkflowStatus
 // and delegate sinks share this conversion to keep additive telemetry in sync.
 func RetentionSnapshot(event agent.RetentionEvent) *session.RetentionSnapshot {
 	return &session.RetentionSnapshot{
-		Policy:                    event.Policy,
-		Trigger:                   event.Trigger,
+		Policy:                    string(event.Policy),
+		Trigger:                   string(event.Trigger),
 		BlocksTrimmed:             event.BlocksTrimmed,
 		BytesBefore:               event.BytesBefore,
 		BytesAfter:                event.BytesAfter,

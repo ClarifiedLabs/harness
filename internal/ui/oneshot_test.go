@@ -718,7 +718,11 @@ func TestREPLCompatibilityDiagnosticDisplayedOnce(t *testing.T) {
 	var out, errw, diagnostics bytes.Buffer
 	app := newTestApp(t, &out, &errw, fp)
 	app.DiagnosticLogger = slog.New(slog.NewJSONHandler(&diagnostics, nil))
-	app.runPrompt("describe")
+	run, ok := app.preparePromptRun("describe", promptOptions{resolveSkillMentions: true, attachPromptImages: true})
+	if !ok {
+		t.Fatal("preparePromptRun rejected prompt")
+	}
+	run()
 	if strings.Count(errw.String(), "model compatibility:") != 1 || !strings.Contains(errw.String(), "proxy request 9") {
 		t.Fatalf("REPL stderr = %q", errw.String())
 	}

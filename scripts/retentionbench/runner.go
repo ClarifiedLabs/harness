@@ -16,6 +16,7 @@ import (
 
 	"harness/internal/llm"
 	"harness/internal/session"
+	"harness/scripts/internal/benchutil"
 )
 
 const (
@@ -321,16 +322,12 @@ func executeOne(ctx context.Context, cfg runConfig, results string, entry matrix
 	cmd := exec.CommandContext(runCtx, cfg.Harness, args...)
 	cmd.Dir = workDir
 	cmd.Env = benchmarkEnvironment()
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
 	record.Started = time.Now().UTC()
-	runErr := cmd.Run()
+	stdout, stderr, runErr := benchutil.RunCommand(cmd)
 	record.Finished = time.Now().UTC()
 	record.WallSeconds = record.Finished.Sub(record.Started).Seconds()
-	record.ExitCode = exitStatus(runErr)
-	_ = os.WriteFile(record.StdoutPath, stdout.Bytes(), 0o644)
-	_ = os.WriteFile(record.StderrPath, stderr.Bytes(), 0o644)
+	record.ExitCode = benchutil.ExitStatus(runErr)
+	record.Reasons = append(record.Reasons, benchutil.WriteOutputFiles(record.StdoutPath, record.StderrPath, stdout, stderr)...)
 
 	if runCtx.Err() != nil {
 		record.Reasons = append(record.Reasons, runCtx.Err().Error())
@@ -412,17 +409,6 @@ func setEnv(env []string, key, value string) []string {
 		}
 	}
 	return append(out, prefix+value)
-}
-
-func exitStatus(err error) int {
-	if err == nil {
-		return 0
-	}
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return exitErr.ExitCode()
-	}
-	return -1
 }
 
 func sanitize(value string) string {

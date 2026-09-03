@@ -126,6 +126,19 @@ func TestBuildRequestStatelessReplayAndGoogleSearch(t *testing.T) {
 	}
 }
 
+func TestBuildRequestGoogleSearchRequiresNeutralName(t *testing.T) {
+	got, err := buildRequest(llm.Request{ServerTools: []llm.ServerTool{{
+		Name: "unexpected",
+		Kind: llm.ServerToolKindGoogleSearch,
+	}}}, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tools) != 0 {
+		t.Fatalf("tools = %+v, want none", got.Tools)
+	}
+}
+
 func TestBuildRequestStatefulTail(t *testing.T) {
 	req := llm.Request{
 		Model:              "gemini-3.6-flash",

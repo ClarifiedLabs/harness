@@ -36,10 +36,7 @@ func commandCatalog(env environment) cli.Catalog {
 		mustConfigCLIFlag("format"),
 		boolCLIFlag("sources", []string{"sources"}, "include each setting's winning source"),
 	}, config.SettingCLIFlags()...)
-	getenv := env.getenv
-	if getenv == nil {
-		getenv = func(string) string { return "" }
-	}
+	getenv := env.lookup
 	return cli.MustCatalog(cli.Command{
 		ID:          "root",
 		Name:        "harness",

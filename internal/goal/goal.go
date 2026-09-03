@@ -4,6 +4,7 @@
 package goal
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -20,9 +21,7 @@ const (
 	StatusPaused   Status = "paused"
 )
 
-const (
-	maxObjectiveLength = 4000
-)
+const maxObjectiveLength = 4000
 
 // State is the compact, serializable goal state persisted in state.json.
 type State struct {
@@ -39,6 +38,31 @@ type Store struct {
 	revision   uint64
 	generation uint64
 	changed    chan struct{}
+}
+
+type generationContextKey struct{}
+
+type generationBinding struct {
+	store      *Store
+	generation uint64
+}
+
+// WithGeneration binds a prompt context to the current goal identity so a
+// canceled stale prompt cannot pause a goal the user has since replaced.
+func WithGeneration(ctx context.Context, store *Store, generation uint64) context.Context {
+	return context.WithValue(ctx, generationContextKey{}, generationBinding{
+		store:      store,
+		generation: generation,
+	})
+}
+
+// GenerationFromContext returns the prompt-local goal generation.
+func GenerationFromContext(ctx context.Context, store *Store) (uint64, bool) {
+	binding, ok := ctx.Value(generationContextKey{}).(generationBinding)
+	if !ok || binding.store != store {
+		return 0, false
+	}
+	return binding.generation, true
 }
 
 // PromptPreview binds rendered goal-driving text to the exact store revision it

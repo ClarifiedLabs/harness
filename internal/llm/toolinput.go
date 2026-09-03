@@ -92,6 +92,10 @@ func invalidToolInputJSONError(raw []byte, err error, fallbackOffset int64) erro
 	if offset <= 0 {
 		offset = int64(len(raw))
 	}
+	// This error is intentionally lossy: providers copy it into the model-facing
+	// InvalidInputError string and diagnostic tool-input object. Callers classify
+	// the malformed input through those fields, not errors.Is/errors.As, so do not
+	// expose the decoder's implementation-specific error chain with %w.
 	return fmt.Errorf("invalid JSON at byte offset %d: %v; input preview %s", offset, err, toolInputPreview(raw, offset))
 }
 

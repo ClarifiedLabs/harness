@@ -218,7 +218,7 @@ func resolveWebFetchTimeoutSeconds(timeoutSeconds int) int {
 func validateHTTPURL(raw string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("invalid url: %v", err)
+		return fmt.Errorf("invalid url: %w", err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return fmt.Errorf("unsupported url scheme %q; only http and https are allowed", u.Scheme)

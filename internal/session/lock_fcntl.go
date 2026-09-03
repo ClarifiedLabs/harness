@@ -8,8 +8,6 @@ import (
 	"syscall"
 )
 
-var errLockHeld = errors.New("session lock held")
-
 func lockSessionFile(f *os.File) error {
 	lock := syscall.Flock_t{Type: syscall.F_WRLCK, Whence: 0, Start: 0, Len: 1}
 	err := syscall.FcntlFlock(f.Fd(), syscall.F_SETLK, &lock)

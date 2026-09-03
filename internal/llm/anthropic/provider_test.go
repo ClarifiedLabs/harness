@@ -1194,7 +1194,7 @@ func TestReasoningReplayDefaultsCurrentTurnOnOfficialEndpoint(t *testing.T) {
 			if p.reasoningReplay != tc.want {
 				t.Fatalf("provider reasoningReplay = %q, want %q", p.reasoningReplay, tc.want)
 			}
-			w := buildRequestWithReasoningReplay(thinkingChainRequest(), 1_000_000, 0, p.reasoningReplay)
+			w := buildRequestWithOptions(thinkingChainRequest(), 1_000_000, 0, buildOptions{reasoningReplay: p.reasoningReplay})
 			// Historical message 1 keeps its thinking block only under full replay;
 			// current_turn drops it (the in-flight chain always keeps its own).
 			historicalThinking := false

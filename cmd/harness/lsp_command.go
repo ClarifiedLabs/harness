@@ -43,7 +43,7 @@ func runLSPServe(env environment, invocation cli.Invocation) int {
 	logLevel := cliLast(values, "log_level", "info")
 	logFormat := cliLast(values, "log_format", "json")
 
-	cfg, err := lspproxy.LoadConfig(resolveLSPConfigPath(configPath, values.Has("config"), env.getenv))
+	cfg, err := lspproxy.LoadConfig(resolveLSPConfigPath(configPath, values.Has("config"), env.lookup))
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness lsp: %v\n", err)
 		return ui.ExitRuntime
@@ -102,9 +102,6 @@ func runLSPServe(env environment, invocation cli.Invocation) int {
 }
 
 func resolveLSPConfigPath(flagValue string, explicit bool, getenv func(string) string) string {
-	if getenv == nil {
-		getenv = os.Getenv
-	}
 	if explicit {
 		return flagValue
 	}

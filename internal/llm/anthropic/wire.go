@@ -283,18 +283,19 @@ type wireEvent struct {
 // tool-schema entry (when tools are present), the system block, and the last
 // content block of the final message, refreshed every call (design §5.4, §7).
 func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
-	return buildRequestWithOptions(req, contextWindow, outputLimit, "", "")
+	return buildRequestWithOptions(req, contextWindow, outputLimit, buildOptions{})
 }
 
-func buildRequestWithReasoningReplay(req llm.Request, contextWindow, outputLimit int, reasoningReplay llm.ReasoningReplay) wireRequest {
-	return buildRequestWithOptions(req, contextWindow, outputLimit, reasoningReplay, "")
+type buildOptions struct {
+	reasoningReplay llm.ReasoningReplay
+	toolSearch      llm.AnthropicToolSearch
 }
 
-func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, reasoningReplay llm.ReasoningReplay, toolSearch llm.AnthropicToolSearch) wireRequest {
+func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:       req.Model,
-		MaxTokens:   maxTokens(req, contextWindow, outputLimit),
+		MaxTokens:   llm.ResolveMaxTokensWithOptions(req, contextWindow, outputLimit, llm.MaxTokensOptions{Required: true}),
 		Stream:      true,
 		Temperature: req.Temperature,
 		ServiceTier: req.ServiceTier,
@@ -327,7 +328,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 	}
 	w.Thinking = buildThinking(req.Reasoning)
 
-	nativeToolSearch := toolSearch != "" && len(req.DeferredToolGroups) > 0
+	nativeToolSearch := opts.toolSearch != "" && len(req.DeferredToolGroups) > 0
 	deferredNames := make(map[string]bool)
 	if nativeToolSearch {
 		for _, group := range req.DeferredToolGroups {
@@ -358,13 +359,11 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 			}
 		}
 	}
-	for _, t := range req.ServerTools {
-		if tool, ok := buildServerTool(t); ok {
-			w.Tools = append(w.Tools, tool)
-		}
+	for _, t := range llm.FilterServerTools(req.ServerTools, llm.ServerToolKindAnthropicWebSearch) {
+		w.Tools = append(w.Tools, buildServerTool(t))
 	}
 	if nativeToolSearch {
-		w.Tools = append(w.Tools, buildToolSearchTool(toolSearch))
+		w.Tools = append(w.Tools, buildToolSearchTool(opts.toolSearch))
 	}
 
 	// Third breakpoint (of the 4 allowed): the tool-schema array is the static
@@ -389,7 +388,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, re
 	// preserved thinking (kimi-k3, kimi-k2.7-code) must keep full replay.
 	includeThinking := w.Thinking != nil && w.Thinking.Type != "disabled"
 	trimThinkingBefore := -1
-	if includeThinking && reasoningReplay == llm.ReasoningReplayCurrentTurn {
+	if includeThinking && opts.reasoningReplay == llm.ReasoningReplayCurrentTurn {
 		trimThinkingBefore = thinkingReplayBoundary(req.Messages)
 	}
 	for i, m := range req.Messages {
@@ -450,15 +449,12 @@ func buildToolSearchTool(mode llm.AnthropicToolSearch) wireTool {
 	return wireTool{Type: "tool_search_tool_bm25_20251119", Name: "tool_search_tool_bm25"}
 }
 
-func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
-	if tool.Kind != llm.ServerToolKindAnthropicWebSearch && !(tool.Kind == "" && tool.Name == llm.ServerToolWebSearch) {
-		return wireTool{}, false
-	}
+func buildServerTool(llm.ServerTool) wireTool {
 	return wireTool{
 		Type:    "web_search_20250305",
 		Name:    "web_search",
 		MaxUses: 3,
-	}, true
+	}
 }
 
 // buildContent maps internal content blocks onto request-side wire blocks. An
@@ -631,14 +627,4 @@ func summaryToDisplay(summary string) string {
 	default:
 		return "summarized"
 	}
-}
-
-func maxTokens(req llm.Request, contextWindow, outputLimit int) int {
-	if mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit); mt > 0 {
-		return mt
-	}
-	if outputLimit > 0 && outputLimit < llm.DefaultMaxTokensCap {
-		return outputLimit
-	}
-	return llm.DefaultMaxTokensCap
 }

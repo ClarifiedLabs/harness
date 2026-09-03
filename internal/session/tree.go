@@ -703,22 +703,6 @@ func (t *Tree) AppendBranch(targetParent, fromLeaf, common, summary, customFocus
 	return t.ActiveLeaf, nil
 }
 
-// SetLeaf selects an existing safe entry without adding a marker. It is used
-// when extracting branches into a separate session.
-func (t *Tree) SetLeaf(id string) error {
-	if id != "" {
-		if _, ok := t.byID[id]; !ok {
-			return fmt.Errorf("session: leaf %q not found", id)
-		}
-	}
-	msgs, refs, err := t.buildContext(id)
-	if err != nil {
-		return err
-	}
-	t.ActiveLeaf, t.activeMsgs, t.activeRefs = id, msgs, refs
-	return nil
-}
-
 // Extract creates a new session tree containing only the path to leaf. Entry
 // IDs are preserved so the child session can name its exact parent point while
 // subsequently growing an independent append-only tree.

@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -34,23 +33,12 @@ import (
 	"harness/internal/modelproxy/modeldiscovery"
 	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
-	"harness/internal/reasoningprofile"
 	"harness/internal/tracing"
 )
 
 const maxStreamRequestBytes = 64 << 20
 
 var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-
-var reasoningProfileRank = map[string]int{
-	"none":    0,
-	"minimal": 1,
-	"low":     2,
-	"medium":  3,
-	"high":    4,
-	"xhigh":   5,
-	"max":     6,
-}
 
 type Config struct {
 	ProviderConfigs        []string      `json:"provider_configs"`
@@ -79,63 +67,6 @@ func (c CostBudgetConfig) Enabled() bool {
 // MetricsConfig toggles the Prometheus /metrics endpoint on a separate port.
 // It remains an alias for source compatibility with existing callers.
 type MetricsConfig = metrics.Config
-
-// Duration is a JSON duration setting. Strings use Go duration syntax such as
-// "24h"; numeric values are seconds. Set distinguishes an explicit zero so
-// each caller can apply its own zero-value semantics.
-type Duration struct {
-	Duration time.Duration
-	Set      bool
-}
-
-func (d *Duration) UnmarshalJSON(data []byte) error {
-	d.Set = true
-	var s string
-	if err := json.Unmarshal(data, &s); err == nil {
-		return d.setString(s)
-	}
-	var n json.Number
-	if err := json.Unmarshal(data, &n); err != nil {
-		return fmt.Errorf("duration must be a string like \"24h\" or a number of seconds")
-	}
-	seconds, err := strconv.ParseInt(n.String(), 10, 64)
-	if err != nil {
-		return fmt.Errorf("duration seconds must be an integer: %w", err)
-	}
-	if seconds < 0 {
-		return fmt.Errorf("duration must be non-negative")
-	}
-	d.Duration = time.Duration(seconds) * time.Second
-	return nil
-}
-
-func (d Duration) MarshalJSON() ([]byte, error) {
-	if !d.Set {
-		return []byte("null"), nil
-	}
-	return json.Marshal(d.Duration.String())
-}
-
-func (d Duration) IsZero() bool {
-	return !d.Set
-}
-
-func (d *Duration) setString(s string) error {
-	s = strings.TrimSpace(s)
-	if s == "0" {
-		d.Duration = 0
-		return nil
-	}
-	v, err := time.ParseDuration(s)
-	if err != nil {
-		return err
-	}
-	if v < 0 {
-		return fmt.Errorf("duration must be non-negative")
-	}
-	d.Duration = v
-	return nil
-}
 
 type Options struct {
 	ConfigDir string
@@ -179,18 +110,6 @@ type Options struct {
 // usageKey identifies an aggregate usage bucket by provider and model.
 type usageKey struct {
 	targetID string
-}
-
-// catalogSnapshot is the immutable served state: a registry used for model
-// metadata, a pricer used for request costs, and the catalog served at
-// /v1/models. It is swapped atomically when either catalog source refreshes so
-// availability, metadata, and prices stay fresh without a restart. Readers
-// Load() it; refreshers Store() a freshly built one.
-type catalogSnapshot struct {
-	registry *llm.Registry
-	catalog  protocol.Catalog
-	targets  map[string]resolvedTarget
-	pricer   pricing.Pricer
 }
 
 type resolvedTarget struct {
@@ -519,59 +438,6 @@ func streamFailed(ctx context.Context, streamErr string, status int) bool {
 	return streamErr != "" || status >= http.StatusBadRequest
 }
 
-// recordMetrics stamps one model request into the metrics registry. It is called
-// once per /v1/stream or /v1/compact (including bounded retries), regardless of whether the
-// target resolved (empty provider/model labels are omitted) or the model is
-// priced, so free models and pre-resolution failures still get counters. Cost is
-// recorded only when usage.CostKnown. failed is true when the stream errored or
-// returned a 4xx/5xx status. Purpose is normalized to the bounded llm contract;
-// key is the authorizing API key's name ("anonymous" when auth is disabled or
-// absent).
-func (h *Handler) recordMetrics(r *http.Request, providerID, model string, purpose llm.RequestPurpose, usage llm.Usage, duration time.Duration, failed bool) {
-	if h.metrics == nil || h.metricFams == nil {
-		return
-	}
-	key := "anonymous"
-	if name, ok := apikey.AuthorizedName(r); ok {
-		key = name
-	}
-	labels := map[string]string{
-		"provider": providerID,
-		"model":    model,
-		"purpose":  string(llm.NormalizeRequestPurpose(purpose)),
-		"key":      key,
-	}
-	h.metricFams.requests.Inc(labels)
-	h.metricFams.duration.Add(duration.Seconds(), labels)
-	if failed {
-		h.metricFams.errors.Inc(labels)
-	}
-	if usage.InputTokens != 0 {
-		h.metricFams.input.Add(float64(usage.InputTokens), labels)
-	}
-	if usage.OutputTokens != 0 {
-		h.metricFams.output.Add(float64(usage.OutputTokens), labels)
-	}
-	if usage.CacheReadTokens != 0 {
-		h.metricFams.cacheRead.Add(float64(usage.CacheReadTokens), labels)
-	}
-	if promptInput := llm.PromptInputTokens(usage); promptInput != 0 {
-		h.metricFams.promptInput.Add(float64(promptInput), labels)
-	}
-	if usage.CacheWriteTokens != 0 {
-		h.metricFams.cacheWrite.Add(float64(usage.CacheWriteTokens), labels)
-	}
-	if usage.CacheWrite1hTokens != 0 {
-		h.metricFams.cacheWrite1h.Add(float64(usage.CacheWrite1hTokens), labels)
-	}
-	if usage.ReasoningTokens != 0 {
-		h.metricFams.reasoning.Add(float64(usage.ReasoningTokens), labels)
-	}
-	if usage.CostKnown {
-		h.metricFams.cost.Add(usage.CostUSD, labels)
-	}
-}
-
 // buildSnapshot resolves provider-direct availability and metadata together
 // with models.dev and configured fallbacks, then builds the registry and served
 // catalog. Manual providers keep their configured availability and prices
@@ -630,151 +496,6 @@ func (h *Handler) UpdateProviderCatalogs(updates map[string]modeldiscovery.State
 		return
 	}
 	h.snapshot.Store(snapshot)
-}
-
-// pricingInfo dates the served catalog's prices from every source that actually
-// contributed price data. Provider-direct catalogs and models.dev may expire on
-// different schedules; manual prices are dated by the provider-config files.
-func (h *Handler) pricingInfo(md *modelcatalog.Catalog, mdSourceDate time.Time, providerCatalogs map[string]modeldiscovery.State) *protocol.PricingInfo {
-	sourceDate := h.configSourceDate
-	var expiresAt time.Time
-	if md != nil && !mdSourceDate.IsZero() && modelsDevContributesPrice(h.providers, md, providerCatalogs) {
-		sourceDate = mdSourceDate
-		if h.pricingMaxAge > 0 {
-			expiresAt = mdSourceDate.Add(h.pricingMaxAge)
-		}
-	}
-	if h.providerModelsMaxAge > 0 {
-		for _, state := range providerCatalogs {
-			if !state.Authoritative || state.Snapshot.FetchedAt.IsZero() || !snapshotHasPrice(state.Snapshot) {
-				continue
-			}
-			if sourceDate.IsZero() || state.Snapshot.FetchedAt.Before(sourceDate) {
-				sourceDate = state.Snapshot.FetchedAt
-			}
-			candidate := state.Snapshot.FetchedAt.Add(h.providerModelsMaxAge)
-			if expiresAt.IsZero() || candidate.Before(expiresAt) {
-				expiresAt = candidate
-			}
-		}
-	}
-	if sourceDate.IsZero() {
-		return nil
-	}
-	return &protocol.PricingInfo{
-		SourceDate:    sourceDate,
-		MaxAgeSeconds: int64(h.pricingMaxAge / time.Second),
-		ExpiresAt:     expiresAt,
-	}
-}
-
-// effectiveProviders returns provider configs ready for the registry and
-// catalog. Fresh complete provider snapshots are authoritative for managed
-// availability; stale snapshots contribute metadata only. models.dev and the
-// configured entries remain fallbacks. Manual providers are unchanged unless
-// they explicitly opt into discovery.
-func (h *Handler) effectiveProviders(md *modelcatalog.Catalog, providerCatalogs map[string]modeldiscovery.State) ([]llm.ProviderConfig, bool) {
-	out := make([]llm.ProviderConfig, 0, len(h.providers))
-	pruned := false
-	for _, pc := range h.providers {
-		spec, discoverySupported, resolveErr := modeldiscovery.Resolve(pc)
-		if resolveErr != nil {
-			h.logger.Warn("provider model discovery configuration invalid", "provider", pc.Name, "err", resolveErr)
-			discoverySupported = false
-		}
-		_ = spec
-		state, hasState := providerCatalogs[pc.Name]
-		if hasState && state.Unsupported {
-			discoverySupported = false
-			hasState = false
-		}
-		explicitDiscovery := pc.ModelDiscovery != nil &&
-			(pc.ModelDiscovery.Enabled == nil || *pc.ModelDiscovery.Enabled)
-		if !pc.Managed && !explicitDiscovery {
-			out = append(out, pc)
-			continue
-		}
-
-		baseline := modeldiscovery.ProviderFromConfig(pc)
-		if provider, ok := md.Provider(pc.Name); ok {
-			baseline = modeldiscovery.OverlayProvider(baseline, provider)
-		}
-		effective := baseline
-		if hasState {
-			if state.Authoritative && state.Snapshot.Complete {
-				effective = modeldiscovery.MergeProvider(baseline, state.Snapshot)
-			} else {
-				effective = modeldiscovery.OverlaySnapshotMetadata(baseline, state.Snapshot)
-			}
-		} else if pc.Managed && !discoverySupported {
-			provider, ok := md.Provider(pc.Name)
-			if !ok {
-				pruned = true
-				h.logger.Warn("managed provider no longer exists in models.dev catalog; removing it from live catalog", "provider", pc.Name)
-				continue
-			}
-			effective = provider
-		}
-
-		cp := pc
-		cp.Models = make([]llm.ModelEntry, 0, len(pc.Models))
-		for _, entry := range pc.Models {
-			info, ok := effective.ModelInfo(entry.Name)
-			if !ok {
-				pruned = true
-				h.logger.Warn("configured model is absent from authoritative model catalog; removing it from live catalog", "provider", pc.Name, "model", entry.Name)
-				continue
-			}
-			configuredPrice := entry.Price
-			if info.ContextWindow > 0 {
-				entry.ContextWindow = info.ContextWindow
-			}
-			if info.OutputLimit > 0 {
-				entry.OutputLimit = info.OutputLimit
-			}
-			if len(info.InputModalities) > 0 {
-				entry.InputModalities = append([]string(nil), info.InputModalities...)
-			}
-			if hasState {
-				if direct, ok := state.Snapshot.Models[entry.Name]; ok && direct.InputModalitiesKnown {
-					entry.InputModalities = append([]string(nil), direct.InputModalities...)
-				}
-			}
-			if len(info.ServiceTiers) > 0 {
-				entry.ServiceTiers = llm.NormalizeServiceTiers(info.ServiceTiers)
-			}
-			if info.Reasoning != nil {
-				reasoning := info.Reasoning.Supported
-				entry.Reasoning = &reasoning
-				entry.ReasoningSummarySupported = info.Reasoning.SummarySupported
-				entry.ReasoningOptions = append([]llm.ReasoningOption(nil), info.Reasoning.Options...)
-			}
-			entry.Shape = info.Shape
-			switch {
-			case !pc.Managed:
-				entry.Price = configuredPrice
-			case pc.Name == modelcatalog.OpenAICodexProviderID:
-				entry.Price = llm.Price{}
-			case strings.TrimSpace(pc.PriceSource) != "":
-				entry.Price = llm.Price{}
-				if priceProvider, ok := md.Provider(pc.PriceSource); ok {
-					if priceInfo, ok := priceProvider.ModelInfo(entry.Name); ok {
-						entry.Price = priceInfo.Price
-					}
-				}
-			default:
-				entry.Price = info.Price
-			}
-			cp.Models = append(cp.Models, entry)
-		}
-		if len(cp.Models) == 0 {
-			pruned = true
-			h.logger.Warn("provider has no models remaining in authoritative model catalog; removing it from live catalog", "provider", pc.Name)
-			continue
-		}
-		out = append(out, cp)
-	}
-	return out, pruned
 }
 
 func snapshotHasPrice(snapshot modeldiscovery.Snapshot) bool {
@@ -954,28 +675,6 @@ func (h *Handler) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(h.usageSnapshotForRequest(r)); err != nil {
 		h.logger.Warn("write usage report failed", "err", err)
 	}
-}
-
-// recordUsage accumulates one priced request into the per-model usage map. It is
-// called only for requests with known cost, so every bucket has a meaningful
-// CostUSD.
-func (h *Handler) recordUsage(targetID string, u llm.Usage, cost float64) {
-	key := usageKey{targetID: targetID}
-	h.usageMu.Lock()
-	defer h.usageMu.Unlock()
-	acc := h.usage[key]
-	if acc == nil {
-		acc = &protocol.ModelUsage{TargetID: targetID}
-		h.usage[key] = acc
-	}
-	acc.Requests++
-	acc.InputTokens += int64(u.InputTokens)
-	acc.OutputTokens += int64(u.OutputTokens)
-	acc.CacheReadTokens += int64(u.CacheReadTokens)
-	acc.CacheWriteTokens += int64(u.CacheWriteTokens)
-	acc.CacheWrite1hTokens += int64(u.CacheWrite1hTokens)
-	acc.ReasoningTokens += int64(u.ReasoningTokens)
-	acc.CostUSD += cost
 }
 
 func (h *Handler) usageSnapshotForRequest(r *http.Request) protocol.UsageReport {
@@ -1764,45 +1463,6 @@ func (h *Handler) Close() error {
 	return h.wsPool.Close()
 }
 
-type countingResponseWriter struct {
-	http.ResponseWriter
-	status int
-	bytes  int
-}
-
-func (w *countingResponseWriter) WriteHeader(status int) {
-	if w.status == 0 {
-		w.status = status
-		w.ResponseWriter.WriteHeader(status)
-	}
-}
-
-func (w *countingResponseWriter) Write(b []byte) (int, error) {
-	if w.status == 0 {
-		w.status = http.StatusOK
-	}
-	n, err := w.ResponseWriter.Write(b)
-	w.bytes += n
-	return n, err
-}
-
-func (w *countingResponseWriter) Flush() {
-	if f, ok := w.ResponseWriter.(http.Flusher); ok {
-		f.Flush()
-	}
-}
-
-func (w *countingResponseWriter) statusCode() int {
-	if w.status == 0 {
-		return http.StatusOK
-	}
-	return w.status
-}
-
-func (w *countingResponseWriter) bytesWritten() int {
-	return w.bytes
-}
-
 func requesterName(r *http.Request) string {
 	if v := strings.TrimSpace(r.Header.Get("X-Harness-Requester")); v != "" {
 		return v
@@ -2029,92 +1689,6 @@ func (h *Handler) resolveTarget(id string) (resolvedTarget, error) {
 	return resolvedTarget{}, fmt.Errorf("target %q is not available from the model proxy", id)
 }
 
-func (h *Handler) checkCostBudget(w http.ResponseWriter, r *http.Request, target resolvedTarget, request llm.Request, diagnostic *llm.APIErrorDiagnostic) (*costBudgetTracker, bool, string) {
-	budget, err := h.requestCostBudget(r)
-	if err != nil {
-		msg := err.Error()
-		writeError(w, http.StatusInternalServerError, &protocol.Error{StatusCode: http.StatusInternalServerError, Code: "cost_budget_state_error", Message: msg, Diagnostic: diagnostic})
-		return nil, false, msg
-	}
-	if budget == nil {
-		return nil, true, ""
-	}
-	snapshot := h.snapshot.Load()
-	if snapshot == nil || snapshot.pricer == nil {
-		msg := "api key cost budget is enabled but pricing is unavailable"
-		if budget.RejectUnpriced() {
-			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg, Diagnostic: diagnostic})
-			return budget, false, msg
-		}
-		return budget, true, ""
-	}
-	price := snapshot.pricer.PriceUsage(pricing.Input{
-		TargetID: target.targetID,
-		Provider: target.pc,
-		Model:    target.entry,
-		Request:  request,
-	})
-	if !price.Known {
-		msg := fmt.Sprintf("api key cost budget is enabled but target %q has no known price", target.targetID)
-		if budget.RejectUnpriced() {
-			writeError(w, http.StatusBadRequest, &protocol.Error{StatusCode: http.StatusBadRequest, Code: "cost_budget_unpriced_target", Message: msg, Diagnostic: diagnostic})
-			return budget, false, msg
-		}
-		return budget, true, ""
-	}
-	if ok, retryAfter := budget.Check(); !ok {
-		if retryAfter < 0 {
-			retryAfter = 0
-		}
-		retrySeconds := int(math.Ceil(retryAfter.Seconds()))
-		w.Header().Set("Retry-After", strconv.Itoa(retrySeconds))
-		msg := fmt.Sprintf("api key cost budget exhausted; retry after %s", retryAfter.Round(time.Second))
-		writeError(w, http.StatusTooManyRequests, &protocol.Error{
-			StatusCode:   http.StatusTooManyRequests,
-			Code:         "cost_budget_exceeded",
-			Message:      msg,
-			Retryable:    true,
-			RetryAfterMS: retryAfter.Milliseconds(),
-			Diagnostic:   diagnostic,
-		})
-		return budget, false, msg
-	}
-	return budget, true, ""
-}
-
-func (h *Handler) requestCostBudget(r *http.Request) (*costBudgetTracker, error) {
-	entry, ok := apikey.AuthorizedEntry(r)
-	if !ok || entry.CostBudget == nil || !entry.CostBudget.Enabled() {
-		return nil, nil
-	}
-	cfg := CostBudgetConfig{
-		LimitUSD:       entry.CostBudget.LimitUSD,
-		Period:         Duration{Duration: time.Duration(entry.CostBudget.PeriodSeconds) * time.Second, Set: true},
-		RejectUnpriced: entry.CostBudget.RejectUnpriced,
-	}
-	statePath := h.keyBudgetStatePath(entry)
-	cacheKey := strings.Join([]string{
-		statePath,
-		strconv.FormatFloat(cfg.LimitUSD, 'g', -1, 64),
-		strconv.FormatInt(entry.CostBudget.PeriodSeconds, 10),
-		strconv.FormatBool(cfg.RejectUnpriced),
-	}, "|")
-	h.keyBudgetMu.Lock()
-	defer h.keyBudgetMu.Unlock()
-	if h.keyBudgets == nil {
-		h.keyBudgets = map[string]*costBudgetTracker{}
-	}
-	if budget := h.keyBudgets[cacheKey]; budget != nil {
-		return budget, nil
-	}
-	budget, err := newCostBudgetTrackerAtPath(cfg, statePath, h.now)
-	if err != nil {
-		return nil, err
-	}
-	h.keyBudgets[cacheKey] = budget
-	return budget, nil
-}
-
 func (h *Handler) keyBudgetStatePath(entry apikey.Entry) string {
 	hash := hex.EncodeToString(entry.Hash)
 	if len(hash) > 16 {
@@ -2129,239 +1703,6 @@ func (h *Handler) keyBudgetStatePath(entry apikey.Entry) string {
 		filename += "-" + hash
 	}
 	return filepath.Join(h.configDir, "state", "api_key_budgets", filename+".json")
-}
-
-func (h *Handler) priceUsage(targetID string, request llm.Request, usage llm.Usage) llm.Usage {
-	snapshot := h.snapshot.Load()
-	if snapshot == nil || snapshot.pricer == nil {
-		return usage
-	}
-	target, ok := snapshot.targets[targetID]
-	if !ok {
-		return usage
-	}
-	res := snapshot.pricer.PriceUsage(pricing.Input{
-		TargetID: targetID,
-		Provider: target.pc,
-		Model:    target.entry,
-		Request:  request,
-		Usage:    usage,
-	})
-	if !res.Known {
-		return usage
-	}
-	usage.CostUSD = res.CostUSD
-	usage.CostKnown = true
-	return usage
-}
-
-func (h *Handler) reasoningForTarget(target resolvedTarget, profile string, requested llm.ReasoningConfig) llm.ReasoningConfig {
-	if profile == "" {
-		profile = requested.Profile
-	}
-	profile = normalizeReasoningProfile(profile)
-	info := modelEntryReasoning(target.entry)
-	summary := requested.Summary
-	if info != nil && !info.SupportsSummaries() {
-		summary = ""
-	}
-	if profile == "" {
-		return llm.ReasoningConfig{Summary: summary}
-	}
-	if info == nil || !info.Supported {
-		return llm.ReasoningConfig{Summary: summary}
-	}
-	mode := reasoningModeForProviderConfig(target.pc)
-	out := llm.ReasoningConfig{Profile: profile, Summary: summary}
-	switch profile {
-	case "none":
-		if info.SupportsToggle() {
-			disabled := false
-			out.Enabled = &disabled
-		}
-	case "minimal", "low", "medium", "high", "xhigh", "max":
-		if effort := mappedReasoningEffort(info, profile); effort != "" {
-			out.Effort = effort
-		} else if budget, ok := mappedReasoningBudget(info, profile); ok {
-			out.BudgetTokens = &budget
-		}
-	}
-	if mode == "responses" {
-		out.Enabled = nil
-	}
-	if mode == "openai" && out.Enabled != nil {
-		out.Enabled = nil
-	}
-	if profile == "none" && out.Enabled == nil {
-		return llm.ReasoningConfig{}
-	}
-	return out
-}
-
-func normalizeReasoningProfile(profile string) string {
-	if normalized, ok := reasoningprofile.Normalize(profile); ok {
-		return normalized
-	}
-	return strings.ToLower(strings.TrimSpace(profile))
-}
-
-func mappedReasoningEffort(info *llm.ReasoningInfo, profile string) string {
-	values, ok := info.EffortValues()
-	if !ok {
-		if len(info.Options) > 0 {
-			return ""
-		}
-		if profile == "minimal" {
-			return "low"
-		}
-		if profile == "max" {
-			return "high"
-		}
-		if profile == "xhigh" {
-			return "high"
-		}
-		return profile
-	}
-	if len(values) == 0 {
-		if profile == "minimal" {
-			return "low"
-		}
-		if profile == "max" {
-			return "high"
-		}
-		if profile == "xhigh" {
-			return "high"
-		}
-		return profile
-	}
-	type candidate struct {
-		value string
-		rank  int
-	}
-	var candidates []candidate
-	seen := map[string]bool{}
-	for _, value := range values {
-		clean := strings.ToLower(strings.TrimSpace(value))
-		if clean == "" || clean == "none" || seen[clean] {
-			continue
-		}
-		rank, ok := reasoningProfileRank[clean]
-		if !ok {
-			continue
-		}
-		candidates = append(candidates, candidate{value: clean, rank: rank})
-		seen[clean] = true
-	}
-	if len(candidates) == 0 {
-		return ""
-	}
-	switch profile {
-	case "minimal":
-		best := candidates[0]
-		for _, c := range candidates[1:] {
-			if c.rank < best.rank {
-				best = c
-			}
-		}
-		return best.value
-	case "max":
-		best := candidates[0]
-		for _, c := range candidates[1:] {
-			if c.rank > best.rank {
-				best = c
-			}
-		}
-		return best.value
-	}
-	targetRank, ok := reasoningProfileRank[profile]
-	if !ok {
-		return ""
-	}
-	best := candidates[0]
-	bestDistance := absInt(best.rank - targetRank)
-	for _, c := range candidates[1:] {
-		distance := absInt(c.rank - targetRank)
-		if distance < bestDistance || (distance == bestDistance && c.rank < best.rank) {
-			best = c
-			bestDistance = distance
-		}
-	}
-	return best.value
-}
-
-func mappedReasoningBudget(info *llm.ReasoningInfo, profile string) (int, bool) {
-	minPtr, maxPtr, ok := info.BudgetTokenRange()
-	if !ok {
-		return 0, false
-	}
-	minBudget := 0
-	if minPtr != nil {
-		minBudget = *minPtr
-	}
-	if maxPtr == nil {
-		if minBudget <= 0 {
-			return 0, false
-		}
-		return minBudget, true
-	}
-	if *maxPtr <= 0 {
-		return 0, false
-	}
-	maxBudget := *maxPtr
-	if minBudget > maxBudget {
-		minBudget = maxBudget
-	}
-	var budget int
-	switch profile {
-	case "minimal":
-		budget = int(math.Ceil(float64(maxBudget) * 0.05))
-		if budget < 1 {
-			budget = 1
-		}
-	case "low":
-		budget = int(math.Round(float64(maxBudget) * 0.25))
-	case "medium":
-		budget = int(math.Round(float64(maxBudget) * 0.50))
-	case "high":
-		budget = int(math.Round(float64(maxBudget) * 0.75))
-	case "xhigh":
-		budget = int(math.Round(float64(maxBudget) * 0.90))
-	case "max":
-		budget = maxBudget
-	default:
-		return 0, false
-	}
-	if budget < minBudget {
-		budget = minBudget
-	}
-	if budget > maxBudget {
-		budget = maxBudget
-	}
-	return budget, true
-}
-
-func absInt(n int) int {
-	if n < 0 {
-		return -n
-	}
-	return n
-}
-
-func reasoningModeForProviderConfig(pc llm.ProviderConfig) string {
-	apiType := strings.ToLower(strings.TrimSpace(pc.APIType))
-	if apiType == "" {
-		apiType = strings.ToLower(strings.TrimSpace(pc.Name))
-	}
-	if apiType == "anthropic" || apiType == "responses" {
-		return apiType
-	}
-	if strings.EqualFold(pc.Name, "google") || strings.Contains(strings.ToLower(pc.BaseURL), "generativelanguage.googleapis.com") {
-		return "google"
-	}
-	if strings.EqualFold(pc.Name, "openrouter") || strings.Contains(strings.ToLower(pc.BaseURL), "openrouter.ai") {
-		return "openrouter"
-	}
-	return "openai"
 }
 
 func codexResponsesUsesLocalTokenCount(pc llm.ProviderConfig) bool {

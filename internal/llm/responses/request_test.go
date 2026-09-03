@@ -190,7 +190,7 @@ func TestBuildRequestMaxOutputTokensRaisedToAPIFloor(t *testing.T) {
 func TestBuildRequestMaxOutputTokensRaisedToConfiguredFloor(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 999_999
-	w := buildRequestWithConfig(req, 1_000_000, 0, buildOptions{
+	w := buildRequestWithOptions(req, 1_000_000, 0, buildOptions{
 		minOutputTokens: 32,
 		baseURL:         defaultBaseURL,
 		providerName:    "testai",
@@ -224,7 +224,7 @@ func TestBuildRequestOmitMaxOutputTokens(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			req := basicRequest()
 			req.MaxTokens = tc.userValue
-			w := buildRequestWithOptions(req, tc.contextWindow, tc.outputLimit, true)
+			w := buildRequestWithOptions(req, tc.contextWindow, tc.outputLimit, buildOptions{omitMaxOutputTokens: true})
 			if w.MaxOutputTokens != nil {
 				t.Fatalf("max_output_tokens = %v, want omitted", w.MaxOutputTokens)
 			}
@@ -335,7 +335,7 @@ func TestBuildRequestPromptCacheKey(t *testing.T) {
 func TestBuildRequestPromptCacheAutoCustomBaseURLOmits(t *testing.T) {
 	req := basicRequest()
 	req.PromptCacheKey = "harness-custom"
-	w := buildRequestWithConfig(req, 0, 0, buildOptions{
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{
 		baseURL:      "https://api.deepseek.com",
 		providerName: "deepseek",
 	})
@@ -354,7 +354,7 @@ func TestBuildRequestPromptCacheAutoCustomBaseURLOmits(t *testing.T) {
 func TestBuildRequestPromptCacheExplicitPromptCacheKey(t *testing.T) {
 	req := basicRequest()
 	req.PromptCacheKey = "harness-explicit"
-	w := buildRequestWithConfig(req, 0, 0, buildOptions{
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{
 		promptCache:  llm.PromptCacheConfig{KeyField: llm.PromptCacheKeyFieldPromptCacheKey},
 		baseURL:      "https://api.deepseek.com",
 		providerName: "deepseek",
@@ -367,7 +367,7 @@ func TestBuildRequestPromptCacheExplicitPromptCacheKey(t *testing.T) {
 func TestBuildRequestPromptCacheSessionIDOmittedForResponses(t *testing.T) {
 	req := basicRequest()
 	req.PromptCacheKey = "harness-session"
-	w := buildRequestWithConfig(req, 0, 0, buildOptions{
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{
 		promptCache:  llm.PromptCacheConfig{KeyField: llm.PromptCacheKeyFieldSessionID},
 		baseURL:      "https://openrouter.ai/api/v1",
 		providerName: "openrouter",
@@ -463,18 +463,18 @@ func TestBuildRequestPromptCacheBreakpointCapabilityGate(t *testing.T) {
 	if got := countPromptCacheBreakpoints(buildRequest(request("gpt-5.5"), 0, 0).Input); got != 0 {
 		t.Fatalf("older model breakpoint count = %d, want 0", got)
 	}
-	if got := countPromptCacheBreakpoints(buildRequestWithConfig(request("gpt-5.6"), 0, 0, buildOptions{
+	if got := countPromptCacheBreakpoints(buildRequestWithOptions(request("gpt-5.6"), 0, 0, buildOptions{
 		baseURL: "https://compatible.test/v1",
 	}).Input); got != 0 {
 		t.Fatalf("compatible auto breakpoint count = %d, want 0", got)
 	}
 	enabled, disabled := true, false
-	if got := countPromptCacheBreakpoints(buildRequestWithConfig(request("custom-model"), 0, 0, buildOptions{
+	if got := countPromptCacheBreakpoints(buildRequestWithOptions(request("custom-model"), 0, 0, buildOptions{
 		baseURL: "https://compatible.test/v1", promptCache: llm.PromptCacheConfig{ExplicitBreakpoints: &enabled},
 	}).Input); got != 1 {
 		t.Fatalf("compatible opt-in breakpoint count = %d, want 1", got)
 	}
-	if got := countPromptCacheBreakpoints(buildRequestWithConfig(request("gpt-5.6"), 0, 0, buildOptions{
+	if got := countPromptCacheBreakpoints(buildRequestWithOptions(request("gpt-5.6"), 0, 0, buildOptions{
 		baseURL: defaultBaseURL, promptCache: llm.PromptCacheConfig{ExplicitBreakpoints: &disabled},
 	}).Input); got != 0 {
 		t.Fatalf("first-party opt-out breakpoint count = %d, want 0", got)
@@ -678,6 +678,7 @@ func TestBuildRequestServerTools(t *testing.T) {
 		ServerTools: []llm.ServerTool{
 			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindOpenAIWebSearch},
 			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindOpenRouterWebSearch, Parameters: json.RawMessage(`{"max_results":3}`)},
+			{Name: "unexpected", Kind: llm.ServerToolKindOpenAIWebSearch},
 		},
 	}
 	w := buildRequest(req, 0, 0)

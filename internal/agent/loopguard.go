@@ -232,13 +232,6 @@ func (g *turnGuard) recordTurn(calls []llm.ToolCall, results []llm.ContentBlock,
 	g.snapshotStreaks(progress)
 }
 
-// recordTools retains the small legacy test helper while production passes the
-// richer aggregate through recordTurn.
-func (g *turnGuard) recordTools(calls []llm.ToolCall, results []llm.ContentBlock) {
-	progress := g.aggregateTurnProgress(tools.Default(), 0, calls, results)
-	g.recordTurn(calls, results, &progress)
-}
-
 func (g *turnGuard) resetForUserSteer(progress *TurnProgress) {
 	g.repeatRuns = 0
 	g.repeatSteered = false

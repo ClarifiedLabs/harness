@@ -39,7 +39,7 @@ func runSessionAnalyze(env environment, invocation cli.Invocation) int {
 		err    error
 	)
 	if len(invocation.Args) == 1 {
-		dir, resolveErr := session.ResolveSessionDir(stateDir(env.getenv), invocation.Args[0])
+		dir, resolveErr := session.ResolveSessionDir(stateDir(env.lookup), invocation.Args[0])
 		if resolveErr != nil {
 			fmt.Fprintf(env.stderr, "session analyze: %v\n", resolveErr)
 			return ui.ExitUsage
@@ -55,7 +55,7 @@ func runSessionAnalyze(env environment, invocation cli.Invocation) int {
 		if env.now != nil {
 			now = env.now
 		}
-		root := filepath.Join(stateDir(env.getenv), "harness", "sessions")
+		root := filepath.Join(stateDir(env.lookup), "harness", "sessions")
 		dirs, discoverErr := sessionDirsSince(root, now().Add(-window), all)
 		if discoverErr != nil {
 			err = discoverErr

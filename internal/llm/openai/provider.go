@@ -89,7 +89,14 @@ func (p *Provider) Name() string { return "openai" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		body, err := json.Marshal(buildRequestWithOptionsAndMin(req, p.contextWindow, p.outputLimit, p.reasoningMode, p.promptCache, p.baseURL, p.providerName, p.minOutputTokens, p.reasoningReplay))
+		body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
+			reasoningMode:   p.reasoningMode,
+			promptCache:     p.promptCache,
+			baseURL:         p.baseURL,
+			providerName:    p.providerName,
+			minOutputTokens: p.minOutputTokens,
+			reasoningReplay: p.reasoningReplay,
+		}))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 			return

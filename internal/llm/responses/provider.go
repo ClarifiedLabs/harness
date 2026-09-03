@@ -247,7 +247,7 @@ func (p *Provider) streamHTTPFallback(ctx context.Context, req llm.Request, yiel
 }
 
 func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) {
-	body, err := json.Marshal(buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
+	body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
 		omitMaxOutputTokens: p.omitMaxOutputTokens,
 		minOutputTokens:     p.minOutputTokens,
 		promptCache:         p.promptCache,

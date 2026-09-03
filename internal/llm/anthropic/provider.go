@@ -152,7 +152,10 @@ func supportsToolSearch(model string) bool {
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
-		wireReq := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, p.reasoningReplay, p.resolvedToolSearch(req.Model))
+		wireReq := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
+			reasoningReplay: p.reasoningReplay,
+			toolSearch:      p.resolvedToolSearch(req.Model),
+		})
 		var aggregate llm.Usage
 		contentIndexBase := 0
 		for continuations := 0; ; {

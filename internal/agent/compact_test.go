@@ -1639,7 +1639,7 @@ func TestCompactNoOpReportsUnchanged(t *testing.T) {
 
 	before := len(a.Transcript())
 	sink := &recordSink{}
-	usage, changed, err := a.compact(context.Background(), sink, "auto")
+	usage, changed, err := a.compactInternal(context.Background(), sink, compactOptions{trigger: "auto"})
 	if err != nil {
 		t.Fatalf("compact: %v", err)
 	}
@@ -2528,7 +2528,7 @@ func TestCompactionFixtureContextReduction(t *testing.T) {
 		DisplayPath: "artifacts/tool-results/r.txt",
 		ModelPath:   "/session/artifacts/tool-results/r.txt",
 	}}
-	if changed := a.applyRetention(sink); !changed {
+	if changed := a.applyRetentionPolicyWithDecision(sink, a.estimateContext(nil)).changed; !changed {
 		t.Fatal("retention pass made no changes on the fixture transcript")
 	}
 	mustValid(t, a.Transcript())
@@ -2545,7 +2545,7 @@ func TestCompactionFixtureContextReduction(t *testing.T) {
 	for _, m := range a.Transcript() {
 		for _, b := range m.Content {
 			if b.Kind == llm.BlockToolUse && b.ToolName == "write" {
-				if strings.Contains(string(b.ToolInput), retentionInputMarker) {
+				if retentionInputTrimmed(b.ToolInput) {
 					receipts++
 				} else {
 					verbatim++

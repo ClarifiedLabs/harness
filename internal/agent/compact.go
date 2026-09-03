@@ -221,7 +221,7 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 			return "", nil
 		})
 		sink := &idleCompactionSink{}
-		usage, changed, err := worker.compactInternal(ctx, sink, "idle", false, false, "")
+		usage, changed, err := worker.compactInternal(ctx, sink, compactOptions{trigger: "idle"})
 		result := IdleCompactionResult{Usage: usage}
 		if err != nil || !changed {
 			return result, err
@@ -412,7 +412,7 @@ func (a *Agent) Compact(ctx context.Context, sink EventSink) (llm.Usage, error) 
 // emphasis. The trimmed focus is stored for observability on this checkpoint
 // only and is never inherited by later compactions.
 func (a *Agent) CompactWithFocus(ctx context.Context, sink EventSink, focus string) (llm.Usage, error) {
-	u, _, err := a.compactInternal(ctx, sink, "manual", false, false, strings.TrimSpace(focus))
+	u, _, err := a.compactInternal(ctx, sink, compactOptions{trigger: "manual", focus: strings.TrimSpace(focus)})
 	return u, err
 }
 
@@ -424,16 +424,14 @@ func (a *Agent) CompactWithFocus(ctx context.Context, sink EventSink, focus stri
 // resulting checkpoint to a target percentage; callers must estimate the final
 // request and reject it when the exact instructions still do not fit safely.
 func (a *Agent) CompactForContinuation(ctx context.Context, sink EventSink) (llm.Usage, bool, error) {
-	return a.compactInternal(ctx, sink, "continuation", false, true, "")
+	return a.compactInternal(ctx, sink, compactOptions{trigger: "continuation", collapseAll: true})
 }
 
-// compact returns the summary-call usage, a changed flag (true only when the
-// live transcript was actually rewritten), and any error. A no-op (nothing old
-// enough to summarize and the transcript already within budget, or a PreCompact
-// block) returns changed=false so the mid-loop caller does not churn its trigger
-// state every turn.
-func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
-	return a.compactInternal(ctx, sink, trigger, false, false, "")
+type compactOptions struct {
+	trigger      string
+	forceCurrent bool
+	collapseAll  bool
+	focus        string
 }
 
 // compactTriggered is used when a measured request footprint or provider
@@ -441,10 +439,14 @@ func (a *Agent) compact(ctx context.Context, sink EventSink, trigger string) (ll
 // there may be no older turn to summarize and the byte estimate can still be
 // optimistic, so force the current-turn shrink path instead of no-oping.
 func (a *Agent) compactTriggered(ctx context.Context, sink EventSink, trigger string) (llm.Usage, bool, error) {
-	return a.compactInternal(ctx, sink, trigger, true, false, "")
+	return a.compactInternal(ctx, sink, compactOptions{trigger: trigger, forceCurrent: true})
 }
 
-func (a *Agent) compactInternal(ctx context.Context, sink EventSink, trigger string, forceCurrent, collapseAll bool, focus string) (llm.Usage, bool, error) {
+func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compactOptions) (llm.Usage, bool, error) {
+	trigger := opts.trigger
+	forceCurrent := opts.forceCurrent
+	collapseAll := opts.collapseAll
+	focus := opts.focus
 	if progress, ok := sink.(CompactionProgressSink); ok {
 		progress.CompactionStart()
 		defer progress.CompactionComplete()

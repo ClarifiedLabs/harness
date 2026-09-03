@@ -15,6 +15,10 @@ import (
 	"harness/internal/term"
 )
 
+func newPromptLineEditor(in io.Reader, w io.Writer) *promptLineEditor {
+	return newPromptLineEditorWithReader(bufio.NewReader(in), w)
+}
+
 func readEditedInput(t *testing.T, input string) (replInput, bool, error) {
 	t.Helper()
 	var out bytes.Buffer

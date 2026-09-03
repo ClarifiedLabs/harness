@@ -671,22 +671,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 			// Malformed shell is a model error, not a stats failure.
 			continue
 		}
-		var argv []string
-		if len(input.Argv) > 0 {
-			if err := json.Unmarshal(input.Argv, &argv); err != nil {
-				var s string
-				if err2 := json.Unmarshal(input.Argv, &s); err2 == nil {
-					_ = json.Unmarshal([]byte(s), &argv)
-				}
-			}
-		}
-		hasArgv := len(argv) > 0
-		// Steps argv classification best-effort.
-		hasSteps := len(input.Steps) > 0
-		if hasSteps {
-			// Reuse argv decode for steps loosely.
-			_ = hasArgv // keep for branching below; steps block handles its own counts.
-		}
+		argv := decodeShellArgv(input.Argv)
 		stats.commands.calls++
 		if input.Background {
 			stats.commands.background++
@@ -695,7 +680,7 @@ func collectToolStats(events []Event) (toolStats, error) {
 		}
 		if input.Command != "" {
 			stats.commands.shell++
-		} else if hasArgv {
+		} else if len(argv) > 0 {
 			stats.commands.argv++
 		}
 		if len(input.Steps) > 0 {
@@ -704,19 +689,8 @@ func collectToolStats(events []Event) (toolStats, error) {
 			for _, step := range input.Steps {
 				if step.Command != "" {
 					stats.commands.stepShell++
-				} else {
-					var sArgv []string
-					if len(step.Argv) > 0 {
-						if err := json.Unmarshal(step.Argv, &sArgv); err != nil {
-							var s string
-							if err2 := json.Unmarshal(step.Argv, &s); err2 == nil {
-								_ = json.Unmarshal([]byte(s), &sArgv)
-							}
-						}
-					}
-					if len(sArgv) > 0 {
-						stats.commands.stepArgv++
-					}
+				} else if len(decodeShellArgv(step.Argv)) > 0 {
+					stats.commands.stepArgv++
 				}
 			}
 		}
@@ -735,6 +709,19 @@ func collectToolStats(events []Event) (toolStats, error) {
 		}
 	}
 	return stats, nil
+}
+
+func decodeShellArgv(raw json.RawMessage) []string {
+	var argv []string
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &argv); err != nil {
+			var encoded string
+			if err2 := json.Unmarshal(raw, &encoded); err2 == nil {
+				_ = json.Unmarshal([]byte(encoded), &argv)
+			}
+		}
+	}
+	return argv
 }
 
 func skillReadPathHashes(input json.RawMessage) []string {

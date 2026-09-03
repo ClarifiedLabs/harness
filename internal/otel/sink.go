@@ -95,15 +95,6 @@ func (s *Sink) baseAttrs(extra map[string]string) map[string]string {
 	return m
 }
 
-// ToolStart is not needed: tool accounting is via ToolResult + prompt/turn aggregates.
-
-// ToolResult records per-tool metrics when tool name is unknown; it is a
-// no-op placeholder because llm.ToolResult has no name. Use ToolResultWithName
-// instead. It exists so Sink satisfies agent.EventSink when wrapped via a tee.
-func (s *Sink) ToolResult(result llm.ToolResult) {
-	_ = result
-}
-
 func (s *Sink) ToolResultWithName(toolName string, result llm.ToolResult, durationMS int64, activity tools.Activity) {
 	if s == nil || s.exp == nil {
 		return
@@ -232,9 +223,6 @@ func (s *Sink) TurnProgress(p agent.TurnProgress) {
 	}
 }
 
-// TurnComplete currently delegates to TurnProgress for the common batch/steer signals;
-// it remains a stable hook for per-turn gauges added in later plan slices.
-
 func dominantActivity(a agent.ToolActivityCounts) string {
 	max := a.Inspect
 	dom := "inspect"
@@ -258,15 +246,6 @@ func dominantActivity(a agent.ToolActivityCounts) string {
 		dom = "other"
 	}
 	return dom
-}
-
-// TurnComplete records tools/operations and batch counters per turn.
-func (s *Sink) TurnComplete(usage agent.TurnUsage) {
-	if s == nil || s.exp == nil {
-		return
-	}
-	// The TurnProgress already covered most; TurnComplete is just a hook for future use.
-	_ = usage
 }
 
 // PromptComplete records prompt-level fleet metrics.
@@ -522,11 +501,11 @@ func (s *Sink) RetentionApplied(event agent.RetentionEvent) {
 	if s == nil || s.exp == nil {
 		return
 	}
-	policy := event.Policy
+	policy := string(event.Policy)
 	if policy == "" {
 		policy = "unknown"
 	}
-	trigger := event.Trigger
+	trigger := string(event.Trigger)
 	if trigger == "" {
 		trigger = "unknown"
 	}
@@ -590,7 +569,7 @@ func (s *Sink) FlushAsync() {
 	}
 	exp := s.exp
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), DefaultExportTimeout)
 		defer cancel()
 		_ = exp.Export(ctx)
 	}()

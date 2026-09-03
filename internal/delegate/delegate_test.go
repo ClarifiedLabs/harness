@@ -1765,8 +1765,8 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	requestEvent := llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Sequence: 4, RetryDelayMS: 25}
 	sink.ModelRequestEvent(requestEvent)
 	sink.RetentionApplied(agent.RetentionEvent{
-		Policy:             "pressure_epoch",
-		Trigger:            "context_pressure",
+		Policy:             agent.RetentionEventPolicyPressureEpoch,
+		Trigger:            agent.RetentionTriggerContextPressure,
 		BlocksTrimmed:      1,
 		BytesBefore:        10_000,
 		BytesAfter:         4_000,

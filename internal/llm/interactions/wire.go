@@ -88,7 +88,7 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) (wireRequest,
 		ServiceTier:           req.ServiceTier,
 	}
 	config := wireGenerationConfig{
-		MaxOutputTokens: llm.ResolveMaxTokens(req, contextWindow, outputLimit),
+		MaxOutputTokens: llm.ResolveMaxTokensWithOptions(req, contextWindow, outputLimit, llm.MaxTokensOptions{}),
 		StopSequences:   append([]string(nil), req.StopSeqs...),
 	}
 	config.ThinkingLevel, config.ThinkingSummaries = interactionThinking(req.Reasoning)
@@ -107,8 +107,8 @@ func buildRequest(req llm.Request, contextWindow, outputLimit int) (wireRequest,
 			Parameters:  parameters,
 		})
 	}
-	for _, tool := range req.ServerTools {
-		if tool.Name == llm.ServerToolWebSearch && (tool.Kind == "" || tool.Kind == llm.ServerToolKindGoogleSearch) {
+	for _, tool := range llm.FilterServerTools(req.ServerTools, llm.ServerToolKindGoogleSearch) {
+		if tool.Name == llm.ServerToolWebSearch {
 			w.Tools = append(w.Tools, wireTool{Type: "google_search"})
 		}
 	}

@@ -24,6 +24,10 @@ func readOnlyRegistry() *tools.Registry {
 	return reg
 }
 
+func retentionDecision(total int) ContextEstimate {
+	return ContextEstimate{Total: total, Source: ContextEstimateSourceBytes}
+}
+
 func TestRetentionBytesIncludeNestedPlaintextThinking(t *testing.T) {
 	const thinking = "private chain of thought"
 	messages := []llm.Message{{
@@ -62,7 +66,7 @@ func TestRetentionTrimsOldReadOnlyResults(t *testing.T) {
 
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
-	a.applyRetention(&recordSink{})
+	a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil))
 	mustValid(t, a.Transcript())
 
 	old := a.Transcript()[2].Content[0].ResultText
@@ -88,7 +92,7 @@ func TestRetentionKeepsMutatingResultsWithinRetentionAge(t *testing.T) {
 
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
-	a.applyRetention(&recordSink{})
+	a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil))
 
 	if got := a.Transcript()[2].Content[0].ResultText; got != big {
 		t.Errorf("mutating-tool result should be preserved, len=%d want %d", len(got), len(big))
@@ -109,7 +113,7 @@ func TestRetentionReplacesAgedImages(t *testing.T) {
 	}
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
-	a.applyRetention(&recordSink{})
+	a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil))
 	mustValid(t, a.Transcript())
 
 	if b := a.Transcript()[0].Content[0]; b.Kind != llm.BlockText || !strings.Contains(b.Text, "image omitted") {
@@ -146,7 +150,7 @@ func TestRetentionReplacesAgedRichResultImages(t *testing.T) {
 	}
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
-	a.applyRetention(&recordSink{})
+	a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil))
 	got := a.Transcript()
 	mustValid(t, got)
 
@@ -176,11 +180,11 @@ func TestRetentionIdempotent(t *testing.T) {
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
 
-	if changed := a.applyRetention(&recordSink{}); !changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; !changed {
 		t.Fatal("first retention pass reported unchanged")
 	}
 	first := a.Transcript()[2].Content[0].ResultText
-	if changed := a.applyRetention(&recordSink{}); changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; changed {
 		t.Fatal("second retention pass reported a change")
 	}
 	second := a.Transcript()[2].Content[0].ResultText
@@ -204,12 +208,12 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 		stateful   bool
 		context    int
 		wantChange bool
-		wantPolicy string
+		wantPolicy RetentionEventPolicy
 	}{
-		{name: "force age for stateful", policy: RetentionPolicyAge, stateful: true, context: 1, wantChange: true, wantPolicy: "age"},
+		{name: "force age for stateful", policy: RetentionPolicyAge, stateful: true, context: 1, wantChange: true, wantPolicy: RetentionEventPolicyAge},
 		{name: "disable stateless", policy: RetentionPolicyDisabled, context: 100_000, wantChange: false},
-		{name: "force pressure for stateless", policy: RetentionPolicyPressure, context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
-		{name: "auto uses pressure when high", context: 100_000, wantChange: true, wantPolicy: "pressure_epoch"},
+		{name: "force pressure for stateless", policy: RetentionPolicyPressure, context: 100_000, wantChange: true, wantPolicy: RetentionEventPolicyPressureEpoch},
+		{name: "auto uses pressure when high", context: 100_000, wantChange: true, wantPolicy: RetentionEventPolicyPressureEpoch},
 		{name: "auto preserves history when low", context: 1, wantChange: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -219,7 +223,7 @@ func TestRetentionPolicyOverridesProviderDefault(t *testing.T) {
 				ContextWindow:     100_000,
 			})
 			a.SetTranscript(oldImageTranscript())
-			pass := a.applyRetentionPolicy(&recordSink{}, tc.context)
+			pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(tc.context))
 			if pass.changed != tc.wantChange {
 				t.Fatalf("retention changed = %t, want %t (pass %+v)", pass.changed, tc.wantChange, pass)
 			}
@@ -327,7 +331,7 @@ func TestRetentionLeavesDeclaredStablePrefixByteIdentical(t *testing.T) {
 		userText("q3"), asstText("a3"),
 		userText("q4"), asstText("a4"),
 	)
-	if pass := a.applyRetentionPolicy(&recordSink{}, 0); !pass.changed {
+	if pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(0)); !pass.changed {
 		t.Fatal("retention did not degrade the now-old image")
 	}
 	after, err := llm.FingerprintMessages(a.Transcript()[:stable])
@@ -363,11 +367,11 @@ func testPressureRetentionThresholdAndHysteresis(t *testing.T, policy RetentionP
 	a.SetTranscript(oldImageTranscript())
 	sink := &recordSink{}
 
-	if pass := a.applyRetentionPolicy(sink, 59_999); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(59_999)); pass.changed || pass.observed {
 		t.Fatalf("pressure below high-water mark = %+v, want no epoch", pass)
 	}
-	first := a.applyRetentionPolicy(sink, 60_000)
-	if !first.changed || first.event.Policy != "pressure_epoch" {
+	first := a.applyRetentionPolicyWithDecision(sink, retentionDecision(60_000))
+	if !first.changed || first.event.Policy != RetentionEventPolicyPressureEpoch {
 		t.Fatalf("pressure at high-water mark = %+v, want epoch", first)
 	}
 
@@ -375,16 +379,16 @@ func testPressureRetentionThresholdAndHysteresis(t *testing.T, policy RetentionP
 	// run again while context remains above the low-water mark.
 	a.SetTranscript(oldImageTranscript())
 	a.retentionEpochArmed = false
-	if pass := a.applyRetentionPolicy(sink, 59_000); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(59_000)); pass.changed || pass.observed {
 		t.Fatalf("disarmed pressure above low-water mark = %+v, want no epoch", pass)
 	}
-	if pass := a.applyRetentionPolicy(sink, 50_000); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(50_000)); pass.changed || pass.observed {
 		t.Fatalf("low-water rearm pass = %+v, want no epoch", pass)
 	}
 	if !a.retentionEpochArmed {
 		t.Fatal("pressure epoch did not rearm at low-water mark")
 	}
-	if pass := a.applyRetentionPolicy(sink, 60_000); !pass.changed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(60_000)); !pass.changed {
 		t.Fatalf("rearmed pressure at high-water mark = %+v, want epoch", pass)
 	}
 }
@@ -406,7 +410,7 @@ func TestPressureRetentionRearmsAfterCompaction(t *testing.T) {
 	sink := &recordSink{}
 
 	// Fire an epoch at the high-water mark; the epoch disarms itself.
-	if pass := a.applyRetentionPolicy(sink, 60_000); !pass.changed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(60_000)); !pass.changed {
 		t.Fatalf("pressure at high-water mark = %+v, want epoch", pass)
 	}
 	if a.retentionEpochArmed {
@@ -428,10 +432,10 @@ func TestPressureRetentionRearmsAfterCompaction(t *testing.T) {
 	// retention disabled for the rest of the session. observed (not changed) is
 	// the signal: degradeCurrent already consumed the aged image, so the epoch
 	// fires but trims nothing new.
-	if pass := a.applyRetentionPolicy(sink, 55_000); pass.changed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(55_000)); pass.changed {
 		t.Fatalf("mid-water pass = %+v, want no epoch", pass)
 	}
-	if pass := a.applyRetentionPolicy(sink, 60_000); !pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(60_000)); !pass.observed {
 		t.Fatalf("post-compaction high-water mark = %+v, want epoch", pass)
 	}
 }
@@ -451,7 +455,7 @@ func TestRetentionArchivesExactReadOnlyResultWithStableRecoveryPath(t *testing.T
 		ModelPath:   "/session/artifacts/tool-results/result.txt",
 	}}
 
-	if changed := a.applyRetention(sink); !changed {
+	if changed := a.applyRetentionPolicyWithDecision(sink, a.estimateContext(nil)).changed; !changed {
 		t.Fatal("retention pass reported unchanged")
 	}
 	if len(sink.archived) != 1 {
@@ -490,7 +494,7 @@ func TestRetentionKeepsOriginalWhenArtifactWriteFails(t *testing.T) {
 	a.SetTranscript(msgs)
 	sink := &archiveSink{archiveErr: errors.New("disk unavailable")}
 
-	if changed := a.applyRetention(sink); changed {
+	if changed := a.applyRetentionPolicyWithDecision(sink, a.estimateContext(nil)).changed; changed {
 		t.Fatal("retention trimmed a result whose exact artifact could not be written")
 	}
 	if got := a.Transcript()[2].Content[0].ResultText; got != big {
@@ -633,7 +637,7 @@ func TestAutoPressureEpochTrimsEligibleBlocksAndResetsOnce(t *testing.T) {
 		t.Fatalf("retention events = %d, want one epoch: %+v", len(sink.retention), sink.retention)
 	}
 	event := sink.retention[0]
-	if event.Policy != "pressure_epoch" || event.Trigger != "context_pressure" || event.BlocksTrimmed != 2 {
+	if event.Policy != RetentionEventPolicyPressureEpoch || event.Trigger != RetentionTriggerContextPressure || event.BlocksTrimmed != 2 {
 		t.Fatalf("retention event = %+v", event)
 	}
 	if !event.ResponseStateReset || event.NextRequestStateful || event.BytesAfter >= event.BytesBefore || event.ContextTokensAfter >= event.ContextTokensBefore {
@@ -856,28 +860,28 @@ func TestPressureRetentionFloorTriggersBelowWindowPercentage(t *testing.T) {
 	a.SetTranscript(oldImageTranscript())
 	sink := &recordSink{}
 
-	if pass := a.applyRetentionPolicy(sink, 199_999); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(199_999)); pass.changed || pass.observed {
 		t.Fatalf("context below floor = %+v, want no epoch", pass)
 	}
 	// Above the floor but far below the 60% window high-water mark (600K).
-	first := a.applyRetentionPolicy(sink, 200_000)
-	if !first.changed || first.event.Policy != "pressure_epoch" {
+	first := a.applyRetentionPolicyWithDecision(sink, retentionDecision(200_000))
+	if !first.changed || first.event.Policy != RetentionEventPolicyPressureEpoch {
 		t.Fatalf("context at floor = %+v, want epoch", first)
 	}
 
 	// Hysteresis uses the floor-scaled low-water mark (200K * 50/60 ≈ 166.7K).
 	a.SetTranscript(oldImageTranscript())
 	a.retentionEpochArmed = false
-	if pass := a.applyRetentionPolicy(sink, 190_000); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(190_000)); pass.changed || pass.observed {
 		t.Fatalf("disarmed above scaled low-water = %+v, want no epoch", pass)
 	}
-	if pass := a.applyRetentionPolicy(sink, 166_000); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(sink, retentionDecision(166_000)); pass.changed || pass.observed {
 		t.Fatalf("scaled low-water rearm pass = %+v, want no epoch", pass)
 	}
 	if !a.retentionEpochArmed {
 		t.Fatal("floor epoch did not rearm at the scaled low-water mark")
 	}
-	second := a.applyRetentionPolicy(sink, 200_000)
+	second := a.applyRetentionPolicyWithDecision(sink, retentionDecision(200_000))
 	if !second.changed {
 		t.Fatalf("rearmed floor pass = %+v, want epoch", second)
 	}
@@ -897,10 +901,10 @@ func TestAutoRetentionFloorTriggersBelowWindowPercentage(t *testing.T) {
 		userImage("old.png", agentOnePixelPNG, "q0"), asstText("a0"),
 		userText("q1"), asstText("a1"), userText("q2"), asstText("a2"), userText("q3"), asstText("a3"),
 	})
-	if pass := a.applyRetentionPolicy(&recordSink{}, 199_999); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(199_999)); pass.changed || pass.observed {
 		t.Fatalf("auto below floor = %+v, want no epoch", pass)
 	}
-	if pass := a.applyRetentionPolicy(&recordSink{}, 200_000); !pass.changed || pass.event.Policy != "pressure_epoch" {
+	if pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(200_000)); !pass.changed || pass.event.Policy != RetentionEventPolicyPressureEpoch {
 		t.Fatalf("auto at floor = %+v, want pressure epoch", pass)
 	}
 }
@@ -916,7 +920,7 @@ func TestPressureRetentionFloorDisabledByDefault(t *testing.T) {
 		userText("q2"), asstText("a2"),
 		userText("q3"), asstText("a3"),
 	})
-	if pass := a.applyRetentionPolicy(&recordSink{}, 200_000); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(200_000)); pass.changed || pass.observed {
 		t.Fatalf("20%% of window without a floor = %+v, want no epoch", pass)
 	}
 }
@@ -935,10 +939,10 @@ func TestPressureRetentionFloorAboveWindowPercentageIsNoOp(t *testing.T) {
 		userText("q2"), asstText("a2"),
 		userText("q3"), asstText("a3"),
 	})
-	if pass := a.applyRetentionPolicy(&recordSink{}, 599_999); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(599_999)); pass.changed || pass.observed {
 		t.Fatalf("just below 60%% with high floor = %+v, want no epoch", pass)
 	}
-	if pass := a.applyRetentionPolicy(&recordSink{}, 600_000); !pass.changed {
+	if pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(600_000)); !pass.changed {
 		t.Fatalf("at 60%% with high floor = %+v, want epoch (window governs)", pass)
 	}
 }
@@ -954,7 +958,7 @@ func TestPressureRetentionFloorNothingOldEnough(t *testing.T) {
 	a.SetTranscript([]llm.Message{
 		userText("q1"), asstText("a1"),
 	})
-	if pass := a.applyRetentionPolicy(&recordSink{}, 900_000); pass.changed || pass.observed {
+	if pass := a.applyRetentionPolicyWithDecision(&recordSink{}, retentionDecision(900_000)); pass.changed || pass.observed {
 		t.Fatalf("floor pass with nothing old enough = %+v, want no epoch", pass)
 	}
 }
@@ -972,7 +976,7 @@ func TestRetentionHeadIsSmallerThanCompactionPreview(t *testing.T) {
 	}
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
-	if changed := a.applyRetention(&recordSink{}); !changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; !changed {
 		t.Fatal("retention pass reported unchanged")
 	}
 	got := a.Transcript()[2].Content[0].ResultText
@@ -1038,7 +1042,7 @@ func TestRetentionArchivedNonReadOnlyResultTrimsAtTwiceAge(t *testing.T) {
 	// result is preserved.
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(turns(defaultRetentionKeepTurns))
-	a.applyRetention(sink)
+	a.applyRetentionPolicyWithDecision(sink, a.estimateContext(nil))
 	if got := a.Transcript()[2].Content[0].ResultText; got != big {
 		t.Fatalf("mutating result trimmed before 2x age: %d bytes", len(got))
 	}
@@ -1046,7 +1050,7 @@ func TestRetentionArchivedNonReadOnlyResultTrimsAtTwiceAge(t *testing.T) {
 	// Past 2x the boundary the archived body is trimmed with a recovery hint.
 	a2 := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a2.SetTranscript(turns(defaultRetentionKeepTurns*retentionArchivedAgeFactor + 1))
-	a2.applyRetention(sink)
+	a2.applyRetentionPolicyWithDecision(sink, a2.estimateContext(nil))
 	got := a2.Transcript()[2].Content[0].ResultText
 	if got == big || !strings.Contains(got, toolresult.ArchivedHintMarker) {
 		t.Fatalf("aged archived mutating result not trimmed with hint: %d bytes", len(got))
@@ -1066,7 +1070,7 @@ func TestRetentionKeepsArchivedNonReadOnlyResultWhenArchiveFails(t *testing.T) {
 	}
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
-	if changed := a.applyRetention(&archiveSink{archiveErr: errors.New("disk unavailable")}); changed {
+	if changed := a.applyRetentionPolicyWithDecision(&archiveSink{archiveErr: errors.New("disk unavailable")}, a.estimateContext(nil)).changed; changed {
 		t.Fatal("trimmed a result whose archive could not be written")
 	}
 	if got := a.Transcript()[2].Content[0].ResultText; got != big {
@@ -1096,7 +1100,7 @@ func TestRetentionKeepTurnsDecoupledFromCompaction(t *testing.T) {
 	if got := a.retentionKeepTurns(); got != 4 {
 		t.Fatalf("default retention keep turns = %d, want 4", got)
 	}
-	if changed := a.applyRetention(&recordSink{}); !changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; !changed {
 		t.Fatal("default retention boundary did not trim a 5-turn-old result")
 	}
 
@@ -1164,13 +1168,13 @@ func TestRetentionTrimsSupersededWriteInputs(t *testing.T) {
 		t.Fatalf("test setup: superseding write (index 5) not after boundary %d", boundary)
 	}
 
-	if changed := a.applyRetention(&recordSink{}); !changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; !changed {
 		t.Fatal("retention did not trim a superseded write input")
 	}
 	mustValid(t, a.Transcript())
 
 	first := a.Transcript()[1].Content[0]
-	if !strings.Contains(string(first.ToolInput), retentionInputMarker) {
+	if !retentionInputTrimmed(first.ToolInput) {
 		t.Fatalf("superseded write input not replaced: %.120s", first.ToolInput)
 	}
 	if len(first.ToolInput) >= len(writeInput) {
@@ -1189,7 +1193,7 @@ func TestRetentionTrimsSupersededWriteInputs(t *testing.T) {
 	}
 
 	// Idempotency: a second pass leaves the receipt byte-identical.
-	if changed := a.applyRetention(&recordSink{}); changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; changed {
 		t.Fatal("second retention pass re-trimmed a receipt")
 	}
 }
@@ -1216,7 +1220,7 @@ func TestRetentionKeepsWriteInputWhenNoNewerSuccess(t *testing.T) {
 	}
 	a := newAgent(llmtest.New("fake"), fileMutationRegistry(t), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(base(true))
-	if changed := a.applyRetention(&recordSink{}); changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; changed {
 		t.Fatal("trimmed a write input whose only newer sibling failed")
 	}
 }
@@ -1245,12 +1249,12 @@ func TestRetentionTrimsSupersededEditInputs(t *testing.T) {
 	if boundary := keepBoundary(turnStarts(msgs), a.retentionKeepTurns()); boundary <= 5 {
 		t.Fatalf("test setup: superseding edit (index 5) not after boundary %d", boundary)
 	}
-	if changed := a.applyRetention(&recordSink{}); !changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; !changed {
 		t.Fatal("retention did not trim a superseded edit input")
 	}
 	mustValid(t, a.Transcript())
 	got := a.Transcript()[1].Content[0].ToolInput
-	if !strings.Contains(string(got), retentionInputMarker) {
+	if !retentionInputTrimmed(got) {
 		t.Fatalf("edit receipt missing marker: %.160s", got)
 	}
 	if strings.Contains(string(got), oldText) {
@@ -1319,7 +1323,7 @@ func TestRetentionKeepsNonReadOnlyResultWithoutArchiver(t *testing.T) {
 	}
 	a := newAgent(llmtest.New("fake"), readOnlyRegistry(), Options{RetentionPolicy: RetentionPolicyAge})
 	a.SetTranscript(msgs)
-	if changed := a.applyRetention(&recordSink{}); changed {
+	if changed := a.applyRetentionPolicyWithDecision(&recordSink{}, a.estimateContext(nil)).changed; changed {
 		t.Fatal("trimmed a mutating result with no archiver to preserve its bytes")
 	}
 	if got := a.Transcript()[2].Content[0].ResultText; got != big {

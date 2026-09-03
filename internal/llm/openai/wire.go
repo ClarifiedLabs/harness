@@ -195,18 +195,23 @@ type wireUsage struct {
 // tool results are hoisted into sibling role:"tool" messages placed immediately
 // after the issuing assistant message, in call order (design §4).
 func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
-	return buildRequestForMode(req, contextWindow, outputLimit, "openai")
+	return buildRequestWithOptions(req, contextWindow, outputLimit, buildOptions{
+		reasoningMode: "openai",
+		baseURL:       defaultBaseURL,
+		providerName:  "openai",
+	})
 }
 
-func buildRequestForMode(req llm.Request, contextWindow, outputLimit int, reasoningMode string) wireRequest {
-	return buildRequestWithOptions(req, contextWindow, outputLimit, reasoningMode, llm.PromptCacheConfig{}, defaultBaseURL, "openai")
+type buildOptions struct {
+	reasoningMode   string
+	promptCache     llm.PromptCacheConfig
+	baseURL         string
+	providerName    string
+	minOutputTokens int
+	reasoningReplay bool
 }
 
-func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string) wireRequest {
-	return buildRequestWithOptionsAndMin(req, contextWindow, outputLimit, reasoningMode, promptCache, baseURL, providerName, 0, false)
-}
-
-func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit int, reasoningMode string, promptCache llm.PromptCacheConfig, baseURL, providerName string, minOutputTokens int, reasoningReplay bool) wireRequest {
+func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	w := wireRequest{
 		Model:         req.Model,
@@ -216,8 +221,8 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 		ServiceTier:   req.ServiceTier,
 	}
 
-	if mt := maxTokens(req, contextWindow, outputLimit, minOutputTokens); mt > 0 {
-		if isFirstPartyOpenAIChat(baseURL) {
+	if mt := llm.ResolveMaxTokensWithOptions(req, contextWindow, outputLimit, llm.MaxTokensOptions{Minimum: opts.minOutputTokens}); mt > 0 {
+		if isFirstPartyOpenAIChat(opts.baseURL) {
 			w.MaxCompletionTokens = &mt
 		} else {
 			w.MaxTokens = &mt
@@ -226,13 +231,13 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 	if len(req.StopSeqs) > 0 {
 		w.Stop = req.StopSeqs
 	}
-	switch llm.ResolvePromptCacheKeyField(providerName, "openai", baseURL, promptCache) {
+	switch llm.ResolvePromptCacheKeyField(opts.providerName, "openai", opts.baseURL, opts.promptCache) {
 	case llm.PromptCacheKeyFieldPromptCacheKey:
 		w.PromptCacheKey = req.PromptCacheKey
 	case llm.PromptCacheKeyFieldSessionID:
 		w.SessionID = llm.PromptCacheSessionID(req.PromptCacheKey)
 	}
-	switch reasoningMode {
+	switch opts.reasoningMode {
 	case "openrouter":
 		w.Reasoning = openRouterReasoning(req.Reasoning)
 	case "google":
@@ -247,7 +252,7 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 	// opted in AND reasoning is enabled for this request — mirrors the
 	// Responses dialect's replayReasoning gate, so reasoning-less requests
 	// (compaction summaries, prewarm) stay clean of replay payloads.
-	replayReasoning := reasoningReplay && (req.Reasoning.Effort != "" || req.Reasoning.Summary != "")
+	replayReasoning := opts.reasoningReplay && (req.Reasoning.Effort != "" || req.Reasoning.Summary != "")
 
 	// The system message carries only the stable system prompt. Volatile
 	// per-request context is appended as a trailing system message after the
@@ -278,10 +283,17 @@ func buildRequestWithOptionsAndMin(req llm.Request, contextWindow, outputLimit i
 			},
 		})
 	}
-	for _, t := range req.ServerTools {
-		if tool, ok := buildServerTool(t); ok {
-			w.Tools = append(w.Tools, tool)
+	for _, t := range llm.FilterServerTools(req.ServerTools,
+		llm.ServerToolKindOpenAIWebSearch,
+		llm.ServerToolKindOpenRouterWebSearch,
+		llm.ServerToolKindMimoWebSearch,
+		llm.ServerToolKindKimiWebSearch,
+		llm.ServerToolKindZAIWebSearch,
+	) {
+		if t.Kind == llm.ServerToolKindOpenAIWebSearch && t.Name != llm.ServerToolWebSearch {
+			continue
 		}
+		w.Tools = append(w.Tools, buildServerTool(t))
 	}
 	// Opt into parallel tool calls when tools are present (Responses already does),
 	// so the model can batch independent reads in one turn instead of one-call-per-
@@ -300,24 +312,16 @@ func isFirstPartyOpenAIChat(baseURL string) bool {
 	return err == nil && strings.EqualFold(u.Hostname(), "api.openai.com")
 }
 
-func maxTokens(req llm.Request, contextWindow, outputLimit, minOutputTokens int) int {
-	mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit)
-	if mt > 0 && minOutputTokens > 0 && mt < minOutputTokens {
-		return minOutputTokens
-	}
-	return mt
-}
-
-func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
+func buildServerTool(tool llm.ServerTool) wireTool {
 	switch tool.Kind {
 	case llm.ServerToolKindOpenRouterWebSearch:
-		return wireTool{Type: "openrouter:web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
+		return wireTool{Type: "openrouter:web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}
 	case llm.ServerToolKindMimoWebSearch:
 		maxKeyword := 3
 		forceSearch := false
-		return wireTool{Type: "web_search", MaxKeyword: &maxKeyword, ForceSearch: &forceSearch}, true
+		return wireTool{Type: "web_search", MaxKeyword: &maxKeyword, ForceSearch: &forceSearch}
 	case llm.ServerToolKindKimiWebSearch:
-		return wireTool{Type: "builtin_function", Function: &wireToolDecl{Name: "$web_search"}}, true
+		return wireTool{Type: "builtin_function", Function: &wireToolDecl{Name: "$web_search"}}
 	case llm.ServerToolKindZAIWebSearch:
 		return wireTool{Type: "web_search", WebSearch: &wireZAIWebSearch{
 			Enable:       "True",
@@ -325,13 +329,10 @@ func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
 			SearchResult: "True",
 			Count:        "5",
 			ContentSize:  "medium",
-		}}, true
-	case llm.ServerToolKindOpenAIWebSearch, "":
-		if tool.Name == llm.ServerToolWebSearch {
-			return wireTool{Type: "web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
-		}
+		}}
+	default:
+		return wireTool{Type: "web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}
 	}
-	return wireTool{}, false
 }
 
 func openRouterReasoning(reasoning llm.ReasoningConfig) *wireReasoning {

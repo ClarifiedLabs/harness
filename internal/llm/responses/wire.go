@@ -223,16 +223,9 @@ type wireUsage struct {
 }
 
 func buildRequest(req llm.Request, contextWindow, outputLimit int) wireRequest {
-	return buildRequestWithOptions(req, contextWindow, outputLimit, false)
-}
-
-func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, omitMaxOutputTokens bool) wireRequest {
-	return buildRequestWithConfig(req, contextWindow, outputLimit, buildOptions{
-		omitMaxOutputTokens: omitMaxOutputTokens,
-		minOutputTokens:     minMaxOutputTokens,
-		promptCache:         llm.PromptCacheConfig{},
-		baseURL:             defaultBaseURL,
-		providerName:        "openai",
+	return buildRequestWithOptions(req, contextWindow, outputLimit, buildOptions{
+		baseURL:      defaultBaseURL,
+		providerName: "openai",
 	})
 }
 
@@ -246,7 +239,7 @@ type buildOptions struct {
 	disablePromptCacheBreakpoints bool
 }
 
-func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
+func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
 	// Replay persisted encrypted reasoning items only when reasoning is enabled
 	// for this request (mirrors the Anthropic dialect's includeThinking gate).
@@ -276,7 +269,14 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 		w.PromptCacheKey = req.PromptCacheKey
 	}
 
-	if mt := maxTokens(req, contextWindow, outputLimit, opts.omitMaxOutputTokens, opts.minOutputTokens); mt > 0 {
+	minimum := opts.minOutputTokens
+	if minimum <= 0 {
+		minimum = minMaxOutputTokens
+	}
+	if mt := llm.ResolveMaxTokensWithOptions(req, contextWindow, outputLimit, llm.MaxTokensOptions{
+		Omit:    opts.omitMaxOutputTokens,
+		Minimum: minimum,
+	}); mt > 0 {
 		w.MaxOutputTokens = &mt
 	}
 	if req.Reasoning.Effort != "" || req.Reasoning.Summary != "" {
@@ -317,10 +317,14 @@ func buildRequestWithConfig(req llm.Request, contextWindow, outputLimit int, opt
 		}
 		w.Tools = append(w.Tools, wireTool{Type: "tool_search"})
 	}
-	for _, t := range req.ServerTools {
-		if tool, ok := buildServerTool(t); ok {
-			w.Tools = append(w.Tools, tool)
+	for _, t := range llm.FilterServerTools(req.ServerTools,
+		llm.ServerToolKindOpenAIWebSearch,
+		llm.ServerToolKindOpenRouterWebSearch,
+	) {
+		if t.Kind == llm.ServerToolKindOpenAIWebSearch && t.Name != llm.ServerToolWebSearch {
+			continue
 		}
+		w.Tools = append(w.Tools, buildServerTool(t))
 	}
 	if len(w.Tools) > 0 {
 		w.ParallelTools = true
@@ -404,16 +408,11 @@ func canonicalOpenAIEndpoint(baseURL string) bool {
 	return err == nil && strings.EqualFold(u.Hostname(), "api.openai.com")
 }
 
-func buildServerTool(tool llm.ServerTool) (wireTool, bool) {
-	switch tool.Kind {
-	case llm.ServerToolKindOpenRouterWebSearch:
-		return wireTool{Type: "openrouter:web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
-	case llm.ServerToolKindOpenAIWebSearch, "":
-		if tool.Name == llm.ServerToolWebSearch {
-			return wireTool{Type: "web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}, true
-		}
+func buildServerTool(tool llm.ServerTool) wireTool {
+	if tool.Kind == llm.ServerToolKindOpenRouterWebSearch {
+		return wireTool{Type: "openrouter:web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}
 	}
-	return wireTool{}, false
+	return wireTool{Type: "web_search", Parameters: llm.RawObjectOrNil(tool.Parameters)}
 }
 
 func insertRequestContext(input []wireInputItem, contextText string) []wireInputItem {
@@ -685,24 +684,6 @@ func textPartType(role llm.Role) string {
 		return "output_text"
 	}
 	return "input_text"
-}
-
-// maxTokens resolves the max_output_tokens to send. When omit is true, the
-// field is suppressed for compatible backends that reject it. Zero means "omit"
-// so the server keeps its default. A positive value below the API floor is
-// raised to minMaxOutputTokens so the request is not rejected.
-func maxTokens(req llm.Request, contextWindow, outputLimit int, omit bool, minOutputTokens int) int {
-	if omit {
-		return 0
-	}
-	if minOutputTokens <= 0 {
-		minOutputTokens = minMaxOutputTokens
-	}
-	mt := llm.ResolveMaxTokens(req, contextWindow, outputLimit)
-	if mt > 0 && mt < minOutputTokens {
-		return minOutputTokens
-	}
-	return mt
 }
 
 func inputMessagePhase(m llm.Message) string {

@@ -35,6 +35,18 @@ const (
 
 const bareEscapeSequenceTimeout = 50 * time.Millisecond
 
+type cursorKeyHandler struct {
+	trace string
+	apply func(*lineEditState)
+}
+
+var cursorKeyHandlers = map[rune]cursorKeyHandler{
+	ctrlA: {trace: "raw ctrl-a moves to start", apply: (*lineEditState).home},
+	ctrlB: {trace: "raw ctrl-b moves left", apply: (*lineEditState).left},
+	ctrlE: {trace: "raw ctrl-e moves to end", apply: (*lineEditState).end},
+	ctrlF: {trace: "raw ctrl-f moves right", apply: (*lineEditState).right},
+}
+
 // Paste-burst detection thresholds (non-bracketed paste fallback). A keystroke
 // arriving within pasteEnterGap of the previous one enters "paste mode"; paste
 // mode exits after a gap longer than pasteExitGap. Staying in paste mode too long
@@ -132,10 +144,6 @@ type promptLineEditor struct {
 	// When the writer is coordinated, OutputCoordinator's mutex protects it and
 	// serializes asynchronous writes around prompt redraws.
 	activePrompt *lineEditState
-}
-
-func newPromptLineEditor(in io.Reader, w io.Writer) *promptLineEditor {
-	return newPromptLineEditorWithReader(bufio.NewReader(in), w)
 }
 
 func newPromptLineEditorWithReader(r *bufio.Reader, w io.Writer) *promptLineEditor {
@@ -465,6 +473,13 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 	if e.pasteCRPending && !(e.pasteMode && r == '\n') {
 		e.pasteCRPending = false
 	}
+	if handler, ok := cursorKeyHandlers[r]; ok {
+		e.clearShiftEnterPending()
+		e.markManualEdit(s)
+		e.tracef(handler.trace)
+		handler.apply(s)
+		return viEditResult{redraw: true}, nil
+	}
 	switch r {
 	case '\r':
 		if e.consumeShiftEnterPending() {
@@ -500,34 +515,10 @@ func (e *promptLineEditor) handleKey(v *viLineState, s *lineEditState, h *lineEd
 			e.refreshPasteSummary(s)
 		}
 		return viEditResult{redraw: true}, nil
-	case ctrlA:
-		e.clearShiftEnterPending()
-		e.markManualEdit(s)
-		e.tracef("raw ctrl-a moves to start")
-		s.home()
-		return viEditResult{redraw: true}, nil
-	case ctrlB:
-		e.clearShiftEnterPending()
-		e.markManualEdit(s)
-		e.tracef("raw ctrl-b moves left")
-		s.left()
-		return viEditResult{redraw: true}, nil
 	case rune(lineTermEdit):
 		e.clearShiftEnterPending()
 		e.tracef("raw ctrl-g opens editor text len=%d", len(s.buf))
 		return e.edit(s, duringPrompt)
-	case ctrlE:
-		e.clearShiftEnterPending()
-		e.markManualEdit(s)
-		e.tracef("raw ctrl-e moves to end")
-		s.end()
-		return viEditResult{redraw: true}, nil
-	case ctrlF:
-		e.clearShiftEnterPending()
-		e.markManualEdit(s)
-		e.tracef("raw ctrl-f moves right")
-		s.right()
-		return viEditResult{redraw: true}, nil
 	case ctrlC:
 		e.clearShiftEnterPending()
 		e.tracef("raw ctrl-c interrupts")

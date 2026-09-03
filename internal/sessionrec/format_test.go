@@ -56,7 +56,7 @@ func TestWorkflowStatusSnapshotDistinguishesAvailabilityAndOutcomes(t *testing.T
 
 func TestRetentionSnapshotPreservesCausalFields(t *testing.T) {
 	event := agent.RetentionEvent{
-		Policy: "pressure_epoch", Trigger: "context_pressure", BlocksTrimmed: 2,
+		Policy: agent.RetentionEventPolicyPressureEpoch, Trigger: agent.RetentionTriggerContextPressure, BlocksTrimmed: 2,
 		BytesBefore: 100, BytesAfter: 40, BytesRemoved: 60,
 		ContextTokensBefore: 90, ContextTokensAfter: 20,
 		DecisionContextTokens: 90, DecisionContextSource: agent.ContextEstimateSourceResponseUsageDelta,

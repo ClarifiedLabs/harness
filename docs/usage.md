@@ -208,8 +208,10 @@ and send an explicit switch.
 `harness --help` is the authoritative flag list: it is generated from the same
 configuration catalog used for parsing and includes each setting's defaults and
 corresponding environment variables. The reference below adds the behavioral
-notes.
+notes. Its declaration tokens are checked against the root CLI catalog; prose and
+value placeholders remain hand-maintained.
 
+<!-- harness-root-flags:start -->
 ```text
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
 -i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
@@ -283,6 +285,7 @@ notes.
 -config <file>    alternate config path
 -h, --help        print this usage screen and exit 0
 ```
+<!-- harness-root-flags:end -->
 
 `color_theme` changes the truecolor syntax roles and displayed added/removed diff
 rows used by live fenced Markdown, reasoning-summary fences, tool diffs, session

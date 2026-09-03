@@ -3,9 +3,11 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -358,6 +360,14 @@ func TestWebFetchNonHTTPSchemeRejected(t *testing.T) {
 		if err == nil {
 			t.Errorf("scheme in %q should be rejected", u)
 		}
+	}
+}
+
+func TestWebFetchInvalidURLWrapsParseError(t *testing.T) {
+	err := validateHTTPURL("http://%")
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		t.Fatalf("error = %v, want wrapped *url.Error", err)
 	}
 }
 

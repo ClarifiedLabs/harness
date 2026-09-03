@@ -3,13 +3,10 @@
 package session
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"runtime"
 )
-
-var errLockHeld = errors.New("session lock held")
 
 func lockSessionFile(*os.File) error {
 	return fmt.Errorf("session locking is unsupported on %s", runtime.GOOS)

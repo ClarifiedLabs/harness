@@ -114,24 +114,25 @@ type environment struct {
 	promptFinished func()
 }
 
+func (env environment) lookup(name string) string {
+	if env.getenv == nil {
+		return ""
+	}
+	return env.getenv(name)
+}
+
 func (env environment) envLookup() func(string) (string, bool) {
 	if env.lookupEnv != nil {
 		return env.lookupEnv
 	}
-	if env.getenv == nil {
-		return func(string) (string, bool) { return "", false }
-	}
 	return func(name string) (string, bool) {
-		value := env.getenv(name)
+		value := env.lookup(name)
 		return value, value != ""
 	}
 }
 
 func harnessLoadOptions(env environment, args []string) config.LoadOptions {
-	getenv := env.getenv
-	if getenv == nil {
-		getenv = func(string) string { return "" }
-	}
+	getenv := env.lookup
 	return config.LoadOptions{
 		Args:              args,
 		LookupEnv:         env.envLookup(),
@@ -196,20 +197,18 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	stdin := env.stdin
 	stdout := env.stdout
 	stderr := env.stderr
-	getenv := env.getenv
+	getenv := env.lookup
 	now := env.now
 	if now == nil {
 		now = time.Now
 	}
 	result, err := config.LoadParsed(harnessLoadOptions(env, nil), invocation.Flags)
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "%v", err)
 	}
 	if result.Run.Help {
 		if err := commandCatalog(env).WriteHelp(stdout, "root"); err != nil {
-			fmt.Fprintf(stderr, "harness: help: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "help: %v", err)
 		}
 		return ui.ExitOK
 	}
@@ -228,11 +227,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		// invocation errors, so they remain ordinary stderr usage errors.
 		switch {
 		case !runOptions.PromptSet && runOptions.InitialPromptSet:
-			fmt.Fprintln(stderr, "harness: -i is not supported with -format json; use -p or pipe stdin")
-			return ui.ExitUsage
+			return fail(stderr, ui.ExitUsage, "-i is not supported with -format json; use -p or pipe stdin")
 		case !runOptions.PromptSet && !env.stdinPiped:
-			fmt.Fprintln(stderr, "harness: -format json without -p: nothing to read JSON messages from; use -p or pipe stdin")
-			return ui.ExitUsage
+			return fail(stderr, ui.ExitUsage, "-format json without -p: nothing to read JSON messages from; use -p or pipe stdin")
 		case runOptions.PromptSet:
 			jsonRunStreamMode = runstream.ModeOneshot
 		default:
@@ -291,8 +288,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		var err error
 		proxyTracer, err = tracing.NewTracer(true)
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: trace proxy: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "trace proxy: %v", err)
 		}
 	}
 	proxyURL := cfg.ModelProxyURL
@@ -301,94 +297,14 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	proxyClient, err := modelclient.New(proxyURL, nil, modelclient.WithAPIKey(cfg.ModelProxyAPIKey), modelclient.WithTracer(proxyTracer))
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "%v", err)
 	}
 	if !jsonRunMode {
 		startupCtx, stopStartup, startupInterrupted = signalCancelContext(env.sigCh)
 		defer stopStartup()
 	}
-	if runOptions.ShowAgents || runOptions.ShowModels {
-		var agents *agentsListOutput
-		if runOptions.ShowAgents {
-			var err error
-			agents, err = buildAgentsListOutput(cfg)
-			if err != nil {
-				fmt.Fprintf(stderr, "harness: agents: %v\n", err)
-				return ui.ExitUsage
-			}
-		}
-		var models *modelsListOutput
-		if runOptions.ShowModels {
-			catalog, err := checkModelProxy(startupCtx, proxyClient)
-			if err != nil {
-				if startupInterrupted() || errors.Is(err, context.Canceled) {
-					return ui.ExitInterrupt
-				}
-				fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
-				return ui.ExitRuntime
-			}
-			if startupInterrupted() {
-				return ui.ExitInterrupt
-			}
-			models = buildModelsListOutput(catalog)
-		}
-		if runOptions.OutputFormat == "json" {
-			out := infoOutput{Version: 1}
-			if agents != nil {
-				out.DefaultAgent = agents.DefaultAgent
-				out.SelectedAgent = agents.SelectedAgent
-				out.Agents = agents.Agents
-			}
-			if models != nil {
-				out.ProviderCount = models.ProviderCount
-				out.ModelCount = models.ModelCount
-				out.Models = sortedModelListEntries(models.Models)
-			}
-			if err := writeInformationalJSON(stdout, out); err != nil {
-				fmt.Fprintf(stderr, "harness: info: %v\n", err)
-				return ui.ExitRuntime
-			}
-			return ui.ExitOK
-		}
-		if agents != nil {
-			fmt.Fprint(stdout, formatAgentsListText(*agents))
-			if models != nil {
-				fmt.Fprintln(stdout)
-			}
-		}
-		if models != nil {
-			fmt.Fprint(stdout, formatModelsListText(*models))
-		}
-		return ui.ExitOK
-	}
-	if runOptions.CheckModelProxy {
-		catalog, err := checkModelProxy(startupCtx, proxyClient)
-		if err != nil {
-			if startupInterrupted() || errors.Is(err, context.Canceled) {
-				return ui.ExitInterrupt
-			}
-			fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
-			return ui.ExitRuntime
-		}
-		if startupInterrupted() {
-			return ui.ExitInterrupt
-		}
-		if runOptions.OutputFormat == "json" {
-			out := infoOutput{
-				Version:       1,
-				ModelProxyURL: proxyClient.URL(),
-				ProviderCount: 0,
-				ModelCount:    catalogModelCount(catalog),
-			}
-			if err := writeInformationalJSON(stdout, out); err != nil {
-				fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
-				return ui.ExitRuntime
-			}
-		} else {
-			fmt.Fprintf(stdout, "model proxy ok: %s (%d targets)\n", proxyClient.URL(), catalogModelCount(catalog))
-		}
-		return ui.ExitOK
+	if code, handled := runRootInformational(startupCtx, stdout, stderr, cfg, runOptions, proxyClient, startupInterrupted); handled {
+		return code
 	}
 	// The JSON run modes give stdout exclusively to the NDJSON event stream:
 	// assistant text and reasoning flow as assistant_delta/reasoning_summary
@@ -406,70 +322,19 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// Lock a resumed session before reading or repairing any of its files. The
 	// same lock remains active until the process exits or an interactive command
 	// rotates to a new session directory.
-	var activeSessionLock *session.Lock
-	var pendingSessionLock *session.Lock
-	var retiredSessionLocks []*session.Lock
-	defer func() {
-		if pendingSessionLock != nil {
-			_ = pendingSessionLock.Close()
-		}
-		if activeSessionLock != nil {
-			_ = activeSessionLock.Close()
-		}
-		for _, lock := range retiredSessionLocks {
-			_ = lock.Close()
-		}
-	}()
-	switchSessionLock := func(path string) error {
-		next, err := session.AcquireLock(path)
-		if err != nil {
-			return err
-		}
-		previous := activeSessionLock
-		activeSessionLock = next
-		if previous != nil {
-			_ = previous.Close()
-		}
-		return nil
-	}
-	prepareSessionLockChange := func(path string) error {
-		if pendingSessionLock != nil {
-			return errors.New("session: another path change is pending")
-		}
-		next, err := session.AcquireLock(path)
-		if err != nil {
-			return err
-		}
-		pendingSessionLock = next
-		return nil
-	}
-	commitSessionLockChange := func() {
-		if pendingSessionLock == nil {
-			return
-		}
-		previous := activeSessionLock
-		activeSessionLock = pendingSessionLock
-		pendingSessionLock = nil
-		if previous != nil {
-			// Canceled background children can finish their final checkpoint after a
-			// path rotation returns. Retain ownership of old roots until process exit
-			// so they cannot race a resume of the prior session.
-			retiredSessionLocks = append(retiredSessionLocks, previous)
-		}
-	}
+	locks := &rootSessionLocks{}
+	defer locks.close()
 
 	// Load a resumed session up front: its saved agent selects the tool set and
 	// any agent-specific model target when no -agent flag overrides it.
 	var resumed *session.Session
 	if runOptions.Resume != "" {
-		if err := switchSessionLock(runOptions.Resume); err != nil {
-			fmt.Fprintf(stderr, "harness: resume %s: %v\n", runOptions.Resume, err)
-			return ui.ExitRuntime
+		if err := locks.switchTo(runOptions.Resume); err != nil {
+			return fail(stderr, ui.ExitRuntime, "resume %s: %v", runOptions.Resume, err)
 		}
 		s, err := session.Load(runOptions.Resume)
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: resume %s: %v\n", runOptions.Resume, err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "resume %s: %v", runOptions.Resume, err)
 		}
 		resumed = &s
 		if s.Recovery != nil {
@@ -493,8 +358,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	if resumed != nil {
 		abandoned, skipped, err := session.AbandonRunningChildren(runOptions.Resume, startedAt)
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: resume child sessions: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "resume child sessions: %v", err)
 		}
 		if abandoned > 0 {
 			fmt.Fprintf(stderr, "[marked %d interrupted child session(s) abandoned]\n", abandoned)
@@ -515,58 +379,29 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// still holds the source lock because loading it may perform recovery and child
 	// cleanup. All ordinary runs lock their write destination before setup proceeds.
 	if !runOptions.DebugRequest && (runOptions.Resume == "" || filepath.Clean(sessionPath) != filepath.Clean(runOptions.Resume)) {
-		if err := switchSessionLock(sessionPath); err != nil {
-			fmt.Fprintf(stderr, "harness: session %s: %v\n", sessionPath, err)
-			return ui.ExitRuntime
+		if err := locks.switchTo(sessionPath); err != nil {
+			return fail(stderr, ui.ExitRuntime, "session %s: %v", sessionPath, err)
 		}
 	}
 	resumeCloned := false
 	resumeCloneFrom := ""
 	resumeCloneTo := ""
 	if resumed != nil && runOptions.Session != "" && filepath.Clean(runOptions.Session) != filepath.Clean(runOptions.Resume) {
-		cloneCreated := now()
-		resumeCloneFrom = resumed.Tree.ActiveLeaf
-		cloneCWD := resumed.CWD
-		if current, cwdErr := os.Getwd(); cwdErr == nil {
-			cloneCWD = current
-		}
-		cloneTree, err := resumed.Tree.Extract(resumeCloneFrom, cloneCreated, cloneCWD)
+		clone, err := cloneSessionForResume(resumed, now)
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: clone resumed session: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "clone resumed session: %v", err)
 		}
-		resumeCloneTo, err = cloneTree.AppendBranch(resumeCloneFrom, resumeCloneFrom, resumeCloneFrom, "", "")
-		if err != nil {
-			fmt.Fprintf(stderr, "harness: clone resumed session: %v\n", err)
-			return ui.ExitRuntime
-		}
-		cloneMessages, err := cloneTree.BuildContext()
-		if err != nil {
-			fmt.Fprintf(stderr, "harness: clone resumed session: %v\n", err)
-			return ui.ExitRuntime
-		}
-		resumed.Tree = cloneTree
-		resumed.Messages = cloneMessages
-		resumed.Created = cloneCreated
-		resumed.Updated = cloneCreated
-		resumed.Prompt = 0
-		resumed.ProxySessionID = ""
-		resumed.CacheAffinityID = ""
-		resumed.ResponseState = nil
-		resumed.Usage = session.UsageTotals{}
-		resumed.UsageByModel = nil
-		resetTrajectoryForResumeClone(resumed)
-		created = cloneCreated
+		created = clone.Created
+		resumeCloneFrom = clone.From
+		resumeCloneTo = clone.To
 		resumeCloned = true
 	}
 	logger, diagnosticLogger, diagnosticsSink, err := newHarnessLogger(terminalOutput.Stderr(), cfg.LogLevel, sessionPath, !runOptions.DebugRequest)
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "%v", err)
 	}
 	if len(runOptions.Images) > 0 && !runOptions.PromptSet && !runOptions.InitialPromptSet {
-		fmt.Fprintln(stderr, "harness: -image requires -p one-shot mode or -i initial interactive prompt")
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "-image requires -p one-shot mode or -i initial interactive prompt")
 	}
 
 	interactiveSession := !runOptions.PromptSet && !env.stdinPiped
@@ -577,8 +412,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	machineInteractive := runOptions.OutputFormat == "json" && env.stdinPiped && !runOptions.PromptSet
 	agents, err := resolveConfiguredAgents(cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "%v", err)
 	}
 	agentName := cfg.Agent
 	agentSource := result.Sources["agent"]
@@ -595,21 +429,15 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	startupAgent, ok := agents[agentName]
 	if !ok {
-		fmt.Fprintf(stderr, "harness: unknown agent %q (available: %s)\n", agentName, strings.Join(agentdef.Names(agents), ", "))
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "unknown agent %q (available: %s)", agentName, strings.Join(agentdef.Names(agents), ", "))
 	}
 	if !runOptions.PromptSet && !startupAgent.InteractiveSelectable {
-		fmt.Fprintf(stderr, "harness: agent %q is not available for interactive selection (available: %s)\n", agentName, strings.Join(agentdef.InteractiveNames(agents), ", "))
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "agent %q is not available for interactive selection (available: %s)", agentName, strings.Join(agentdef.InteractiveNames(agents), ", "))
 	}
 
 	catalog, err := proxyClient.Catalog(startupCtx)
 	if err != nil {
-		if startupInterrupted() || errors.Is(err, context.Canceled) {
-			return ui.ExitInterrupt
-		}
-		fmt.Fprintf(stderr, "harness: model proxy: %v\n", err)
-		return ui.ExitRuntime
+		return modelProxyFailure(stderr, startupInterrupted, err)
 	}
 	modelRegistry := modelclient.Registry(catalog)
 	modelRegistry.SetDefaultContextWindow(cfg.DefaultContextWindow)
@@ -626,8 +454,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	if err != nil {
 		configuredSelectionUnavailable := startModel != "" || startProvider != ""
 		if configuredSelectionUnavailable && (runOptions.PromptSet || env.stdinPiped) {
-			fmt.Fprintf(stderr, "harness: %v\n", err)
-			return ui.ExitUsage
+			return fail(stderr, ui.ExitUsage, "%v", err)
 		}
 		reader := bufio.NewReader(stdin)
 		stdin = reader
@@ -647,8 +474,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if configuredSelectionUnavailable {
 			fmt.Fprintf(stderr, "harness: %v\n", err)
 			if _, err := readStartupLine(startupModelRetryPrompt); err != nil {
-				fmt.Fprintf(stderr, "harness: model selection: %v\n", err)
-				return ui.ExitUsage
+				return fail(stderr, ui.ExitUsage, "model selection: %v", err)
 			}
 			fmt.Fprintln(stderr)
 		}
@@ -674,8 +500,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			return ui.ExitUsage
 		}
 		if err := validateReasoningConfig(modelRegistry, selection.RegistryModel, reasoningModeForProvider(catalog, selection.Provider), reasoning); err != nil {
-			fmt.Fprintf(stderr, "harness: %v\n", err)
-			return ui.ExitUsage
+			return fail(stderr, ui.ExitUsage, "%v", err)
 		}
 		saveDefault := false
 		if !env.stdinPiped {
@@ -692,8 +517,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if saveDefault {
 			configPath := configWritePath
 			if err := saveSelectedModel(configPath, selection.Provider, selection.Model, reasoning); err != nil {
-				fmt.Fprintf(stderr, "harness: save selected model: %v\n", err)
-				return ui.ExitRuntime
+				return fail(stderr, ui.ExitRuntime, "save selected model: %v", err)
 			}
 			fmt.Fprintf(stderr, "harness: saved selected model to %s\n", configPath)
 		}
@@ -704,8 +528,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	serverTools := webSearchServerToolsForModel(cfg.Provider, modelRegistry, registryModel, cfg.WebSearch)
 	reasoning.Summary = effectiveReasoningSummary(cfg.ReasoningSummary, reasoningModeForProvider(catalog, selection.Provider), interactiveSession, suppressReasoningOutput)
 	if err := validateReasoningConfig(modelRegistry, registryModel, reasoningModeForProvider(catalog, selection.Provider), reasoning); err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "%v", err)
 	}
 
 	// System prompt composition (design §8.5). -system-prompt may be an @file
@@ -714,8 +537,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// prompts are still composed.
 	configuredSystemPrompt, err := resolveAtFile(cfg.SystemPrompt)
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: -system-prompt: %v\n", err)
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "-system-prompt: %v", err)
 	}
 	cfg.SystemPrompt = configuredSystemPrompt
 	// The env block must report the absolute working directory so the model can
@@ -732,14 +554,12 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	userAgentsPath := userAgentsMDPath(getenv)
 	userAgentsMD, err := loadAgentsMDFile(userAgentsPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitRuntime
+		return fail(stderr, ui.ExitRuntime, "%v", err)
 	}
 	projectAgentsPath := projectAgentsMDPath(wd)
 	projectAgentsMD, err := loadAgentsMDFile(projectAgentsPath)
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: %v\n", err)
-		return ui.ExitRuntime
+		return fail(stderr, ui.ExitRuntime, "%v", err)
 	}
 	warnLargeAgentsMD(stderr, cfg.AgentsMDWarnBytes, userAgentsPath, userAgentsMD)
 	warnLargeAgentsMD(stderr, cfg.AgentsMDWarnBytes, projectAgentsPath, projectAgentsMD)
@@ -1030,8 +850,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	for name, a := range agents {
 		expanded, err := resolveAtFile(a.Prompt)
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: agent %q prompt: %v\n", name, err)
-			return ui.ExitUsage
+			return fail(stderr, ui.ExitUsage, "agent %q prompt: %v", name, err)
 		}
 		a.Prompt = expanded
 		agents[name] = a
@@ -1039,13 +858,11 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 
 	currentAgent, ok := agents[agentName]
 	if !ok {
-		fmt.Fprintf(stderr, "harness: unknown agent %q (available: %s)\n", agentName, strings.Join(agentdef.Names(agents), ", "))
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "unknown agent %q (available: %s)", agentName, strings.Join(agentdef.Names(agents), ", "))
 	}
 	toolRegistry, err := subsetForAgentTools(toolCatalog, currentAgent.AllowedTools, pendingMCP)
 	if err != nil {
-		fmt.Fprintf(stderr, "harness: agent %q: %v\n", agentName, err)
-		return ui.ExitUsage
+		return fail(stderr, ui.ExitUsage, "agent %q: %v", agentName, err)
 	}
 	systemPrompt := buildSystem(currentAgent.Prompt)
 	var hookRunner *hooks.Runner
@@ -1366,16 +1183,14 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	if runOptions.DebugRequest {
 		includePrompt, prompt, images, err := debugRequestPrompt(runOptions, stdin, env.stdinPiped, modelRegistry.SupportsInputModality(registryModel, "image"))
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: debug request: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "debug request: %v", err)
 		}
 		if len(runOptions.Images) > 0 && len(images) == 0 {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
 		}
 		out := buildDebugRequestOutput(ag, cfg, registryModel, agentName, includePrompt, prompt, images, nil)
 		if err := writeInformationalJSON(stdout, out); err != nil {
-			fmt.Fprintf(stderr, "harness: debug request: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "debug request: %v", err)
 		}
 		return ui.ExitOK
 	}
@@ -1483,9 +1298,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		StateDir:                stateDir(getenv),
 		Created:                 created,
 		Now:                     now,
-		BeforeSessionPathChange: prepareSessionLockChange,
+		BeforeSessionPathChange: locks.prepareChange,
 		OnSessionPathChanged: func(path string) {
-			defer commitSessionLockChange()
+			defer locks.commitChange()
 			snap := delegateState.Snapshot()
 			snap.SessionPath = path
 			snap.CacheAffinityID = ag.CacheAffinityID()
@@ -1593,30 +1408,26 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if otelCfg.ServiceName == "" {
 			otelCfg.ServiceName = "harness"
 		}
-		if otelCfg.Timeout == 0 {
-			otelCfg.Timeout = 5 * time.Second
-		}
 		sessionID := ""
 		if sessionPath != "" {
 			sessionID = filepath.Base(sessionPath)
 		}
 		exp, err := otel.NewExporter(otelCfg, buildinfo.Current(), sessionID, cfg.Provider, cfg.Model, agentName, cfg.OTel.ResourceAttributes)
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: otel: %v\n", err)
-			return ui.ExitUsage
+			return fail(stderr, ui.ExitUsage, "otel: %v", err)
 		}
 		otelSink := otel.NewSink(exp, toolRegistry, cfg.Provider, cfg.Model, agentName, false)
 		otelSink.SetIdentity(sessionID, cfg.Provider, cfg.Model, agentName)
 		otelSink.RecordSkillCatalog(skillCatalogReport)
 		app.SetOTel(otelSink)
 		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), otel.ShutdownExportTimeout)
 			defer cancel()
 			_ = exp.Export(ctx)
 		}()
 		periodicCtx, cancelPeriodic := context.WithCancel(context.Background())
 		defer cancelPeriodic()
-		exp.SetPeriodic(periodicCtx)
+		exp.SetPeriodic(periodicCtx, logger)
 		defer app.RecordOTelSession()
 	}
 
@@ -1681,17 +1492,15 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		} else {
 			prompt, err = ui.BuildPrompt(runOptions.Prompt, stdin, env.stdinPiped)
 		}
-		if jsonRunMode && (startupInterrupted() || errors.Is(err, context.Canceled)) {
+		if jsonRunMode && startupInterruptedOrCanceled(startupInterrupted, err) {
 			return ui.ExitInterrupt
 		}
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: read prompt: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "read prompt: %v", err)
 		}
 		images, err := loadConfiguredImages(runOptions.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: image: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "image: %v", err)
 		}
 		if len(runOptions.Images) > 0 && len(images) == 0 {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
@@ -1778,8 +1587,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	if runOptions.InitialPromptSet {
 		images, err := loadConfiguredImages(runOptions.Images, modelRegistry.SupportsInputModality(registryModel, "image"))
 		if err != nil {
-			fmt.Fprintf(stderr, "harness: image: %v\n", err)
-			return ui.ExitRuntime
+			return fail(stderr, ui.ExitRuntime, "image: %v", err)
 		}
 		if len(runOptions.Images) > 0 && len(images) == 0 {
 			fmt.Fprintf(stderr, "[image skipped: model %s does not support image input]\n", registryModel)
@@ -2286,7 +2094,7 @@ func setupDelegateTmuxViewer(cfg config.Config, getenv func(string) string, stde
 }
 
 func runSessionTimings(env environment, invocation cli.Invocation) int {
-	dir, err := session.ResolveSessionDir(stateDir(env.getenv), invocation.Args[0])
+	dir, err := session.ResolveSessionDir(stateDir(env.lookup), invocation.Args[0])
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: session timings: %v\n", err)
 		return ui.ExitUsage
@@ -2304,7 +2112,7 @@ func runSessionStats(env environment, invocation cli.Invocation) int {
 		fmt.Fprintln(env.stderr, "usage: harness session stats [--format text|json] <session-dir>")
 		return ui.ExitUsage
 	}
-	dir, err := session.ResolveSessionDir(stateDir(env.getenv), invocation.Args[0])
+	dir, err := session.ResolveSessionDir(stateDir(env.lookup), invocation.Args[0])
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: session stats: %v\n", err)
 		return ui.ExitUsage
@@ -2377,7 +2185,7 @@ func sessionReplayOptions(env environment, quiet bool, colorTheme highlight.Them
 	}
 	return session.ReplayOptions{
 		Markdown:   true,
-		ANSI:       env.colorTTY && !envColorDisabled(env.getenv),
+		ANSI:       env.colorTTY && !envColorDisabled(env.lookup),
 		ColorTheme: colorTheme,
 		Width:      width,
 		Quiet:      quiet,
@@ -2392,9 +2200,6 @@ func highlightColorTheme(value string) highlight.Theme {
 }
 
 func envColorDisabled(getenv func(string) string) bool {
-	if getenv == nil {
-		return false
-	}
 	if getenv("NO_COLOR") != "" {
 		return true
 	}

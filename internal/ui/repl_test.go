@@ -272,8 +272,8 @@ func TestRetentionTelemetryIsPersistedWithoutEnteringTranscript(t *testing.T) {
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
 	sink := newREPLSink(app.Renderer, app, 3)
 	sink.RetentionApplied(agent.RetentionEvent{
-		Policy:              "pressure_epoch",
-		Trigger:             "context_pressure",
+		Policy:              agent.RetentionEventPolicyPressureEpoch,
+		Trigger:             agent.RetentionTriggerContextPressure,
 		BlocksTrimmed:       2,
 		BytesBefore:         30_000,
 		BytesAfter:          5_000,

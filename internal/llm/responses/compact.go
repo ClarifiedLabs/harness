@@ -130,7 +130,7 @@ func (p *Provider) compactContextV2(ctx context.Context, req llm.Request) (llm.C
 
 func (p *Provider) compactionRequestBase(req llm.Request) (wireRequest, []wireInputItem) {
 	req = p.withToolSearchDowngrade(req)
-	base := buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
+	base := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
 		omitMaxOutputTokens:           p.omitMaxOutputTokens,
 		minOutputTokens:               p.minOutputTokens,
 		promptCache:                   p.promptCache,

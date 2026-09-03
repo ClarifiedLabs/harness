@@ -193,11 +193,29 @@ const (
 	RetentionRequestModeStateless      RetentionRequestMode = "stateless"
 )
 
+// RetentionEventPolicy identifies the policy that produced a retention epoch.
+// It is distinct from RetentionPolicy because automatic and pressure settings
+// both produce pressure epochs.
+type RetentionEventPolicy string
+
+const (
+	RetentionEventPolicyAge           RetentionEventPolicy = "age"
+	RetentionEventPolicyPressureEpoch RetentionEventPolicy = "pressure_epoch"
+)
+
+// RetentionTrigger identifies the condition that started a retention epoch.
+type RetentionTrigger string
+
+const (
+	RetentionTriggerTurnAge         RetentionTrigger = "turn_age"
+	RetentionTriggerContextPressure RetentionTrigger = "context_pressure"
+)
+
 // RetentionEvent describes one transcript-retention epoch. It is diagnostics
 // only and is never added to the transcript or provider request.
 type RetentionEvent struct {
-	Policy              string
-	Trigger             string
+	Policy              RetentionEventPolicy
+	Trigger             RetentionTrigger
 	BlocksTrimmed       int
 	BytesBefore         int
 	BytesAfter          int
@@ -330,7 +348,6 @@ type ClosureTrigger string
 
 const (
 	ClosureTriggerTurnBudget  ClosureTrigger = "turn_budget"
-	ClosureTriggerStagnation  ClosureTrigger = "stagnation"
 	ClosureTriggerRepeatGuard ClosureTrigger = "repeat_guard"
 	ClosureTriggerErrorGuard  ClosureTrigger = "error_guard"
 )
@@ -850,12 +867,6 @@ func (a *Agent) SetServerTools(serverTools []llm.ServerTool) {
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
 	a.resetResponseState()
-}
-
-// SetHooks replaces the lifecycle hook runner used by subsequent turns.
-func (a *Agent) SetHooks(runner *hooks.Runner) {
-	a.hooks = runner
-	a.compactionRuntimeVersion++
 }
 
 // Steer injects text as an in-prompt steering message. It is the simple text-only
@@ -1939,6 +1950,21 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	checkpoint := func(kind PromptCheckpointKind) {
 		reportPromptCheckpoint(sink, PromptCheckpoint{Kind: kind, Turn: turns, Usage: promptUsage()})
 	}
+	finalizePrompt := func(validationPhase string) error {
+		usage, wasted, estimate, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
+		total = add(total, usage)
+		wastedTotal = add(wastedTotal, wasted)
+		lastContext = estimate
+		if !completed {
+			return nil
+		}
+		completeTurn()
+		if err := a.validateTranscript(validationPhase); err != nil {
+			return err
+		}
+		checkpoint(PromptCheckpointClosedTurn)
+		return nil
+	}
 	defer func() {
 		// Persist the measurement anchor for the next prompt and for /context;
 		// it stays zero after a compaction/retention reset until the next
@@ -2417,16 +2443,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			startClosure(ClosureTriggerErrorGuard, turns)
 			terminationReason = TerminationErrorGuard
 			sink.Notice(errorStormNotice(guard.errorRuns))
-			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
-			total = add(total, fu)
-			wastedTotal = add(wastedTotal, fw)
-			lastContext = fctx
-			if completed {
-				completeTurn()
-				if err := a.validateTranscript("after error-guard summary"); err != nil {
-					return err
-				}
-				checkpoint(PromptCheckpointClosedTurn)
+			if err := finalizePrompt("after error-guard summary"); err != nil {
+				return err
 			}
 			break
 		}
@@ -2443,16 +2461,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			} else {
 				sink.Notice(commandRepeatLoopNotice(guard.commandRuns))
 			}
-			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
-			total = add(total, fu)
-			wastedTotal = add(wastedTotal, fw)
-			lastContext = fctx
-			if completed {
-				completeTurn()
-				if err := a.validateTranscript("after repeat-guard summary"); err != nil {
-					return err
-				}
-				checkpoint(PromptCheckpointClosedTurn)
+			if err := finalizePrompt("after repeat-guard summary"); err != nil {
+				return err
 			}
 			break
 		}
@@ -2500,16 +2510,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			startClosure(ClosureTriggerTurnBudget, turns)
 			terminationReason = TerminationTurnLimit
 			sink.Notice(maxTurnsNotice(a.maxTurns))
-			fu, fw, fctx, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
-			total = add(total, fu)
-			wastedTotal = add(wastedTotal, fw)
-			lastContext = fctx
-			if completed {
-				completeTurn()
-				if err := a.validateTranscript("after turn-limit summary"); err != nil {
-					return err
-				}
-				checkpoint(PromptCheckpointClosedTurn)
+			if err := finalizePrompt("after turn-limit summary"); err != nil {
+				return err
 			}
 			break
 		}

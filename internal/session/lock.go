@@ -12,8 +12,11 @@ import (
 
 const lockFile = "session.lock"
 
-// ErrLocked means another process owns the session's advisory lock.
-var ErrLocked = errors.New("session is active")
+var (
+	// ErrLocked means another process owns the session's advisory lock.
+	ErrLocked   = errors.New("session is active")
+	errLockHeld = errors.New("session lock held")
+)
 
 // LockedError reports the session and, when available, the process holding it.
 type LockedError struct {

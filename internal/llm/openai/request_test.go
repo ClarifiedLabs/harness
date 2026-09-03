@@ -141,7 +141,7 @@ func TestBuildRequestMaxTokensSmallCatalogOutputLimit(t *testing.T) {
 func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 4_436
-	w := buildRequestWithOptions(req, 262_144, 262_144, "openrouter", llm.PromptCacheConfig{}, "https://openrouter.ai/api/v1", "openrouter")
+	w := buildRequestWithOptions(req, 262_144, 262_144, buildOptions{reasoningMode: "openrouter", baseURL: "https://openrouter.ai/api/v1", providerName: "openrouter"})
 	if w.MaxTokens == nil || *w.MaxTokens != 65_536 {
 		t.Fatalf("max_tokens = %v, want 65536", w.MaxTokens)
 	}
@@ -163,7 +163,7 @@ func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 func TestBuildRequestMaxTokensRaisedToConfiguredFloor(t *testing.T) {
 	req := basicRequest()
 	req.EstimatedInputTokens = 999_999
-	w := buildRequestWithOptionsAndMin(req, 1_000_000, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "testai", 16, false)
+	w := buildRequestWithOptions(req, 1_000_000, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "testai", minOutputTokens: 16})
 	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 16 {
 		t.Fatalf("max_completion_tokens = %v, want 16 (configured floor)", w.MaxCompletionTokens)
 	}
@@ -181,7 +181,7 @@ func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
 func TestBuildRequestUsesLegacyMaxTokensForCompatibleEndpoint(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 333
-	w := buildRequestWithOptions(req, 1_000_000, 0, "openai", llm.PromptCacheConfig{}, "https://api.compatible.test/v1", "openai")
+	w := buildRequestWithOptions(req, 1_000_000, 0, buildOptions{reasoningMode: "openai", baseURL: "https://api.compatible.test/v1", providerName: "openai"})
 	if w.MaxTokens == nil || *w.MaxTokens != 333 || w.MaxCompletionTokens != nil {
 		t.Fatalf("caps = max_tokens:%v max_completion_tokens:%v, want compatible max_tokens only", w.MaxTokens, w.MaxCompletionTokens)
 	}
@@ -195,6 +195,7 @@ func TestBuildRequestServerTools(t *testing.T) {
 			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindMimoWebSearch},
 			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindKimiWebSearch},
 			{Name: llm.ServerToolWebSearch, Kind: llm.ServerToolKindZAIWebSearch},
+			{Name: "unexpected", Kind: llm.ServerToolKindOpenAIWebSearch},
 		},
 	}
 	w := buildRequest(req, 0, 0)
@@ -261,7 +262,7 @@ func TestBuildRequestReasoningEffortOpenAI(t *testing.T) {
 func TestBuildRequestReasoningEffortOpenRouter(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Effort: "medium"}
-	w := buildRequestForMode(req, 0, 0, "openrouter")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openrouter", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.ReasoningEffort != "" {
 		t.Fatalf("reasoning_effort = %q, want omitted for OpenRouter", w.ReasoningEffort)
 	}
@@ -280,7 +281,7 @@ func TestBuildRequestReasoningEffortOpenRouter(t *testing.T) {
 
 func TestBuildRequestReasoningOpenRouterExcludesByDefault(t *testing.T) {
 	req := basicRequest()
-	w := buildRequestForMode(req, 0, 0, "openrouter")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openrouter", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.Reasoning == nil || w.Reasoning.Exclude == nil || !*w.Reasoning.Exclude {
 		t.Fatalf("reasoning = %+v, want exclude true by default for OpenRouter", w.Reasoning)
 	}
@@ -289,7 +290,7 @@ func TestBuildRequestReasoningOpenRouterExcludesByDefault(t *testing.T) {
 func TestBuildRequestReasoningSummaryOpenRouterIncludesReasoning(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Summary: "auto"}
-	w := buildRequestForMode(req, 0, 0, "openrouter")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openrouter", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.Reasoning == nil || w.Reasoning.Exclude == nil || *w.Reasoning.Exclude {
 		t.Fatalf("reasoning = %+v, want exclude false when reasoning summary is requested", w.Reasoning)
 	}
@@ -299,7 +300,7 @@ func TestBuildRequestReasoningBudgetOpenRouter(t *testing.T) {
 	req := basicRequest()
 	budget := 2048
 	req.Reasoning = llm.ReasoningConfig{BudgetTokens: &budget}
-	w := buildRequestForMode(req, 0, 0, "openrouter")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openrouter", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.ReasoningEffort != "" {
 		t.Fatalf("reasoning_effort = %q, want omitted for OpenRouter", w.ReasoningEffort)
 	}
@@ -320,7 +321,7 @@ func TestBuildRequestReasoningBudgetGoogle(t *testing.T) {
 	req := basicRequest()
 	budget := 2048
 	req.Reasoning = llm.ReasoningConfig{BudgetTokens: &budget}
-	w := buildRequestForMode(req, 0, 0, "google")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "google", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.ReasoningEffort != "" {
 		t.Fatalf("reasoning_effort = %q, want omitted for Google budget", w.ReasoningEffort)
 	}
@@ -344,7 +345,7 @@ func TestBuildRequestReasoningBudgetGoogle(t *testing.T) {
 func TestBuildRequestReasoningEffortGoogle(t *testing.T) {
 	req := basicRequest()
 	req.Reasoning = llm.ReasoningConfig{Effort: "medium"}
-	w := buildRequestForMode(req, 0, 0, "google")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "google", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.ReasoningEffort != "medium" {
 		t.Fatalf("reasoning_effort = %q, want medium", w.ReasoningEffort)
 	}
@@ -357,7 +358,7 @@ func TestBuildRequestReasoningDisabledGoogle(t *testing.T) {
 	req := basicRequest()
 	enabled := false
 	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
-	w := buildRequestForMode(req, 0, 0, "google")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "google", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.ExtraBody == nil || w.ExtraBody.Google == nil || w.ExtraBody.Google.ThinkingConfig == nil ||
 		w.ExtraBody.Google.ThinkingConfig.ThinkingBudget == nil || *w.ExtraBody.Google.ThinkingConfig.ThinkingBudget != 0 {
 		t.Fatalf("extra_body = %+v, want google thinking_budget 0", w.ExtraBody)
@@ -368,7 +369,7 @@ func TestBuildRequestReasoningToggleOpenRouter(t *testing.T) {
 	req := basicRequest()
 	enabled := false
 	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
-	w := buildRequestForMode(req, 0, 0, "openrouter")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openrouter", baseURL: defaultBaseURL, providerName: "openai"})
 	if w.Reasoning == nil || w.Reasoning.Enabled == nil || *w.Reasoning.Enabled || w.Reasoning.Exclude == nil || !*w.Reasoning.Exclude {
 		t.Fatalf("reasoning = %+v, want enabled false with exclude true", w.Reasoning)
 	}
@@ -431,7 +432,7 @@ func TestBuildRequestPromptCacheKey(t *testing.T) {
 func TestBuildRequestPromptCacheAutoOpenRouterSessionID(t *testing.T) {
 	req := basicRequest()
 	req.PromptCacheKey = "harness-openrouter-session"
-	w := buildRequestWithOptions(req, 0, 0, "openrouter", llm.PromptCacheConfig{}, "https://openrouter.ai/api/v1", "openrouter")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openrouter", baseURL: "https://openrouter.ai/api/v1", providerName: "openrouter"})
 	if w.SessionID != "harness-openrouter-session" {
 		t.Fatalf("session_id = %q, want harness-openrouter-session", w.SessionID)
 	}
@@ -453,7 +454,7 @@ func TestBuildRequestPromptCacheAutoOpenRouterSessionID(t *testing.T) {
 func TestBuildRequestPromptCacheAutoCustomBaseURLOmits(t *testing.T) {
 	req := basicRequest()
 	req.PromptCacheKey = "harness-custom"
-	w := buildRequestWithOptions(req, 0, 0, "openai", llm.PromptCacheConfig{}, "https://api.deepseek.com", "deepseek")
+	w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openai", baseURL: "https://api.deepseek.com", providerName: "deepseek"})
 	if w.PromptCacheKey != "" || w.SessionID != "" {
 		t.Fatalf("cache fields = prompt_cache_key %q session_id %q, want omitted", w.PromptCacheKey, w.SessionID)
 	}
@@ -480,7 +481,7 @@ func TestBuildRequestPromptCacheExplicitFields(t *testing.T) {
 		{name: "none", field: llm.PromptCacheKeyFieldNone},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := buildRequestWithOptions(req, 0, 0, "openai", llm.PromptCacheConfig{KeyField: tc.field}, "https://api.deepseek.com", "deepseek")
+			w := buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openai", promptCache: llm.PromptCacheConfig{KeyField: tc.field}, baseURL: "https://api.deepseek.com", providerName: "deepseek"})
 			if w.PromptCacheKey != tc.wantPrompt || w.SessionID != tc.wantSession {
 				t.Fatalf("cache fields = prompt_cache_key %q session_id %q, want %q/%q", w.PromptCacheKey, w.SessionID, tc.wantPrompt, tc.wantSession)
 			}
@@ -696,7 +697,7 @@ func assistantWireMessage(t *testing.T, w wireRequest) wireMessage {
 }
 
 func TestBuildRequestReasoningContentReplayOptIn(t *testing.T) {
-	w := buildRequestWithOptionsAndMin(reasoningReplayRequest(), 0, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "kimi-for-coding", 0, true)
+	w := buildRequestWithOptions(reasoningReplayRequest(), 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-for-coding", reasoningReplay: true})
 	msg := assistantWireMessage(t, w)
 	if msg.ReasoningContent != "first thought\nsecond thought" {
 		t.Fatalf("reasoning_content = %q, want concatenated thinking blocks", msg.ReasoningContent)
@@ -720,7 +721,7 @@ func TestBuildRequestReasoningContentReplayRequiresReasoningEnabled(t *testing.T
 	// replay payloads even when the provider opted in.
 	req := reasoningReplayRequest()
 	req.Reasoning = llm.ReasoningConfig{}
-	b, err := json.Marshal(buildRequestWithOptionsAndMin(req, 0, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "kimi-for-coding", 0, true))
+	b, err := json.Marshal(buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-for-coding", reasoningReplay: true}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -730,7 +731,7 @@ func TestBuildRequestReasoningContentReplayRequiresReasoningEnabled(t *testing.T
 }
 
 func TestBuildRequestReasoningContentOnlyOnAssistantMessages(t *testing.T) {
-	w := buildRequestWithOptionsAndMin(reasoningReplayRequest(), 0, 0, "openai", llm.PromptCacheConfig{}, defaultBaseURL, "kimi-for-coding", 0, true)
+	w := buildRequestWithOptions(reasoningReplayRequest(), 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-for-coding", reasoningReplay: true})
 	for _, m := range w.Messages {
 		if m.Role != "assistant" && m.ReasoningContent != "" {
 			t.Fatalf("%s message carries reasoning_content %q", m.Role, m.ReasoningContent)

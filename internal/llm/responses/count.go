@@ -27,7 +27,7 @@ type countResponse struct {
 
 func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.InputTokenCount, error) {
 	req = p.withToolSearchDowngrade(req)
-	w := buildRequestWithConfig(req, p.contextWindow, p.outputLimit, buildOptions{
+	w := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
 		omitMaxOutputTokens:           true,
 		minOutputTokens:               p.minOutputTokens,
 		promptCache:                   p.promptCache,

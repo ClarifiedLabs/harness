@@ -568,7 +568,7 @@ func TestBuildRequestNativeToolSearchFlattensDeferredGroups(t *testing.T) {
 		ToolSearchFallback: "tool_catalog",
 		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
 	}
-	w := buildRequestWithOptions(req, 200_000, 0, "", llm.AnthropicToolSearchBM25)
+	w := buildRequestWithOptions(req, 200_000, 0, buildOptions{toolSearch: llm.AnthropicToolSearchBM25})
 	if len(w.Tools) != 3 || w.Tools[0].Name != "read" || w.Tools[0].DeferLoading ||
 		w.Tools[1].Name != "mcp__demo__search" || !w.Tools[1].DeferLoading ||
 		w.Tools[2].Type != "tool_search_tool_bm25_20251119" || w.Tools[2].Name != "tool_search_tool_bm25" {
@@ -592,7 +592,7 @@ func TestBuildRequestNativeToolSearchRequiresDeferredGroups(t *testing.T) {
 		ToolSearchFallback: "tool_catalog",
 		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
 	}
-	w := buildRequestWithOptions(req, 200_000, 0, "", llm.AnthropicToolSearchBM25)
+	w := buildRequestWithOptions(req, 200_000, 0, buildOptions{toolSearch: llm.AnthropicToolSearchBM25})
 	if len(w.Tools) != 1 || w.Tools[0].Name != "tool_catalog" || w.Tools[0].Type != "" {
 		t.Fatalf("tools = %+v, want unchanged local catalog without deferred inventory", w.Tools)
 	}
@@ -604,7 +604,7 @@ func TestBuildRequestNativeToolSearchRegexVariant(t *testing.T) {
 		DeferredToolGroups: []llm.ToolGroup{{Name: "lsp", Tools: []llm.ToolSchema{{Name: "lsp_definition", Parameters: json.RawMessage(`{}`)}}}},
 		Messages:           []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}}},
 	}
-	w := buildRequestWithOptions(req, 200_000, 0, "", llm.AnthropicToolSearchRegex)
+	w := buildRequestWithOptions(req, 200_000, 0, buildOptions{toolSearch: llm.AnthropicToolSearchRegex})
 	last := w.Tools[len(w.Tools)-1]
 	if last.Type != "tool_search_tool_regex_20251119" || last.Name != "tool_search_tool_regex" {
 		t.Fatalf("search tool = %+v", last)
@@ -799,7 +799,7 @@ func wireContentTypes(msg wireMessage) []string {
 }
 
 func TestBuildRequestReasoningReplayCurrentTurn(t *testing.T) {
-	w := buildRequestWithReasoningReplay(thinkingChainRequest(), 1_000_000, 0, llm.ReasoningReplayCurrentTurn)
+	w := buildRequestWithOptions(thinkingChainRequest(), 1_000_000, 0, buildOptions{reasoningReplay: llm.ReasoningReplayCurrentTurn})
 
 	// Historical assistant messages (before the last real user turn at index 4)
 	// lose thinking AND redacted_thinking but keep their other blocks.
@@ -824,7 +824,7 @@ func TestBuildRequestReasoningReplayCurrentTurn(t *testing.T) {
 
 func TestBuildRequestReasoningReplayFullUnchanged(t *testing.T) {
 	for _, mode := range []llm.ReasoningReplay{"", llm.ReasoningReplayFull} {
-		w := buildRequestWithReasoningReplay(thinkingChainRequest(), 1_000_000, 0, mode)
+		w := buildRequestWithOptions(thinkingChainRequest(), 1_000_000, 0, buildOptions{reasoningReplay: mode})
 		for _, i := range []int{1, 3, 5, 7} {
 			if w.Messages[i].Content[0].Type != "thinking" && w.Messages[i].Content[0].Type != "redacted_thinking" {
 				t.Fatalf("mode %q message %d lost its leading thinking block: %v", mode, i, wireContentTypes(w.Messages[i]))
@@ -840,7 +840,7 @@ func TestBuildRequestReasoningReplayCurrentTurnKeepsAllWithoutUserText(t *testin
 	enabled := true
 	req.Reasoning = llm.ReasoningConfig{Enabled: &enabled}
 	req.Messages = req.Messages[5:] // assistant + tool rounds only... starts with assistant
-	w := buildRequestWithReasoningReplay(req, 1_000_000, 0, llm.ReasoningReplayCurrentTurn)
+	w := buildRequestWithOptions(req, 1_000_000, 0, buildOptions{reasoningReplay: llm.ReasoningReplayCurrentTurn})
 	for i, m := range w.Messages {
 		if m.Role == "assistant" && m.Content[0].Type != "thinking" {
 			t.Fatalf("message %d lost thinking though no user text turn exists: %v", i, wireContentTypes(m))
@@ -853,7 +853,7 @@ func TestBuildRequestReasoningOffStillStripsAllThinking(t *testing.T) {
 	req := thinkingChainRequest()
 	req.Reasoning = llm.ReasoningConfig{Enabled: &disabled}
 	for _, mode := range []llm.ReasoningReplay{"", llm.ReasoningReplayCurrentTurn} {
-		w := buildRequestWithReasoningReplay(req, 1_000_000, 0, mode)
+		w := buildRequestWithOptions(req, 1_000_000, 0, buildOptions{reasoningReplay: mode})
 		for i, m := range w.Messages {
 			for _, c := range m.Content {
 				if c.Type == "thinking" || c.Type == "redacted_thinking" {
