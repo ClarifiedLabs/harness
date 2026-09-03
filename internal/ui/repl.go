@@ -70,10 +70,11 @@ type ModelSelection struct {
 
 // AgentSummary is one configured agent row for /agent listing.
 type AgentSummary struct {
-	Name        string
-	Description string
-	Model       string
-	Delegatable bool
+	Name                  string
+	Description           string
+	Model                 string
+	InteractiveSelectable bool
+	Delegatable           bool
 }
 
 // AgentSelection is the runtime agent bundle returned by App.SwitchAgent: the
@@ -205,7 +206,7 @@ type App struct {
 	idleCompactionAfter func(time.Duration) <-chan time.Time
 
 	AgentName             string         // current agent definition name
-	AvailableAgents       []AgentSummary // sorted agent names/descriptions for /agent listing
+	AvailableAgents       []AgentSummary // all configured agents, sorted by name, for /agent listing and interactive cycling
 	RefreshAgentSummaries func() []AgentSummary
 	SwitchAgent           func(name string) (AgentSelection, error)
 	// HandoffSwitchAgent may select an implementation agent that is hidden from
@@ -3699,44 +3700,47 @@ func (app *App) reasoningLabel() string {
 	return strings.Join(parts, ",")
 }
 
-// agentSummary renders the current agent plus available agents and descriptions,
-// marking the current one.
+// agentSummary renders the current agent plus all configured agents and
+// descriptions, grouped by whether they are available for interactive use.
 func (app *App) agentSummary() string {
 	if app.RefreshAgentSummaries != nil {
 		app.AvailableAgents = app.RefreshAgentSummaries()
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "current agent: %s [%s]\n", app.AgentName, app.currentAgentModelSummary())
-	b.WriteString("available agents:")
-	if len(app.AvailableAgents) == 0 {
-		b.WriteString(" none configured")
-		return b.String()
-	}
-	labels := make([]string, len(app.AvailableAgents))
-	for i, a := range app.AvailableAgents {
+	interactiveRows := make([]NameDescription, 0, len(app.AvailableAgents))
+	nonInteractiveRows := make([]NameDescription, 0, len(app.AvailableAgents))
+	for _, a := range app.AvailableAgents {
 		label := a.Name
 		if a.Name == app.AgentName {
 			label += " (current)"
 		}
-		labels[i] = label
-	}
-	rows := make([]NameDescription, 0, len(app.AvailableAgents))
-	for i, a := range app.AvailableAgents {
-		modelInfo := app.agentModelSummary(a)
-		parts := []string{"[" + modelInfo + "]"}
+		parts := []string{"[" + app.agentModelSummary(a) + "]"}
 		if a.Delegatable {
 			parts = append(parts, "[delegatable]")
 		}
 		if strings.TrimSpace(a.Description) != "" {
 			parts = append(parts, a.Description)
 		}
-		rows = append(rows, NameDescription{
-			Name:        labels[i],
-			Description: strings.Join(parts, " "),
-		})
+		row := NameDescription{Name: label, Description: strings.Join(parts, " ")}
+		if a.InteractiveSelectable {
+			interactiveRows = append(interactiveRows, row)
+		} else {
+			nonInteractiveRows = append(nonInteractiveRows, row)
+		}
 	}
-	b.WriteByte('\n')
-	WriteNameDescriptionList(&b, rows, NameDescriptionListOptions{Indent: "  ", Width: app.summaryWidth()})
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "current agent: %s [%s]\n", app.AgentName, app.currentAgentModelSummary())
+	writeSection := func(heading string, rows []NameDescription) {
+		b.WriteString(heading)
+		if len(rows) == 0 {
+			b.WriteString(" none configured\n")
+			return
+		}
+		b.WriteByte('\n')
+		WriteNameDescriptionList(&b, rows, NameDescriptionListOptions{Indent: "  ", Width: app.summaryWidth()})
+	}
+	writeSection("interactive agents:", interactiveRows)
+	writeSection("non-interactive agents:", nonInteractiveRows)
 	return strings.TrimSuffix(b.String(), "\n")
 }
 
@@ -3761,25 +3765,34 @@ func (app *App) switchAgent(name string) {
 	}
 }
 
-// nextAgentName returns the configured agent after the current one, wrapping to
-// the first entry. AvailableAgents is already in canonical lexical order. If the
-// current name is absent, the first entry is the recovery target.
+// nextAgentName returns the interactive-selectable agent after the current one,
+// wrapping to the first such entry. AvailableAgents is already in canonical
+// lexical order. If the current name is absent or non-interactive, the first
+// interactive entry is the recovery target.
 func (app *App) nextAgentName() (string, bool) {
-	if len(app.AvailableAgents) == 0 || app.SwitchAgent == nil {
+	if app.SwitchAgent == nil {
 		return "", false
 	}
-	next := 0
-	for i, summary := range app.AvailableAgents {
+	first := ""
+	foundCurrent := false
+	for _, summary := range app.AvailableAgents {
+		if !summary.InteractiveSelectable {
+			continue
+		}
+		if first == "" {
+			first = summary.Name
+		}
+		if foundCurrent {
+			return summary.Name, true
+		}
 		if summary.Name == app.AgentName {
-			next = (i + 1) % len(app.AvailableAgents)
-			break
+			foundCurrent = true
 		}
 	}
-	name := app.AvailableAgents[next].Name
-	if name == app.AgentName {
+	if first == "" || first == app.AgentName {
 		return "", false
 	}
-	return name, true
+	return first, true
 }
 
 // cycleAgent applies the next configured agent through the same full switch path

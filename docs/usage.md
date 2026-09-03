@@ -1417,7 +1417,7 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/reasoning summary <auto\|concise\|detailed\|none>` | switch Responses API reasoning summaries for subsequent turns |
 | `/effort [profile]` | alias for `/reasoning [profile]` |
 | `/fast [on\|off\|status]` | toggle or inspect the current model's `:fast` sibling; reports unavailable when the model has none |
-| `/agent` | list agents and descriptions, marking the current one |
+| `/agent` | list all configured agents and descriptions in interactive and non-interactive sections, marking the current one |
 | `/agent <name>` | switch the active agent |
 | `/mode`, `/mode <name>` | alias for `/agent` |
 | `/plan` | alias for `/agent plan` |
@@ -1560,9 +1560,11 @@ An agent definition bundles a set of allowed tools with extra system-prompt
 instructions and an optional model target override. Root interactive sessions
 can start with or switch to agents whose `interactive_selectable` setting is
 true, using `-agent <name>`, `HARNESS_AGENT`, config `agent`, or `/agent <name>`.
-The setting defaults to true when omitted. It does not restrict one-shot runs,
-delegation or child continuation, and plan handoffs may still target hidden
-implementation agents.
+The `/agent` listing still shows every configured agent, grouped under
+`interactive agents:` and `non-interactive agents:` headings. The setting
+defaults to true when omitted. It does not restrict one-shot runs, delegation or
+child continuation, and plan handoffs may still target hidden implementation
+agents.
 
 Shift-Tab switches use the same full agent runtime selection as `/agent` and emit
 the existing `[agent switched: <name>]` notice and provider/model line.

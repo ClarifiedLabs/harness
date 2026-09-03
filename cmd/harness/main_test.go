@@ -5205,6 +5205,25 @@ func TestRunREPLAgentListShowsModelConfig(t *testing.T) {
 		!strings.Contains(got, "auto (current)  [inherit current]") {
 		t.Fatalf("/agent output missing inherited provider/model, stderr=%q", got)
 	}
+	interactiveStart := strings.Index(got, "\ninteractive agents:")
+	nonInteractiveStart := strings.Index(got, "\nnon-interactive agents:")
+	if interactiveStart < 0 || nonInteractiveStart <= interactiveStart {
+		t.Fatalf("/agent output missing ordered agent sections, stderr=%q", got)
+	}
+	for _, name := range []string{"auto", "plan", "security"} {
+		row := strings.Index(got, "\n  "+name)
+		if row <= interactiveStart || row >= nonInteractiveStart {
+			t.Errorf("/agent output missing interactive %s row in interactive section, stderr=%q", name, got)
+		}
+	}
+	for _, name := range []string{"explore", "independent", "review"} {
+		if row := strings.Index(got, "\n  "+name); row <= nonInteractiveStart {
+			t.Errorf("/agent output missing non-interactive %s row in non-interactive section, stderr=%q", name, got)
+		}
+	}
+	if strings.Contains(got, "[non-interactive]") {
+		t.Errorf("/agent output should identify non-interactive agents by section, stderr=%q", got)
+	}
 	if len(fp.Requests) != 0 {
 		t.Fatalf("/agent listing should not call model, got %d requests", len(fp.Requests))
 	}
@@ -5472,15 +5491,21 @@ func expectedDefaultToolNames() []string {
 	return append(names, "delegate", "background_jobs", "update_todos", "record_plan")
 }
 
-func TestAgentSummariesHideNonInteractiveAgentsWithoutAffectingDelegation(t *testing.T) {
+func TestAgentSummariesIncludeNonInteractiveAgentsWithoutAffectingDelegation(t *testing.T) {
 	agents := agentdef.Builtins()
 	got := agentSummaries(agents, expectedDefaultToolNames())
-	var names []string
+	var names, interactiveNames []string
 	for _, summary := range got {
 		names = append(names, summary.Name)
+		if summary.InteractiveSelectable {
+			interactiveNames = append(interactiveNames, summary.Name)
+		}
 	}
-	if !slices.Equal(names, []string{"auto", "plan"}) {
-		t.Fatalf("interactive summary names = %v, want [auto plan]", names)
+	if !slices.Equal(names, agentdef.Names(agents)) {
+		t.Fatalf("summary names = %v, want all agents %v", names, agentdef.Names(agents))
+	}
+	if !slices.Equal(interactiveNames, []string{"auto", "plan"}) {
+		t.Fatalf("interactive summary names = %v, want [auto plan]", interactiveNames)
 	}
 
 	var candidateNames []string

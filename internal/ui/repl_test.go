@@ -3298,10 +3298,10 @@ func TestREPLAgentCommandLists(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.AgentName = "plan"
 	app.AvailableAgents = []AgentSummary{
-		{Name: "auto", Description: "Default agent"},
+		{Name: "auto", Description: "Default agent", InteractiveSelectable: true},
 		{Name: "independent", Description: "Work independently"},
-		{Name: "plan", Description: "Plan changes", Model: "anthropic:claude-opus-4-8", Delegatable: true},
-		{Name: "style", Description: "Style review", Model: "openai:gpt-5.5", Delegatable: true},
+		{Name: "plan", Description: "Plan changes", Model: "anthropic:claude-opus-4-8", InteractiveSelectable: true, Delegatable: true},
+		{Name: "style", Description: "Style review", Model: "openai:gpt-5.5", InteractiveSelectable: true, Delegatable: true},
 	}
 
 	in := strings.NewReader("/agent\n/exit\n")
@@ -3322,18 +3322,23 @@ func TestREPLAgentCommandLists(t *testing.T) {
 	}
 	for _, want := range []string{
 		"current agent: plan [anthropic:claude-opus-4-8]",
+		"interactive agents:",
 		"auto            [inherit current] Default agent",
-		"independent     [inherit current] Work independently",
 		"plan (current)  [anthropic:claude-opus-4-8] [delegatable] Plan changes",
 		"style           [openai:gpt-5.5] [delegatable] Style review",
+		"non-interactive agents:",
+		"independent  [inherit current] Work independently",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/agent output missing %q, errw=%q", want, got)
 		}
 	}
+	if strings.Contains(got, "[non-interactive]") {
+		t.Errorf("/agent output should group rather than label non-interactive rows, errw=%q", got)
+	}
 	for _, notWant := range []string{
 		"auto            [inherit current] [delegatable]",
-		"independent     [inherit current] [delegatable]",
+		"independent  [inherit current] [delegatable]",
 	} {
 		if strings.Contains(got, notWant) {
 			t.Errorf("/agent output should not mark row delegatable with %q, errw=%q", notWant, got)
@@ -3348,8 +3353,8 @@ func TestREPLAgentCommandAlignsAndWrapsDescriptions(t *testing.T) {
 	app.AgentName = "auto"
 	app.SummaryWidth = func() int { return 54 }
 	app.AvailableAgents = []AgentSummary{
-		{Name: "auto", Description: "one two three four five six"},
-		{Name: "review", Description: "short", Model: "openai:gpt-5.5"},
+		{Name: "auto", Description: "one two three four five six", InteractiveSelectable: true},
+		{Name: "review", Description: "short", Model: "openai:gpt-5.5", InteractiveSelectable: true},
 	}
 
 	if code := Run(strings.NewReader("/agent\n/exit\n"), app, nil); code != 0 {
@@ -3357,9 +3362,11 @@ func TestREPLAgentCommandAlignsAndWrapsDescriptions(t *testing.T) {
 	}
 	got := errw.String()
 	for _, want := range []string{
+		"interactive agents:",
 		"  auto (current)  [inherit current] one two three four",
 		"                  five six",
 		"  review          [openai:gpt-5.5] short",
+		"non-interactive agents: none configured",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("/agent output missing %q:\n%s", want, got)
@@ -3578,16 +3585,20 @@ func nextShiftTabDelay(t *testing.T, requests <-chan shiftTabDelayRequest) shift
 
 func TestNextAgentNameCyclesWrapsAndRecovers(t *testing.T) {
 	app := &App{
-		AvailableAgents: []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}},
-		SwitchAgent:     func(string) (AgentSelection, error) { return AgentSelection{}, nil },
+		AvailableAgents: []AgentSummary{
+			{Name: "auto", InteractiveSelectable: true},
+			{Name: "explore"},
+			{Name: "plan", InteractiveSelectable: true},
+		},
+		SwitchAgent: func(string) (AgentSelection, error) { return AgentSelection{}, nil },
 	}
 	for _, tt := range []struct {
 		current string
 		want    string
 		ok      bool
 	}{
-		{current: "auto", want: "explore", ok: true},
-		{current: "explore", want: "plan", ok: true},
+		{current: "auto", want: "plan", ok: true},
+		{current: "explore", want: "auto", ok: true},
 		{current: "plan", want: "auto", ok: true},
 		{current: "missing", want: "auto", ok: true},
 	} {
@@ -3602,7 +3613,7 @@ func TestNextAgentNameCyclesWrapsAndRecovers(t *testing.T) {
 	if got, ok := app.nextAgentName(); ok || got != "" {
 		t.Fatalf("zero agents = %q, %v; want no-op", got, ok)
 	}
-	app.AvailableAgents = []AgentSummary{{Name: "auto"}}
+	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}}
 	app.AgentName = "auto"
 	if got, ok := app.nextAgentName(); ok || got != "" {
 		t.Fatalf("one current agent = %q, %v; want no-op", got, ok)
@@ -3621,7 +3632,7 @@ func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
-	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
+	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "explore", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 
 	catalog := tools.CatalogWithOptions(tools.Options{})
 	toolSets := make(map[string]*tools.Registry)
@@ -3742,7 +3753,7 @@ func TestREPLShiftTabFailedSwitchRetainsDraft(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{textDelta("ok")}, Stop: llm.StopEndTurn})
 	app := newTestApp(t, &out, &errw, fp)
-	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "plan"}}
+	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 	app.SwitchAgent = func(string) (AgentSelection, error) { return AgentSelection{}, errors.New("switch broke") }
 	prewarms := 0
 	app.Prewarm = func() { prewarms++ }
@@ -3769,7 +3780,7 @@ func TestREPLShiftTabPendingPrewarmCancelledByExplicitAgentSwitch(t *testing.T) 
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
-	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
+	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "explore", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
 	}
@@ -3865,7 +3876,7 @@ func TestREPLRapidAgentSwitchesPrewarmOnlySettledSelection(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
-	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "explore"}, {Name: "plan"}}
+	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "explore", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
 	}
@@ -3962,7 +3973,7 @@ func TestREPLShiftTabPendingPrewarmCancelledByRealPrompt(t *testing.T) {
 		},
 	})
 	app := newTestApp(t, &out, &errw, fp)
-	app.AvailableAgents = []AgentSummary{{Name: "auto"}, {Name: "plan"}}
+	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		return AgentSelection{Name: name, Tools: tools.Default(), System: "PLAN", Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
 	}

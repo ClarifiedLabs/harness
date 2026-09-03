@@ -2414,15 +2414,16 @@ func agentSummaries(agents map[string]agentdef.Definition, parentTools []string)
 	for _, name := range delegate.DelegatableAgentNames(parentTools, delegateAgentCandidates(agents)) {
 		delegatable[name] = true
 	}
-	names := agentdef.InteractiveNames(agents)
+	names := agentdef.Names(agents)
 	out := make([]ui.AgentSummary, 0, len(names))
 	for _, name := range names {
 		a := agents[name]
 		out = append(out, ui.AgentSummary{
-			Name:        name,
-			Description: a.Description,
-			Model:       a.Model,
-			Delegatable: delegatable[name],
+			Name:                  name,
+			Description:           a.Description,
+			Model:                 a.Model,
+			InteractiveSelectable: a.InteractiveSelectable,
+			Delegatable:           delegatable[name],
 		})
 	}
 	return out
