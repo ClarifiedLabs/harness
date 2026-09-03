@@ -1203,9 +1203,11 @@ Provider config files written by `setup` and `refresh-models` are managed
 prices and missing metadata from authenticated provider catalogs and models.dev,
 so cache refreshes update served metadata without re-running setup or restarting.
 A fresh, complete provider response controls availability. A failed provider
-request preserves the last successful snapshot and configured allowlist; an
-auto-detected 404/405 falls back to models.dev availability. Background refresh
-only hides confirmed-absent targets in memory and never rewrites provider files.
+request preserves the last successful snapshot and configured allowlist. An
+auto-detected 404/405 falls back to models.dev availability only until that
+endpoint has returned a successful snapshot; later 404/405 responses preserve
+the cached snapshot like other transient failures. Background refresh only hides
+confirmed-absent targets in memory and never rewrites provider files.
 A hand-written config without `"managed": true` is manual: the proxy does not
 edit it and uses its own `price` and `input_modalities` entries. A managed config
 may set `price_source` to resolve prices from a different models.dev provider

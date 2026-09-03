@@ -123,6 +123,65 @@ func TestStartProviderModelRefreshDemotesExpiredSnapshotAfterFailure(t *testing.
 	}
 }
 
+func TestStartProviderModelRefreshPreservesSnapshotAcrossTransientNotFound(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			_, _ = w.Write([]byte(`{"data":[{"id":"fugu"}]}`))
+		case 2:
+			w.WriteHeader(http.StatusNotFound)
+		default:
+			_, _ = w.Write([]byte(`{"data":[{"id":"fugu-recovered"}]}`))
+		}
+	}))
+	defer server.Close()
+
+	var unixNow atomic.Int64
+	unixNow.Store(1_000)
+	ticks := make(chan time.Time)
+	env := environment{
+		providerModelsClient: server.Client(),
+		providerModelsTicks:  ticks,
+		now:                  func() time.Time { return time.Unix(unixNow.Load(), 0) },
+	}
+	provider := llm.ProviderConfig{Name: "sakana", APIType: "openai", BaseURL: server.URL, APIKey: "secret", Managed: true}
+	updates := make(chan map[string]modeldiscovery.State, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startProviderModelRefresh(ctx, env, t.TempDir(), []llm.ProviderConfig{provider}, nil, time.Hour, nil, func(state map[string]modeldiscovery.State) {
+		updates <- state
+	})
+
+	first := receiveProviderUpdate(t, updates)["sakana"]
+	if !first.Authoritative || first.Unsupported || len(first.Snapshot.Models) != 1 {
+		t.Fatalf("first update = %+v, want authoritative snapshot", first)
+	}
+
+	unixNow.Store(1_000 + int64(2*time.Hour/time.Second))
+	ticks <- time.Unix(unixNow.Load(), 0)
+	second := receiveProviderUpdate(t, updates)["sakana"]
+	if second.Authoritative || second.Unsupported || len(second.Snapshot.Models) != 1 {
+		t.Fatalf("not-found update = %+v, want metadata-only cached snapshot", second)
+	}
+	if _, ok := second.Snapshot.Models["fugu"]; !ok {
+		t.Fatalf("not-found update lost previous model: %+v", second.Snapshot.Models)
+	}
+
+	ticks <- time.Unix(unixNow.Load(), 0)
+	third := receiveProviderUpdate(t, updates)["sakana"]
+	if !third.Authoritative || third.Unsupported || len(third.Snapshot.Models) != 1 {
+		t.Fatalf("recovered update = %+v, want authoritative snapshot", third)
+	}
+	if _, ok := third.Snapshot.Models["fugu-recovered"]; !ok {
+		t.Fatalf("recovered update models = %+v", third.Snapshot.Models)
+	}
+	if got := requests.Load(); got != 3 {
+		t.Fatalf("provider requests = %d, want 3", got)
+	}
+}
+
 func receiveProviderUpdate(t *testing.T, updates <-chan map[string]modeldiscovery.State) map[string]modeldiscovery.State {
 	t.Helper()
 	select {

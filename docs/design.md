@@ -970,8 +970,11 @@ authoritative for availability; a stale snapshot can only enrich metadata. The
 serving coordinator performs an immediate bounded-concurrency refresh followed
 by hourly polling, then swaps one immutable catalog snapshot after each cycle.
 Network/auth/decode failures retain the prior state. Auto-detected 404/405
-responses mark discovery unsupported for that process and restore models.dev
-availability authority.
+responses mark discovery unsupported and restore models.dev availability only
+when the endpoint has never produced a successful snapshot. After a successful
+snapshot, later 404/405 responses preserve that state as transient failures; the
+snapshot still ages to metadata-only on schedule, returning availability to the
+configured and models.dev baselines without removing the provider.
 
 The synthetic `openai-codex` provider uses the public OpenAI Codex catalog only
 as baseline metadata. With working `codex_oauth`, the authenticated ChatGPT

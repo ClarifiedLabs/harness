@@ -144,13 +144,18 @@ func refreshProviderModels(ctx context.Context, env environment, configDir strin
 	updates := map[string]modeldiscovery.State{}
 	for result := range results {
 		if result.err != nil {
-			if result.unsupported {
+			previousState, hadPrevious := previous[result.provider]
+			preserveUnsupported := result.unsupported && hadPrevious &&
+				previousState.Snapshot.Complete && len(previousState.Snapshot.Models) > 0
+			if result.unsupported && !preserveUnsupported {
 				updates[result.provider] = modeldiscovery.State{Unsupported: true}
 			}
 			if logger != nil {
 				switch {
 				case errors.Is(result.err, modeldiscovery.ErrNoCredentials):
 					logger.Debug("provider model discovery skipped; credentials unavailable", "provider", result.provider)
+				case preserveUnsupported:
+					logger.Warn("previously supported provider model discovery endpoint returned an unsupported status; preserving cached catalog", "provider", result.provider, "err", result.err)
 				case errors.Is(result.err, modeldiscovery.ErrUnsupported):
 					logger.Debug("provider model discovery endpoint unsupported", "provider", result.provider)
 				default:
