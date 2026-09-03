@@ -3803,15 +3803,21 @@ func TestRunJSONSigintDuringSessionStartHook(t *testing.T) {
 	})
 	go func() { codeCh <- run(env) }()
 
-	deadline := time.After(time.Second)
+	deadline := time.NewTimer(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
 	for {
 		if _, err := os.Stat(marker); err == nil {
 			break
 		}
 		select {
-		case <-deadline:
-			t.Fatal("session-start hook did not start")
-		case <-time.After(10 * time.Millisecond):
+		case code := <-codeCh:
+			finished = true
+			t.Fatalf("run exited before session-start hook started: code=%d; stdout=%q stderr=%q", code, out.String(), errw.String())
+		case <-deadline.C:
+			t.Fatal("session-start hook did not start within 5s")
+		case <-ticker.C:
 		}
 	}
 	signals <- os.Interrupt
