@@ -45,6 +45,9 @@ type Manager struct {
 	clock     func() time.Time             // injected into instances
 	lookPath  func(string) (string, error) // availability probe
 	acquireFn func(ctx context.Context, s ResolvedServer, root string) (*lspClient, error)
+
+	// commands caches the effective command resolved for status.
+	commands map[string]string
 }
 
 // openDocKey scopes document sync state to one live LSP client. A relaunched
@@ -78,6 +81,7 @@ func NewManager(cfg Config, namespace string, logger *slog.Logger) *Manager {
 		instances: make(map[string]*serverInstance),
 		docs:      make(map[openDocKey]*docState),
 		present:   make(map[string]bool),
+		commands:  make(map[string]string),
 		lookPath:  exec.LookPath,
 	}
 	m.computeAvailable()
@@ -102,30 +106,38 @@ func (m *Manager) bareName(name string) string {
 	return strings.TrimPrefix(name, "mcp__"+m.namespace+"__")
 }
 
-// computeAvailable records the sorted set of languages whose server binary is on
-// PATH for the one-time runtime hint.
+// computeAvailable records the sorted set of languages whose server command can
+// be resolved for the current workspace. Most commands are PATH lookups; the
+// built-in TypeScript entry may resolve to a project-local TypeScript 7 compiler.
 func (m *Manager) computeAvailable() {
 	present := map[string]bool{}
 	servers := make(map[string]bool, len(m.cfg.Servers))
-	for _, s := range m.cfg.Servers {
-		if len(s.Command) == 0 {
+	commands := make(map[string]string, len(m.cfg.Servers))
+	cwd, _ := os.Getwd()
+	for _, configured := range m.cfg.Servers {
+		if len(configured.Command) == 0 {
 			continue
 		}
-		if _, err := m.lookPath(s.Command[0]); err == nil {
-			servers[s.Name] = true
-			for _, l := range s.Languages {
-				present[l] = true
+		server, installed := m.resolveServerCommand(configured, cwd)
+		if len(server.Command) > 0 {
+			commands[server.Name] = server.Command[0]
+		}
+		if installed {
+			servers[server.Name] = true
+			for _, language := range server.Languages {
+				present[language] = true
 			}
 		}
 	}
 	langs := make([]string, 0, len(present))
-	for l := range present {
-		langs = append(langs, l)
+	for language := range present {
+		langs = append(langs, language)
 	}
 	sort.Strings(langs)
 	m.mu.Lock()
 	m.available = langs
 	m.present = servers
+	m.commands = commands
 	m.mu.Unlock()
 }
 
@@ -133,8 +145,8 @@ func (m *Manager) computeAvailable() {
 // /lsp reflect a binary installed or removed during a long-running session.
 func (m *Manager) RefreshAvailability() { m.computeAvailable() }
 
-// InstalledLanguages returns the sorted languages backed by a server command
-// currently on PATH. Installation does not imply successful initialization.
+// InstalledLanguages returns the sorted languages backed by a resolvable server
+// command. Installation does not imply successful initialization.
 func (m *Manager) InstalledLanguages() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -153,8 +165,8 @@ type ServerRootStatus struct {
 }
 
 // ServerStatus is a user-facing snapshot of one configured server. Installed
-// only means the configured command is present on PATH; Roots distinguishes
-// successful initialization from failed attempts without launching the server.
+// only means its effective command is resolvable; Roots distinguishes successful
+// initialization from failed attempts without launching the server.
 type ServerStatus struct {
 	Name      string
 	Languages []string
@@ -174,7 +186,9 @@ func (m *Manager) ServerStatuses() []ServerStatus {
 			Name: server.Name, Languages: slices.Clone(server.Languages),
 			Installed: m.present[server.Name],
 		}
-		if len(server.Command) > 0 {
+		if command := m.commands[server.Name]; command != "" {
+			status.Command = command
+		} else if len(server.Command) > 0 {
 			status.Command = server.Command[0]
 		}
 		index[server.Name] = len(statuses)
@@ -351,6 +365,7 @@ func (m *Manager) targetFor(ctx context.Context, path string) (*fileTarget, *mcp
 		return nil, errorResult("no language server configured for %s files", extOrName(abs))
 	}
 	root, _ := detectRoot(filepath.Dir(abs), s.RootMarkers)
+	s, _ = m.resolveServerCommand(s, root)
 	cl, err := m.acquire(ctx, s, root)
 	if err != nil {
 		return nil, errorResult("%v", err)
@@ -538,7 +553,8 @@ func (m *Manager) handleWorkspaceSymbols(ctx context.Context, args toolArgs) (*m
 			return errorResult("provide 'path' (any file in the target project) to pick the workspace"), nil
 		}
 		cwd, _ := os.Getwd()
-		c, err := m.acquire(ctx, m.cfg.Servers[0], cwd)
+		server, _ := m.resolveServerCommand(m.cfg.Servers[0], cwd)
+		c, err := m.acquire(ctx, server, cwd)
 		if err != nil {
 			return errorResult("%v", err), nil
 		}
@@ -914,9 +930,10 @@ func (m *Manager) acquire(ctx context.Context, s ResolvedServer, root string) (*
 const prewarmScanMaxEntries = 20000
 
 // Prewarm background-launches language servers for which there is file evidence
-// below the workspace surrounding the process cwd. For each installed configured
-// server it scans (bounded) for a matching file extension, derives the server
-// root from that source file and the server's root markers, then acquires one
+// below the workspace surrounding the process cwd. For each configured server
+// with a resolvable effective command, it scans (bounded) for a matching file
+// extension, derives the server root from that source file and the server's root
+// markers, then acquires one
 // client. Servers with undetectable languages, no detected root, or no file
 // evidence are skipped. Launch failures are logged by the server instance. It
 // returns the sorted unique languages whose servers were successfully warmed.
@@ -930,7 +947,7 @@ func (m *Manager) Prewarm(ctx context.Context) []string {
 		m.mu.Lock()
 		present := m.present[s.Name]
 		m.mu.Unlock()
-		if !present {
+		if !present && !usesAutomaticTypeScriptCommand(s) {
 			continue
 		}
 		exts := serverExtensions(s)
@@ -953,7 +970,11 @@ func (m *Manager) Prewarm(ctx context.Context) []string {
 		if !found {
 			continue
 		}
-		if _, err := m.acquire(ctx, s, root); err != nil {
+		effective, installed := m.resolveServerCommand(s, root)
+		if !installed {
+			continue
+		}
+		if _, err := m.acquire(ctx, effective, root); err != nil {
 			// serverInstance.ensure owns the user-facing launch warning. Keeping this
 			// context at debug avoids reporting the same prewarm failure twice.
 			m.logger.Debug("lsp prewarm: server unavailable",

@@ -1,6 +1,6 @@
 {
   "//": "Compatibility config for `harness lsp serve -config <path>`. Normal harness config uses top-level lsp.servers inline.",
-  "//defaults": "These same servers are embedded in the binary, so this file is optional; use it to add languages or replace a default by name. Same-name entries replace the whole default server definition, so include languages, root_markers, and command. command[0] must be on PATH.",
+  "//defaults": "These same servers are embedded in the binary, so this file is optional; use it to add languages or replace a default by name. Same-name entries replace the whole default server definition, so include languages, root_markers, and command. command[0] must be on PATH. A TypeScript entry retaining the built-in name and command automatically uses a project-local TypeScript 7+ tsc LSP when available.",
   "version": 1,
   "servers": {
     "gopls": {

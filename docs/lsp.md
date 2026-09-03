@@ -47,7 +47,8 @@ In an interactive session, `/lsp enable` and `/lsp disable` override the initial
 setting for that process only. `/lsp` and `/lsp status` show:
 
 - whether native LSP tools are currently exposed to the active agent;
-- installed languages whose configured server commands are currently on `PATH`;
+- installed languages whose effective server commands are currently resolvable
+  (normally on `PATH`, with project-local TypeScript as described below);
 - ready languages with at least one live, initialized server root; and
 - each server's `missing`, `idle`, `initializing`, `ready`, or `failed` state,
   including failed roots, initialization errors, and active backoff retry times.
@@ -79,7 +80,8 @@ while higher-priority enclosing markers such as `go.work` continue to take
 precedence.
 
 Servers whose root markers are not found, whose languages have no file evidence,
-or whose binary is not on `PATH` stay lazy. The evidence scan is bounded (20000
+or whose effective command cannot be resolved stay lazy. The evidence scan is
+bounded (20000
 entries); an inconclusive scan skips prewarming rather than guessing, and files
 that live only under skipped directories are not evidence. Skipped directories:
 `.git`, `node_modules`, `vendor`, `target`, `dist`, `build`, `__pycache__`,
@@ -170,12 +172,13 @@ result in path order. Unsupported paths and unavailable servers are skipped.
 Diagnostics failures are supplemental and do not fail or roll back the mutation;
 failed mutations do not run this follow-up.
 
-A call on a file type with no configured server, a missing server binary, or a
+A call on a file type with no configured server, an unresolved server command,
+or a
 server that does not implement that operation returns a normal tool error. The
 model receives the complete enabled `lsp_*` tool list, capability-specific tool
 descriptions, and the preserved schema descriptions explaining the 1-based
 position/range conventions. A concise system hint separately lists languages
-whose configured server command is on `PATH` and notes that initialization is
+whose effective server command is resolvable and notes that initialization is
 lazy; `/lsp status` is the
 authoritative human-facing view of installed commands versus ready or failed
 workspace roots.
@@ -211,8 +214,38 @@ The shim ships embedded default configs for:
 - Go: `gopls`
 - Rust: `rust-analyzer`
 - Python: `pyright`, launched as `pyright-langserver --stdio`
-- TypeScript/JavaScript: `typescript-language-server`
+- TypeScript/JavaScript: project-local TypeScript 7+
+  (`tsc --lsp --stdio`), otherwise `typescript-language-server`
 - C/C++: `clangd`
+
+The built-in `typescript-language-server` entry has version-aware
+resolution. Harness searches the detected workspace root and its ancestors up
+to the nearest Git root, then uses the nearest
+`node_modules/typescript/package.json`. This supports hoisted npm, pnpm, and Yarn
+`node_modules` installs inside a repository without selecting dependencies from
+an unrelated shared parent. Without a Git boundary, only the detected root is
+searched. For TypeScript 7
+or newer it runs that package's declared `tsc` binary with `--lsp --stdio`. For
+TypeScript 6 or older it retains `typescript-language-server`, which selects the
+workspace TypeScript SDK for its tsserver-based protocol. A project-local
+TypeScript package is authoritative and is never replaced by a different global
+version.
+
+When the project has no local TypeScript package, Harness checks a global `tsc`
+and uses it directly only when a nearby TypeScript package manifest identifies
+version 7 or newer. Discovery never executes `tsc` merely to inspect its version;
+nonstandard global shims can be selected with an explicit command. Otherwise
+Harness falls back to `typescript-language-server`.
+
+Automatic selection applies exactly while the server name and command retain the
+embedded defaults. Changing either the name or command disables it; this is also
+the escape hatch for layouts without `node_modules`, such as Plug'n'Play SDK
+paths. Because LSP prewarming is enabled by default, the selected project package
+can be launched during startup when TypeScript/JavaScript file evidence exists;
+treat installed project dependencies as executable code. TypeScript command
+status is resolved relative to the process working directory; a nested project
+root can select a different version. Installing or changing TypeScript after an
+LSP root starts requires restarting Harness to replace that live server.
 
 A server launches lazily on the first tool call for one of its files. To add languages, or
 replace a default server definition by name, add inline `lsp.servers` entries to
