@@ -157,7 +157,7 @@ func planTools() []string {
 
 func defaultTools() []string {
 	names := tools.DefaultNames()
-	return append(names, "update_todos", "record_plan", "delegate", "background_jobs")
+	return append(names, "update_todos", "record_plan", "delegate", "background_jobs", "acp", "agent_sessions")
 }
 
 // Resolve merges config-file agent entries onto the built-ins and returns the

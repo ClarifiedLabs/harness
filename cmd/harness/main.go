@@ -25,8 +25,13 @@ import (
 	"syscall"
 	"time"
 
+	"harness/internal/acp"
+	"harness/internal/acpagent"
+	"harness/internal/acpclient"
+	"harness/internal/acptool"
 	"harness/internal/agent"
 	"harness/internal/agentdef"
+	"harness/internal/agentsession"
 	"harness/internal/background"
 	"harness/internal/buildinfo"
 	"harness/internal/cli"
@@ -112,6 +117,8 @@ type environment struct {
 	// promptFinished is a test/embedding hook invoked after a prompt's final
 	// session save, including after run has returned for a forced exit.
 	promptFinished func()
+	// acpRootFactory is a command-level test seam. Production leaves it nil.
+	acpRootFactory func(cli.Invocation) acpagent.Factory
 }
 
 func (env environment) lookup(name string) string {
@@ -611,24 +618,17 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		MaxContextBytes: cfg.ToolResultMaxBytes,
 		Now:             now,
 	})
+	agentSessionManager := agentsession.NewManager(agentsession.Options{
+		Background: backgroundManager,
+		Canceler:   backgroundManager,
+		Now:        now,
+	})
 
 	// Agent definitions (tool-gating layer). The tool catalog holds every
 	// constructible tool; each agent selects a subset, realized by Subset so the
 	// runtime advertises and dispatches only that agent's tools. Built once and
 	// shared with /agent and the /mode alias.
-	toolCatalog := tools.CatalogWithOptions(tools.Options{
-		MaxResultBytes:                cfg.ToolResultMaxBytes,
-		MaxResultLines:                cfg.ToolResultMaxLines,
-		ReadDefaultLimit:              cfg.ReadDefaultLimit,
-		ReadTotalLinesMaxBytes:        cfg.ReadTotalLinesMaxBytes,
-		ReadResultBytes:               cfg.ReadResultMaxBytes,
-		ReadResultLines:               cfg.ReadResultMaxLines,
-		Background:                    backgroundManager,
-		DispatchTimeout:               time.Duration(cfg.ToolTimeoutSeconds) * time.Second,
-		ShellTimeoutSeconds:           cfg.ShellTimeoutSeconds,
-		ShellBackgroundTimeoutSeconds: cfg.ShellBackgroundTimeoutSeconds,
-	})
-	backgroundManager.SetResultPreparer(toolCatalog.PrepareResultWithOriginal)
+	toolCatalog := newRootToolCatalog(cfg, backgroundManager)
 	build := buildinfo.Current()
 	sessionBuild := session.BuildMetadata{
 		Version:  build.Version,
@@ -733,11 +733,29 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 	}
 	delegateRunner := delegate.NewRunner(delegateState.Snapshot, resolveDelegate, delegateOpts)
-	toolCatalog.Register(delegate.NewTool(delegateRunner, backgroundManager))
+	toolCatalog.Register(delegate.NewToolWithSessions(delegateRunner, agentSessionManager, backgroundManager))
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
 	toolCatalog.Register(todo.NewTool(todoStore))
 	planSessionDir := func() string { return delegateState.Snapshot().SessionPath }
 	toolCatalog.Register(plan.NewTool(planStore, planSessionDir))
+	toolCatalog.Register(acptool.NewTool(agentSessionManager, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
+		argv := append([]string{target.Command}, target.Args...)
+		return acpclient.NewFactory(acpclient.Options{
+			Argv: argv,
+			Env:  acpTargetEnvironment(os.Environ(), target.Env),
+			CWD:  cwd,
+			ClientInfo: &acp.Implementation{
+				Name:    "harness",
+				Title:   "Harness",
+				Version: build.Version,
+			},
+			Logger: logger,
+			LogStderr: func(line string) {
+				logger.Warn("acp: child stderr: "+line, logging.Category("acp"))
+			},
+		})
+	}))
+	toolCatalog.Register(agentsession.NewTool(agentSessionManager))
 	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()
 	// MCP (opt-in): one-shot runs synchronously so the single request can use MCP
@@ -1075,41 +1093,14 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}, nil
 	}
 
-	ag := agent.New(provider, toolRegistry, agent.Options{
-		MaxTurns:                  cfg.MaxTurns,
-		MaxPromptTokens:           cfg.MaxPromptTokens,
-		MaxOutputTokens:           cfg.MaxOutputTokens,
-		MaxPromptCostUSD:          cfg.MaxPromptCostUSD,
-		Model:                     cfg.Model,
-		ContextWindow:             cfg.ContextWindow,
-		Registry:                  modelRegistry,
-		Reasoning:                 reasoning,
-		ReasoningReplayDomain:     selection.ReasoningReplayDomain,
-		ServerTools:               serverTools,
-		Now:                       now,
-		CompactKeepTurns:          cfg.CompactKeepTurns,
-		CompactKeepTokens:         cfg.CompactKeepTokens,
-		CompactTriggerPercent:     cfg.CompactTriggerPercent,
-		CompactTargetPercent:      cfg.CompactTargetPercent,
-		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
-		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
-		CompactTimeout:            time.Duration(cfg.CompactTimeoutSeconds) * time.Second,
-		CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes,
-		Hooks:                     hookRunner,
-		StagnationNudge:           cfg.StagnationNudge,
-		ShowDiffs:                 cfg.ShowDiffs,
-		ResponsesStateful:         responsesStatefulForProvider(cfg, catalog, cfg.Provider),
-		NativeCompaction:          nativeCompactionForProvider(catalog, cfg.Provider),
-		RetentionPolicy:           agent.RetentionPolicy(cfg.RetentionPolicy),
-		RetentionFloorTokens:      cfg.RetentionFloorTokens,
-		RetentionKeepTurns:        cfg.RetentionKeepTurns,
-		RetentionResultHeadBytes:  cfg.RetentionResultHeadBytes,
-		Interactive:               interactiveSession,
-		Steer:                     !cfg.NoSteer,
+	ag := newRootAgent(provider, toolRegistry, rootAgentConfig{
+		Config: cfg, Registry: modelRegistry, Reasoning: reasoning,
+		ReasoningReplayDomain: selection.ReasoningReplayDomain,
+		ServerTools:           serverTools, Hooks: hookRunner, Interactive: interactiveSession,
+		Now: now, Sleep: env.agentSleep,
+		ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider),
+		NativeCompaction:  nativeCompactionForProvider(catalog, cfg.Provider),
 	})
-	if env.agentSleep != nil {
-		ag.SetSleep(env.agentSleep)
-	}
 
 	var totals session.UsageTotals
 	var resumedUsageByModel map[string]session.UsageTotals
@@ -1247,6 +1238,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		ImageDetail:            cfg.ImageDetail,
 		Hooks:                  hookRunner,
 		Background:             backgroundManager,
+		AgentSessions:          agentSessionManager,
 		AvailableModels:        modelRegistry.Models(),
 		SwitchModel:            switchModel,
 		PickModel:              catalogModelPicker(catalog),
@@ -2014,6 +2006,37 @@ func modelListReasoningText(reasoning bool) string {
 		return "-"
 	}
 	return "reasoning"
+}
+
+// acpTargetEnvironment builds a complete deterministic child environment when
+// a target configures overrides. Each name appears once and configured values
+// replace inherited values. A nil result preserves direct environment
+// inheritance when no overrides are configured.
+func acpTargetEnvironment(inherited []string, overrides map[string]string) []string {
+	if len(overrides) == 0 {
+		return nil
+	}
+	values := make(map[string]string, len(inherited)+len(overrides))
+	for _, entry := range inherited {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || name == "" {
+			continue
+		}
+		values[name] = value
+	}
+	for name, value := range overrides {
+		values[name] = value
+	}
+	names := make([]string, 0, len(values))
+	for name := range values {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	env := make([]string, 0, len(names))
+	for _, name := range names {
+		env = append(env, name+"="+values[name])
+	}
+	return env
 }
 
 func fileAgentDefinitions(agents map[string]config.FileAgentConfig) map[string]agentdef.FileDefinition {

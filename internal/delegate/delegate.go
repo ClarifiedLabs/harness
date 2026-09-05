@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"harness/internal/agent"
+	"harness/internal/agentsession"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/plan"
@@ -94,6 +95,17 @@ type Launch struct {
 	System                string
 	Agent                 string
 	Tools                 *tools.Registry
+	// TranscriptSanitizer and RequestSanitizer, when non-nil, are installed on
+	// every child agent (see agent.SetTranscriptSanitizer/SetRequestSanitizer).
+	// Protocol-served roots (ACP) set them so transport control sequences stay
+	// out of child transcripts and model-facing replay as well. They are
+	// process-local behavior, not runtime identity, and never enter the
+	// continuation fingerprint.
+	TranscriptSanitizer func([]llm.Message) ([]llm.Message, bool)
+	RequestSanitizer    func(llm.Request) llm.Request
+	// StateTextSanitizer cleans TODO and plan text before child persistence,
+	// including inherited continuation state. Nil preserves ordinary behavior.
+	StateTextSanitizer func(string) string
 }
 
 // AgentCandidate is a configured agent that may be delegated to when its tools
@@ -188,6 +200,7 @@ type RunRequest struct {
 	Background      bool
 	ResourceKey     string
 	Access          string
+	Interactive     bool
 
 	maxTurnsInherited         bool
 	leaseAcquired             bool
@@ -220,10 +233,9 @@ type RunResult struct {
 	ProviderName        string
 	Model               string
 	SaveError           error
-	// Progress carries the live-progress closure (func() agent.DelegateProgressSnapshot)
-	// for foreground delegates so the parent wait ticker can read child activity while
-	// the (synchronous) run is in progress. It is nil for failure-before-run paths.
-	Progress any
+	// Progress carries bounded live activity for foreground delegates so the
+	// parent wait ticker can read it while the synchronous run is in progress.
+	Progress tools.BackgroundProgress
 }
 
 // RuntimeRebinder is implemented by tools whose behavior depends on the
@@ -241,11 +253,19 @@ type Runner struct {
 	opts             Options
 	childToolBuilder func(Runtime, Launch, string, []string) (*tools.Registry, error)
 	budget           *delegateBudget
+	activeChildren   *activeChildRegistry
 	background       tools.BackgroundJobStarter
 }
 
 func NewRunner(snapshot func() Runtime, resolve func(Runtime, string) (Launch, error), opts Options) *Runner {
-	return &Runner{snapshot: snapshot, resolve: resolve, opts: opts, budget: newDelegateBudget(opts)}
+	budget := newDelegateBudget(opts)
+	return &Runner{
+		snapshot:       snapshot,
+		resolve:        resolve,
+		opts:           opts,
+		budget:         budget,
+		activeChildren: newActiveChildRegistry(budget.maxActive),
+	}
 }
 
 type delegateBudget struct {
@@ -308,8 +328,9 @@ func (c inheritedValuesContext) Value(key any) any {
 }
 
 type Tool struct {
-	runner     *Runner
-	background tools.BackgroundJobStarter
+	runner        *Runner
+	background    tools.BackgroundJobStarter
+	agentSessions *agentsession.Manager
 	// progress stashes live Progress objects keyed by raw input between
 	// StartProgress and RunMetered so foreground runs reuse the exact object
 	// the renderer's closure reads. Lazily allocated; nil when unused.
@@ -321,6 +342,13 @@ func New(snapshot func() Runtime, resolve func(Runtime, string) (Launch, error),
 }
 
 func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
+	return NewToolWithSessions(runner, nil, background...)
+}
+
+// NewToolWithSessions constructs a delegate tool that can open reusable
+// interactive delegate sessions. Existing NewTool callers retain ordinary
+// foreground and background behavior.
+func NewToolWithSessions(runner *Runner, manager *agentsession.Manager, background ...tools.BackgroundJobStarter) *Tool {
 	var starter tools.BackgroundJobStarter
 	if len(background) > 0 {
 		starter = background[0]
@@ -328,7 +356,7 @@ func NewTool(runner *Runner, background ...tools.BackgroundJobStarter) *Tool {
 	if runner != nil {
 		runner.background = starter
 	}
-	return &Tool{runner: runner, background: starter}
+	return &Tool{runner: runner, background: starter, agentSessions: manager}
 }
 
 func (*Tool) Name() string { return "delegate" }
@@ -409,6 +437,10 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 			return tools.MeteredResult{}, err
 		}
 		req.leaseAcquired = true
+		if req.Interactive {
+			prepared.req = req
+			return t.startInteractive(ctx, prepared)
+		}
 		// Create the progress here so its closure is available to the parent wait
 		// ticker immediately (the job runs in a goroutine that starts now); the
 		// same progress feeds the child sink inside the job's Run closure.
@@ -450,8 +482,9 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		receipt += ", scope: " + req.ResourceKey + ", access: " + req.Access
 		receipt += ")"
 		return tools.MeteredResult{
-			Text:     receipt,
-			Progress: progress.Closure(),
+			Text:            receipt,
+			Progress:        progress.Closure(),
+			BackgroundJobID: info.ID,
 		}, nil
 	}
 	// Foreground: the live progress was created by StartProgress (called by the
@@ -486,7 +519,7 @@ func toBackgroundJobResult(result RunResult) tools.BackgroundJobResult {
 // blocks. The progress is stashed keyed by the raw input so RunMetered,
 // invoked next with the same input, reuses this exact object (not a fresh one);
 // RunMetered removes it. Distinct parallel inputs thus never collide.
-func (t *Tool) StartProgress(input json.RawMessage) any {
+func (t *Tool) StartProgress(input json.RawMessage) tools.BackgroundProgress {
 	if t == nil || t.runner == nil {
 		return nil
 	}
@@ -519,19 +552,20 @@ func (t *Tool) RebindRuntime(snapshot func() Runtime) tools.Tool {
 	if t == nil || t.runner == nil {
 		return NewTool(nil)
 	}
-	return NewTool(t.runner.Rebind(snapshot), t.background)
+	return NewToolWithSessions(t.runner.Rebind(snapshot), t.agentSessions, t.background)
 }
 
 func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	var args struct {
-		Task       string `json:"task"`
-		Agent      string `json:"agent"`
-		Mode       string `json:"mode"`
-		MaxTurns   *int   `json:"max_turns"`
-		ContinueID string `json:"continue_child_id"`
-		Background bool   `json:"background"`
-		Scope      string `json:"scope"`
-		Access     string `json:"access"`
+		Task        string `json:"task"`
+		Agent       string `json:"agent"`
+		Mode        string `json:"mode"`
+		MaxTurns    *int   `json:"max_turns"`
+		ContinueID  string `json:"continue_child_id"`
+		Background  bool   `json:"background"`
+		Interactive bool   `json:"interactive"`
+		Scope       string `json:"scope"`
+		Access      string `json:"access"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return RunRequest{}, err
@@ -552,6 +586,9 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 	if !args.Background && (resourceKey != "" || access != "") {
 		return RunRequest{}, fmt.Errorf("scope and access require background:true")
 	}
+	if args.Interactive && !args.Background {
+		return RunRequest{}, fmt.Errorf("interactive:true requires background:true")
+	}
 	return RunRequest{
 		Kind:            kind,
 		Mode:            mode,
@@ -560,6 +597,7 @@ func DecodeRunRequest(input json.RawMessage, kind string) (RunRequest, error) {
 		MaxTurns:        args.MaxTurns,
 		ContinueChildID: strings.TrimSpace(args.ContinueID),
 		Background:      args.Background,
+		Interactive:     args.Interactive,
 		ResourceKey:     resourceKey,
 		Access:          access,
 	}, nil
@@ -706,8 +744,21 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	childTodos := todo.NewStore()
 	childPlans := plan.NewStore()
 	if continuation != nil {
-		childTodos.Restore(continuation.state.Todos)
-		childPlans.Replace(continuation.state.Plan)
+		items := append([]todo.Item(nil), continuation.state.Todos...)
+		if launch.StateTextSanitizer != nil {
+			for i := range items {
+				items[i].Step = launch.StateTextSanitizer(items[i].Step)
+			}
+		}
+		childTodos.Restore(items)
+		if continuation.state.Plan != nil {
+			value := *continuation.state.Plan
+			if launch.StateTextSanitizer != nil {
+				value.Title = launch.StateTextSanitizer(value.Title)
+				value.Body = launch.StateTextSanitizer(value.Body)
+			}
+			childPlans.Replace(&value)
+		}
 	}
 	cacheAffinityID := childCacheAffinityID(runtime.CacheAffinityID, childID)
 	if continuation != nil {
@@ -720,10 +771,10 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		return result, err
 	}
 	if slices.Contains(toolNames, updateTodosToolName) {
-		childTools.Register(todo.NewTool(childTodos))
+		childTools.Register(todo.NewToolWithTextSanitizer(childTodos, launch.StateTextSanitizer))
 	}
 	if slices.Contains(toolNames, recordPlanToolName) {
-		childTools.Register(plan.NewTool(childPlans, func() string { return childDir }))
+		childTools.Register(plan.NewToolWithTextSanitizer(childPlans, func() string { return childDir }, launch.StateTextSanitizer))
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		MaxTurns:                  maxTurns,
@@ -751,9 +802,24 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		RetentionResultHeadBytes:  r.opts.RetentionResultHeadBytes,
 		Now:                       r.opts.Now,
 		ShowDiffs:                 r.opts.ShowDiffs,
+		Interactive:               req.Interactive,
+		Steer:                     req.Interactive,
 	})
+	unregister, ok := r.activeChildren.Register(childID, child)
+	if !ok {
+		terminalErr = fmt.Errorf("delegate active child registry is full or already contains %q", childID)
+		finish()
+		return result, terminalErr
+	}
+	defer unregister()
 	child.SetSystem(launch.System)
 	child.SetCacheAffinityID(cacheAffinityID)
+	if launch.TranscriptSanitizer != nil {
+		child.SetTranscriptSanitizer(launch.TranscriptSanitizer)
+	}
+	if launch.RequestSanitizer != nil {
+		child.SetRequestSanitizer(launch.RequestSanitizer)
+	}
 	prompt := req.Task
 	if continuation != nil {
 		prompt = continuationPrompt(req.ContinueChildID, req.Task)
@@ -1044,6 +1110,9 @@ func (r *Runner) prepareRun(req RunRequest) (preparedRun, error) {
 	req.ChildID = strings.TrimSpace(req.ChildID)
 	req.ResourceKey = strings.TrimSpace(req.ResourceKey)
 	req.Access = strings.TrimSpace(req.Access)
+	if req.Interactive && !req.Background {
+		return preparedRun{}, fmt.Errorf("interactive:true requires background:true")
+	}
 	if !req.Background && !req.leaseAcquired && (req.ResourceKey != "" || req.Access != "") {
 		return preparedRun{}, fmt.Errorf("scope and access require background:true")
 	}
@@ -1158,6 +1227,26 @@ func loadContinuationSource(runtime Runtime, childID string) (*continuationSourc
 		return nil, err
 	}
 	dir := session.ChildSessionDir(runtime.SessionPath, childID)
+	info, err := os.Lstat(dir)
+	if err != nil {
+		return nil, fmt.Errorf("delegate continuation %q: stat child dir: %w", childID, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("delegate continuation %q: child path is not a real directory", childID)
+	}
+	// The whole chain must stay inside the session tree: a symlinked parent
+	// component must not redirect continuation reads into another session.
+	root, err := filepath.EvalSymlinks(runtime.SessionPath)
+	if err != nil {
+		return nil, fmt.Errorf("delegate continuation %q: resolve session root: %w", childID, err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return nil, fmt.Errorf("delegate continuation %q: resolve child dir: %w", childID, err)
+	}
+	if resolved == root || !strings.HasPrefix(resolved, root+string(os.PathSeparator)) {
+		return nil, fmt.Errorf("delegate continuation %q: child dir escapes the session tree", childID)
+	}
 	metaPath := filepath.Join(dir, "meta.json")
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
@@ -1737,6 +1826,10 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 			"type":        "boolean",
 			"description": "Only independent work; joined automatically.",
 		},
+		"interactive": map[string]any{
+			"type":        "boolean",
+			"description": "Open a reusable delegate session. Requires background:true.",
+		},
 		"scope": map[string]any{
 			"type":        "string",
 			"description": "Background workspace; default: cwd. Separate concurrent write scopes. Requires background:true.",
@@ -2006,20 +2099,22 @@ type Progress struct {
 func NewProgress() *Progress { return &Progress{} }
 
 // Snapshot returns a renderer-safe copy of the current live activity.
-func (p *Progress) Snapshot() agent.DelegateProgressSnapshot {
+func (p *Progress) Snapshot() tools.BackgroundProgressSnapshot {
 	if p == nil {
-		return agent.DelegateProgressSnapshot{}
+		return tools.BackgroundProgressSnapshot{}
 	}
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return agent.DelegateProgressSnapshot{
-		Turn:     p.turn,
-		Attempt:  p.attempt,
-		Tools:    p.tools,
-		Agent:    p.agent,
-		Context:  p.ctx,
-		Usage:    p.usage,
-		Finished: p.finished,
+	return tools.BackgroundProgressSnapshot{
+		Kind:          "delegate",
+		Label:         p.agent,
+		Turn:          p.turn,
+		Attempt:       p.attempt,
+		Tools:         p.tools,
+		ContextUsed:   max(p.ctx.Total, p.ctx.PayloadTotal),
+		ContextWindow: p.ctx.Window,
+		Usage:         p.usage,
+		Finished:      p.finished,
 	}
 }
 
@@ -2086,11 +2181,10 @@ func (p *Progress) markFinished() {
 	p.finished = true
 }
 
-// Closure returns a func() agent.DelegateProgressSnapshot that reads this
-// progress. It is the opaque `any` carried through tools/background to the
-// renderer (which type-asserts it back). nil progress yields a zero snapshot.
-func (p *Progress) Closure() func() agent.DelegateProgressSnapshot {
-	return func() agent.DelegateProgressSnapshot { return p.Snapshot() }
+// Closure returns the protocol-neutral live progress source. Nil progress
+// yields a zero snapshot.
+func (p *Progress) Closure() tools.BackgroundProgress {
+	return func() tools.BackgroundProgressSnapshot { return p.Snapshot() }
 }
 
 func (s *childSink) User(text string) {

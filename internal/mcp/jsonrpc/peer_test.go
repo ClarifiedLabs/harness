@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // pipePeers wires two peers over net.Pipe and registers them for cleanup.
@@ -308,6 +310,115 @@ func TestCallContextCancel(t *testing.T) {
 	if _, err := a.Call(context.Background(), "still-alive", nil); !errors.As(err, new(*Error)) {
 		t.Fatalf("peer not alive after late response: %v", err)
 	}
+}
+
+func TestCallAndNotifyContextCancellationInterruptBlockedEnqueue(t *testing.T) {
+	peer := &Peer{out: make(chan Message), done: make(chan struct{}), waiters: make(map[ID]chan pending)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := peer.Call(ctx, "blocked", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Call error = %v, want context.Canceled", err)
+	}
+	peer.mu.Lock()
+	waiters := len(peer.waiters)
+	peer.mu.Unlock()
+	if waiters != 0 {
+		t.Fatalf("cancelled blocked call retained %d waiters", waiters)
+	}
+	if err := peer.NotifyContext(ctx, "blocked", nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("NotifyContext error = %v, want context.Canceled", err)
+	}
+}
+
+func TestInboundHandlerConcurrencyAndBackpressureAreBounded(t *testing.T) {
+	const limit = 4
+	serverConn, clientConn := net.Pipe()
+	var started atomic.Int32
+	var handlers sync.WaitGroup
+	handlers.Add(limit)
+	server := NewPeer(serverConn, PeerOptions{
+		MaxConcurrentHandlers: limit,
+		Handlers: map[string]Handler{"block": func(ctx context.Context, _ json.RawMessage) (json.RawMessage, *Error) {
+			started.Add(1)
+			handlers.Done()
+			<-ctx.Done()
+			return nil, NewError(CodeInternal, "closed")
+		}},
+	})
+	defer server.Close()
+	defer clientConn.Close()
+
+	writes := make(chan error, 1)
+	go func() {
+		enc := NewEncoder(clientConn)
+		var err error
+		// One request occupies each slot. Further rejected responses fill the
+		// blocked writer queue until the peer closes rather than spawning handlers.
+		for i := 0; i < limit+outBufferSize+2; i++ {
+			if writeErr := enc.Encode(NewRequest(IntID(int64(i+1)), "block", nil)); writeErr != nil {
+				err = writeErr
+				break
+			}
+		}
+		writes <- err
+	}()
+
+	handlers.Wait()
+	select {
+	case <-server.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("peer did not close when rejected responses filled its output queue")
+	}
+	if got := started.Load(); got != limit {
+		t.Fatalf("started handlers = %d, want bounded at %d", got, limit)
+	}
+	if err := server.Err(); !errors.Is(err, ErrPeerBlocked) {
+		t.Fatalf("server error = %v, want ErrPeerBlocked", err)
+	}
+	select {
+	case <-writes:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client writer remained blocked after peer shutdown")
+	}
+}
+
+func TestInlineNotificationBypassesSaturatedHandlerLimit(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+	control := make(chan string, 1)
+	server := NewPeer(serverConn, PeerOptions{
+		MaxConcurrentHandlers: 1,
+		Handlers: map[string]Handler{"block": func(context.Context, json.RawMessage) (json.RawMessage, *Error) {
+			close(entered)
+			<-release
+			return json.RawMessage(`{}`), nil
+		}},
+		InlineNotifications: map[string]NotificationHandler{"cancel": func(_ context.Context, params json.RawMessage) {
+			control <- string(params)
+		}},
+	})
+	defer server.Close()
+	defer clientConn.Close()
+	enc := NewEncoder(clientConn)
+	if err := enc.Encode(NewRequest(IntID(1), "block", nil)); err != nil {
+		t.Fatal(err)
+	}
+	<-entered
+	if err := enc.Encode(NewNotification("cancel", json.RawMessage(`{"id":1}`))); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-control:
+		if got != `{"id":1}` {
+			t.Fatalf("inline notification params = %s", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("inline notification was dropped at handler limit")
+	}
+	releaseOnce.Do(func() { close(release) })
 }
 
 func TestCloseFailsPendingCalls(t *testing.T) {

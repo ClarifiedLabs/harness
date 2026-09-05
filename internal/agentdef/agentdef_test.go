@@ -359,9 +359,9 @@ func TestResolveReasoningOverride(t *testing.T) {
 	}
 }
 
-func TestDefaultToolsIncludeTodosAndPlanButOmitGoalAndHandoffTools(t *testing.T) {
+func TestDefaultToolsIncludeCoordinationAndACPButOmitGoalAndHandoffTools(t *testing.T) {
 	def := defaultTools()
-	for _, name := range []string{"update_todos", "record_plan"} {
+	for _, name := range []string{"update_todos", "record_plan", "acp", "agent_sessions"} {
 		if !slices.Contains(def, name) {
 			t.Errorf("default tools missing %s: %v", name, def)
 		}
@@ -390,6 +390,17 @@ func TestDefaultInheritingAgentsIncludeTodosAndRecordPlan(t *testing.T) {
 	custom := m["custom_impl"]
 	if !slices.Equal(custom.AllowedTools, defaultTools()) {
 		t.Errorf("custom default-inheriting tools = %v, want default set %v", custom.AllowedTools, defaultTools())
+	}
+}
+
+func TestACPToolsStayOutOfRestrictedBuiltins(t *testing.T) {
+	builtins := Builtins()
+	for _, agent := range []string{"explore", "plan", "review"} {
+		for _, tool := range []string{"acp", "agent_sessions"} {
+			if slices.Contains(builtins[agent].AllowedTools, tool) {
+				t.Errorf("%s tools unexpectedly include %q: %v", agent, tool, builtins[agent].AllowedTools)
+			}
+		}
 	}
 }
 

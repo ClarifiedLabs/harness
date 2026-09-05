@@ -105,7 +105,7 @@ func (f *fakeBackgroundStarter) SetDiagnosticIdentity(id string, identity tools.
 }
 
 func TestToBackgroundJobResultPreservesChildSessionMetadata(t *testing.T) {
-	progress := func() agent.DelegateProgressSnapshot { return agent.DelegateProgressSnapshot{Finished: true} }
+	progress := tools.BackgroundProgress(func() tools.BackgroundProgressSnapshot { return tools.BackgroundProgressSnapshot{Finished: true} })
 	usage := llm.Usage{
 		InputTokens: 11, CacheReadTokens: 7, OutputTokens: 5, ReasoningTokens: 3,
 		CacheWriteTokens: 2, CacheWrite1hTokens: 1, CostUSD: 0.25, CostKnown: true,
@@ -2277,7 +2277,7 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 	s := newChildSink("", nil, false, p, nil)
 	ctx := agent.ContextEstimate{Total: 1000, Window: 200000}
 	s.TurnAttemptStart(3, 1, ctx)
-	if got := p.Snapshot(); got.Turn != 3 || got.Attempt != 1 || got.Context.Total != 1000 || got.Context.Window != 200000 {
+	if got := p.Snapshot(); got.Turn != 3 || got.Attempt != 1 || got.ContextUsed != 1000 || got.ContextWindow != 200000 {
 		t.Fatalf("after TurnAttemptStart = %+v", got)
 	}
 
@@ -2293,7 +2293,7 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 	}
 
 	s.TurnComplete(agent.TurnUsage{Turn: 3, Context: ctx})
-	if got := p.Snapshot(); got.Context.Total != 1000 {
+	if got := p.Snapshot(); got.ContextUsed != 1000 {
 		t.Fatalf("after TurnComplete = %+v", got)
 	}
 
@@ -2311,7 +2311,7 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 // panics: every sink callback and Snapshot must be a no-op on a nil *Progress.
 func TestProgressNilSafe(t *testing.T) {
 	var p *Progress
-	if got := p.Snapshot(); got != (agent.DelegateProgressSnapshot{}) {
+	if got := p.Snapshot(); got != (tools.BackgroundProgressSnapshot{}) {
 		t.Fatalf("nil Snapshot = %+v, want zero", got)
 	}
 	p.markTurn(1, 1, agent.ContextEstimate{})
@@ -2320,7 +2320,7 @@ func TestProgressNilSafe(t *testing.T) {
 	p.markTool()
 	p.markFinished()
 	p.SetAgent("explore")
-	if got := p.Closure()(); got != (agent.DelegateProgressSnapshot{}) {
+	if got := p.Closure()(); got != (tools.BackgroundProgressSnapshot{}) {
 		t.Fatalf("nil Closure = %+v, want zero", got)
 	}
 }
@@ -2355,10 +2355,7 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 	if progress == nil {
 		t.Fatalf("StartProgress returned nil for a foreground delegate")
 	}
-	snapshot, ok := progress.(func() agent.DelegateProgressSnapshot)
-	if !ok {
-		t.Fatalf("StartProgress returned %T, want the progress closure", progress)
-	}
+	snapshot := progress
 	if got := snapshot(); got.Turn != 0 || got.Finished {
 		t.Fatalf("closure before run = %+v, want zero and not finished", got)
 	}
@@ -2375,8 +2372,8 @@ func TestProgressClosureLiveDuringRun(t *testing.T) {
 	if got := snapshot(); got.Turn != 1 || got.Tools != 1 || got.Finished {
 		t.Fatalf("live closure mid-run = %+v, want turn 1, 1 tool, not finished", got)
 	}
-	if got := snapshot(); got.Agent != "explore" {
-		t.Fatalf("live closure agent = %q, want explore", got.Agent)
+	if got := snapshot(); got.Label != "explore" {
+		t.Fatalf("live closure agent = %q, want explore", got.Label)
 	}
 	activity := activityRegistry.Snapshot()
 	if len(activity.Active) != 1 || activity.Recent.DisplayID != "d1" || activity.Recent.Agent != "explore" || activity.Recent.Turn != 1 {
@@ -2468,10 +2465,7 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	if req.Progress == nil {
 		t.Fatalf("background request should carry a progress closure")
 	}
-	snapshot, ok := req.Progress.(func() agent.DelegateProgressSnapshot)
-	if !ok {
-		t.Fatalf("background request progress = %T, want closure", req.Progress)
-	}
+	snapshot := req.Progress
 	// Before the job runs, the closure reads zero.
 	if got := snapshot(); got.Turn != 0 || got.Finished {
 		t.Fatalf("closure before job run = %+v, want zero", got)
@@ -2507,11 +2501,11 @@ func TestProgressBackgroundExposedOnJob(t *testing.T) {
 	if completed.Progress == nil {
 		t.Fatalf("background result should carry progress closure")
 	}
-	final, ok := completed.Progress.(func() agent.DelegateProgressSnapshot)
-	if !ok || !final().Finished {
+	final := completed.Progress
+	if final == nil || !final().Finished {
 		t.Fatalf("background result progress not finished: %T", completed.Progress)
 	}
-	if got := snapshot(); !got.Finished || got.Agent != "explore" {
+	if got := snapshot(); !got.Finished || got.Label != "explore" {
 		t.Fatalf("closure after job run = %+v, want finished explore", got)
 	}
 }
@@ -2772,5 +2766,124 @@ func TestDelegateChildViewClosesAfterSaveMeta(t *testing.T) {
 	}
 	if !slices.Equal(events, want) {
 		t.Fatalf("events = %v, want %v", events, want)
+	}
+}
+
+func TestContinuationRejectsSymlinkedChildDir(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{Stop: llm.StopEndTurn})
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "source", ChildID: "source"}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	dir := session.ChildSessionDir(fixture.sessionPath, "source")
+	moved := dir + ".moved"
+	if err := os.Rename(dir, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(moved, dir); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fixture.runner.Run(context.Background(), RunRequest{Task: "continue", ContinueChildID: "source", ChildID: "continued"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "not a real directory") {
+		t.Fatalf("symlinked child continuation error = %v, want real-directory rejection", err)
+	}
+}
+
+func TestContinuationRejectsChildDirEscapingSessionTree(t *testing.T) {
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{Stop: llm.StopEndTurn})
+	if _, err := fixture.runner.Run(context.Background(), RunRequest{Task: "source", ChildID: "source"}, nil); err != nil {
+		t.Fatalf("source Run: %v", err)
+	}
+	// Replace the children directory with a symlink that points outside the
+	// session tree; the final component is a real directory, so only the
+	// containment check can reject it.
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "source"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	childrenDir := filepath.Dir(session.ChildSessionDir(fixture.sessionPath, "source"))
+	moved := childrenDir + ".moved"
+	if err := os.Rename(childrenDir, moved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, childrenDir); err != nil {
+		t.Fatal(err)
+	}
+	_, err := fixture.runner.Run(context.Background(), RunRequest{Task: "continue", ContinueChildID: "source", ChildID: "continued"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "escapes the session tree") {
+		t.Fatalf("escaping child continuation error = %v, want containment rejection", err)
+	}
+}
+
+func TestChildAgentInstallsLaunchSanitizers(t *testing.T) {
+	provider := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "done"}},
+		Stop:   llm.StopEndTurn,
+	})
+	runtime := Runtime{
+		Provider:        provider,
+		ProviderName:    "fake",
+		Model:           "model-v1",
+		ContextWindow:   100_000,
+		Registry:        llm.NewRegistry(nil),
+		System:          "base system",
+		SessionPath:     filepath.Join(t.TempDir(), "session"),
+		CacheAffinityID: "parent-cache",
+	}
+	state := NewState(runtime)
+	catalog := &tools.Registry{}
+	catalog.Register(fakeChildTool{name: "read", out: "ok"})
+	transcriptSanitizer := func(msgs []llm.Message) ([]llm.Message, bool) {
+		changed := false
+		out := make([]llm.Message, len(msgs))
+		for i, msg := range msgs {
+			blocks := make([]llm.ContentBlock, len(msg.Content))
+			for j, block := range msg.Content {
+				if strings.Contains(block.Text, "\x1b") {
+					block.Text = strings.ReplaceAll(block.Text, "\x1b", "")
+					changed = true
+				}
+				blocks[j] = block
+			}
+			msg.Content = blocks
+			out[i] = msg
+		}
+		return out, changed
+	}
+	requestSanitized := false
+	runner := NewRunner(state.Snapshot, func(runtime Runtime, _ string) (Launch, error) {
+		return Launch{
+			Provider:            runtime.Provider,
+			ProviderName:        runtime.ProviderName,
+			Model:               runtime.Model,
+			ContextWindow:       runtime.ContextWindow,
+			Registry:            runtime.Registry,
+			System:              runtime.System,
+			Agent:               "worker",
+			Tools:               catalog,
+			TranscriptSanitizer: transcriptSanitizer,
+			RequestSanitizer: func(req llm.Request) llm.Request {
+				requestSanitized = true
+				return req
+			},
+		}, nil
+	}, Options{MaxTurns: 4, DisableAutoCompaction: true})
+
+	if _, err := runner.Run(context.Background(), RunRequest{Task: "inject \x1b[31m control", ChildID: "child"}, nil); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !requestSanitized {
+		t.Fatal("request sanitizer was not installed on the child agent")
+	}
+	if len(provider.Requests) == 0 {
+		t.Fatal("child made no model requests")
+	}
+	for _, req := range provider.Requests {
+		for _, msg := range req.Messages {
+			for _, block := range msg.Content {
+				if strings.Contains(block.Text, "\x1b") {
+					t.Fatalf("child request retained a control sequence: %+v", block)
+				}
+			}
+		}
 	}
 }

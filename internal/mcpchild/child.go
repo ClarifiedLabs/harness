@@ -34,13 +34,20 @@ type Child struct {
 	done chan struct{}
 }
 
-// Spawn starts command with args in its own process group, draining its stderr
-// line-by-line via logLine (nil discards), and returns a Child whose Conn reads
-// the child's stdout and writes its stdin. extraEnv is the full child
-// environment; nil inherits the parent's. The child's lifetime is owned by the
-// Child (plain exec.Command, not CommandContext) so a request ctx never kills it.
+// Spawn starts command in the current process directory. See SpawnInDir.
 func Spawn(command string, args []string, extraEnv []string, logLine func(string)) (*Child, error) {
+	return SpawnInDir(command, args, extraEnv, "", logLine)
+}
+
+// SpawnInDir starts command with args in its own process group, draining its
+// stderr line-by-line via logLine (nil discards), and returns a Child whose Conn
+// reads the child's stdout and writes its stdin. extraEnv is the full child
+// environment; nil inherits the parent's. A non-empty dir becomes the child's
+// working directory. The child's lifetime is owned by the Child (plain
+// exec.Command, not CommandContext) so a request ctx never kills it.
+func SpawnInDir(command string, args []string, extraEnv []string, dir string, logLine func(string)) (*Child, error) {
 	cmd := exec.Command(command, args...) // nosemgrep: dangerous-exec-command
+	cmd.Dir = dir
 	if extraEnv != nil {
 		cmd.Env = extraEnv
 	} else {

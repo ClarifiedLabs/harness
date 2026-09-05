@@ -34,16 +34,32 @@ type Tool interface {
 	Run(ctx context.Context, input json.RawMessage) (string, error)
 }
 
+// BackgroundProgressSnapshot is bounded, process-local live execution state.
+// It is display/diagnostic-only and is never persisted or model-facing.
+type BackgroundProgressSnapshot struct {
+	Kind          string
+	Label         string
+	Phase         string
+	Detail        string
+	Turn          int
+	Attempt       int
+	Tools         int
+	ContextUsed   int
+	ContextWindow int
+	Usage         llm.Usage
+	Finished      bool
+}
+
+// BackgroundProgress returns a thread-safe point-in-time progress copy.
+type BackgroundProgress func() BackgroundProgressSnapshot
+
 // MeteredResult is returned by tools that consume model tokens internally.
 // Dispatch preserves Usage so the agent can include it in prompt/session totals.
-// Progress, when non-nil, is an opaque closure (func() agent.DelegateProgressSnapshot)
-// built by the tool that reports the run's live activity for the parent wait
-// ticker; it is consumed via type assertion by the renderer only. Keeping it
-// `any` avoids a tools -> agent import cycle.
 type MeteredResult struct {
-	Text     string
-	Usage    llm.Usage
-	Progress any
+	Text            string
+	Usage           llm.Usage
+	Progress        BackgroundProgress
+	BackgroundJobID string
 }
 
 // RunResult separates concise model-visible text from a complete original that
@@ -75,21 +91,23 @@ type RichResult struct {
 // BackgroundJobRequest is the reusable contract for tools that can hand work to
 // the process-local background job manager. The manager owns job ids, status,
 // cancellation, notices, and request-context delivery; the tool owns its input
-// validation and execution semantics. Progress, when non-nil, is the opaque
-// live-progress closure (func() agent.DelegateProgressSnapshot) the job should
-// report while running; the manager stores it on the job so the parent wait
-// ticker can read it mid-run.
+// validation and execution semantics. Progress, when non-nil, reports bounded
+// live state while running; the manager stores it on the job so the parent wait
+// ticker can read it mid-run. SessionID and Operation are optional correlation
+// metadata and do not change job lifecycle semantics.
 type BackgroundJobRequest struct {
 	Kind        string
 	Description string
 	Agent       string
+	SessionID   string
+	Operation   int
 	ResourceKey string
 	Access      string
 	// WaitForPrompt marks work whose result must be incorporated before the parent
 	// agent may finish its current prompt. Ordinary background commands leave this
 	// false; background delegates set it so the parent joins and synthesizes them.
 	WaitForPrompt bool
-	Progress      any
+	Progress      BackgroundProgress
 	Run           func(context.Context, string) (BackgroundJobResult, error)
 }
 
@@ -100,10 +118,8 @@ type BackgroundJobRequest struct {
 // for display and session diagnostics; it is not folded into parent accounting.
 // Metrics carries the same diagnostics-only aggregate telemetry as RunResult;
 // the background manager retains it for completion diagnostics without adding it
-// to model-visible context. Progress, when non-nil, is an opaque closure
-// (func() agent.DelegateProgressSnapshot) reporting the job's live activity while
-// it runs; it is consumed via type assertion by the renderer only. Keeping it
-// `any` avoids a tools -> agent cycle.
+// to model-visible context. Progress, when non-nil, reports the job's bounded
+// live activity while it runs.
 type BackgroundJobResult struct {
 	Text           string
 	OriginalText   string
@@ -111,7 +127,7 @@ type BackgroundJobResult struct {
 	Usage          llm.Usage
 	Compactions    int
 	Metrics        map[string]int
-	Progress       any
+	Progress       BackgroundProgress
 }
 
 // BackgroundJobInfo is the minimal start acknowledgement a tool needs to return
@@ -119,6 +135,8 @@ type BackgroundJobResult struct {
 type BackgroundJobInfo struct {
 	ID          string
 	Status      string
+	SessionID   string
+	Operation   int
 	ResourceKey string
 	Access      string
 }
@@ -645,11 +663,10 @@ func (r *Registry) RequiredModality(call llm.ToolCall) (modality string, ok bool
 	return modality, modality != ""
 }
 
-// ProgressFor reports a tool's live-progress closure when the tool implements
+// ProgressFor reports a tool's live progress when the tool implements
 // ProgressStarter. Unknown tools and non-progressing tools return ok=false so
-// optional observers can silently skip them. The returned `any` is an opaque
-// func() agent.DelegateProgressSnapshot closure for the renderer to read.
-func (r *Registry) ProgressFor(call llm.ToolCall) (progress any, ok bool) {
+// optional observers can silently skip them.
+func (r *Registry) ProgressFor(call llm.ToolCall) (progress BackgroundProgress, ok bool) {
 	t, found := r.tools[call.Name]
 	if !found {
 		return nil, false
@@ -842,7 +859,7 @@ func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm
 		}
 		if mt, ok := t.(MeteredTool); ok {
 			result, err := mt.RunMetered(ctx, input)
-			done <- outcome{out: result.Text, usage: result.Usage, err: err}
+			done <- outcome{out: result.Text, usage: result.Usage, backgroundJobID: result.BackgroundJobID, err: err}
 			return
 		}
 		out, err := t.Run(ctx, input)

@@ -1343,16 +1343,13 @@ func awaitJobDone(t *testing.T, m *Manager, id string) {
 	}
 }
 
-// TestManagerExposesProgressOnJob verifies the opaque progress closure supplied
-// with a background job request is stored on the job and surfaced through the
-// snapshot immediately at start (before the run completes) and after it
-// finishes. The manager treats progress as an opaque `any`; a sentinel closure
-// stands in for the agent-typed closure the delegate tool builds in production.
+// TestManagerExposesProgressOnJob verifies live progress supplied with a
+// background job request is surfaced immediately and after completion.
 func TestManagerExposesProgressOnJob(t *testing.T) {
 	m := NewManager(Options{})
 	startedRun := make(chan struct{})
 	release := make(chan struct{})
-	progress := func() int { return 42 } // sentinel; the manager must not introspect it
+	progress := tools.BackgroundProgress(func() tools.BackgroundProgressSnapshot { return tools.BackgroundProgressSnapshot{Turn: 42} })
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
 		Kind:          "delegate",
 		Description:   "inspect",
@@ -1378,7 +1375,7 @@ func TestManagerExposesProgressOnJob(t *testing.T) {
 	if !ok || snap.Status != StatusRunning {
 		t.Fatalf("running snapshot = %+v ok=%v", snap, ok)
 	}
-	if got := sentinelProgressValue(snap.Progress); got != 42 {
+	if got := progressTurn(snap.Progress); got != 42 {
 		t.Fatalf("mid-run snapshot progress = %v (invoked), want 42", snap.Progress)
 	}
 
@@ -1390,7 +1387,7 @@ func TestManagerExposesProgressOnJob(t *testing.T) {
 	if !ok || snap.Status != StatusCompleted {
 		t.Fatalf("completed snapshot = %+v ok=%v", snap, ok)
 	}
-	if got := sentinelProgressValue(snap.Progress); got != 42 {
+	if got := progressTurn(snap.Progress); got != 42 {
 		t.Fatalf("completed snapshot progress = %v (invoked), want 42", snap.Progress)
 	}
 }
@@ -1400,8 +1397,8 @@ func TestManagerExposesProgressOnJob(t *testing.T) {
 // manager stores back onto the job so the final snapshot reflects it.
 func TestManagerJobResultProgressOverridesStartProgress(t *testing.T) {
 	m := NewManager(Options{})
-	startProgress := func() int { return 1 }
-	resultProgress := func() int { return 2 }
+	startProgress := tools.BackgroundProgress(func() tools.BackgroundProgressSnapshot { return tools.BackgroundProgressSnapshot{Turn: 1} })
+	resultProgress := tools.BackgroundProgress(func() tools.BackgroundProgressSnapshot { return tools.BackgroundProgressSnapshot{Turn: 2} })
 	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
 		Kind:     "delegate",
 		Progress: startProgress,
@@ -1416,22 +1413,16 @@ func TestManagerJobResultProgressOverridesStartProgress(t *testing.T) {
 	snap, _ := m.Get(started.ID)
 	// The result closure must override the start closure. Verify by invoking it
 	// rather than comparing function values directly.
-	if got := sentinelProgressValue(snap.Progress); got != 2 {
+	if got := progressTurn(snap.Progress); got != 2 {
 		t.Fatalf("final snapshot progress = %v (invoked), want 2", snap.Progress)
 	}
 }
 
-// sentinelProgressValue type-asserts an opaque progress `any` back to the
-// sentinel func() int used by these tests and invokes it, mirroring how the
-// renderer consumes the production func() agent.DelegateProgressSnapshot. It
-// returns -1 (a value no sentinel produces) when the assertion fails, so a
-// mismatched or nil closure is reported as a wrong value rather than a panic.
-func sentinelProgressValue(progress any) int {
-	fn, ok := progress.(func() int)
-	if !ok || fn == nil {
+func progressTurn(progress tools.BackgroundProgress) int {
+	if progress == nil {
 		return -1
 	}
-	return fn()
+	return progress().Turn
 }
 
 // selectPathWaitTimer lets a test place a timer value specifically in the

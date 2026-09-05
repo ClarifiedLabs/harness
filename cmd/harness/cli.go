@@ -28,6 +28,7 @@ var commandHandlers = map[string]commandHandler{
 	"session.analyze":  runSessionAnalyze,
 	"lsp.serve":        runLSPServe,
 	"lsp.version":      runLSPVersion,
+	"acp.serve":        runACPServe,
 }
 
 func commandCatalog(env environment) cli.Catalog {
@@ -78,6 +79,12 @@ func commandCatalog(env environment) cli.Catalog {
 						valueCLIFlag("before", []string{"before"}, "RFC3339", "include only events at or before this timestamp", ""),
 						valueCLIFlag("format", []string{"format"}, "format", "output format: text or json", "text"),
 					}},
+				},
+			},
+			{
+				ID: "acp", Name: "acp", Summary: "Serve Harness as an ACP agent.",
+				Commands: []cli.Command{
+					{ID: "acp.serve", Name: "serve", Summary: "Serve Harness root sessions over ACP v1 on stdin/stdout.", Runnable: true, Args: exactArgs(0, ""), Flags: acpServeCLIFlags()},
 				},
 			},
 			{
@@ -156,6 +163,11 @@ func mustConfigCLIFlag(id string) cli.Flag {
 		panic("missing config CLI flag " + id)
 	}
 	return flag
+}
+
+func acpServeCLIFlags() []cli.Flag {
+	flags := []cli.Flag{mustConfigCLIFlag("config")}
+	return append(flags, config.SettingCLIFlags()...)
 }
 
 func sessionResumeCLIFlags() []cli.Flag {

@@ -1509,6 +1509,52 @@ func TestREPLClearResetsAndRotates(t *testing.T) {
 	}
 }
 
+func TestREPLClearResetsAgentSessionsBeforeBackgroundJobs(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	manager := background.NewManager(background.Options{})
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	_, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "agent",
+		Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			return tools.BackgroundJobResult{}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-started
+	reset := false
+	app.AgentSessions = &testAgentSessionLifecycle{reset: func(ctx context.Context) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("agent-session reset context is unbounded")
+		}
+		select {
+		case <-canceled:
+			t.Fatal("background manager reset before agent sessions")
+		default:
+		}
+		reset = true
+		return nil
+	}}
+	app.Background = manager
+
+	app.clear()
+
+	if !reset {
+		t.Fatal("clear did not reset agent sessions")
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("clear did not reset background jobs after agent sessions")
+	}
+}
+
 func TestREPLClearRecordsCompletedBackgroundDiagnosticsInOldSession(t *testing.T) {
 	var out, errw bytes.Buffer
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))

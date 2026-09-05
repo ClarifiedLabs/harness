@@ -52,11 +52,19 @@ type Writer interface {
 type PeerOptions struct {
 	Handlers      map[string]Handler
 	Notifications map[string]NotificationHandler
+	// InlineNotifications are small control callbacks that must not be dropped
+	// when ordinary handler slots are saturated (for example cancellation). They
+	// run in decode order and therefore must never block.
+	InlineNotifications map[string]NotificationHandler
 	// HandlersWithID routes inbound requests whose handler needs the request id
 	// (for in-flight cancellation tracking). A method present here takes
 	// precedence over the same method in Handlers.
 	HandlersWithID map[string]HandlerID
 	Logger         *slog.Logger
+	// MaxConcurrentHandlers bounds inbound request and notification callbacks.
+	// Once all slots are occupied, requests receive an internal error when the
+	// output queue is available; a blocked output closes the peer instead.
+	MaxConcurrentHandlers int
 }
 
 // CallOpts customizes a single Call. OnCancel, if set, is invoked exactly once
@@ -68,7 +76,11 @@ type CallOpts struct {
 
 // outBufferSize bounds the writer's queue. A full channel applies backpressure
 // to callers, which is acceptable flow control.
-const outBufferSize = 64
+const (
+	outBufferSize                = 64
+	defaultMaxConcurrentHandlers = 64
+	maximumConcurrentHandlers    = 1024
+)
 
 type pending struct {
 	result json.RawMessage
@@ -87,7 +99,8 @@ type Peer struct {
 	idCounter atomic.Int64
 	closed    atomic.Bool
 
-	out chan Message // sole path to the Encoder; drained by one writer goroutine
+	out          chan Message // sole path to the Encoder; drained by one writer goroutine
+	handlerSlots chan struct{}
 
 	mu      sync.Mutex
 	waiters map[ID]chan pending
@@ -119,17 +132,25 @@ func NewPeerWithCodec(closer io.Closer, dec Reader, enc Writer, opts PeerOptions
 		logger = slog.New(slog.DiscardHandler)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	maxHandlers := opts.MaxConcurrentHandlers
+	if maxHandlers <= 0 {
+		maxHandlers = defaultMaxConcurrentHandlers
+	}
+	if maxHandlers > maximumConcurrentHandlers {
+		maxHandlers = maximumConcurrentHandlers
+	}
 	p := &Peer{
-		closer:  closer,
-		dec:     dec,
-		enc:     enc,
-		opts:    opts,
-		logger:  logger,
-		out:     make(chan Message, outBufferSize),
-		waiters: make(map[ID]chan pending),
-		ctx:     ctx,
-		cancel:  cancel,
-		done:    make(chan struct{}),
+		closer:       closer,
+		dec:          dec,
+		enc:          enc,
+		opts:         opts,
+		logger:       logger,
+		out:          make(chan Message, outBufferSize),
+		handlerSlots: make(chan struct{}, maxHandlers),
+		waiters:      make(map[ID]chan pending),
+		ctx:          ctx,
+		cancel:       cancel,
+		done:         make(chan struct{}),
 	}
 	go p.writeLoop()
 	go p.readLoop()
@@ -153,7 +174,7 @@ func (p *Peer) CallWith(ctx context.Context, method string, params json.RawMessa
 	p.waiters[key] = ch
 	p.mu.Unlock()
 
-	if err := p.send(NewRequest(id, method, params)); err != nil {
+	if err := p.sendContext(ctx, NewRequest(id, method, params)); err != nil {
 		p.removeWaiter(key)
 		return nil, err
 	}
@@ -200,6 +221,13 @@ func (p *Peer) Notify(method string, params json.RawMessage) error {
 	return p.send(NewNotification(method, params))
 }
 
+// NotifyContext sends a notification but abandons a blocked enqueue when ctx is
+// cancelled. Control paths should use this form so a stuck peer cannot delay
+// cancellation or process teardown indefinitely.
+func (p *Peer) NotifyContext(ctx context.Context, method string, params json.RawMessage) error {
+	return p.sendContext(ctx, NewNotification(method, params))
+}
+
 // TryNotify sends a notification without blocking on a full outbound queue.
 // It is intended for best-effort fan-out paths; ordinary request/response flow
 // should keep using the blocking send for backpressure.
@@ -242,6 +270,20 @@ func (p *Peer) send(m Message) error {
 		return nil
 	case <-p.done:
 		return ErrPeerClosed
+	}
+}
+
+func (p *Peer) sendContext(ctx context.Context, m Message) error {
+	if p.closed.Load() {
+		return ErrPeerClosed
+	}
+	select {
+	case p.out <- m:
+		return nil
+	case <-p.done:
+		return ErrPeerClosed
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -331,7 +373,11 @@ func (p *Peer) dispatchRequest(m Message) {
 	// A HandlerID (id-aware) handler takes precedence over a plain Handler for
 	// the same method.
 	if handler, ok := p.opts.HandlersWithID[m.Method]; ok {
+		if !p.acquireHandler(id) {
+			return
+		}
 		go func() {
+			defer p.releaseHandler()
 			result, rpcErr := p.callHandlerID(handler, id, m.Params)
 			if rpcErr != nil {
 				p.send(NewErrorResponse(id, rpcErr))
@@ -346,8 +392,12 @@ func (p *Peer) dispatchRequest(m Message) {
 		p.send(NewErrorResponse(id, Errorf(CodeMethodNotFound, "method not found: %s", m.Method)))
 		return
 	}
+	if !p.acquireHandler(id) {
+		return
+	}
 	// Dispatch in a new goroutine so a slow handler never blocks the read loop.
 	go func() {
+		defer p.releaseHandler()
 		result, rpcErr := p.callHandler(handler, m.Params)
 		if rpcErr != nil {
 			p.send(NewErrorResponse(id, rpcErr))
@@ -383,18 +433,63 @@ func (p *Peer) callHandlerID(handler HandlerID, id ID, params json.RawMessage) (
 }
 
 func (p *Peer) dispatchNotification(m Message) {
+	if handler, ok := p.opts.InlineNotifications[m.Method]; ok {
+		p.callNotificationHandler(handler, m.Params)
+		return
+	}
 	handler, ok := p.opts.Notifications[m.Method]
 	if !ok {
 		return // tolerate unknown notifications
 	}
+	if !p.acquireNotification() {
+		p.logger.Debug("jsonrpc: dropping notification at handler limit", "method", m.Method)
+		return
+	}
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				p.logger.Debug("jsonrpc: notification handler panic", "recover", r)
-			}
-		}()
-		handler(p.ctx, m.Params)
+		defer p.releaseHandler()
+		p.callNotificationHandler(handler, m.Params)
 	}()
+}
+
+func (p *Peer) callNotificationHandler(handler NotificationHandler, params json.RawMessage) {
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Debug("jsonrpc: notification handler panic", "recover", r)
+		}
+	}()
+	handler(p.ctx, params)
+}
+
+func (p *Peer) acquireHandler(id ID) bool {
+	if p.closed.Load() {
+		return false
+	}
+	select {
+	case p.handlerSlots <- struct{}{}:
+		return true
+	default:
+		rpcErr := Errorf(CodeInternal, "too many concurrent requests")
+		if err := p.trySend(NewErrorResponse(id, rpcErr)); err != nil {
+			p.shutdown(err)
+		}
+		return false
+	}
+}
+
+func (p *Peer) acquireNotification() bool {
+	if p.closed.Load() {
+		return false
+	}
+	select {
+	case p.handlerSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Peer) releaseHandler() {
+	<-p.handlerSlots
 }
 
 // shutdown records the terminal error once, cancels in-flight handlers, closes

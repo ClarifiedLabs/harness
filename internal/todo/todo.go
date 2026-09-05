@@ -123,9 +123,18 @@ func (s *Store) ensureStaleReminderInterval() {
 	}
 }
 
-type Tool struct{ store *Store }
+type Tool struct {
+	store        *Store
+	sanitizeText func(string) string
+}
 
-func NewTool(store *Store) *Tool { return &Tool{store: store} }
+func NewTool(store *Store) *Tool { return NewToolWithTextSanitizer(store, nil) }
+
+// NewToolWithTextSanitizer applies an optional host-boundary sanitizer before
+// validating and storing steps. Nil preserves ordinary tool behavior.
+func NewToolWithTextSanitizer(store *Store, sanitize func(string) string) *Tool {
+	return &Tool{store: store, sanitizeText: sanitize}
+}
 
 func (*Tool) Name() string { return "update_todos" }
 
@@ -170,6 +179,9 @@ func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 	}
 	active := 0
 	for i := range args.Todos {
+		if t.sanitizeText != nil {
+			args.Todos[i].Step = t.sanitizeText(args.Todos[i].Step)
+		}
 		args.Todos[i].Step = strings.TrimSpace(args.Todos[i].Step)
 		if args.Todos[i].Step == "" {
 			return "", fmt.Errorf("todos[%d]: step is required", i)

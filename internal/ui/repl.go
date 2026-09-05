@@ -138,6 +138,14 @@ type LSPSelection struct {
 	Status LSPStatus
 }
 
+// AgentSessionLifecycle is the protocol-neutral process lifetime owned alongside
+// background jobs. Implementations stop new admissions before closing or
+// resetting their reusable runtimes.
+type AgentSessionLifecycle interface {
+	CloseAll(context.Context) error
+	Reset(context.Context) error
+}
+
 // App bundles the dependencies the REPL and one-shot driver need. main builds it
 // from the resolved config, provider factory, tool registry, and renderer
 // (design §10). The agent owns the running transcript; App tracks the cumulative
@@ -168,6 +176,7 @@ type App struct {
 	Hooks                 *hooks.Runner
 	HookContext           []string
 	Background            *background.Manager
+	AgentSessions         AgentSessionLifecycle
 
 	AvailableModels        []string
 	SwitchModel            func(model string, reasoning llm.ReasoningConfig) (ModelSelection, error)
@@ -4133,8 +4142,9 @@ func (app *App) clear() {
 	}
 	app.clearAPIContinuation()
 	app.RecordOTelSession()
+	app.resetAgentSessions()
 	if app.Background != nil {
-		app.stopBackgroundJobs()
+		app.stopBackgroundJobsOnly()
 		app.saveOrWarn(app.SessionPath)
 		app.Background.Clear()
 	}
@@ -5100,9 +5110,39 @@ func (app *App) planPromptStatusPrintedBeforeUsageForPrompt(prompt int) bool {
 	return app.planPromptStatusBeforeUsage && app.planPromptStatusBeforeUsagePrompt == prompt
 }
 
-const backgroundShutdownWait = time.Second
+const (
+	agentSessionShutdownWait = 5 * time.Second
+	backgroundShutdownWait   = time.Second
+)
+
+func (app *App) closeAgentSessions() {
+	if app.AgentSessions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agentSessionShutdownWait)
+	defer cancel()
+	if err := app.AgentSessions.CloseAll(ctx); err != nil {
+		fmt.Fprintf(app.Errw, "[agent sessions: close failed: %v]\n", err)
+	}
+}
+
+func (app *App) resetAgentSessions() {
+	if app.AgentSessions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), agentSessionShutdownWait)
+	defer cancel()
+	if err := app.AgentSessions.Reset(ctx); err != nil {
+		fmt.Fprintf(app.Errw, "[agent sessions: reset failed: %v]\n", err)
+	}
+}
 
 func (app *App) stopBackgroundJobs() {
+	app.closeAgentSessions()
+	app.stopBackgroundJobsOnly()
+}
+
+func (app *App) stopBackgroundJobsOnly() {
 	if app.Background == nil {
 		return
 	}
@@ -5712,8 +5752,8 @@ func (app *App) RecordOTelSession() {
 		agentName := job.Agent
 		usage := job.Result.Usage
 		turns, compactions := 0, 0
-		if progress, ok := job.Progress.(func() agent.DelegateProgressSnapshot); ok {
-			turns = progress().Turn
+		if job.Progress != nil {
+			turns = job.Progress().Turn
 		}
 		if job.Result.TranscriptPath != "" {
 			if raw, err := os.ReadFile(filepath.Join(job.Result.TranscriptPath, "meta.json")); err == nil {
@@ -6381,7 +6421,7 @@ func (s *accumulatingSink) PromptWorkWaitStart() {
 	s.r.PromptWorkWaitStart()
 	// Surface the outstanding background delegate jobs' live progress so the
 	// wait ticker can summarize their activity while the parent joins them.
-	var progress []any
+	var progress []tools.BackgroundProgress
 	if s.app.Background != nil {
 		for _, snap := range s.app.Background.List() {
 			if snap.Status != background.StatusRunning {
@@ -6403,7 +6443,7 @@ func (s *accumulatingSink) PromptWorkWaitComplete() {
 // ToolProgress forwards a foreground tool call's live-progress closure to the
 // renderer's wait ticker so child-run activity is visible while the (blocking)
 // call runs. A nil progress clears it.
-func (s *accumulatingSink) ToolProgress(call llm.ToolCall, progress any) {
+func (s *accumulatingSink) ToolProgress(call llm.ToolCall, progress tools.BackgroundProgress) {
 	s.r.SetToolProgress(call.Name, progress)
 }
 

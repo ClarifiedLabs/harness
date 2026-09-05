@@ -559,6 +559,17 @@ func TestConfigPathResolution(t *testing.T) {
 	if result.ConfigPath != envPath {
 		t.Fatalf("path=%q", result.ConfigPath)
 	}
+	base := t.TempDir()
+	if err := os.WriteFile(filepath.Join(base, "relative.json"), []byte(`{"max_turns":4}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	result, err = Load(LoadOptions{Args: []string{"--config", "relative.json"}, LookupEnv: lookup(nil), ConfigBaseDir: base})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConfigPath != filepath.Join(base, "relative.json") || result.Config.MaxTurns != 4 {
+		t.Fatalf("base-relative config: path=%q max=%d", result.ConfigPath, result.Config.MaxTurns)
+	}
 	missing := filepath.Join(t.TempDir(), "missing.json")
 	result, err = Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: missing})
 	if err != nil || result.ConfigPath != "" {

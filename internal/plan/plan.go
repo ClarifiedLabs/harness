@@ -48,12 +48,19 @@ func (s *Store) Replace(p *Plan) {
 }
 
 type Tool struct {
-	store      *Store
-	sessionDir func() string
+	store        *Store
+	sessionDir   func() string
+	sanitizeText func(string) string
 }
 
 func NewTool(store *Store, sessionDir func() string) *Tool {
-	return &Tool{store: store, sessionDir: sessionDir}
+	return NewToolWithTextSanitizer(store, sessionDir, nil)
+}
+
+// NewToolWithTextSanitizer applies an optional host-boundary sanitizer before
+// validating, storing, or writing plan text. Nil preserves ordinary tool behavior.
+func NewToolWithTextSanitizer(store *Store, sessionDir func() string, sanitize func(string) string) *Tool {
+	return &Tool{store: store, sessionDir: sessionDir, sanitizeText: sanitize}
 }
 
 func (*Tool) Name() string { return "record_plan" }
@@ -87,6 +94,10 @@ func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
+	}
+	if t.sanitizeText != nil {
+		args.Title = t.sanitizeText(args.Title)
+		args.Plan = t.sanitizeText(args.Plan)
 	}
 	title, body := strings.TrimSpace(args.Title), strings.TrimSpace(args.Plan)
 	if title == "" || body == "" {

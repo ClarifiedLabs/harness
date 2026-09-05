@@ -113,7 +113,7 @@ func LoadParsed(options LoadOptions, values cli.Values) (Result, error) {
 	if meta.Help || meta.Version {
 		return Result{Run: meta}, nil
 	}
-	path, err := resolveConfigPath(flags, lookup, options.DefaultConfigPath)
+	path, err := resolveConfigPath(flags, lookup, options.DefaultConfigPath, options.ConfigBaseDir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -176,17 +176,17 @@ func ResolveConfigPath(options LoadOptions) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return resolveConfigPath(newParsedFlagState(invocation.Flags), lookup, options.DefaultConfigPath)
+	return resolveConfigPath(newParsedFlagState(invocation.Flags), lookup, options.DefaultConfigPath, options.ConfigBaseDir)
 }
 
-func resolveConfigPath(flags *flagState, lookup func(string) (string, bool), conventional string) (string, error) {
+func resolveConfigPath(flags *flagState, lookup func(string) (string, bool), conventional, baseDir string) (string, error) {
 	if values := flags.invocation["config"]; len(values) > 0 {
 		for _, value := range values {
 			if strings.TrimSpace(value.value) == "" {
 				return "", fmt.Errorf("flag --%s requires a non-empty path", value.name)
 			}
 		}
-		path := values[len(values)-1].value
+		path := configPathFromBase(values[len(values)-1].value, baseDir)
 		if err := requireConfigFile(path, "flag --config"); err != nil {
 			return "", err
 		}
@@ -196,6 +196,7 @@ func resolveConfigPath(flags *flagState, lookup func(string) (string, bool), con
 		if strings.TrimSpace(path) == "" {
 			return "", fmt.Errorf("environment HARNESS_CONFIG requires a non-empty path")
 		}
+		path = configPathFromBase(path, baseDir)
 		if err := requireConfigFile(path, "environment HARNESS_CONFIG"); err != nil {
 			return "", err
 		}
@@ -204,6 +205,7 @@ func resolveConfigPath(flags *flagState, lookup func(string) (string, bool), con
 	if conventional == "" {
 		return "", nil
 	}
+	conventional = configPathFromBase(conventional, baseDir)
 	_, err := os.Stat(conventional)
 	if err == nil {
 		return conventional, nil
@@ -213,6 +215,14 @@ func resolveConfigPath(flags *flagState, lookup func(string) (string, bool), con
 	}
 	return "", fmt.Errorf("inspect default config %q: %w", conventional, err)
 }
+
+func configPathFromBase(path, baseDir string) string {
+	if path == "" || baseDir == "" || filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(baseDir, path)
+}
+
 func requireConfigFile(path, source string) error {
 	info, err := os.Stat(path)
 	if err != nil {
@@ -303,6 +313,27 @@ func resolveMCPLocalEnv(context *resolveContext) error {
 	}
 	return nil
 }
+func resolveACPTargets(context *resolveContext) error {
+	if context.file.ACP.Set && context.file.ACP.Value.Targets.Set {
+		targets := cloneACPTargets(context.file.ACP.Value.Targets.Value)
+		for name, target := range targets {
+			target.Command = strings.TrimSpace(target.Command)
+			target.WorkspaceAccess = strings.TrimSpace(target.WorkspaceAccess)
+			values, err := expandStringMap(target.Env, context.lookup, fmt.Sprintf("acp.targets.%s.env", name))
+			if err != nil {
+				return context.fileError("acp.targets", err)
+			}
+			target.Env = values
+			targets[name] = target
+		}
+		context.result.Config.ACP.Targets = targets
+		context.fileSource("acp.targets")
+	} else {
+		context.defaultSource("acp.targets")
+	}
+	return nil
+}
+
 func resolveLSPTools(context *resolveContext) error {
 	if context.file.LSP.Set && context.file.LSP.Value.Tools.Set {
 		context.result.Config.LSP.Tools = append([]string(nil), context.file.LSP.Value.Tools.Value...)

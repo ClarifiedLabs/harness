@@ -172,6 +172,7 @@ func mergeFileConfig(global, project fileConfig, globalPath, projectPath string)
 	out.HistSize = mergeOpt(global.HistSize, project.HistSize, globalPath, projectPath, "histsize", sourceMap)
 	out.MCP = mergeMCPOpt(global.MCP, project.MCP, globalPath, projectPath, sourceMap)
 	out.LSP = mergeLSPOpt(global.LSP, project.LSP, globalPath, projectPath, sourceMap)
+	out.ACP = mergeACPOpt(global.ACP, project.ACP, globalPath, projectPath, sourceMap)
 	out.OTel = mergeOTelOpt(global.OTel, project.OTel, globalPath, projectPath, sourceMap)
 	return out, sourceMap
 }
@@ -249,6 +250,26 @@ func mergeLSPOpt(global, project optional[fileLSPConfig], globalPath, projectPat
 		return optional[fileLSPConfig]{Set: true, Value: merged}
 	}
 	return optional[fileLSPConfig]{}
+}
+
+func mergeACPOpt(global, project optional[fileACPConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileACPConfig] {
+	if !global.Set && !project.Set {
+		return optional[fileACPConfig]{}
+	}
+	var gVal, pVal fileACPConfig
+	if global.Set {
+		gVal = global.Value
+	}
+	if project.Set {
+		pVal = project.Value
+	}
+	merged := fileACPConfig{
+		Targets: mergeOpt(gVal.Targets, pVal.Targets, globalPath, projectPath, "acp.targets", sourceMap),
+	}
+	if merged.Targets.Set || global.Set || project.Set {
+		return optional[fileACPConfig]{Set: true, Value: merged}
+	}
+	return optional[fileACPConfig]{}
 }
 
 func mergeOTelOpt(global, project optional[fileOTelConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileOTelConfig] {

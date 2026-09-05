@@ -4068,6 +4068,38 @@ func TestRunDefaultAgentTools(t *testing.T) {
 	}
 }
 
+func TestRunCustomAgentResolvesAgentSessionTools(t *testing.T) {
+	configPath := writeMainConfig(t, `{
+		"agents": {
+			"custom": {
+				"description": "Custom outbound agent work.",
+				"allowed_tools": ["acp", "agent_sessions"]
+			}
+		}
+	}`)
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-config", configPath, "-model", "claude-opus-4-8", "-agent", "custom", "-p", "hi"}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if got, want := toolNames(fp.Requests[0]), []string{"acp", "agent_sessions"}; !slices.Equal(got, want) {
+		t.Fatalf("custom agent tools = %v, want %v", got, want)
+	}
+}
+
+func TestACPTargetEnvironmentOverridesAndDeduplicates(t *testing.T) {
+	inherited := []string{"B=old", "A=keep", "B=new", "EMPTY=", "WITH_EQUALS=one=two"}
+	got := acpTargetEnvironment(inherited, map[string]string{"B": "configured", "C": "added"})
+	want := []string{"A=keep", "B=configured", "C=added", "EMPTY=", "WITH_EQUALS=one=two"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ACP target environment = %q, want %q", got, want)
+	}
+	if got := acpTargetEnvironment(inherited, nil); got != nil {
+		t.Fatalf("ACP target environment without overrides = %q, want inherited nil", got)
+	}
+}
+
 func TestRunInteractiveDefaultExposesTodosAndPlan(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "hi\n/exit\n")
@@ -5488,7 +5520,7 @@ func expectedPlanToolNames() []string {
 
 func expectedDefaultToolNames() []string {
 	names := tools.DefaultNames()
-	return append(names, "delegate", "background_jobs", "update_todos", "record_plan")
+	return append(names, "delegate", "background_jobs", "update_todos", "record_plan", "acp", "agent_sessions")
 }
 
 func TestAgentSummariesIncludeNonInteractiveAgentsWithoutAffectingDelegation(t *testing.T) {

@@ -107,6 +107,7 @@ type fileConfig struct {
 	HistSize                      optional[int]                        `json:"histsize"`
 	MCP                           optional[fileMCPConfig]              `json:"mcp"`
 	LSP                           optional[fileLSPConfig]              `json:"lsp"`
+	ACP                           optional[fileACPConfig]              `json:"acp"`
 	OTel                          optional[fileOTelConfig]             `json:"otel"`
 }
 
@@ -125,6 +126,10 @@ type fileLocalMCPConfig struct {
 	Command optional[string]            `json:"command"`
 	Args    optional[[]string]          `json:"args"`
 	Env     optional[map[string]string] `json:"env"`
+}
+
+type fileACPConfig struct {
+	Targets optional[map[string]ACPTargetConfig] `json:"targets"`
 }
 
 type fileLSPConfig struct {
@@ -289,6 +294,19 @@ func validEnvName(name string) bool {
 		return false
 	}
 	return true
+}
+
+func cloneACPTargets(in map[string]ACPTargetConfig) map[string]ACPTargetConfig {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]ACPTargetConfig, len(in))
+	for name, target := range in {
+		target.Args = append([]string(nil), target.Args...)
+		target.Env = maps.Clone(target.Env)
+		out[name] = target
+	}
+	return out
 }
 
 func cloneLSPServers(in map[string]LSPServerConfig) map[string]LSPServerConfig {

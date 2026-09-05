@@ -184,8 +184,9 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 			return false
 		}
 	}
+	app.resetAgentSessions()
 	if app.Background != nil {
-		app.stopBackgroundJobs()
+		app.stopBackgroundJobsOnly()
 		app.saveOrWarn(app.SessionPath)
 		app.Background.Clear()
 	}

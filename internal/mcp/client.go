@@ -8,13 +8,19 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"time"
 
 	"harness/internal/mcp/jsonrpc"
 )
 
-// maxListToolsPages caps tools/list pagination so a buggy server returning a
-// never-advancing cursor cannot loop forever.
-const maxListToolsPages = 1000
+// Discovery limits keep a buggy or hostile server from accumulating an
+// unbounded paginated tool catalog in memory.
+const (
+	maxListToolsPages = 1000
+	maxListToolsCount = 10_000
+	maxListToolsBytes = 16 << 20
+	cancelNotifyGrace = 100 * time.Millisecond
+)
 
 // Client is an MCP client over a single transport. It performs the initialize
 // handshake, lists tools (paging internally), and calls tools. It auto-replies
@@ -226,6 +232,7 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 
 	var all []Tool
 	cursor := ""
+	cumulativeBytes := 0
 	for page := 0; ; page++ {
 		if page >= maxListToolsPages {
 			return nil, fmt.Errorf("mcp: tools/list exceeded %d pages (non-advancing cursor?)", maxListToolsPages)
@@ -239,9 +246,16 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 		if err != nil {
 			return nil, fmt.Errorf("mcp: tools/list: %w", err)
 		}
+		cumulativeBytes += len(resRaw)
+		if cumulativeBytes > maxListToolsBytes {
+			return nil, fmt.Errorf("mcp: tools/list exceeded %d cumulative response bytes", maxListToolsBytes)
+		}
 		var result ListToolsResult
 		if err := json.Unmarshal(resRaw, &result); err != nil {
 			return nil, fmt.Errorf("mcp: decode tools/list result: %w", err)
+		}
+		if len(result.Tools) > maxListToolsCount-len(all) {
+			return nil, fmt.Errorf("mcp: tools/list exceeded %d tools", maxListToolsCount)
 		}
 		all = append(all, result.Tools...)
 		if result.NextCursor == "" {
@@ -290,8 +304,11 @@ func (c *Client) call(ctx context.Context, method string, params json.RawMessage
 			return
 		}
 		// Best-effort: the context that cancelled the call is done, so use a
-		// fresh background context to deliver the notification.
-		_ = c.transport.Notify(context.Background(), NotifCancelled, body)
+		// short fresh deadline. A peer with a blocked writer must not delay the
+		// caller or subprocess teardown indefinitely.
+		notifyCtx, cancel := context.WithTimeout(context.Background(), cancelNotifyGrace)
+		defer cancel()
+		_ = c.transport.Notify(notifyCtx, NotifCancelled, body)
 	})
 }
 

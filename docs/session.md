@@ -204,6 +204,57 @@ are process-local display events only: they are not appended to either parent
 or child persistence. Child `raw.ndjson` retains the complete replay content
 and remains the full-fidelity source for `session replay --follow`.
 
+## Reusable and provider ACP sessions
+
+Reusable `agent_sessions` state is process-local. An outbound configured ACP
+session keeps one subprocess, JSON-RPC peer, and opaque remote ACP `sessionId`
+behind its logical `as_…` ID. Neither that runtime nor its remote conversation is
+serialized into the parent `state.json`; idle sessions therefore cannot be
+recovered after `/clear`, shutdown, crash, or resume. Each finite prompt is a
+separate immutable `bg_…` background job. Its progress snapshots and ACP
+`session/update` frames are transient; only ordinary parent tool records,
+explicit `background_jobs` results, and automatic exactly-once completion
+context follow the parent recording rules. Idle runtimes hold no background
+lease, while every new operation reacquires its configured cwd/access lease.
+
+Reusable interactive delegates split the process-local control plane from the
+durable child data plane. The `as_…` wrapper and its current-tail pointer are
+not persisted, but every `bg_…` operation is also a fresh child ID with its own
+`children/<bg-id>/state.json`, `raw.ndjson`, `meta.json`, tree, compactions, and
+artifacts. The first child may continue an explicit compatible source; each
+follow-up then creates a new child whose `continued_from` names the prior
+validated terminal child. It never appends to or overwrites that source. Only a
+child that passes the usual continuation-source validation advances the live
+tail, and the fixed launch runtime/fingerprint remains in force across parent
+agent/model changes. Consequently the lineage remains for forensic inspection
+and manual `continue_child_id` use after the logical session disappears, but the
+`as_…` handle itself cannot be resumed.
+
+The inbound provider mode, `harness acp serve`, is different: every
+`session/new` constructs a canonical **root** Harness session directory and
+holds its normal session lock. Client prompts append to one provider-backed root
+conversation, preserving `ProxySessionID`, `CacheAffinityID`, validated response
+continuation state, TODOs, latest plan, usage, and `UsageByModel`. The ACP sink
+uses `internal/sessionrec`, the same canonical raw recorder as terminal roots and
+delegate children, so user, assistant, tool, attempt, checkpoint, usage, notice,
+and model-request events follow the established `raw.ndjson` shapes rather than
+a parallel ACP log format. ACP wire updates are a sanitized live projection of
+those events, not the durable source.
+
+Before provider requests and tool dispatch, the normal active-turn and
+closed-turn checkpoint paths atomically capture recoverable state. At prompt end
+the root flushes `raw.ndjson`, repairs/sanitizes the transcript and resets any
+continuation fingerprint invalidated by sanitization, then performs the normal
+consolidated save. Validated image payloads are preserved byte-for-byte during
+text sanitization. ACP TODO steps and plan titles/bodies are sanitized before
+they enter live state or immutable plan artifacts, including delegate child
+state; root snapshots also sanitize detached copies as a persistence safeguard.
+`session/close` or connection teardown closes reusable child sessions/background
+work and performs a final consolidated save. If explicit root teardown times
+out, the connection retains its closing session and rejects successor roots. These paths
+retain the repository-wide rule that canonical session/state writes use a temp
+file plus rename and tree appends are synced before `state.json` replacement.
+
 ## Analysis and inspection commands
 
 - `harness session analyze [--since D|--all] [--before RFC3339] [--format

@@ -57,8 +57,11 @@ type LoadOptions struct {
 	Args              []string
 	LookupEnv         func(string) (string, bool)
 	DefaultConfigPath string
-	Defaults          RuntimeDefaults
-	WorkingDir        string // optional override for project-config discovery (tests); empty uses os.Getwd
+	// ConfigBaseDir resolves relative --config and HARNESS_CONFIG paths without
+	// mutating process-wide cwd. Empty preserves ordinary os.Getwd semantics.
+	ConfigBaseDir string
+	Defaults      RuntimeDefaults
+	WorkingDir    string // optional override for project-config discovery (tests); empty uses os.Getwd
 }
 
 // Result separates persistent/source-resolved settings from invocation-only
@@ -167,6 +170,7 @@ type Config struct {
 	HookConfigs []string     `json:"hook_configs,omitempty"`
 	MCP         MCPConfig    `json:"mcp"`
 	LSP         LSPConfig    `json:"lsp"`
+	ACP         ACPConfig    `json:"acp"`
 	OTel        OTelConfig   `json:"otel"`
 }
 
@@ -205,6 +209,18 @@ type LocalMCPConfig struct {
 	Command   string            `json:"command"`
 	Args      []string          `json:"args,omitempty"`
 	Env       map[string]string `json:"env,omitempty"`
+}
+
+type ACPConfig struct {
+	Targets map[string]ACPTargetConfig `json:"targets,omitempty"`
+}
+
+type ACPTargetConfig struct {
+	Command         string            `json:"command"`
+	Args            []string          `json:"args,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	Description     string            `json:"description,omitempty"`
+	WorkspaceAccess string            `json:"workspace_access"`
 }
 
 type LSPConfig struct {

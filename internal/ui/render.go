@@ -18,6 +18,7 @@ import (
 	"harness/internal/markdown"
 	"harness/internal/sessionrec"
 	"harness/internal/term/highlight"
+	"harness/internal/tools"
 )
 
 // ANSI styling is emitted only when RenderOptions.Color is set. Rendering stays
@@ -152,16 +153,16 @@ type Renderer struct {
 	liveStatus            bool
 	delegateActivity      *delegate.ActivityRegistry
 	disableDelegateStatus bool
-	statusActive          bool                  // in a wait; the ticker should keep the line painted
-	statusDrawn           bool                  // a status line is currently on the terminal
-	statusLabel           string                // e.g. "turn: 3" or "tool: shell argv=[\"rg\",\"x\"]"
-	statusStart           time.Time             // when the current wait began
-	statusCtx             agent.ContextEstimate // context usage to append for model waits (r27)
-	statusProgress        any                   // foreground delegate live-progress closure, or nil
-	statusBgProgress      []any                 // background delegate progress closures while joining
-	statusModel           string                // proxy correlation/retry/cancellation state
-	statusInput           string                // during-prompt typed buffer shown after "> "
-	statusInputCursor     int                   // rune index of the edit cursor within statusInput
+	statusActive          bool                       // in a wait; the ticker should keep the line painted
+	statusDrawn           bool                       // a status line is currently on the terminal
+	statusLabel           string                     // e.g. "turn: 3" or "tool: shell argv=[\"rg\",\"x\"]"
+	statusStart           time.Time                  // when the current wait began
+	statusCtx             agent.ContextEstimate      // context usage to append for model waits (r27)
+	statusProgress        tools.BackgroundProgress   // foreground live progress, or nil
+	statusBgProgress      []tools.BackgroundProgress // background progress while joining
+	statusModel           string                     // proxy correlation/retry/cancellation state
+	statusInput           string                     // during-prompt typed buffer shown after "> "
+	statusInputCursor     int                        // rune index of the edit cursor within statusInput
 	ticker                *time.Ticker
 	tickerStop            chan struct{}
 	tickerDone            chan struct{}
@@ -451,12 +452,9 @@ func (r *Renderer) PromptWorkWaitStart() {
 	r.beginWait("background: waiting for delegates", agent.ContextEstimate{})
 }
 
-// SetBackgroundProgress attaches the live-progress closures of the outstanding
-// background delegate jobs so the wait ticker can summarize their activity while
-// the parent is blocked joining them. A nil slice clears them. progress entries
-// are opaque func() agent.DelegateProgressSnapshot closures type-asserted at
-// render time; entries that are not the expected closure type are skipped.
-func (r *Renderer) SetBackgroundProgress(progress []any) {
+// SetBackgroundProgress attaches live progress for outstanding background jobs
+// so the wait ticker can summarize activity while the parent joins them.
+func (r *Renderer) SetBackgroundProgress(progress []tools.BackgroundProgress) {
 	if len(progress) == 0 {
 		r.drainActivity()
 	}
@@ -468,11 +466,9 @@ func (r *Renderer) SetBackgroundProgress(progress []any) {
 	r.renderMu.Unlock()
 }
 
-// SetToolProgress attaches (progress != nil) or clears (nil) the live-progress
-// closure for the currently running foreground tool call so its wait ticker can
-// show child-run activity. progress is an opaque func() agent.DelegateProgressSnapshot
-// closure type-asserted at render time.
-func (r *Renderer) SetToolProgress(name string, progress any) {
+// SetToolProgress attaches (progress != nil) or clears (nil) bounded live
+// progress for the currently running foreground tool call.
+func (r *Renderer) SetToolProgress(name string, progress tools.BackgroundProgress) {
 	if progress == nil {
 		r.drainActivity()
 	}
@@ -1689,27 +1685,19 @@ func contextPercent(ctx agent.ContextEstimate) int { return sessionrec.ContextPe
 
 func contextUsed(ctx agent.ContextEstimate) int { return sessionrec.ContextUsed(ctx) }
 
-// delegateProgressSnapshot type-asserts an opaque `any` to the concrete
-// func() agent.DelegateProgressSnapshot closure carried through tools/background
-// (which cannot import agent) and invokes it. ok is false when the value is nil
-// or not the expected closure type, so non-delegate progress is silently skipped.
-func delegateProgressSnapshot(progress any) (agent.DelegateProgressSnapshot, bool) {
+func backgroundProgressSnapshot(progress tools.BackgroundProgress) (tools.BackgroundProgressSnapshot, bool) {
 	if progress == nil {
-		return agent.DelegateProgressSnapshot{}, false
+		return tools.BackgroundProgressSnapshot{}, false
 	}
-	fn, ok := progress.(func() agent.DelegateProgressSnapshot)
-	if !ok || fn == nil {
-		return agent.DelegateProgressSnapshot{}, false
-	}
-	return fn(), true
+	return progress(), true
 }
 
 // writeDelegateProgress appends one foreground delegate child run's live activity
 // to the status line, e.g. "· turn 3 · 2 tools · 4.2k/200k ctx 2% · $0.04". A
 // finished run is shown once (its final snapshot) before the wait clears. Zero
 // state (no turn yet) renders nothing so a just-started run does not flicker.
-func writeDelegateProgress(b *strings.Builder, progress any) {
-	s, ok := delegateProgressSnapshot(progress)
+func writeDelegateProgress(b *strings.Builder, progress tools.BackgroundProgress) {
+	s, ok := backgroundProgressSnapshot(progress)
 	if !ok {
 		return
 	}
@@ -1729,8 +1717,9 @@ func writeDelegateProgress(b *strings.Builder, progress any) {
 			fmt.Fprintf(b, " · %d tools", s.Tools)
 		}
 	}
-	if used := contextUsed(s.Context); s.Context.Window > 0 && used > 0 {
-		fmt.Fprintf(b, " · ctx %d%% %s/%s", contextPercent(s.Context), humanTokens(used), humanTokens(s.Context.Window))
+	if s.ContextWindow > 0 && s.ContextUsed > 0 {
+		percent := min(100, max(0, s.ContextUsed*100/s.ContextWindow))
+		fmt.Fprintf(b, " · ctx %d%% %s/%s", percent, humanTokens(s.ContextUsed), humanTokens(s.ContextWindow))
 	}
 	if s.Usage.CostKnown && s.Usage.CostUSD > 0 {
 		fmt.Fprintf(b, " · $%.3f", s.Usage.CostUSD)
@@ -1741,12 +1730,12 @@ func writeDelegateProgress(b *strings.Builder, progress any) {
 // delegate jobs, e.g. "· 2 jobs: explore turn 5 · plan idle · $0.04". Idle jobs
 // (no turn yet) render "idle"; finished jobs render their final state once.
 // Jobs with no agent name fall back to the job kind.
-func writeBackgroundProgress(b *strings.Builder, progress []any) {
+func writeBackgroundProgress(b *strings.Builder, progress []tools.BackgroundProgress) {
 	var segs []string
 	var totalCost float64
 	costKnown := true
 	for _, p := range progress {
-		s, ok := delegateProgressSnapshot(p)
+		s, ok := backgroundProgressSnapshot(p)
 		if !ok {
 			continue
 		}
@@ -1773,10 +1762,10 @@ func writeBackgroundProgress(b *strings.Builder, progress []any) {
 // backgroundJobSegment renders one job's live state for the background
 // summary. A job with no activity yet is "idle". An agent name prefixes the
 // state when present so concurrent jobs are distinguishable at a glance.
-func backgroundJobSegment(s agent.DelegateProgressSnapshot) string {
+func backgroundJobSegment(s tools.BackgroundProgressSnapshot) string {
 	var b strings.Builder
-	if s.Agent != "" {
-		b.WriteString(s.Agent)
+	if s.Label != "" {
+		b.WriteString(s.Label)
 		b.WriteByte(' ')
 	}
 	if s.Turn == 0 && !s.Finished {

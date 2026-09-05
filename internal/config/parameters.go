@@ -408,10 +408,27 @@ var customDefinitions = []parameterDefinition{
 	custom("lsp.servers", "object", "lsp.servers", true, resolveLSPServers, func(c Config) any { return redactLSPServers(c.LSP.Servers) }),
 	custom("lsp.serena.args", "string[]", "lsp.serena.args", false, resolveSerenaArgs, func(c Config) any { return c.LSP.Serena.Args }),
 	custom("lsp.serena.env", "object", "lsp.serena.env", true, resolveSerenaEnv, func(c Config) any { return redactStringMap(c.LSP.Serena.Env) }),
+	acpTargetsDefinition(),
 	hooksCustomDefinition(),
 	custom("hook_configs", "string[]", "hook_configs", false, func(*resolveContext) error { return nil }, func(c Config) any { return c.HookConfigs }),
 	oTelHeadersDefinition(),
 	custom("otel.resource_attributes", "object", "otel.resource_attributes", false, resolveOTelResourceAttributes, func(c Config) any { return c.OTel.ResourceAttributes }),
+}
+
+func acpTargetsDefinition() customDefinition {
+	definition := custom("acp.targets", "object", "acp.targets", true, resolveACPTargets, func(c Config) any {
+		return redactACPTargets(c.ACP.Targets)
+	})
+	definition.validateFn = func(file fileConfig, path string) error {
+		if !file.ACP.Set || !file.ACP.Value.Targets.Set {
+			return nil
+		}
+		if err := validateACPTargets(file.ACP.Value.Targets.Value); err != nil {
+			return fmt.Errorf("config %q setting acp.targets: %w", path, err)
+		}
+		return nil
+	}
+	return definition
 }
 
 func oTelHeadersDefinition() customDefinition {
@@ -465,6 +482,19 @@ func redactStringMap(values map[string]string) any {
 	}
 	return out
 }
+func redactACPTargets(values map[string]ACPTargetConfig) any {
+	out := cloneACPTargets(values)
+	for name, target := range out {
+		if target.Env != nil {
+			for key := range target.Env {
+				target.Env[key] = redactedValue
+			}
+		}
+		out[name] = target
+	}
+	return out
+}
+
 func redactLSPServers(values map[string]LSPServerConfig) any {
 	out := cloneLSPServers(values)
 	for name, server := range out {

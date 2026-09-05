@@ -15,7 +15,9 @@ This page is the operational overview.
 | `shell` | run a shell command or direct argv program; co-issued calls may run concurrently (best-effort) |
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
 | `update_todos` | replace the current advisory TODO list for multi-step work |
-| `delegate` | run a configured child agent and return its final report |
+| `delegate` | run a configured child agent and return its final report, optionally as a reusable interactive lineage |
+| `acp` | list configured ACP targets or start one as a reusable detached agent session |
+| `agent_sessions` | list or control reusable process-local agent sessions |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `tool_catalog` | conditionally list, describe, and activate optional MCP/LSP tools |
 | `record_plan` | Record a complete implementation plan |
@@ -309,6 +311,76 @@ order. Unsupported paths and unavailable servers remain silent; a diagnostics
 failure is reported as supplemental text and never changes a successful mutation
 into a failed one. Failed mutations do not request diagnostics.
 
+## Reusable Agent Sessions And ACP
+
+ACP targets are an allowlist configured under `acp.targets`; the model cannot
+supply a command. `acp` has `action:"targets"` (the default) and
+`action:"start"`. `targets` takes no other fields and returns sorted target names
+plus optional descriptions. `start` requires `target` and nonblank `prompt`, and
+accepts optional `cwd` (default current directory). Its `target` schema enum is
+the configured name list. The result identifies a reusable `as_…` session and
+its first immutable `bg_…` operation. No targets means listing returns an inert
+`No ACP targets configured.` result and starting fails.
+
+Targets run the configured `command` plus `args` directly as argv, never through
+a shell. Harness inherits its environment, applies the target's resolved `env`
+overrides, sets the selected cwd, and gives the subprocess the same host
+privileges as Harness. This is a trusted-code feature: there is no sandbox,
+permission prompt, path restriction, or enforcement implied by
+`workspace_access`. That field is only a required background scheduling lease
+(`read_only` or `exclusive`). Target-list output and the tool schema do not
+expose command/argv. Config projections redact every configured environment
+value, and the model sees neither environment names/values nor an option to
+override them.
+
+Starts and follow-up prompts are always detached. While one operation runs, ACP
+message output is accumulated as its bounded terminal result; safe thought,
+tool, plan, mode, session-info, and usage updates appear only as bounded
+background progress. Commands, mode, configuration, session-info, and usage
+metadata are validated independently of prompt activity, including during
+session creation and while idle. During an admitted prompt they retain their
+bounded progress/diagnostic projection; otherwise they are validated and ignored.
+Updates are not streamed into the parent transcript. Use the ordinary
+completion delivery, or one `background_jobs` `wait` when a strict dependency
+requires the result; do not poll. Every follow-up creates a new immutable
+`bg_…` job. A reusable session becomes idle after a successful operation but
+retains no lease while idle: its process stays alive, and the next prompt must
+reacquire the same canonical cwd/access lease. Harness admits at most 32 live
+reusable sessions per root manager; close an idle session before starting
+another when that bound is reached. Terminal session records do not consume the
+live-runtime bound, and list/get history retains at most 256 session records.
+
+`agent_sessions` accepts `list` (default), `get`, `prompt`, `steer`, `interrupt`,
+and `close`. Except for `list`, each action takes the logical `session_id`
+(`as_…`); `prompt` and `steer` additionally require `prompt`. `prompt` requires
+an idle session and starts another `bg_…` job. `steer` requires a running,
+steer-capable runtime; configured ACP v1 targets are not steerable. `interrupt`
+cancels the current operation and lets a backend that confirms reuse return to
+idle. `close` permanently retires the logical session, interrupts active work,
+and tears down its subprocess. In contrast, `background_jobs cancel` addresses
+one `bg_…` operation, while `get`/`wait` only observe immutable operation state;
+none of those job operations closes an idle `as_…` runtime.
+
+ACP subprocess sessions, logical IDs, progress, and remote conversation state
+exist only in the current Harness process. `/clear`, normal process shutdown,
+and root-session teardown close them; they cannot be resumed from a Harness
+session directory. The parent records ordinary tool receipts/results and normal
+background completion delivery, not the ACP wire updates or remote transcript.
+
+A reusable **interactive delegate** uses the same `agent_sessions` controls but
+different durable child semantics. Start it with `delegate` plus
+`background:true, interactive:true`; foreground interactive delegates are
+rejected. The receipt returns `session_id: as_…` and `job_id: bg_…`. Each
+operation runs a fresh persisted delegate child whose child ID is that `bg_…`
+job ID and whose `continued_from` points to the prior validated terminal child.
+The fixed runtime selected at launch is retained across parent model switches.
+`agent_sessions steer` delivers live text only to the active child before its
+next model request; it fails while idle or after the child stops accepting
+steers. An initial `continue_child_id` may seed the lineage, but later follow-ups
+continue automatically from the logical session's current tail—pass the `as_…`
+ID to `agent_sessions`, never to `delegate.continue_child_id`. Closing the
+logical session does not delete its durable child directories.
+
 ## Delegation
 
 `delegate` starts a fresh-context child agent using the requested agent
@@ -347,6 +419,8 @@ Set `mode:"implementation"` only for scoped mutating implementation. It adds an
 implementation-mode system block directing the child to make the requested
 changes, verify them, and return an exact handoff with changed paths, checks
 run, and any remaining work. Omit `mode` for exploration and review delegates.
+Set `interactive:true` only together with `background:true` when follow-up prompts
+or live steering are expected; see [Reusable Agent Sessions And ACP](#reusable-agent-sessions-and-acp).
 
 When a child run fails only for transient provider reasons (rate limit,
 overloaded, 5xx, provider-side timeout), the delegate error names those classes

@@ -59,8 +59,8 @@ func (t peerTransport) CallCancelable(ctx context.Context, method string, params
 	return t.peer.CallWith(ctx, method, params, opts)
 }
 
-func (t peerTransport) Notify(_ context.Context, method string, params json.RawMessage) error {
-	return t.peer.Notify(method, params)
+func (t peerTransport) Notify(ctx context.Context, method string, params json.RawMessage) error {
+	return t.peer.NotifyContext(ctx, method, params)
 }
 
 func (t peerTransport) Done() <-chan struct{} {

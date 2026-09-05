@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 
@@ -290,6 +291,28 @@ func TestClientListToolsPagination(t *testing.T) {
 	}
 	if len(tools) != 3 || tools[0].Name != "a" || tools[1].Name != "b" || tools[2].Name != "c" {
 		t.Fatalf("tools = %+v", tools)
+	}
+}
+
+func TestClientListToolsRejectsOversizedCatalog(t *testing.T) {
+	handlers := map[string]jsonrpc.Handler{
+		MethodInitialize: okInitHandler(ProtocolVersion, false),
+		MethodListTools: func(context.Context, json.RawMessage) (json.RawMessage, *jsonrpc.Error) {
+			advertised := make([]Tool, maxListToolsCount+1)
+			for i := range advertised {
+				advertised[i].Name = "tool"
+			}
+			raw, _ := json.Marshal(ListToolsResult{Tools: advertised})
+			return raw, nil
+		},
+	}
+	notifs := map[string]jsonrpc.NotificationHandler{NotifInitialized: func(context.Context, json.RawMessage) {}}
+	client, _ := newClientWithFake(t, ClientOptions{}, handlers, notifs)
+	if _, err := client.Initialize(context.Background()); err != nil {
+		t.Fatalf("initialize: %v", err)
+	}
+	if _, err := client.ListTools(context.Background()); err == nil || !strings.Contains(err.Error(), "exceeded 10000 tools") {
+		t.Fatalf("oversized catalog error = %v", err)
 	}
 }
 

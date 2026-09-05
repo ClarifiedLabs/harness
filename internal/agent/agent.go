@@ -154,33 +154,11 @@ type ToolMutationSink interface {
 	ToolMutation(call llm.ToolCall, paths []string)
 }
 
-// DelegateProgressSnapshot is a best-effort, lock-protected snapshot of one
-// delegate run's live activity, reported by the child sink to the parent
-// renderer's wait ticker. It is diagnostic only: never persisted and never fed
-// to the model. Zero values render as "no stats yet".
-//
-// The live object is a func() DelegateProgressSnapshot closure created in
-// internal/delegate (which imports this package) and carried as an opaque
-// `any` through internal/tools and internal/background so neither of those
-// packages needs to import agent. The renderer type-asserts the `any` back to
-// the concrete closure type to read the snapshot.
-type DelegateProgressSnapshot struct {
-	Turn     int
-	Attempt  int
-	Tools    int    // count of ToolStart calls seen so far
-	Agent    string // child agent name, for the background summary label
-	Context  ContextEstimate
-	Usage    llm.Usage // last TurnAttemptComplete usage
-	Finished bool      // set once the run returns (success or failure)
-}
-
-// ToolProgressSink is optionally implemented by sinks that want live child-run
+// ToolProgressSink is optionally implemented by sinks that want bounded live
 // progress attached to an outstanding tool call's wait ticker. Set is called
-// with a progress closure (opaque `any`) before the call's ToolResult, and
-// cleared with nil after. Tools that do not support live progress are simply
-// skipped.
+// before the call's ToolResult and cleared with nil after.
 type ToolProgressSink interface {
-	ToolProgress(call llm.ToolCall, progress any)
+	ToolProgress(call llm.ToolCall, progress tools.BackgroundProgress)
 }
 
 // RetentionRequestMode describes the request shape before or after a retention
@@ -630,6 +608,8 @@ type Agent struct {
 	deferredToolGroups        []llm.ToolGroup
 	registry                  *llm.Registry
 	transcript                []llm.Message
+	transcriptSanitizer       func([]llm.Message) ([]llm.Message, bool)
+	requestSanitizer          func(llm.Request) llm.Request
 	validatedPrefix           int // count of leading transcript messages already known valid (r62)
 	system                    string
 	model                     string
@@ -920,6 +900,21 @@ func (a *Agent) DrainSteerContent() SteerInput {
 // prompt ends before the agent consumes it. Non-blocking.
 func (a *Agent) DrainSteerContents() []SteerInput {
 	return a.drainSteerInputs()
+}
+
+// SetTranscriptSanitizer installs an optional host-boundary sanitizer. It runs
+// immediately before each provider request, and any rewrite invalidates remote
+// response continuation state. Protocol providers use this to keep transport
+// control sequences out of same-prompt model replay.
+func (a *Agent) SetTranscriptSanitizer(sanitize func([]llm.Message) ([]llm.Message, bool)) {
+	a.transcriptSanitizer = sanitize
+}
+
+// SetRequestSanitizer installs an optional final provider-boundary sanitizer.
+// If it clears an unsafe continuation ID, the agent resets continuation state
+// and rebuilds the request with full transcript context.
+func (a *Agent) SetRequestSanitizer(sanitize func(llm.Request) llm.Request) {
+	a.requestSanitizer = sanitize
 }
 
 // SetTranscript replaces the running transcript (used when resuming a session).
@@ -1418,7 +1413,23 @@ func (c *turnAttemptCoordinator) abandon(res turnResult) {
 }
 
 func (a *Agent) modelRequest(requestContext []string) modelRequest {
-	return a.modelRequestForTranscript(requestContext, a.transcript)
+	if a.transcriptSanitizer != nil {
+		if transcript, changed := a.transcriptSanitizer(a.transcript); changed {
+			a.SetTranscript(transcript)
+		}
+	}
+	request := a.modelRequestForTranscript(requestContext, a.transcript)
+	if a.requestSanitizer == nil {
+		return request
+	}
+	sanitized := a.requestSanitizer(request.request)
+	if request.usedPrevious && request.request.PreviousResponseID != "" && sanitized.PreviousResponseID == "" {
+		a.resetResponseState()
+		request = a.modelRequestForTranscript(requestContext, a.transcript)
+		sanitized = a.requestSanitizer(request.request)
+	}
+	request.request = sanitized
+	return request
 }
 
 func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []llm.Message) modelRequest {

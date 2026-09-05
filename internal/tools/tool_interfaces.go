@@ -34,15 +34,11 @@ type RequiredInputModality interface {
 }
 
 // ProgressStarter is an optional capability for tools whose Run may block for a
-// long time behind a child run (such as delegate) and want to surface live
-// activity to the parent wait ticker. StartProgress returns an opaque closure
-// (func() agent.DelegateProgressSnapshot) the renderer reads while the call is
-// outstanding; it is nil if the tool does not support live progress for this
-// input. The closure is created before the blocking Run, so it can report live
-// state rather than only a final snapshot. Returning `any` keeps this package
-// free of an agent import cycle.
+// long time and want to surface live activity to the parent wait ticker. The
+// source is created before the blocking Run, so it can report live state rather
+// than only a final snapshot.
 type ProgressStarter interface {
-	StartProgress(input json.RawMessage) any
+	StartProgress(input json.RawMessage) BackgroundProgress
 }
 
 // SequentialTool optionally opts specific inputs out of default-parallel
@@ -82,6 +78,13 @@ type InputTrimmer interface {
 // into tools that opt into background execution.
 type BackgroundJobStarter interface {
 	StartBackgroundJob(BackgroundJobRequest) (BackgroundJobInfo, error)
+}
+
+// BackgroundJobCanceler is the narrow cancellation seam used by owners of
+// reusable operations. Implementations must use the same path as the public
+// background_jobs cancel action.
+type BackgroundJobCanceler interface {
+	CancelBackgroundJob(string) bool
 }
 
 // BackgroundJobDiagnosticIdentitySetter is the optional diagnostics capability

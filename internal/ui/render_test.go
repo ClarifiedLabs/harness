@@ -15,6 +15,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/term/highlight"
+	"harness/internal/tools"
 )
 
 func stripRenderTestANSI(s string) string {
@@ -1345,8 +1346,8 @@ func TestLiveDelegateStatusUsesWaitLifecycleAcrossBackgroundJoin(t *testing.T) {
 		DelegateActivity: registry,
 		Width:            func() int { return 80 },
 	})
-	r.SetBackgroundProgress([]any{func() agent.DelegateProgressSnapshot {
-		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 9}
+	r.SetBackgroundProgress([]tools.BackgroundProgress{func() tools.BackgroundProgressSnapshot {
+		return tools.BackgroundProgressSnapshot{Label: "legacy", Turn: 9}
 	}})
 	t.Cleanup(func() {
 		registration.Finish("completed", 0)
@@ -1413,8 +1414,8 @@ func TestLiveDelegateStatusSelectsLatestConcurrentNestedChild(t *testing.T) {
 		DelegateActivity: registry,
 		Width:            func() int { return 120 },
 	})
-	r.SetToolProgress("delegate", func() agent.DelegateProgressSnapshot {
-		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 9}
+	r.SetToolProgress("delegate", func() tools.BackgroundProgressSnapshot {
+		return tools.BackgroundProgressSnapshot{Label: "legacy", Turn: 9}
 	})
 	t.Cleanup(func() {
 		first.Finish("completed", 0)
@@ -1567,8 +1568,8 @@ func TestDelegateStatusOffSuppressesRegistryAndLegacyOnly(t *testing.T) {
 		registration.Finish("completed", 0)
 		r.StopProgress()
 	})
-	r.SetToolProgress("delegate", func() agent.DelegateProgressSnapshot {
-		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 9}
+	r.SetToolProgress("delegate", func() tools.BackgroundProgressSnapshot {
+		return tools.BackgroundProgressSnapshot{Label: "legacy", Turn: 9}
 	})
 	r.StartPromptRun()
 	r.TurnAttemptStart(2, 1, agent.ContextEstimate{})
@@ -1585,8 +1586,8 @@ func TestLiveDelegateStatusRetainsLegacyFallbackWithoutRegistry(t *testing.T) {
 	var out, errw bytes.Buffer
 	r := liveRenderer(&out, &errw, time.Now)
 	defer r.StopProgress()
-	r.SetToolProgress("delegate", func() agent.DelegateProgressSnapshot {
-		return agent.DelegateProgressSnapshot{Agent: "legacy", Turn: 4, Tools: 2}
+	r.SetToolProgress("delegate", func() tools.BackgroundProgressSnapshot {
+		return tools.BackgroundProgressSnapshot{Label: "legacy", Turn: 4, Tools: 2}
 	})
 	r.StartPromptRun()
 	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})

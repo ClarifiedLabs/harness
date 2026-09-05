@@ -98,7 +98,9 @@ func Serve(ctx context.Context, rwc io.ReadWriteCloser, opts ServerOptions) erro
 		},
 		Notifications: map[string]jsonrpc.NotificationHandler{
 			NotifInitialized: s.handleInitializedNotif,
-			NotifCancelled:   s.handleCancelledNotif,
+		},
+		InlineNotifications: map[string]jsonrpc.NotificationHandler{
+			NotifCancelled: s.handleCancelledNotif,
 		},
 		Logger: logger,
 	}

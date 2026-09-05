@@ -1,10 +1,13 @@
 package mcpchild
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,6 +25,10 @@ func TestHelperProcess(t *testing.T) {
 		_, _ = io.Copy(io.Discard, os.Stdin)
 	case "block":
 		select {} // ignores stdin close; must be signalled
+	case "cwd":
+		cwd, _ := os.Getwd()
+		fmt.Fprintln(os.Stdout, cwd)
+		_, _ = io.Copy(io.Discard, os.Stdin)
 	}
 	os.Exit(0)
 }
@@ -52,6 +59,26 @@ func TestChildClosesOnStdinEOF(t *testing.T) {
 	case <-c.Done():
 	case <-time.After(2 * time.Second):
 		t.Fatal("child did not exit after stdin EOF")
+	}
+}
+
+func TestChildUsesSelectedWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	c, err := SpawnInDir(os.Args[0], helperArgs(), helperEnv("cwd"), dir, nil)
+	if err != nil {
+		t.Fatalf("spawn in dir: %v", err)
+	}
+	t.Cleanup(func() { c.Close(context.Background()) })
+	got, err := bufio.NewReader(c.Conn()).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read cwd: %v", err)
+	}
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got = strings.TrimSpace(got); got != want {
+		t.Fatalf("child cwd = %q, want %q", got, want)
 	}
 }
 

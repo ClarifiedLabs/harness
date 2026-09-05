@@ -92,7 +92,7 @@ tool calls dispatch against the local registry:
 ### Package layout
 
 ```
-cmd/harness              config/session/LSP command dispatch, config load, proxy catalog wiring, signals, and REPL-vs-oneshot execution
+cmd/harness              config/session/LSP/ACP command dispatch, config load, proxy catalog wiring, signals, and REPL-vs-oneshot execution
 cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; generated command dispatch plus config inspection
 internal/cli             immutable nested command/flag catalogs, presence-aware parsing, and deterministic scoped help
 internal/modelproxy      proxy protocol, client Provider, server handler
@@ -105,9 +105,14 @@ internal/llm/anthropic   Messages dialect: same responsibilities
 internal/sse             generic SSE frame reader
 internal/retry           backoff + jitter + Retry-After parsing
 internal/agent           turn loop, interrupt state machine, compaction
-internal/tools           Tool interface, registry, dispatch (recover + central truncation), built-in tools; the same registry also hosts the delegate, background-job, MCP (§15), and LSP (§15a) tools
-internal/delegate        configured child-agent tool; starts child agents without an import cycle
+internal/tools           Tool interface, registry, dispatch (recover + central truncation), built-in tools; the same registry also hosts the delegate, background-job, ACP, MCP (§15), and LSP (§15a) tools
+internal/delegate        configured child-agent tool; starts ordinary or reusable interactive child lineages without an import cycle
 internal/background      process-local background job manager + tools
+internal/agentsession    protocol-neutral manager for reusable process-local runtimes and their finite immutable background operations
+internal/acp             stable ACP v1 DTOs, validation, bounds, and model-facing sanitization; no transport or runtime
+internal/acpclient       one stdio ACP subprocess/remote-session adapter implementing agentsession.Runtime
+internal/acpagent        inbound ACP v1 connection lifecycle and update translation over the shared JSON-RPC peer
+internal/acptool         configured-target selector and launcher; depends on config/agentsession/tools, not acpclient
 internal/session         append-only conversation tree, mutable state, replay, archives, artifacts, and derived human-only evidence catalog
 internal/sessionrec      one canonical raw.ndjson recorder shared by root and delegate sinks
 internal/trajectory      bounded host-owned evaluator stagnation control state
@@ -149,6 +154,28 @@ Two optional capabilities run outside that core path. Remote MCP support lives b
 the `harness-mcp-proxy` daemon (§15); LSP code intelligence is served by the in-process
 `internal/lspproxy` manager (registered as short `lsp_*` tools through `internal/lsptools`,
 §15a) and is also exposed as a compatibility stdio MCP shim via `harness lsp serve`.
+
+ACP has two deliberately separate directions and one protocol-neutral lifecycle seam:
+
+```text
+model tool call ─► acptool ─► agentsession ◄── delegate interactive adapter
+                       │             ▲
+                       └─ cmd wiring ─┤
+                                     └── acpclient ─► trusted ACP stdio child
+
+ACP client ─► jsonrpc ─► acpagent ─► cmd/harness root-session adapter ─► agent
+```
+
+`internal/acp` is a leaf wire contract and does not own JSON-RPC, subprocesses,
+configuration, tools, or agent execution. `internal/agentsession` knows only the
+protocol-neutral runtime/background interfaces. `internal/acptool` cannot import
+`internal/acpclient`; `cmd/harness` supplies that factory, just as it implements
+`acpagent.RootSession` without making `internal/acpagent` import `agent`, `session`,
+or UI packages. Both ACP directions reuse `internal/mcp/jsonrpc`, but core
+`internal/mcp` and `internal/mcp/jsonrpc` remain independent of ACP, LLM, and tool
+packages. The supported wire boundary is exactly stable ACP v1; version negotiation
+must reject an incompatible peer rather than guessing that additive Go DTOs imply
+support for another protocol version.
 
 ## 4. Message model (`internal/llm`)
 
@@ -2417,6 +2444,7 @@ this subsection records the runner that surface points at.
 | `max_turns` | int | optional tool-enabled loop budget; defaults to `delegate_max_turns`; the schema publishes that numeric maximum and over-cap values are rejected |
 | `continue_child_id` | string | optional terminal sibling child ID; continues compatible retained state in a fresh child record |
 | `background` | bool | only for independent non-overlapping work; after one useful parent model round, harness joins outstanding delegates and requires synthesis; do not poll or duplicate |
+| `interactive` | bool | open a reusable delegate session; requires `background:true`; every prompt still creates a fresh durable child |
 | `scope` | string | background only; workspace path scope, default process cwd |
 | `access` | string | background only; `read_only` or `exclusive`; default inherited from the selected agent |
 
@@ -2445,6 +2473,17 @@ this subsection records the runner that surface points at.
   runner. It adds a static child-only instruction identifying scoped mutating
   work and requiring implementation, verification, and an exact handoff with
   changed paths, checks run, and any remaining work.
+- `interactive:true` is valid only with `background:true` and routes the launch
+  through `internal/agentsession`. The returned `as_…` ID names a process-local
+  logical runtime; the returned `bg_…` ID names the first finite operation and
+  is also that operation's durable delegate child ID. Every later
+  `agent_sessions prompt` starts another immutable `bg_…` operation and a fresh
+  child directory whose `continued_from` points to the last validated terminal
+  child. The launch provider/model/tool/runtime contract is pinned even if the
+  parent later switches. Only a child that passes the normal continuation-source
+  validation advances the lineage tail; a failed validation leaves the prior
+  tail available. Live `agent_sessions steer` targets only the currently running
+  child and enters its ordinary steering queue before a later model request.
 - **Completion contract:** the child may append exactly one terminal
   `harness-completion` fenced JSON footer with `outcome` (`complete`|`blocked`)
   and, for `blocked`, a bounded `blockers` array; substantive content stays in
@@ -2524,6 +2563,95 @@ this subsection records the runner that surface points at.
   at most 512 events/256 KiB and is never authoritative over the registry.
   The `delegate_tmux` views and inline-feed policy are operational behavior;
   see [tools.md](tools.md#delegation).
+
+### 9.14a `acp` and `agent_sessions`
+
+`acp` exposes only configured, approved ACP subprocess targets. Its schema is:
+
+| param | type | notes |
+|---|---|---|
+| `action` | string | `targets` (default) or `start` |
+| `target` | string | required for `start`; enum is the sorted configured target names |
+| `prompt` | string | required and nonblank for `start` |
+| `cwd` | string | `start` working directory; defaults to the current directory and is canonicalized for the operation lease |
+
+`targets` rejects the other fields and returns only target names plus optional
+one-line descriptions. Command argv, configured environment, and
+`workspace_access` are intentionally absent from model-facing schemas and
+results. `start` always detaches: it creates one logical `as_…` agent session,
+starts operation 1 as a `bg_…` background job, and returns both IDs. There is no
+foreground ACP operation and no model-supplied command, argv, environment, or
+lease access override.
+
+`agent_sessions` controls already-created reusable runtimes:
+
+| param | type | notes |
+|---|---|---|
+| `action` | string | `list` (default), `get`, `prompt`, `steer`, `interrupt`, or `close` |
+| `session_id` | string | required except for `list`; this is the `as_…` ID, not a job or delegate child ID |
+| `prompt` | string | required for `prompt` and `steer`; invalid for all other actions |
+
+`list`/`get` expose bounded state, generation, operation number, active/last job,
+capabilities, progress, and last error. `prompt` is accepted only while the
+runtime is idle and returns a new immutable `bg_…` job; concurrent prompts fail
+with the active job ID. `steer` requires both a running operation and a runtime
+that implements live steering (interactive delegates do; the ACP v1 client does
+not). `interrupt` cancels only the active background operation and may return the
+logical session to idle when the backend confirms reuse. `close` retires the
+`as_…` runtime, interrupts any active operation, and performs bounded resource
+cleanup; it is not equivalent to canceling or merely observing a `bg_…` job.
+
+The ID domains are intentionally not interchangeable:
+
+- `as_…` is the process-local reusable-session control handle.
+- `bg_…` is one finite immutable operation, controlled or waited on through
+  `background_jobs`; for an interactive delegate it is also the physical child
+  record ID under `children/`.
+- An ordinary delegate child ID identifies a durable child record and is the only
+  kind accepted by `continue_child_id`. An `as_…` ID never enters delegate
+  continuation metadata. The remote ACP agent's opaque `sessionId` remains
+  private inside `acpclient`.
+
+The background lease belongs to each running `bg_…` operation, not to the idle
+`as_…` session. Completion releases the lease while leaving a reusable process
+alive; a later prompt reacquires the configured canonical resource/access lease
+and can conflict with work that started during the idle interval. A root manager
+admits at most 32 simultaneously live reusable sessions so detached idle
+subprocesses cannot accumulate without bound; terminal records do not consume
+that limit, and list/get history retains at most 256 records. Every operation has
+its own terminal result and progress snapshot;
+jobs are never reset or mutated into a subsequent operation.
+
+ACP `session/update` traffic is bounded and validated. Prompt-scoped content is
+control/ANSI-sanitized: agent message chunks form the terminal operation text;
+thought, tool, plan, and safe diagnostics update only the process-local progress
+snapshot. Session metadata (commands, mode, configuration, session info, usage)
+is admitted independently of prompt activity. During an admitted prompt it also
+updates bounded progress/diagnostics; while idle it is validated and ignored.
+Metadata received during session creation must match the eventual `session/new`
+identity. Updates never append directly to the parent transcript. The initial `acp` receipt and later `agent_sessions` calls are ordinary
+tool records; terminal operation text reaches the model through the normal
+automatic exactly-once background completion context or an explicit
+`background_jobs` result. Harness does not persist the outbound ACP process,
+opaque remote session, or its remote transcript, so an `as_…` session cannot be
+recovered after process exit or `/clear`. Interactive delegates are the
+exception only at the child layer: each fresh child has the canonical durable
+delegate transcript and `continued_from` lineage described above; the reusable wrapper is still process-local.
+
+Outbound `acpclient` speaks exactly ACP v1: `initialize`, `session/new`, serialized
+text `session/prompt`, `session/update`, `session/cancel`, and advertised
+`session/close`. It automatically declines permission requests, ignores unknown
+update kinds during a prompt with a bounded diagnostic, and treats malformed,
+late prompt-scoped, wrong-session, or incompatible-version traffic as unsafe
+rather than extending the contract. Prompt update admission begins when the
+writer binds the prompt RPC ID, not after its underlying write returns; the
+separate write-completion signal orders cancellation behind the prompt.
+A prompt cancelled before the peer manages to write it fails the entire runtime:
+the abandoned request outlives its prompt context and could otherwise still
+execute on the agent, so teardown is the only safe bound.
+ACP v1 support is the stable versioning boundary for these tools; target-specific
+features or future ACP versions require explicit implementation and capability
+handling.
 
 ### 9.15 background jobs
 

@@ -367,6 +367,73 @@ func TestOneShotWaitsForBackgroundDelegateSynthesizesAndCountsUsage(t *testing.T
 	}
 }
 
+type testAgentSessionLifecycle struct {
+	closeAll func(context.Context) error
+	reset    func(context.Context) error
+}
+
+func (l *testAgentSessionLifecycle) CloseAll(ctx context.Context) error {
+	if l.closeAll != nil {
+		return l.closeAll(ctx)
+	}
+	return nil
+}
+
+func (l *testAgentSessionLifecycle) Reset(ctx context.Context) error {
+	if l.reset != nil {
+		return l.reset(ctx)
+	}
+	return nil
+}
+
+func TestOneShotClosesAgentSessionsBeforeBackgroundShutdown(t *testing.T) {
+	var out, errw bytes.Buffer
+	manager := background.NewManager(background.Options{})
+	started := make(chan struct{})
+	canceled := make(chan struct{})
+	_, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "agent",
+		Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+			close(started)
+			<-ctx.Done()
+			close(canceled)
+			return tools.BackgroundJobResult{}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-started
+	closed := false
+	lifecycle := &testAgentSessionLifecycle{closeAll: func(ctx context.Context) error {
+		if _, ok := ctx.Deadline(); !ok {
+			t.Fatal("agent-session close context is unbounded")
+		}
+		select {
+		case <-canceled:
+			t.Fatal("background manager shut down before agent sessions closed")
+		default:
+		}
+		closed = true
+		return nil
+	}}
+	app := newTestApp(t, &out, &errw, llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}))
+	app.Background = manager
+	app.AgentSessions = lifecycle
+
+	if code := OneShot(app, "finish"); code != ExitOK {
+		t.Fatalf("exit code = %d, errw=%q", code, errw.String())
+	}
+	if !closed {
+		t.Fatal("one-shot did not close agent sessions")
+	}
+	select {
+	case <-canceled:
+	default:
+		t.Fatal("one-shot did not shut down background jobs after agent sessions")
+	}
+}
+
 func TestOneShotShutdownRetainsBackgroundCancellationDiagnostics(t *testing.T) {
 	var out, errw bytes.Buffer
 	manager := background.NewManager(background.Options{})

@@ -501,6 +501,51 @@ and MCP proxy URLs, history path, default agent, and whether Harness is running
 inside tmux. They participate in provenance like other defaults, so any explicit
 flag, environment, or file value—including `false` for tmux—wins.
 
+### ACP targets
+
+Outbound ACP agents are an explicit config-file allowlist. This is the complete
+`acp.targets` shape:
+
+```json
+{
+  "acp": {
+    "targets": {
+      "claude-code": {
+        "command": "claude",
+        "args": ["--acp"],
+        "env": {
+          "ANTHROPIC_API_KEY": "${ANTHROPIC_API_KEY}"
+        },
+        "description": "General-purpose coding agent.",
+        "workspace_access": "exclusive"
+      }
+    }
+  }
+}
+```
+
+Target names must match `[a-zA-Z0-9_-]{1,64}`. Each target has:
+
+| field | required | behavior |
+|---|---|---|
+| `command` | yes | nonblank executable name or path, executed directly without a shell |
+| `args` | no | argv suffix; entries must be nonblank strings |
+| `env` | no | string overrides merged onto the Harness environment after `${NAME}` / `${NAME:-default}` expansion |
+| `description` | no | model-facing selection description; whitespace is collapsed to one line |
+| `workspace_access` | yes | operation lease metadata: `read_only` or `exclusive` |
+
+Environment names must be valid process variable names. A missing required
+`${NAME}` reference, malformed expansion, unknown field, `null`, invalid target,
+or invalid environment key fails configuration loading before any target can
+start. The project `acp.targets` object replaces the global leaf as a whole; it
+is not merged target by target. `config show` preserves names, argv,
+description, and access for operator inspection but redacts every non-empty
+configured environment value. The model-facing `acp` tool reveals only target
+names and descriptions—never command, args, environment, or lease policy.
+Targets and project configs are trusted code: subprocesses run with Harness's
+host privileges and receive no added sandbox or permission prompt. Operational
+tool behavior is in [tools.md](tools.md#reusable-agent-sessions-and-acp).
+
 ### Config commands
 
 ```text
@@ -641,6 +686,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `lsp.servers` | `object` | - | - | - | `lsp.servers` | unset | yes | Structured lsp.servers settings. |
 | `lsp.serena.args` | `string[]` | - | - | - | `lsp.serena.args` | unset | no | Structured lsp.serena.args settings. |
 | `lsp.serena.env` | `object` | - | - | - | `lsp.serena.env` | unset | yes | Structured lsp.serena.env settings. |
+| `acp.targets` | `object` | - | - | - | `acp.targets` | unset | yes | Structured acp.targets settings. |
 | `hooks` | `object` | - | `-hooks` | - | `hooks` | unset | no | Structured hooks settings. |
 | `hook_configs` | `string[]` | - | - | - | `hook_configs` | unset | no | Structured hook_configs settings. |
 | `otel.headers` | `object` | - | - | `OTEL_EXPORTER_OTLP_HEADERS`, `HARNESS_OTEL_HEADERS` | `otel.headers` | unset | yes | Structured otel.headers settings. |
@@ -893,6 +939,123 @@ Google Search call, and Google Search result steps remain in the invisible
 provider-neutral transcript so a full-history fallback is valid after a proxy
 restart. Stored interactions remain subject to the provider account's
 applicable retention policy.
+
+## ACP Agent Server
+
+`harness acp serve` exposes a provider-backed Harness root conversation as a
+stable ACP v1 agent over newline-delimited JSON-RPC on stdin/stdout:
+
+```text
+harness acp serve [flags]
+```
+
+It accepts no positional arguments. The accepted configuration flags are exactly:
+
+```text
+-config <path>
+-model <string>
+-model-proxy-url <string>
+-model-proxy-api-key <string>
+-trace-proxy
+-system-prompt <string>
+-no-env
+-histfile <string>
+-histfilesize <integer>
+-histsize <integer>
+-max-turns <integer>
+-max-prompt-tokens <integer>
+-max-output-tokens <integer>
+-max-prompt-cost <number>
+-goal-max-continuations <integer>
+-tool-timeout <integer>
+-default-context-window <integer>
+-context-window <integer>
+-reasoning <string>
+-reasoning-summary <string>
+-image-detail <string>
+-web-search <string>
+-delegate-output <string>
+-delegate-tmux
+-delegate-tmux-layout <string>
+-responses-stateful
+-retention-policy <string>
+-no-steer
+-agent <string>
+-handoff-agent <string>
+-v
+-tool-stream
+-show-diffs
+-stagnation-nudge
+-log-level <string>
+-no-color
+-color-theme <string>
+-timestamps <string>
+-repl-prompt <string>
+-repl-edit-mode <string>
+-mcp-proxy-api-key <string>
+-otel-enabled
+-otel-endpoint <string>
+-otel-protocol <string>
+-otel-timeout <integer>
+-otel-service-name <string>
+-otel-hostname <string>
+-hooks <object>
+```
+
+`--help` renders this list from `cmd/harness/cli.go`; the root [Flags](#flags)
+and generated [configuration matrix](#harness-configuration-parameters) remain
+the canonical setting semantics and environment/default reference. Run-only
+root flags such as `-p`, `-i`, `-resume`, `-session`, `-image`, `-q`, `--format`,
+`--agents`, and `--models` are intentionally unavailable. For each
+`session/new`, settings are resolved using its requested cwd for project-config
+discovery. An explicit relative `-config` or `HARNESS_CONFIG` remains relative
+to the server's launch directory, not the client-selected workspace.
+
+Stdout is reserved exclusively for ACP JSON-RPC frames. Diagnostics, startup
+errors, and stderr captured from Harness-started ACP/MCP subprocesses go to the
+server process's stderr; terminal Markdown/status rendering is not used on the
+protocol stream. EOF or process interruption closes the active root and its
+owned background work. The server keeps at most one active ACP root session on
+its stdio connection. After a settled `session/close`, the client may create
+another. If teardown exceeds its timeout, the close returns an error and the
+session remains closing for that connection; start a new provider process rather
+than admitting work alongside an unfinished root. All sessions served by a
+process must resolve to the same physical cwd
+(symlinks are resolved). Harness changes the process cwd and cannot safely host
+different physical workspaces concurrently; use a separate provider process per
+workspace.
+
+A client may attach at most 32 stdio MCP servers in `session/new`. Each name must
+use 1–56 ASCII letters, digits, underscores, or hyphens; names must be unique.
+Every command must be an existing absolute executable. Harness executes the
+client-provided command/args directly in the ACP session cwd, inherits its own
+environment, then applies the client's unique env entries as overrides. These
+are trusted local subprocesses with no sandbox or permission prompt. HTTP/SSE MCP transports and
+additional workspace directories are rejected before spawning any supplied MCP
+server.
+
+The stable implemented wire scope is ACP v1: `initialize`, `session/new`,
+serialized `session/prompt`, `session/update`, `session/cancel`, and
+`session/close`. The agent advertises only the optional `session/close`
+capability. It does not advertise or implement session load, list, delete,
+resume, or additional directories; prompt image, audio, or embedded-context
+capabilities; HTTP/SSE MCP; authentication/logout; client filesystem/terminal
+access; or configuration-option control. Prompt text and resource links are
+flattened into one text prompt; other content is unsupported. An incompatible
+protocol offer receives Harness's v1 selection and cannot proceed. Future ACP
+versions or capabilities require an explicit implementation/version change;
+they are not implied by accepting unknown additive JSON fields. Model-facing,
+transcript, and persisted text is control/ANSI-sanitized at the serving boundary.
+Validated base64 image payloads returned by tools are preserved unchanged, not
+subjected to text truncation. TODO steps and plan titles/bodies are sanitized
+before validation, storage, or artifact writes. Delegate child sessions spawned
+under a served root inherit the same sanitizers.
+
+Each served root gets a normal canonical Harness session directory, complete
+provider continuation/cache identity, atomic checkpoints/saves, and the shared
+`raw.ndjson` recorder. See [session.md](session.md#reusable-and-provider-acp-sessions)
+for durability details; outbound configured ACP targets and interactive delegate
+sessions are covered in [tools.md](tools.md#reusable-agent-sessions-and-acp).
 
 ## Model Proxy
 

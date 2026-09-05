@@ -101,6 +101,8 @@ type Job struct {
 	Kind        string
 	Task        string
 	Agent       string
+	SessionID   string
+	Operation   int
 	ResourceKey string
 	Access      string
 	Status      string
@@ -108,9 +110,9 @@ type Job struct {
 	Updated     time.Time
 	Result      tools.BackgroundJobResult
 	Error       string
-	// progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
-	// set at job start so the parent wait ticker can read child activity mid-run.
-	progress             any
+	// progress is set at job start so the parent wait ticker can read bounded
+	// activity mid-run.
+	progress             tools.BackgroundProgress
 	cancel               context.CancelFunc
 	done                 chan struct{}
 	finished             bool
@@ -131,6 +133,8 @@ type Snapshot struct {
 	Kind        string
 	Task        string
 	Agent       string
+	SessionID   string
+	Operation   int
 	ResourceKey string
 	Access      string
 	Status      string
@@ -138,9 +142,9 @@ type Snapshot struct {
 	Updated     time.Time
 	Result      tools.BackgroundJobResult
 	Error       string
-	// Progress is the opaque live-progress closure (func() agent.DelegateProgressSnapshot)
-	// for the renderer to read mid-run; nil when the job did not supply one.
-	Progress       any
+	// Progress is the bounded live source for the renderer to read mid-run; nil
+	// when the job did not supply one.
+	Progress       tools.BackgroundProgress
 	ContextPending bool
 	NoticePending  bool
 }
@@ -215,6 +219,8 @@ func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.Back
 		req.Kind,
 		req.Description,
 		req.Agent,
+		req.SessionID,
+		req.Operation,
 		resourceKey,
 		access,
 		req.WaitForPrompt,
@@ -227,15 +233,17 @@ func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.Back
 	return tools.BackgroundJobInfo{
 		ID:          snap.ID,
 		Status:      snap.Status,
+		SessionID:   snap.SessionID,
+		Operation:   snap.Operation,
 		ResourceKey: snap.ResourceKey,
 		Access:      snap.Access,
 	}, nil
 }
 
 func (m *Manager) start(
-	kind, task, agent, resourceKey, access string,
+	kind, task, agent, sessionID string, operation int, resourceKey, access string,
 	waitForPrompt bool,
-	progress any,
+	progress tools.BackgroundProgress,
 	run func(context.Context, string) (tools.BackgroundJobResult, error),
 ) (Snapshot, error) {
 	if m == nil {
@@ -251,6 +259,8 @@ func (m *Manager) start(
 		Kind:          strings.TrimSpace(kind),
 		Task:          strings.TrimSpace(task),
 		Agent:         strings.TrimSpace(agent),
+		SessionID:     strings.TrimSpace(sessionID),
+		Operation:     operation,
 		ResourceKey:   resourceKey,
 		Access:        access,
 		Status:        StatusRunning,
@@ -368,6 +378,13 @@ func (m *Manager) SetDiagnosticIdentity(id string, identity DiagnosticIdentity) 
 	}
 	job.diagnosticIdentity = &identity
 	return true
+}
+
+// CancelBackgroundJob cancels through the same canonical path used by the
+// background_jobs tool.
+func (m *Manager) CancelBackgroundJob(id string) bool {
+	_, ok := m.Cancel(id)
+	return ok
 }
 
 func (m *Manager) Cancel(id string) (Snapshot, bool) {
@@ -1010,6 +1027,9 @@ func contextFor(job *Job, prepare ResultPreparer, archiver toolresult.Archiver) 
 	if job.Agent != "" {
 		fmt.Fprintf(&b, "agent: %s\n", job.Agent)
 	}
+	if job.SessionID != "" {
+		fmt.Fprintf(&b, "session_id: %s\noperation: %d\n", job.SessionID, job.Operation)
+	}
 	if job.ResourceKey != "" {
 		fmt.Fprintf(&b, "resource: %s\naccess: %s\n", job.ResourceKey, job.Access)
 	}
@@ -1043,6 +1063,8 @@ func snapshotJob(job *Job) Snapshot {
 		Kind:           job.Kind,
 		Task:           job.Task,
 		Agent:          job.Agent,
+		SessionID:      job.SessionID,
+		Operation:      job.Operation,
 		ResourceKey:    job.ResourceKey,
 		Access:         job.Access,
 		Status:         job.Status,
@@ -1304,6 +1326,9 @@ func formatList(jobs []Snapshot) string {
 		if job.Agent != "" {
 			fmt.Fprintf(&b, "\t%s", job.Agent)
 		}
+		if job.SessionID != "" {
+			fmt.Fprintf(&b, "\t%s#%d", job.SessionID, job.Operation)
+		}
 		if job.ResourceKey != "" {
 			fmt.Fprintf(&b, "\t%s:%s", job.Access, job.ResourceKey)
 		}
@@ -1320,6 +1345,9 @@ func formatGet(job Snapshot) string {
 	}
 	if job.Agent != "" {
 		fmt.Fprintf(&b, "agent: %s\n", job.Agent)
+	}
+	if job.SessionID != "" {
+		fmt.Fprintf(&b, "session_id: %s\noperation: %d\n", job.SessionID, job.Operation)
 	}
 	if job.ResourceKey != "" {
 		fmt.Fprintf(&b, "resource: %s\naccess: %s\n", job.ResourceKey, job.Access)

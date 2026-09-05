@@ -225,6 +225,46 @@ func oTelTimeoutSeconds(value int) (int, error) {
 	return value, nil
 }
 
+func validateACPTargets(targets map[string]ACPTargetConfig) error {
+	for name, target := range targets {
+		if !validACPTargetName(name) {
+			return fmt.Errorf("target %q: name must match [a-zA-Z0-9_-]{1,64}", name)
+		}
+		if strings.TrimSpace(target.Command) == "" {
+			return fmt.Errorf("target %q: command must not be empty", name)
+		}
+		for index, arg := range target.Args {
+			if strings.TrimSpace(arg) == "" {
+				return fmt.Errorf("target %q: args[%d] must not be empty", name, index)
+			}
+		}
+		for envName := range target.Env {
+			if !validEnvName(envName) {
+				return fmt.Errorf("target %q: invalid environment variable name %q", name, envName)
+			}
+		}
+		switch strings.TrimSpace(target.WorkspaceAccess) {
+		case "read_only", "exclusive":
+		default:
+			return fmt.Errorf("target %q: workspace_access must be read_only or exclusive", name)
+		}
+	}
+	return nil
+}
+
+func validACPTargetName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for _, char := range []byte(name) {
+		if char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9' || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func validateResolved(config Config) error {
 	if config.MCP.Local.Enable && strings.TrimSpace(config.MCP.Local.Command) == "" {
 		return fmt.Errorf("mcp.local.command is required when mcp.local.enable is true")
