@@ -13,14 +13,17 @@ import (
 
 // ModelInfo is the registry entry for one model.
 type ModelInfo struct {
-	ContextWindow   int            `json:"context_window"`
-	OutputLimit     int            `json:"output_limit,omitempty"`
-	InputModalities []string       `json:"input_modalities,omitempty"`
-	ServerTools     []string       `json:"server_tools,omitempty"`
-	ServiceTiers    []ServiceTier  `json:"service_tiers,omitempty"`
-	Price           Price          `json:"price"`
-	Shape           string         `json:"shape,omitempty"`
-	Reasoning       *ReasoningInfo `json:"reasoning,omitempty"`
+	NativeSteering   bool           `json:"native_steering,omitempty"`
+	AsyncTools       bool           `json:"async_tools,omitempty"`
+	ReasoningUpdates bool           `json:"reasoning_updates,omitempty"`
+	ContextWindow    int            `json:"context_window"`
+	OutputLimit      int            `json:"output_limit,omitempty"`
+	InputModalities  []string       `json:"input_modalities,omitempty"`
+	ServerTools      []string       `json:"server_tools,omitempty"`
+	ServiceTiers     []ServiceTier  `json:"service_tiers,omitempty"`
+	Price            Price          `json:"price"`
+	Shape            string         `json:"shape,omitempty"`
+	Reasoning        *ReasoningInfo `json:"reasoning,omitempty"`
 }
 
 // ProviderConfig is the on-disk schema for a provider JSON file.
@@ -198,6 +201,27 @@ type PromptCacheConfig struct {
 	KeyField            string   `json:"key_field,omitempty"`
 	AffinityHeaders     []string `json:"affinity_headers,omitempty"`
 	ExplicitBreakpoints *bool    `json:"explicit_breakpoints,omitempty"`
+	Mode                string   `json:"mode,omitempty"`
+	TTL                 string   `json:"ttl,omitempty"`
+}
+
+func (p *PromptCacheConfig) UnmarshalJSON(data []byte) error {
+	type plain PromptCacheConfig
+	var value plain
+	if err := json.Unmarshal(data, &value); err != nil {
+		return err
+	}
+	if value.Mode != "" && value.Mode != "implicit" && value.Mode != "explicit" {
+		return fmt.Errorf("prompt_cache.mode must be implicit or explicit")
+	}
+	if value.TTL != "" && value.TTL != "30m" {
+		return fmt.Errorf("prompt_cache.ttl must be 30m")
+	}
+	if value.Mode == "explicit" && value.ExplicitBreakpoints != nil && !*value.ExplicitBreakpoints {
+		return fmt.Errorf("prompt_cache.mode explicit requires explicit_breakpoints")
+	}
+	*p = PromptCacheConfig(value)
+	return nil
 }
 
 // ModelEntry is one model inside a ProviderConfig.

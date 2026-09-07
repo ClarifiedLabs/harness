@@ -265,13 +265,6 @@ type TranscriptRewriteSink interface {
 	TranscriptRewritten()
 }
 
-// ContextEpochSink may replace a closed-turn transcript at a semantic work
-// boundary. It is consulted only after complete tool results have been
-// appended, so implementations never observe or create dangling tool calls.
-type ContextEpochSink interface {
-	TakeContextEpoch(before []llm.Message) (after []llm.Message, applied bool, err error)
-}
-
 // PromptWorkCoordinator is implemented by sinks that own background work whose
 // results must be incorporated before the current parent prompt may finish.
 // Usage is drained exactly once into the parent prompt; completion context is
@@ -494,7 +487,9 @@ type ContextEstimate struct {
 // Options configures an Agent. The zero value is valid; MaxTurns <= 0 means
 // unlimited.
 type Options struct {
-	MaxTurns int
+	AstraNativeSteering    bool
+	ExperimentalAsyncTools bool
+	MaxTurns               int
 	// MaxPromptTokens stops a prompt once its accumulated tokens reach
 	// this ceiling; zero means unlimited. Enforcement lives in the turn loop.
 	MaxPromptTokens int
@@ -543,6 +538,8 @@ type Options struct {
 	// and the post-compaction low-water mark. Zero uses the defaults.
 	CompactTriggerPercent int
 	CompactTargetPercent  int
+	CompactInputTokens    int
+	CompactGrowthTokens   int
 	// DisableAutoCompaction suppresses threshold-based compaction while preserving
 	// manual compaction and provider-overflow recovery. The inverted setting keeps
 	// the Options zero value enabled.
@@ -602,6 +599,11 @@ type Options struct {
 // Agent drives the turn loop against one provider and tool registry, owning the
 // running transcript.
 type Agent struct {
+	astraNativeSteering       bool
+	nativePending             map[string]nativeSteerJob
+	recoveredSteers           []SteerInput
+	nativeRecovery            []llm.SteerSubmission
+	experimentalAsyncTools    bool
 	provider                  llm.Provider
 	tools                     *tools.Registry
 	toolSpecs                 []llm.ToolSchema
@@ -629,6 +631,8 @@ type Agent struct {
 	compactKeepTokens         int
 	compactTriggerPercent     int
 	compactTargetPercent      int
+	compactInputTokens        int
+	compactGrowthTokens       int
 	disableAutoCompaction     bool
 	compactSummaryMaxTokens   int
 	compactTimeout            time.Duration
@@ -655,6 +659,7 @@ type Agent struct {
 	// a checkpoint rejected by its originating provider while retaining the full
 	// semantic transcript for an immediate stateless retry.
 	disabledNativeCompaction map[string]bool
+	nativeCompactionRetryAt  map[string]time.Time
 	// continuationFailures counts consecutive unavailable continuation attempts,
 	// whether found by a local probe or rejected by the provider. Three in a row
 	// disables stateful mode for the rest of the run.
@@ -724,6 +729,10 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		compactKeepTokens:         opts.CompactKeepTokens,
 		compactTriggerPercent:     opts.CompactTriggerPercent,
 		compactTargetPercent:      opts.CompactTargetPercent,
+		compactInputTokens:        opts.CompactInputTokens,
+		experimentalAsyncTools:    opts.ExperimentalAsyncTools,
+		astraNativeSteering:       opts.AstraNativeSteering,
+		compactGrowthTokens:       opts.CompactGrowthTokens,
 		disableAutoCompaction:     opts.DisableAutoCompaction,
 		compactSummaryMaxTokens:   opts.CompactSummaryMaxTokens,
 		compactTimeout:            opts.CompactTimeout,
@@ -805,6 +814,7 @@ func (a *Agent) SetTools(registry *tools.Registry) {
 func (a *Agent) SetProvider(provider llm.Provider) {
 	if provider != nil {
 		a.provider = provider
+		a.refreshToolSpecs()
 		a.compactionRuntimeVersion++
 		a.observedContextWindow = 0
 		a.retentionEpochArmed = true
@@ -825,10 +835,13 @@ func (a *Agent) SetModel(model string, contextWindow int) {
 
 // SetReasoning replaces the reasoning controls sent on subsequent requests.
 func (a *Agent) SetReasoning(reasoning llm.ReasoningConfig) {
+	preserve := a.reasoningUpdatesEnabled() && a.reasoning.Summary == reasoning.Summary && hasReasoningEffort(a.reasoning) && hasReasoningEffort(reasoning)
 	a.reasoning = reasoning
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
-	a.resetResponseState()
+	if !preserve {
+		a.resetResponseState()
+	}
 }
 
 // SetReasoningReplayDomain changes which persisted provider-owned reasoning
@@ -966,9 +979,19 @@ func (a *Agent) SetResponseState(state *llm.ResponseState) {
 		return
 	}
 	a.responseState = *state
+	a.restoreNativePending(state.PendingSteers)
+	if len(state.PendingSteers) > 0 {
+		a.resetResponseState()
+	}
 }
 
 func (a *Agent) resetResponseState() {
+	if len(a.nativePending) > 0 || len(a.responseState.PendingSteers) > 0 {
+		// Recovery includes the pending input in full history. Never replay that
+		// history on a connection that may still hold the same queued input.
+		a.proxySessionID = newProxySessionID()
+	}
+	a.queueNativeRecovery()
 	a.responseState = llm.ResponseState{}
 	a.responseStateEpoch++
 }
@@ -1063,14 +1086,15 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 	}, a.window()), a.measuredInput, a.measuredBoundary)
 	return llm.Request{
 		Model:                a.model,
+		NativeSteering:       a.nativeSteeringEnabled(),
 		Purpose:              llm.RequestPurposeTurn,
 		System:               a.system,
 		Messages:             append([]llm.Message(nil), messages...),
-		Tools:                cloneToolSpecs(a.toolSpecs),
+		Tools:                a.requestToolSpecs(),
 		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
 		ServerTools:          cloneServerTools(a.serverTools),
-		Reasoning:            a.reasoning,
+		Reasoning:            a.requestReasoning(),
 		RequestContext:       append([]string(nil), extraContext...),
 		ProxySessionID:       a.proxySessionID,
 		CacheAffinityID:      a.cacheAffinityID,
@@ -1149,6 +1173,10 @@ func newOpaqueID(prefix string) string {
 // instead of paying the cold cache-write latency. ok is false when there is
 // nothing cacheable yet. The returned request is a self-contained snapshot.
 func (a *Agent) PrewarmRequest() (llm.Request, bool) {
+	a.refreshToolSpecs()
+	if len(a.nativePending) > 0 || len(a.nativeRecovery) > 0 {
+		return llm.Request{}, false
+	}
 	if a.system == "" && len(a.toolSpecs) == 0 && len(a.serverTools) == 0 {
 		return llm.Request{}, false
 	}
@@ -1161,6 +1189,7 @@ func (a *Agent) PrewarmRequest() (llm.Request, bool) {
 	}
 	req.MaxTokens = 1 // smallest legal cap: only the prefill matters
 	req.Purpose = llm.RequestPurposePrewarm
+	req.NativeSteering = false
 	req.StoreResponse = a.responsesStateful
 	req.CachePolicy.StaticTTL = llm.CacheTTLDefault
 	req.Reasoning = llm.ReasoningConfig{} // no thinking/effort — a pure prefix write
@@ -1325,19 +1354,23 @@ func (a *Agent) estimateContextForTranscript(extraContext []string, transcript [
 
 // turnResult holds what one conversational turn produced after assembly.
 type turnResult struct {
-	text       string
-	reasoning  []llm.ContentBlock // provider-owned replay state, in arrival order
-	content    []llm.ContentBlock // exact provider block order when hosted search interleaves content
-	toolCalls  []llm.ToolCall
-	phase      string
-	usage      llm.Usage
-	stopReason llm.StopReason
-	responseID string
-	attempts   int
+	contextPrefix   []llm.Message
+	deliveredSteers []SteerInput
+	contextInput    *int
+	asyncResults    map[string]asyncReadResult
+	text            string
+	reasoning       []llm.ContentBlock // provider-owned replay state, in arrival order
+	content         []llm.ContentBlock // exact provider block order when hosted search interleaves content
+	toolCalls       []llm.ToolCall
+	phase           string
+	usage           llm.Usage
+	stopReason      llm.StopReason
+	responseID      string
+	attempts        int
 }
 
 func (r turnResult) hasPartialOutput() bool {
-	return r.text != "" || len(r.toolCalls) > 0
+	return r.text != "" || len(r.toolCalls) > 0 || len(r.contextPrefix) > 0
 }
 
 type modelRequest struct {
@@ -1413,6 +1446,8 @@ func (c *turnAttemptCoordinator) abandon(res turnResult) {
 }
 
 func (a *Agent) modelRequest(requestContext []string) modelRequest {
+	a.refreshToolSpecs()
+	a.applyNativeRecovery()
 	if a.transcriptSanitizer != nil {
 		if transcript, changed := a.transcriptSanitizer(a.transcript); changed {
 			a.SetTranscript(transcript)
@@ -1443,14 +1478,15 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 	estimate := a.estimatePayloadContextForTranscript(requestContext, visibleTranscript, payloadMessages)
 	req := llm.Request{
 		Model:                a.model,
+		NativeSteering:       a.nativeSteeringEnabled(),
 		Purpose:              llm.RequestPurposeTurn,
 		System:               a.system,
 		Messages:             payloadMessages,
-		Tools:                cloneToolSpecs(a.toolSpecs),
+		Tools:                a.requestToolSpecs(),
 		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
 		ServerTools:          cloneServerTools(a.serverTools),
-		Reasoning:            a.reasoning,
+		Reasoning:            a.requestReasoning(),
 		MaxTokens:            a.maxOutputTokens,
 		StoreResponse:        a.responsesStateful,
 		RequestContext:       append([]string(nil), requestContext...),
@@ -1534,6 +1570,9 @@ func (a *Agent) providerVisibleMessages(messages []llm.Message) []llm.Message {
 			continue
 		}
 		message.Content = content
+		if message.ReasoningState != nil && (!a.reasoningUpdatesEnabled() || message.ReasoningState.ReplayDomain != domain) {
+			message.ReasoningState = nil
+		}
 		out = append(out, message)
 	}
 	return out
@@ -1779,6 +1818,7 @@ func (a *Agent) updateResponseState(res turnResult) {
 		return
 	}
 	a.responseState = llm.ResponseState{
+		PendingSteers:      a.pendingNativeSubmissions(),
 		PreviousResponseID: res.responseID,
 		AnchorMessages:     len(a.transcript),
 		AnchorDigest:       digest,
@@ -1849,6 +1889,12 @@ type PromptAdmission struct {
 // returns the admission needed to execute it. Splitting admission from execution
 // lets callers make transcript insertion part of a larger atomic state transition.
 func (a *Agent) AdmitPromptContent(userText string, images []llm.ContentBlock) PromptAdmission {
+	if len(a.nativePending) > 0 {
+		// A stopped prompt may leave input queued on its old connection. Rebuild
+		// it before admitting a later prompt instead of assuming that queue lives.
+		a.resetResponseState()
+	}
+	a.applyNativeRecovery()
 	promptIndex := len(a.transcript)
 	promptMessage := a.userMessage(userText, images)
 	promptMessage.Origin = llm.MessageOriginPrompt
@@ -2038,6 +2084,11 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
+		// Request-only context guidance uses the same latest provider usage
+		// anchor as this loop, including during a single long prompt.
+		if a.contextManager() != nil {
+			a.measuredInput, a.measuredBoundary = lastInput, appendBoundary
+		}
 		localRetention := a.estimateContext(nil)
 		retentionDecision := localRetention
 		if anchored := a.triggerTokens(lastInput, appendBoundary); anchored > retentionDecision.Total {
@@ -2250,9 +2301,13 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// Context-size signal, not billing: cached tokens occupy the window too.
 		lastInput = res.usage.InputTokens + res.usage.CacheReadTokens +
 			res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
+		if res.contextInput != nil {
+			lastInput = *res.contextInput
+		}
 
 		if err != nil {
 			emitModelErrorDiagnostic(sink, err, promptID, turns+1, res.attempts)
+			a.transcript = append(a.transcript, res.contextPrefix...)
 			a.resetResponseState()
 			// Cancellation repair: keep streamed partial text as a text-only
 			// assistant message; drop the message entirely if nothing streamed.
@@ -2267,6 +2322,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			}
 			if verr := a.validateTranscript("after failed turn"); verr != nil {
 				err = errors.Join(err, verr)
+			} else {
+				deliverNativeSteers(res.deliveredSteers, sink)
 			}
 			if turns > 0 && cancelled && res.text != "" {
 				sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(res.usage, wasted), Wasted: wasted, Context: lastContext})
@@ -2276,6 +2333,14 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 
 		completeTurn()
+		a.transcript = append(a.transcript, res.contextPrefix...)
+		appendBoundary += len(res.contextPrefix)
+		if len(res.contextPrefix) > 0 {
+			if err := a.validateTranscript("after native steering"); err != nil {
+				return err
+			}
+			deliverNativeSteers(res.deliveredSteers, sink)
+		}
 		a.transcript = append(a.transcript, a.assistantMessage(res))
 		a.updateResponseState(res)
 		if modelReq.usedPrevious {
@@ -2376,6 +2441,9 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		checkpoint(PromptCheckpointToolDispatch)
 		executionCalls := executionToolCalls(res.toolCalls)
 		liveInputTokens := a.toolDispatchLiveInputTokens(lastInput, appendBoundary, lastContext)
+		if manager := a.contextManager(); manager != nil {
+			manager.SetContextBudget(max(0, a.contextRemaining(liveInputTokens)), a.contextSoftLimit())
+		}
 		_, reserveReadArchiveHint := sink.(ToolResultArchiver)
 		reserveReadHookContext := a.hooksHasMatchingHooks("read")
 		dispatchCtx := withReadResultBatchBudget(
@@ -2384,6 +2452,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			reserveReadHookContext,
 			reserveReadArchiveHint,
 		)
+		dispatchCtx = context.WithValue(dispatchCtx, asyncResultsKey{}, res.asyncResults)
 		results, parallelBatches, toolUsage := a.dispatchCalls(dispatchCtx, res.toolCalls, promptID, turns, sink)
 		total = add(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
@@ -2418,6 +2487,9 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// tool_use/tool_result pair, so injecting a steering RoleUser message or
 		// breaking here keeps the §4 invariant intact.
 		guard.recordTurn(executionCalls, results, &progress)
+		if len(res.deliveredSteers) > 0 {
+			guard.resetForUserSteer(&progress)
+		}
 
 		// Mid-prompt steering (design §8.1): drain input the user submitted while
 		// this turn was running and inject it as a single RoleUser message the
@@ -2428,7 +2500,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// the message rides on the next model request the loop was already going
 		// to make. It falls through to the usual budget checks so a configured
 		// ceiling still bounds the turn.
-		if steered := a.drainSteer(); !steerInputEmpty(steered) {
+		if steered := a.drainTurnSteer(); !steerInputEmpty(steered) {
 			steerIndex := len(a.transcript)
 			steerMessage := a.userMessage(steered.Text, steered.Images)
 			steerMessage.Origin = llm.MessageOriginSteer
@@ -2511,8 +2583,12 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 		reportTurnProgress(sink, progress)
 		if unlimited || turns < a.maxTurns {
-			if err := a.applyContextEpoch(sink); err != nil {
+			if changed, err := a.applyContextEpoch(ctx, sink); err != nil {
 				sink.Notice("[work context checkpoint failed; continuing current context: " + err.Error() + "]")
+			} else if changed {
+				lastInput, appendBoundary = 0, 0
+				lastContext = a.estimateContext(nil)
+				checkpoint(PromptCheckpointClosedTurn)
 			}
 		}
 
@@ -2581,26 +2657,6 @@ func (a *Agent) refreshToolSpecs() {
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
 	a.resetResponseState()
-}
-
-func (a *Agent) applyContextEpoch(sink EventSink) error {
-	provider, ok := sink.(ContextEpochSink)
-	if !ok {
-		return nil
-	}
-	next, applied, err := provider.TakeContextEpoch(cloneMessages(a.transcript))
-	if err != nil || !applied {
-		return err
-	}
-	if err := llm.ValidateTranscript(next); err != nil {
-		return fmt.Errorf("invalid work context epoch: %w", err)
-	}
-	a.transcript = cloneMessages(next)
-	a.validatedPrefix = 0
-	a.clearMeasuredContext()
-	a.retentionEpochArmed = true
-	a.ResetProxySessionID()
-	return nil
 }
 
 func reportPromptCheckpoint(sink EventSink, checkpoint PromptCheckpoint) {
@@ -2802,8 +2858,12 @@ func reportMaintenance(sink EventSink, purpose string, usage llm.Usage) {
 // gathers fresh request-only context for this distinct model round and returns
 // the request's usage (counted toward the turn total) and estimate.
 func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraContext []string, turn int) (llm.Usage, llm.Usage, ContextEstimate, bool) {
+	if len(a.nativePending) > 0 {
+		a.resetResponseState()
+	}
 	requestContext := a.requestContext(extraContext, sink)
 	modelReq := a.modelRequest(requestContext)
+	modelReq.request.NativeSteering = false
 	modelReq.request.Tools = nil // no tools: force a text-only wind-down
 	modelReq.request.ServerTools = nil
 	attempts := newTurnAttemptCoordinator(a, sink, turn)
@@ -3341,6 +3401,20 @@ func decodedImageSize(data string) int {
 // the result into the failure guard; parallel workers order that fold by emission
 // index so completion timing cannot change guard semantics or warning text.
 func (a *Agent) dispatchTool(ctx context.Context, call llm.ToolCall) (llm.ToolResult, <-chan struct{}, bool) {
+	if cached, ok := ctx.Value(asyncResultsKey{}).(map[string]asyncReadResult); ok {
+		if result, exists := cached[call.ID]; exists && result.name == call.Name && result.inputHash == llm.NormalizedToolCallHash(call.Input) {
+			// The batch allowance is known only after generation completes. Reapply
+			// read-aware limits without rerunning the tool or losing recovery data.
+			if limits, ok := ctx.Value(toolResultByteLimitsContextKey{}).(map[string]toolResultByteLimit); ok {
+				result.result = a.tools.LimitResult(call.Name, result.result, tools.DispatchLimits{MaxResultBytes: limits[call.ID].dispatchBytes})
+			}
+			return result.result, result.completion, result.foldGuard
+		}
+	}
+	return a.dispatchToolDirect(ctx, call)
+}
+
+func (a *Agent) dispatchToolDirect(ctx context.Context, call llm.ToolCall) (llm.ToolResult, <-chan struct{}, bool) {
 	// Parallel workers bypass dispatchOne because hooks are island barriers, but
 	// malformed streamed calls and Kimi's hosted echo still need the same handling.
 	if call.InvalidInputError != "" {
@@ -3684,6 +3758,9 @@ func drainPromptWorkUsage(sink EventSink) llm.Usage {
 }
 
 func (a *Agent) requestContext(extraContext []string, sink EventSink) []string {
+	if guidance := a.contextManagementContext(); guidance != "" {
+		extraContext = append(append([]string(nil), extraContext...), guidance)
+	}
 	provider, ok := sink.(RequestContextProvider)
 	if !ok {
 		return append([]string(nil), extraContext...)
@@ -3900,7 +3977,7 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // rate-limit frame (no status code) is not connect-exhausted, so it stays
 // retryable and still honors its Retry-After hint.
 func retryableStreamError(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, llm.ErrSteeringInterrupted) {
 		return false
 	}
 	var apiErr *llm.APIError
@@ -4021,8 +4098,17 @@ func stopReasonNotice(reason llm.StopReason) string {
 // assembles completed tool calls in emission order, and captures the final
 // usage and stop reason. A terminal stream error is returned with whatever
 // partial text streamed so far (for cancel repair).
-func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (turnResult, error) {
-	var res turnResult
+func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (res turnResult, retErr error) {
+	bridge := a.newNativeSteerBridge(ctx, req)
+	var previousUsage llm.Usage
+	defer func() {
+		bridge.finish(&res, &retErr, sink)
+		currentInput := res.usage.InputTokens + res.usage.CacheReadTokens + res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
+		res.contextInput = &currentInput
+		res.usage = add(previousUsage, res.usage)
+	}()
+	reads := a.newAsyncReads(ctx, req)
+	defer func() { res.asyncResults = reads.finish(retErr != nil) }()
 	var text []byte
 	textBlocks := make(map[int][]byte)
 	orderedBlocks := make(map[int]llm.ContentBlock)
@@ -4042,6 +4128,35 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 			return res, err
 		}
 		switch ev.Kind {
+		case llm.EventLiveSteer:
+			if ev.LiveSteer == nil {
+				continue
+			}
+			bridge.observe(*ev.LiveSteer)
+			sink.Notice("[native steer " + ev.LiveSteer.Status + "]")
+			if ev.LiveSteer.Status == "applied" {
+				if ev.LiveSteer.Boundary {
+					if ev.Usage != nil {
+						res.usage = mergeUsage(res.usage, *ev.Usage)
+					}
+					previousUsage = add(previousUsage, res.usage)
+					res.text = string(text)
+					if res.text != "" || len(res.reasoning) > 0 {
+						res.contextPrefix = append(res.contextPrefix, a.assistantMessage(res))
+					}
+					res.text = ""
+					res.reasoning = nil
+					res.content = nil
+					res.toolCalls = nil
+					res.phase = ""
+					res.usage = llm.Usage{}
+					text = nil
+					textBlocks = make(map[int][]byte)
+					orderedBlocks = make(map[int]llm.ContentBlock)
+				}
+				res.contextPrefix = append(res.contextPrefix, steeringMessages(ev.LiveSteer.Submission)...)
+				res.deliveredSteers = append(res.deliveredSteers, bridge.original(ev.LiveSteer.Submission))
+			}
 		case llm.EventTextDelta:
 			text = append(text, ev.Text...)
 			textBlocks[ev.Index] = append(textBlocks[ev.Index], ev.Text...)
@@ -4079,7 +4194,10 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 					phaseSink.AssistantPhase(ev.Phase)
 				}
 			}
+		case llm.EventToolCallReady:
+			reads.start(ev)
 		case llm.EventToolCallStart:
+			reads.observeStart(ev)
 			sink.ToolUseStart(llm.ToolCall{
 				ID:        ev.ToolID,
 				Name:      ev.ToolName,
@@ -4095,6 +4213,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 				Namespace:         ev.ToolNamespace,
 				Input:             ev.ToolInput,
 				InvalidInputError: ev.InvalidInputError,
+				Async:             ev.ToolAsync,
 			}
 			res.toolCalls = append(res.toolCalls, call)
 			orderedBlocks[ev.Index] = llm.ContentBlock{
@@ -4103,6 +4222,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (tu
 				ToolName:      call.Name,
 				ToolNamespace: call.Namespace,
 				ToolInput:     call.Input,
+				ToolAsync:     call.Async,
 			}
 		case llm.EventUsage:
 			if ev.Usage != nil {
@@ -4229,10 +4349,12 @@ func (a *Agent) drainSteer() SteerInput {
 }
 
 func (a *Agent) drainSteerInputs() []SteerInput {
+	recovered := a.recoveredSteers
+	a.recoveredSteers = nil
 	if a.steer == nil {
-		return nil
+		return recovered
 	}
-	var out []SteerInput
+	out := recovered
 	for {
 		select {
 		case input := <-a.steer:
@@ -4262,7 +4384,7 @@ func (a *Agent) userMessage(text string, images []llm.ContentBlock) llm.Message 
 	if text != "" || len(content) == 0 {
 		content = append(content, llm.ContentBlock{Kind: llm.BlockText, Text: text})
 	}
-	return llm.Message{Role: llm.RoleUser, Time: a.now(), Content: content}
+	return llm.Message{Role: llm.RoleUser, Time: a.now(), Content: content, ReasoningState: a.newReasoningState()}
 }
 
 func textMessageAt(at time.Time, role llm.Role, text string) llm.Message {
@@ -4324,7 +4446,7 @@ func cloneToolGroups(groups []llm.ToolGroup) []llm.ToolGroup {
 
 func equalToolSpecs(left, right []llm.ToolSchema) bool {
 	return slices.EqualFunc(left, right, func(left, right llm.ToolSchema) bool {
-		return left.Name == right.Name && left.Description == right.Description && string(left.Parameters) == string(right.Parameters)
+		return left.Name == right.Name && left.Async == right.Async && left.Description == right.Description && string(left.Parameters) == string(right.Parameters)
 	})
 }
 

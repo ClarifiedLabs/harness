@@ -94,13 +94,16 @@ func (result Result) ValidateFileReferences(validate func(string) error) error {
 
 // Config contains source-resolved user settings only.
 type Config struct {
-	Provider         string `json:"-"` // derived from a provider-qualified Model
-	Model            string `json:"model"`
-	ModelProxyURL    string `json:"model_proxy_url"`
-	ModelProxyAPIKey string `json:"model_proxy_api_key"`
-	TraceProxy       bool   `json:"trace_proxy"`
-	SystemPrompt     string `json:"system_prompt"`
-	NoEnv            bool   `json:"no_env"`
+	AstraNativeSteering                bool   `json:"astra_native_steering"`
+	ExperimentalAsyncTools             bool   `json:"experimental_async_tools"`
+	CodexExperimentalContextManagement bool   `json:"codex_experimental_context_management"`
+	Provider                           string `json:"-"` // derived from a provider-qualified Model
+	Model                              string `json:"model"`
+	ModelProxyURL                      string `json:"model_proxy_url"`
+	ModelProxyAPIKey                   string `json:"model_proxy_api_key"`
+	TraceProxy                         bool   `json:"trace_proxy"`
+	SystemPrompt                       string `json:"system_prompt"`
+	NoEnv                              bool   `json:"no_env"`
 
 	HistFile     string `json:"histfile"`
 	HistFileSize int    `json:"histfilesize"`
@@ -132,6 +135,8 @@ type Config struct {
 	CompactAutoEnabled            bool    `json:"compact_auto_enabled"`
 	CompactTriggerPercent         int     `json:"compact_trigger_percent"`
 	CompactTargetPercent          int     `json:"compact_target_percent"`
+	CompactInputTokens            int     `json:"compact_input_tokens"`
+	CompactGrowthTokens           int     `json:"compact_growth_tokens"`
 	CompactIdleAfterSeconds       int     `json:"compact_idle_after_seconds"`
 	CompactIdleTriggerPercent     int     `json:"compact_idle_trigger_percent"`
 	CompactTimeoutSeconds         int     `json:"compact_timeout_seconds"`

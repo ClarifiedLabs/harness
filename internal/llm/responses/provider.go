@@ -46,6 +46,7 @@ type Config struct {
 }
 
 type Provider struct {
+	live                liveSteering
 	apiKey              string
 	authHeaders         map[string]string
 	baseURL             string
@@ -411,7 +412,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 			return true, nil
 		}
 		d.asm.outputItemDone(event.OutputIndex, event.Item)
-		return false, nil
+		return !d.asm.emitReady(event.OutputIndex, yield), nil
 
 	case "response.completed":
 		d.completed = true

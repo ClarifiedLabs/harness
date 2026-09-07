@@ -14,6 +14,9 @@ import (
 // in the remote prefix.
 func ValidateMessageContent(msgs []Message) error {
 	for i, message := range msgs {
+		if state := message.ReasoningState; state != nil && (message.Role != RoleUser || state.ReplayDomain == "") {
+			return fmt.Errorf("message %d: reasoning state requires a user message and replay domain", i)
+		}
 		openToolSearch := make(map[string]bool)
 		seenToolSearch := make(map[string]bool)
 		for j, block := range message.Content {
@@ -161,7 +164,7 @@ func imageBlockHasForeignFields(block ContentBlock) bool {
 		block.Text != "" ||
 		block.ToolUseID != "" ||
 		block.ToolName != "" ||
-		block.ToolNamespace != "" ||
+		block.ToolNamespace != "" || block.ToolAsync ||
 		len(block.ToolInput) > 0 ||
 		block.ResultForID != "" ||
 		block.ResultText != "" ||

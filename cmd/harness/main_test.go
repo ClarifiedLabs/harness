@@ -266,6 +266,9 @@ type testInfoModelJSON struct {
 	APIType                  string     `json:"api_type"`
 	ContinuationStateful     bool       `json:"continuation_stateful"`
 	NativeCompaction         bool       `json:"native_compaction"`
+	ReasoningUpdates         bool       `json:"reasoning_updates"`
+	AsyncTools               bool       `json:"async_tools"`
+	NativeSteering           bool       `json:"native_steering"`
 	Prewarm                  bool       `json:"prewarm"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd"`
 	Reasoning                bool       `json:"reasoning"`
@@ -1867,6 +1870,9 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 			proxy.catalog.Targets[i].APIType = "responses"
 			proxy.catalog.Targets[i].ContinuationStateful = true
 			proxy.catalog.Targets[i].Prewarm = true
+			proxy.catalog.Targets[i].ReasoningUpdates = true
+			proxy.catalog.Targets[i].AsyncTools = true
+			proxy.catalog.Targets[i].NativeSteering = true
 		}
 	}
 
@@ -1900,6 +1906,9 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 		t.Fatalf("openrouter price = %+v\n%s", openRouterModel.PricePerMillionTokensUSD, out.String())
 	}
 	openAIModel := findJSONModel(t, got.Models, "openai:gpt-5.5")
+	if !openAIModel.ReasoningUpdates || !openAIModel.AsyncTools || !openAIModel.NativeSteering || openRouterModel.ReasoningUpdates || openRouterModel.AsyncTools || openRouterModel.NativeSteering {
+		t.Fatalf("provider capabilities not preserved: openai=%+v, openrouter=%+v", openAIModel, openRouterModel)
+	}
 	if openAIModel.APIType != "responses" || !openAIModel.ContinuationStateful || !openAIModel.Prewarm {
 		t.Fatalf("openai continuation metadata = %+v\n%s", openAIModel, out.String())
 	}
@@ -2791,6 +2800,19 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load source: %v", err)
 	}
+	notes := map[string]string{
+		"task-notes.md":            "Continue from the saved checkpoint.\n",
+		"notes/research/detail.md": "Nested research evidence.\n",
+	}
+	for name, text := range notes {
+		path := filepath.Join(sourcePath, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	fp := llmtest.New("fake", okStepWithUsage(5, 1))
 	env, _, errw, _ := fakeProviderEnv(t,
@@ -2827,6 +2849,95 @@ func TestRunResumeToDistinctSessionClonesWithFreshUsage(t *testing.T) {
 	}
 	if unchanged.Trajectory == nil || !reflect.DeepEqual(*unchanged.Trajectory, priorTrajectory) {
 		t.Fatalf("source trajectory changed: %+v", unchanged.Trajectory)
+	}
+	for name, text := range notes {
+		sourceNote := filepath.Join(sourcePath, name)
+		clonedNote := filepath.Join(destinationPath, name)
+		if got, err := os.ReadFile(clonedNote); err != nil || string(got) != text {
+			t.Fatalf("cloned note %s = %q, %v; want %q", name, got, err, text)
+		}
+		// In-place edits catch shared files (including hard links), not just paths.
+		if err := os.WriteFile(clonedNote, []byte("clone-only edit"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(sourceNote); err != nil || string(got) != text {
+			t.Fatalf("source note %s changed = %q, %v; want %q", name, got, err, text)
+		}
+		if err := os.WriteFile(sourceNote, []byte("source-only edit"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(clonedNote); err != nil || string(got) != "clone-only edit" {
+			t.Fatalf("cloned note %s changed after source edit = %q, %v", name, got, err)
+		}
+	}
+}
+
+func TestRunResumeCloneNotesDebugAndErrors(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		debug     bool
+		invalid   bool
+		locked    bool
+		wantCode  int
+		wantError string
+	}{
+		{name: "debug request", debug: true, wantCode: ui.ExitOK},
+		{name: "invalid source note", invalid: true, wantCode: ui.ExitRuntime, wantError: "clone resumed session: copy task notes:"},
+		{name: "locked destination", locked: true, wantCode: ui.ExitRuntime, wantError: "session "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			sourcePath := filepath.Join(dir, "source")
+			destinationPath := filepath.Join(dir, "destination")
+			prior := session.Session{
+				Provider: "anthropic", Model: "claude-opus-4-8",
+				Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "earlier"}}}},
+			}
+			if err := prior.Save(sourcePath); err != nil {
+				t.Fatal(err)
+			}
+			text := "saved source notes"
+			if tt.invalid {
+				text = "invalid terminal escape: \x1b"
+			}
+			sourceNote := filepath.Join(sourcePath, "task-notes.md")
+			if err := os.WriteFile(sourceNote, []byte(text), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if tt.locked {
+				lock, err := session.AcquireLock(destinationPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer lock.Close()
+			}
+			args := []string{"-model", "claude-opus-4-8", "-resume", sourcePath, "-session", destinationPath, "-p", "continue"}
+			if tt.debug {
+				args = append(args, "--debug-request")
+			}
+			fp := llmtest.New("fake", okStep())
+			env, _, errw, _ := fakeProviderEnv(t, args, fp, "")
+			if code := run(env); code != tt.wantCode {
+				t.Fatalf("exit = %d, want %d; stderr=%q", code, tt.wantCode, errw.String())
+			}
+			if tt.wantError != "" && !strings.Contains(errw.String(), tt.wantError) {
+				t.Fatalf("stderr = %q, want %q", errw.String(), tt.wantError)
+			}
+			if fp.RequestCount() != 0 {
+				t.Fatalf("unexpected model requests: %d", fp.RequestCount())
+			}
+			if _, err := os.Stat(filepath.Join(destinationPath, "task-notes.md")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("destination note should not exist: %v", err)
+			}
+			if tt.debug {
+				if _, err := os.Stat(destinationPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("debug request created destination: %v", err)
+				}
+			}
+			if got, err := os.ReadFile(sourceNote); err != nil || string(got) != text {
+				t.Fatalf("source note changed = %q, %v; want %q", got, err, text)
+			}
+		})
 	}
 }
 

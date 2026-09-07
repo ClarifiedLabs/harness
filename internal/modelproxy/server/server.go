@@ -143,6 +143,8 @@ type metricsCollectors struct {
 }
 
 type Handler struct {
+	liveMu sync.Mutex
+	live   map[liveStreamKey]*liveStreamBinding
 	// snapshot holds the current registry+catalog. Built once in NewHandler and
 	// replaced wholesale after catalog refreshes; never mutated in place.
 	snapshot atomic.Pointer[catalogSnapshot]
@@ -616,6 +618,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleInputTokens(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == compactPath:
 		h.handleCompact(w, r)
+	case r.Method == http.MethodPost && r.URL.Path == "/v1/steer":
+		h.handleSteer(w, r)
 	case r.Method == http.MethodPost && r.URL.Path == streamPath:
 		h.handleStream(w, r)
 	default:
@@ -745,7 +749,7 @@ func (h *Handler) handleInputTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Request.Model = target.entry.Name
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
-	_, req.Request = prepareProviderRequest(req.Request)
+	_, req.Request = prepareProviderRequest(h.mapReasoningStates(target, req.Request))
 	if codexResponsesUsesLocalTokenCount(target.pc) {
 		count := tokencount.EstimateOpenAIChat(req.Request)
 		if count <= 0 {
@@ -854,7 +858,7 @@ func (h *Handler) handleCompact(w http.ResponseWriter, r *http.Request) {
 	req.Request.Purpose = llm.RequestPurposeCompaction
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	req.Request.Reasoning = h.reasoningForTarget(target, req.Request.Reasoning.Profile, req.Request.Reasoning)
-	_, req.Request = prepareProviderRequest(req.Request)
+	_, req.Request = prepareProviderRequest(h.mapReasoningStates(target, req.Request))
 	budget, ok, _ := h.checkCostBudget(cw, r, target, req.Request, nil)
 	if !ok {
 		return
@@ -1067,7 +1071,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	req.Request.Model = model
 	req.Request.ServerTools = resolveServerToolsForTarget(target, req.Request.ServerTools)
 	req.Request.Reasoning = h.reasoningForTarget(target, req.ReasoningProfile, req.Request.Reasoning)
-	sessionKey, providerRequest := prepareProviderRequest(req.Request)
+	sessionKey, providerRequest := prepareProviderRequest(h.mapReasoningStates(target, req.Request))
 	req.Request = providerRequest
 	stateful := providerContinuationStateful(target.pc)
 	if !stateful && (req.Request.StoreResponse || req.Request.PreviousResponseID != "") {
@@ -1101,13 +1105,21 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	apiType = opts.Provider
 	semanticRequest := req.Request
 	semanticRequest.Messages = append([]llm.Message(nil), req.Request.Messages...)
-	provider, releaseProvider, err := h.streamProvider(opts, target.baseTargetID, sessionKey)
+	entry, _ := apikey.AuthorizedEntry(r)
+	provider, releaseProvider, err := h.streamProvider(opts, target.baseTargetID, sessionKey, entry.Hash)
 	if err != nil {
 		streamErr = err.Error()
 		writeFailure(http.StatusBadRequest, llm.APIErrorStageProviderRuntime, protocol.ErrorFrom(err))
 		return
 	}
 	defer releaseProvider()
+	if req.Request.NativeSteering && purpose == llm.RequestPurposeTurn && targetReasoningUpdates(target.pc, target.entry) && targetResponsesWebSocket(target.pc, target.entry) {
+		if steerer, ok := provider.(llm.LiveSteerer); ok {
+			defer h.registerLiveStream(r, target.targetID, sessionKey, steerer)()
+		}
+	} else {
+		req.Request.NativeSteering = false
+	}
 	if req.Request.PreviousResponseID != "" {
 		if availability, ok := provider.(responseContinuationAvailability); ok &&
 			!availability.CanContinueResponse(req.Request.PreviousResponseID) {
@@ -1210,6 +1222,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		finalDiagnostic = nil
 		sentEvents := false
 		attemptToolCalls := 0
+		var responseUsage, carriedUsage llm.Usage
 		var pendingTerminalEvent *llm.ModelRequestEvent
 		cancelEventSent := false
 		for ev, err := range provider.Stream(r.Context(), request) {
@@ -1322,10 +1335,14 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			}
 			sentEvents = true
 			events++
-			if ev.Usage != nil {
-				usage = mergeUsage(usage, *ev.Usage)
-				usage = h.priceUsage(targetID, request, usage)
-				ev.Usage = &usage
+			if ev.Usage != nil || ev.Kind == llm.EventDone {
+				if ev.Usage != nil {
+					responseUsage = mergeUsage(responseUsage, *ev.Usage)
+				}
+				responseUsage = h.priceUsage(targetID, request, responseUsage)
+				usage = addSteeredUsage(carriedUsage, responseUsage)
+				snapshot := responseUsage
+				ev.Usage = &snapshot
 			}
 			switch ev.Kind {
 			case llm.EventToolCallDone:
@@ -1336,11 +1353,12 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					ev.StopReason = llm.StopToolUse
 				}
 				stop = ev.StopReason
-				if ev.Usage != nil {
-					usage = mergeUsage(usage, *ev.Usage)
+			case llm.EventLiveSteer:
+				if ev.LiveSteer != nil && ev.LiveSteer.Boundary {
+					carriedUsage = usage
+					responseUsage = llm.Usage{}
+					attemptToolCalls = 0
 				}
-				usage = h.priceUsage(targetID, request, usage)
-				ev.Usage = &usage
 			}
 			event := ev
 			if err := enc.Encode(protocol.StreamEnvelope{Event: &event}); err != nil {
@@ -1395,12 +1413,13 @@ func validateProxyRequestMessages(req llm.Request) error {
 	return llm.ValidateTranscript(req.Messages)
 }
 
-func (h *Handler) streamProvider(opts factory.Options, providerID, promptCacheKey string) (llm.Provider, func(), error) {
+func (h *Handler) streamProvider(opts factory.Options, providerID, promptCacheKey string, principal []byte) (llm.Provider, func(), error) {
 	if !opts.ResponsesWebSocket {
 		provider, err := h.newProvider(opts)
 		return provider, func() {}, err
 	}
 	key := streamProviderCacheKey(opts, providerID, promptCacheKey)
+	copy(key.Principal[:], principal)
 	return h.wsPool.Acquire(key, func() (llm.Provider, error) {
 		return h.newProvider(opts)
 	})
@@ -1667,7 +1686,7 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 		PromptCache:             pc.PromptCache,
 		ReasoningReplay:         pc.ReasoningReplay,
 		OmitMaxOutputTokens:     providerOmitMaxOutputTokens(pc),
-		ResponsesWebSocket:      providerResponsesWebSocket(pc),
+		ResponsesWebSocket:      targetResponsesWebSocket(pc, entry),
 		ResponsesToolSearch:     pc.ResponsesToolSearch,
 		AnthropicToolSearch:     pc.AnthropicToolSearch,
 		UsageInputIncludesCache: pc.UsageInputIncludesCache,
@@ -2079,6 +2098,9 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				}
 			}
 			target := protocol.Target{
+				ReasoningUpdates:      targetReasoningUpdates(pc, entry),
+				AsyncTools:            targetReasoningUpdates(pc, entry),
+				NativeSteering:        targetReasoningUpdates(pc, entry) && targetResponsesWebSocket(pc, entry),
 				ID:                    id,
 				Aliases:               aliases,
 				DisplayName:           entry.Name,
@@ -2091,7 +2113,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				APIType:               pc.APIType,
 				ContinuationStateful:  providerContinuationStateful(pc),
 				NativeCompaction:      providerResponsesCompaction(pc),
-				Prewarm:               providerResponsesWebSocket(pc),
+				Prewarm:               targetResponsesWebSocket(pc, entry),
 				Price:                 price,
 				Reasoning:             targetReasoningSupported(entry),
 				ReasoningReplayDomain: reasoningReplayDomain(pc.Name, entry, id),
@@ -2199,14 +2221,17 @@ func providerContinuationStateful(pc llm.ProviderConfig) bool {
 	}
 }
 
-func providerResponsesWebSocket(pc llm.ProviderConfig) bool {
+// Astra's public Responses targets use WebSockets by default for native
+// steering. Explicit transport settings still take precedence for every model.
+func targetResponsesWebSocket(pc llm.ProviderConfig, entry llm.ModelEntry) bool {
 	if !strings.EqualFold(strings.TrimSpace(pc.APIType), "responses") {
 		return false
 	}
 	if pc.ResponsesWebSocket != nil {
 		return *pc.ResponsesWebSocket
 	}
-	return pc.Auth != nil && strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth)
+	return targetReasoningUpdates(pc, entry) ||
+		(pc.Auth != nil && strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth))
 }
 
 func providerResponsesCompaction(pc llm.ProviderConfig) bool {

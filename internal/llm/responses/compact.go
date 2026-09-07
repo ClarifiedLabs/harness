@@ -142,7 +142,7 @@ func (p *Provider) compactionRequestBase(req llm.Request) (wireRequest, []wireIn
 	// Compaction canonicalizes provider-owned reasoning state, so retain encrypted
 	// reasoning inputs even when no new reasoning controls were selected for the
 	// maintenance request.
-	input := buildInput(req.Messages, true)
+	input, _ := buildInputWithMessageEnds(req.Messages, true, p.usesCompactionV2() && canonicalOpenAIEndpoint(p.baseURL) && isAstraModel(req.Model), canonicalOpenAIEndpoint(p.baseURL) && isAstraModel(req.Model))
 	if contextText := llm.RequestContextText(req.RequestContext); contextText != "" {
 		input = insertRequestContext(input, contextText)
 	}
@@ -281,13 +281,15 @@ func retainedMessageTokens(raw json.RawMessage) int {
 	if json.Unmarshal(raw, &message) != nil {
 		return max(1, (len(raw)+3)/4)
 	}
-	textBytes := 0
+	textBytes, images := 0, 0
 	for _, part := range message.Content {
 		if part.Type == "input_text" || part.Type == "output_text" {
 			textBytes += len(part.Text)
+		} else if part.Type == "input_image" {
+			images++
 		}
 	}
-	return max(1, (textBytes+3)/4)
+	return max(1, (textBytes+3)/4+images*llm.EstimatedImageTokens)
 }
 
 func truncateRetainedMessage(raw json.RawMessage, maxTokens int) json.RawMessage {
@@ -307,6 +309,14 @@ func truncateRetainedMessage(raw json.RawMessage, maxTokens int) json.RawMessage
 	for _, part := range content {
 		var partType string
 		_ = json.Unmarshal(part["type"], &partType)
+		if partType == "input_image" {
+			imageBytes := llm.EstimatedImageTokens * 4
+			if remainingBytes >= imageBytes {
+				out = append(out, part)
+				remainingBytes -= imageBytes
+			}
+			continue
+		}
 		if partType != "input_text" && partType != "output_text" {
 			out = append(out, part)
 			continue

@@ -419,3 +419,26 @@ Global REPL history persists across sessions, mirroring bash's familiar model:
   file stay safe on POSIX systems.
 - **Scope:** REPL sessions only; one-shot (`-p`) does not load or save
   history.
+
+Experimental context management stores the default checkpoint in
+`task-notes.md` and additional note files under `notes/`. Compatible delegate
+continuations, `/fork`, and `/clone` inherit independent note copies and use the
+existing tree extract operation to preserve earlier entry IDs. Writes use atomic
+rename, with a 1,000,000-byte UTF-8 limit per file and separately bounded reads.
+Notes survive resume and remain isolated per parent/child session. Context
+refresh archives the complete pre-refresh transcript through the existing
+compaction archive, then the ordinary session checkpoint records the
+replacement in the canonical tree. Stable entry IDs and existing
+compaction/context-reset entries supply history and window references; there
+is no duplicate replay recorder or persistent search index. History lookup
+omits encrypted provider state and follows existing tool-output artifact
+references for full evidence. See [tools.md](tools.md#experimental-context-management)
+for retrieval operations.
+
+Native steering stores unresolved submissions in continuation state as
+`pending_steers`. Applied inputs carry a transcript-only `steer_id` so reset and
+resume can recover only unseen submissions. A restored pending queue retires the
+old transport affinity, inserts its user inputs before any later prompt, and
+rebuilds context from history. It never assumes the server's connection-local
+queue survived. This uses the existing atomic session checkpoint and canonical
+recorder; pending input is durable once that checkpoint has been saved.

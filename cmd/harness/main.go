@@ -54,6 +54,7 @@ import (
 	"harness/internal/session"
 	"harness/internal/skills"
 	"harness/internal/sysprompt"
+	"harness/internal/taskcontext"
 	"harness/internal/term"
 	"harness/internal/term/highlight"
 	"harness/internal/tmux"
@@ -398,6 +399,13 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if err != nil {
 			return fail(stderr, ui.ExitRuntime, "clone resumed session: %v", err)
 		}
+		// The destination is locked above for ordinary runs. Debug requests only
+		// clone in memory and must not create notes or other destination files.
+		if !runOptions.DebugRequest {
+			if err := taskcontext.CopyNotes(context.Background(), runOptions.Resume, sessionPath); err != nil {
+				return fail(stderr, ui.ExitRuntime, "clone resumed session: copy task notes: %v", err)
+			}
+		}
 		created = clone.Created
 		resumeCloneFrom = clone.From
 		resumeCloneTo = clone.To
@@ -710,6 +718,10 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		CompactKeepTokens:         cfg.CompactKeepTokens,
 		CompactTriggerPercent:     cfg.CompactTriggerPercent,
 		CompactTargetPercent:      cfg.CompactTargetPercent,
+		CompactInputTokens:        cfg.CompactInputTokens,
+		ExperimentalAsyncTools:    cfg.ExperimentalAsyncTools,
+		AstraNativeSteering:       cfg.AstraNativeSteering,
+		CompactGrowthTokens:       cfg.CompactGrowthTokens,
 		DisableAutoCompaction:     !cfg.CompactAutoEnabled,
 		CompactSummaryMaxTokens:   cfg.CompactSummaryMaxTokens,
 		CompactTimeout:            time.Duration(cfg.CompactTimeoutSeconds) * time.Second,
@@ -738,6 +750,11 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog.Register(todo.NewTool(todoStore))
 	planSessionDir := func() string { return delegateState.Snapshot().SessionPath }
 	toolCatalog.Register(plan.NewTool(planStore, planSessionDir))
+	if cfg.CodexExperimentalContextManagement {
+		manager := taskcontext.New(planSessionDir)
+		manager.SetEnabled(func() bool { return contextManagementForProvider(cfg, catalog, delegateState.Snapshot().ProviderName) })
+		manager.Register(toolCatalog)
+	}
 	toolCatalog.Register(acptool.NewTool(agentSessionManager, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
 		argv := append([]string{target.Command}, target.Args...)
 		return acpclient.NewFactory(acpclient.Options{
@@ -1702,7 +1719,10 @@ func loadedImageBlocks(images []inputimage.Loaded) []llm.ContentBlock {
 
 func buildDebugRequestOutput(ag *agent.Agent, cfg config.Config, registryModel, agentName string, includePrompt bool, prompt string, images []llm.ContentBlock, requestContext []string) debugRequestOutput {
 	snap := ag.DebugRequest(includePrompt, prompt, images, requestContext)
-	toolNames := ag.ToolNames()
+	toolNames := make([]string, 0, len(snap.Request.Tools))
+	for _, tool := range snap.Request.Tools {
+		toolNames = append(toolNames, tool.Name)
+	}
 	return debugRequestOutput{
 		Version:              1,
 		Provider:             cfg.Provider,
@@ -1757,6 +1777,16 @@ func debugContentBlockBytes(b llm.ContentBlock) int {
 
 func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition, error) {
 	agents := agentdef.Resolve(fileAgentDefinitions(cfg.Agents))
+	if cfg.CodexExperimentalContextManagement {
+		for name, definition := range agents {
+			for _, tool := range taskcontext.Names {
+				if !slices.Contains(definition.AllowedTools, tool) {
+					definition.AllowedTools = append(definition.AllowedTools, tool)
+				}
+			}
+			agents[name] = definition
+		}
+	}
 	if err := agentdef.Validate(agents); err != nil {
 		return nil, err
 	}
@@ -1872,6 +1902,9 @@ type modelListEntry struct {
 	APIType                  string     `json:"api_type,omitempty"`
 	ContinuationStateful     bool       `json:"continuation_stateful,omitempty"`
 	NativeCompaction         bool       `json:"native_compaction,omitempty"`
+	ReasoningUpdates         bool       `json:"reasoning_updates"`
+	AsyncTools               bool       `json:"async_tools"`
+	NativeSteering           bool       `json:"native_steering"`
 	Prewarm                  bool       `json:"prewarm,omitempty"`
 	PricePerMillionTokensUSD *llm.Price `json:"price_per_million_tokens_usd,omitempty"`
 	Reasoning                bool       `json:"reasoning"`
@@ -1949,6 +1982,9 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
 			APIType:                  strings.TrimSpace(target.APIType),
 			ContinuationStateful:     target.ContinuationStateful,
 			NativeCompaction:         target.NativeCompaction,
+			ReasoningUpdates:         target.ReasoningUpdates,
+			AsyncTools:               target.AsyncTools,
+			NativeSteering:           target.NativeSteering,
 			Prewarm:                  target.Prewarm,
 			PricePerMillionTokensUSD: modelListPrice(target.Price),
 			Reasoning:                target.Reasoning,
@@ -2394,6 +2430,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		provider = proxyClient.Provider(providerName)
 	}
 	return delegate.Launch{
+		ContextManagement:     contextManagementForProvider(cfg, modelCatalog, providerName),
 		Provider:              provider,
 		ProviderName:          providerName,
 		Model:                 model,
@@ -2592,6 +2629,24 @@ func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, p
 func nativeCompactionForProvider(catalog protocol.Catalog, providerID string) bool {
 	target, ok := catalogTarget(catalog, providerID)
 	return ok && target.NativeCompaction
+}
+
+// Context management is a local harness implementation, restricted for now to
+// the resolved ChatGPT-sign-in provider. Resolve aliases and service-tier variants
+// through the catalog rather than inferring eligibility from a model's name.
+func contextManagementForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
+	if !cfg.CodexExperimentalContextManagement {
+		return false
+	}
+	target, ok := catalogTarget(catalog, providerID)
+	if !ok {
+		return false
+	}
+	provider := target.ProviderLabel
+	if provider == "" {
+		provider, _, _ = strings.Cut(target.ID, ":")
+	}
+	return provider == "openai-codex"
 }
 
 func prewarmForProvider(catalog protocol.Catalog, providerID string) bool {

@@ -93,6 +93,7 @@ func BuildAssistantMessage(reasoning []ContentBlock, text string, calls []ToolCa
 			ToolUseID:     call.ID,
 			ToolName:      call.Name,
 			ToolNamespace: call.Namespace,
+			ToolAsync:     call.Async,
 			ToolInput:     call.Input,
 		})
 	}

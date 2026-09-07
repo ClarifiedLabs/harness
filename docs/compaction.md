@@ -24,6 +24,13 @@ provider item is never parsed, altered, or summarized. Other Responses
 providers that explicitly enable native compaction retain the standalone v1
 `POST /responses/compact` contract; Harness persists that operation's complete
 returned item array.
+The v2 retained-user budget is 64,000 estimated tokens: text uses bytes/4 and
+each user image consumes the shared approximate 1,600-token image weight.
+Newest messages are selected first; at the boundary, text is shortened and
+images that do not fit are omitted. Tool-result image projections are not
+retained as user instructions. The same budget applies to user items carried
+from a previous native checkpoint. Actual image usage varies by model,
+dimensions, and detail; this retention budget is not a provider token count.
 Subsequent same-domain requests send that canonical window followed by newer
 transcript messages. The semantic transcript remains intact, so a
 model/provider switch simply omits the opaque checkpoint and replays normal
@@ -32,8 +39,9 @@ and are added fresh to every active model round; the system prompt remains on
 `Request.System`.
 
 Native compaction resets any stored-response continuation anchor and starts a
-fresh stateless baseline. A native operation failure disables the path for that
-replay domain for the current process and falls through to textual compaction.
+fresh stateless baseline. A native operation failure falls through to textual
+compaction; permanent rejections disable the path for the replay domain, while
+temporary failures apply the cooldown described below.
 If a later request rejects a persisted checkpoint's encrypted content, Harness
 disables that checkpoint and retries once from the preserved semantic
 transcript. Focused manual compaction, continuation handoff, all-history child
@@ -285,3 +293,78 @@ tree, and archive metadata record `summary_source` (`model` or
 
 Compacted transcripts must still satisfy the transcript invariant: kept turns
 are whole turns, so no tool_use/tool_result pair is ever split.
+
+Native compaction distinguishes permanent rejections from temporary failures.
+Unsupported capabilities and non-retryable API errors disable the capability
+for the active replay domain. Timeouts, transport errors, and retryable API
+errors fall back to textual compaction and allow native compaction again after
+a one-minute cooldown (or the provider's longer Retry-After interval). Stale
+checkpoints are discarded before fallback; cancellation still stops the task.
+
+Optional `compact_input_tokens` adds an absolute input-token trigger, useful
+for staying below a provider's long-context price tier without changing the
+model's actual context window. Leave headroom below a billing boundary (for
+example, 250000 for a 272000-token boundary); estimates and incoming tool
+results can overshoot, so this is not a billing cap. `compact_growth_tokens`
+adds a coarse trigger on the transcript body after the newest checkpoint,
+excluding its carried prefix and fixed instructions/tools. For textual
+checkpoints the retained recent turns count as body growth. Both default to
+zero (disabled). They only trigger earlier: the total-window percentage and
+provider-overflow recovery always remain in force. Textual compaction targets
+a low-water mark below each enabled threshold to avoid immediate retriggers.
+
+## Experimental context management
+
+With `codex_experimental_context_management:true`, resolved `openai-codex` targets
+use persistent notes and searchable history in place of model-written
+compaction summaries. Other providers retain the ordinary compaction behavior.
+Provider aliases and service-tier variants are resolved through the catalog;
+model names alone do not enable the feature. All models on `openai-codex` are
+eligible. This top-level config setting defaults to `true`; set it to `false`
+to restore ordinary compaction for `openai-codex` too.
+
+`internal/taskcontext` owns the notes and history tools. `internal/agent` owns
+budget accounting, reminders, and reset installation inside `compactInternal`.
+A reset uses the existing `PreCompact`/`PostCompact` hooks, compaction archive,
+transcript validation, continuation reset, TODO/background overlays, and
+compaction accounting. There is no extra model request or second recorder.
+`new_context` queues the same lifecycle at a closed tool boundary. `/compact`
+also resets from notes; a supplied focus is recorded with the archive/checkpoint.
+Speculative idle summarization is ineligible while this mode is active.
+
+The working-window limit is the existing percentage threshold, constrained by
+`compact_input_tokens` and `compact_growth_tokens` when configured. The model
+receives a reminder with at most 6,144 estimated tokens remaining (scaled down
+to one fifth of the working limit for small windows). At zero, a handoff prompt
+asks it to save notes and call `new_context`. Automatic reset is forced after
+an additional 16,384 tokens (capped at one tenth of the model window), or at the
+full model-window limit, whichever comes first. Explicit prompt token/cost
+limits retain their normal behavior. The estimates reuse the existing provider
+usage anchor and local deltas; they are not exact tokenizer counts.
+
+Before replacement, the complete previous transcript is archived. Its user
+inputs, including steering and images, survive verbatim through typed
+`UserInstructions`; prior recovery hints are not treated as user instructions.
+The replacement includes a recovery hint of at most 4,000 bytes with a preview
+of `task-notes.md`. Other notes are read on demand. Stored notes may reach
+1,000,000 UTF-8 bytes **per file** without increasing this bootstrap budget.
+Completed tool rounds leave active context and remain in the canonical tree.
+An explicit refresh immediately checkpoints the replacement and clears the
+old input-usage anchor. Archive failures leave the transcript and continuation
+state intact; an instruction-only context that cannot shrink reports a failure
+instead of repeatedly resetting without reclaiming space.
+
+The comparison was made against Codex CLI **0.153.4**:
+[activation and token-budget handling](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/session/token_budget.rs),
+[window accounting](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/session/context_window.rs),
+[notes/history contract](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/ext/history-notes/src/tools.rs),
+and [reset lifecycle](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/compact_token_budget.rs).
+Codex's explicit activation checks the backend and eligible ChatGPT subscription,
+not an Astra-only model name. Its note contract also caps each file at 1,000,000
+UTF-8 bytes. Harness uses its own canonical tree IDs and existing tool interface
+rather than duplicating Codex's hosted storage or private protocol. Notes stay
+isolated per Harness session/delegate. Forks, clones, and compatible delegate continuations inherit
+independent note copies and the saved canonical tree so historical IDs remain
+valid; the source delegate is unchanged. Original user instructions remain
+in the fresh context. Exact billing and task-quality parity require live paired
+evaluations; the deterministic suite verifies lifecycle and recovery behavior.

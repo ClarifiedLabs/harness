@@ -544,6 +544,11 @@ func (t *Tree) PrepareCompaction(before []llm.Message, olderCount int, summary, 
 	if err := t.SyncTranscript(before); err != nil {
 		return err
 	}
+	// A notes-based reset archives the complete window. The next sync records
+	// the replacement through the existing context-reset entry type.
+	if olderCount == len(before) {
+		return nil
+	}
 	if olderCount < 0 || olderCount >= len(before) || olderCount >= len(t.activeRefs) {
 		return fmt.Errorf("session: invalid compaction boundary %d for %d messages", olderCount, len(before))
 	}

@@ -329,6 +329,70 @@ func TestRetainedCompactionV2ItemsExcludesToolResultImageProjection(t *testing.T
 	}
 }
 
+func TestRetainedCompactionV2ItemsBoundsUserImages(t *testing.T) {
+	const imageTokens = 1600
+	const keep = compactV2RetainedMessageTokenBudget / imageTokens
+	var input []wireInputItem
+	for i := 0; i < keep+1; i++ {
+		input = append(input, wireInputItem{
+			Type: "message", Role: "user", RetainOnCompaction: true,
+			Content: []wireContentPart{{Type: "input_image", ImageURL: "https://example.test/" + strings.Repeat("x", i+1)}},
+		})
+	}
+	for round := 0; round < 2; round++ {
+		got, err := retainedCompactionV2Items(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != keep {
+			t.Fatalf("round %d retained %d image messages, want %d", round, len(got), keep)
+		}
+		var first struct {
+			Content []wireContentPart `json:"content"`
+		}
+		if err := json.Unmarshal(got[0], &first); err != nil {
+			t.Fatal(err)
+		}
+		if len(first.Content) != 1 || first.Content[0].ImageURL != "https://example.test/xx" {
+			t.Fatalf("older image retained: %s", got[0])
+		}
+		// Previously retained raw user items obey the same budget on recompaction.
+		input = nil
+		for _, raw := range got {
+			input = append(input, wireInputItem{Raw: raw, Type: "message", RetainOnCompaction: true})
+		}
+	}
+}
+
+func TestTruncateRetainedMessageBudgetsImagesAndText(t *testing.T) {
+	raw := json.RawMessage(`{"type":"message","role":"user","extension":true,"content":[{"type":"input_image","image_url":"https://example.test/one","detail":"original","extension":42},{"type":"input_text","text":"abcdefghijk"},{"type":"input_image","image_url":"https://example.test/two"}]}`)
+	original := string(raw)
+	got := truncateRetainedMessage(raw, 1602)
+	var message struct {
+		Extension bool `json:"extension"`
+		Content   []struct {
+			Type      string `json:"type"`
+			Text      string `json:"text"`
+			ImageURL  string `json:"image_url"`
+			Detail    string `json:"detail"`
+			Extension int    `json:"extension"`
+		} `json:"content"`
+	}
+	if err := json.Unmarshal(got, &message); err != nil {
+		t.Fatal(err)
+	}
+	if !message.Extension || len(message.Content) != 2 || message.Content[0].Extension != 42 || message.Content[0].Detail != "original" || message.Content[1].Text != "abcdefgh" {
+		t.Fatalf("budgeted message = %s", got)
+	}
+	if string(raw) != original {
+		t.Fatal("source message mutated")
+	}
+	imageOnly := json.RawMessage(`{"type":"message","role":"user","content":[{"type":"input_image","image_url":"https://example.test/one"}]}`)
+	if got := truncateRetainedMessage(imageOnly, 1599); len(got) != 0 {
+		t.Fatalf("image cannot fit remaining budget: %s", got)
+	}
+}
+
 func TestBuildRequestReplaysCompactedItemsWithoutPruning(t *testing.T) {
 	retained := json.RawMessage(`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"kept"}],"provider_extension":{"x":1}}`)
 	compaction := json.RawMessage(`{"id":"cmp_1","type":"compaction","encrypted_content":"opaque","created_by":"server"}`)

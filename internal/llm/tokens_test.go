@@ -75,7 +75,7 @@ func TestEstimateInputTokensCountsToolResultImagesWithoutBase64Text(t *testing.T
 	baseTokens := EstimateInputTokens(base)
 	richTokens := EstimateInputTokens(rich)
 	metadataBytes := len(image.Kind) + len(image.ImageMediaType) + len(image.ImageDetail) + len(image.ImageName)
-	wantDelta := metadataBytes/estimateBytesPerToken + estimateImageTokens
+	wantDelta := metadataBytes/estimateBytesPerToken + EstimatedImageTokens
 	// Integer division happens after all request bytes, so one token of rounding
 	// drift is possible relative to dividing the image metadata separately.
 	if delta := richTokens - baseTokens; delta < wantDelta-1 || delta > wantDelta+1 {

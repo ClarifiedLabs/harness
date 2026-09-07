@@ -26,12 +26,13 @@ type responseContinuationAvailability interface {
 	CanContinueResponse(responseID string) bool
 }
 
-// wsPoolKey keeps transport configuration and session affinity independently
-// hashed. Both arrays are comparable, so the key can be used directly in a map
+// wsPoolKey keeps transport configuration, session affinity, and authenticated
+// principal independently hashed. The arrays are comparable for use in a map
 // without delimiter-sensitive string construction.
 type wsPoolKey struct {
 	Connection [32]byte
 	Session    [32]byte
+	Principal  [32]byte
 }
 
 type wsPoolOptions struct {

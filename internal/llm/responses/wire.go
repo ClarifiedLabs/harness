@@ -19,20 +19,21 @@ const minMaxOutputTokens = 16
 // wireRequest is the OpenAI Responses request body. Store is always sent false
 // so harness remains stateless and resends its own transcript every step.
 type wireRequest struct {
-	Model              string          `json:"model"`
-	Instructions       string          `json:"instructions,omitempty"`
-	Input              []wireInputItem `json:"input"`
-	Tools              []wireTool      `json:"tools,omitempty"`
-	MaxOutputTokens    *int            `json:"max_output_tokens,omitempty"`
-	Temperature        *float64        `json:"temperature,omitempty"`
-	ServiceTier        string          `json:"service_tier,omitempty"`
-	Reasoning          *wireReasoning  `json:"reasoning,omitempty"`
-	Stream             bool            `json:"stream"`
-	Store              bool            `json:"store"`
-	ParallelTools      bool            `json:"parallel_tool_calls,omitempty"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
-	PromptCacheKey     string          `json:"prompt_cache_key,omitempty"`
-	Include            []string        `json:"include,omitempty"`
+	Model              string                  `json:"model"`
+	Instructions       string                  `json:"instructions,omitempty"`
+	Input              []wireInputItem         `json:"input"`
+	Tools              []wireTool              `json:"tools,omitempty"`
+	MaxOutputTokens    *int                    `json:"max_output_tokens,omitempty"`
+	Temperature        *float64                `json:"temperature,omitempty"`
+	ServiceTier        string                  `json:"service_tier,omitempty"`
+	Reasoning          *wireReasoning          `json:"reasoning,omitempty"`
+	Stream             bool                    `json:"stream"`
+	Store              bool                    `json:"store"`
+	ParallelTools      bool                    `json:"parallel_tool_calls,omitempty"`
+	PreviousResponseID string                  `json:"previous_response_id,omitempty"`
+	PromptCacheKey     string                  `json:"prompt_cache_key,omitempty"`
+	PromptCacheOptions *wirePromptCacheOptions `json:"prompt_cache_options,omitempty"`
+	Include            []string                `json:"include,omitempty"`
 }
 
 // reasoningInclude requests that reasoning items carry their encrypted_content,
@@ -59,7 +60,8 @@ type wireInputItem struct {
 	// such as rich tool-result images. It is transport-local and never serialized.
 	RetainOnCompaction bool `json:"-"`
 
-	Type string `json:"type"`
+	Type      string         `json:"type"`
+	Reasoning *wireReasoning `json:"reasoning,omitempty"`
 
 	// message
 	Role    string `json:"role,omitempty"`
@@ -67,6 +69,7 @@ type wireInputItem struct {
 	Content any    `json:"content,omitempty"`
 
 	// function_call / function_call_output
+	Async     bool    `json:"async,omitempty"`
 	CallID    string  `json:"call_id,omitempty"`
 	Name      string  `json:"name,omitempty"`
 	Namespace string  `json:"namespace,omitempty"`
@@ -105,7 +108,13 @@ type wirePromptCacheBreakpoint struct {
 	Mode string `json:"mode"`
 }
 
+type wirePromptCacheOptions struct {
+	Mode string `json:"mode,omitempty"`
+	TTL  string `json:"ttl,omitempty"`
+}
+
 type wireTool struct {
+	Async        bool            `json:"async,omitempty"`
 	Type         string          `json:"type"`
 	Name         string          `json:"name,omitempty"`
 	Description  string          `json:"description,omitempty"`
@@ -158,6 +167,7 @@ type wireEvent struct {
 }
 
 type wireOutputItem struct {
+	Async            bool              `json:"async,omitempty"`
 	Raw              json.RawMessage   `json:"-"`
 	ID               string            `json:"id"`
 	Type             string            `json:"type"`
@@ -241,16 +251,28 @@ type buildOptions struct {
 
 func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
 	contextWindow = llm.EffectiveContextWindow(contextWindow, req.ContextWindowHint)
-	// Replay persisted encrypted reasoning items only when reasoning is enabled
-	// for this request (mirrors the Anthropic dialect's includeThinking gate).
-	// buildRequest sets Reasoning/Include under the same condition below, so a
-	// request with reasoning off (compaction summary, prewarm) must not carry
-	// reasoning input items without the matching reasoning/include fields.
-	replayReasoning := req.Reasoning.Effort != "" || req.Reasoning.Summary != ""
-	input, messageEnds := buildInputWithMessageEnds(req.Messages, replayReasoning)
+	// Empty reasoning controls select provider defaults. Ordinary turns must
+	// still preserve available reasoning, including after a continuation reset.
+	// Textual summaries and prewarm deliberately omit it unless requested;
+	// native compaction separately canonicalizes all reasoning inputs.
+	explicitReasoning := req.Reasoning.Effort != "" || req.Reasoning.Summary != ""
+	replayReasoning := explicitReasoning || req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn
+	updates := canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model) && (req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn || req.Purpose == llm.RequestPurposeCompaction)
+	input, messageEnds := buildInputWithMessageEnds(req.Messages, replayReasoning, updates, canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model))
+	if updates {
+		for _, m := range req.Messages {
+			if state := m.ReasoningState; state != nil && state.Baseline.Effort != "" {
+				// Only effort is historical; summaries follow the current request,
+				// including an empty summary that disables them.
+				req.Reasoning.Effort = state.Baseline.Effort
+				explicitReasoning = true
+				break
+			}
+		}
+	}
 	contextText := llm.RequestContextText(req.RequestContext)
 	if !opts.disablePromptCacheBreakpoints && promptCacheBreakpointsEnabled(req.Model, opts.baseURL, opts.promptCache) {
-		placePromptCacheBreakpoint(input, messageEnds, req.CachePolicy.StableMessagePrefix, contextText)
+		placePromptCacheBreakpoint(input, messageEnds, req.CachePolicy.StableMessagePrefix, contextText, opts.promptCache.Mode != "explicit")
 	}
 	if contextText != "" {
 		input = insertRequestContext(input, contextText)
@@ -268,6 +290,10 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 	if llm.ResolvePromptCacheKeyField(opts.providerName, "responses", opts.baseURL, opts.promptCache) == llm.PromptCacheKeyFieldPromptCacheKey {
 		w.PromptCacheKey = req.PromptCacheKey
 	}
+	if !opts.disablePromptCacheBreakpoints && promptCacheBreakpointsEnabled(req.Model, opts.baseURL, opts.promptCache) &&
+		(opts.promptCache.Mode != "" || opts.promptCache.TTL != "") {
+		w.PromptCacheOptions = &wirePromptCacheOptions{Mode: opts.promptCache.Mode, TTL: opts.promptCache.TTL}
+	}
 
 	minimum := opts.minOutputTokens
 	if minimum <= 0 {
@@ -279,11 +305,20 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 	}); mt > 0 {
 		w.MaxOutputTokens = &mt
 	}
-	if req.Reasoning.Effort != "" || req.Reasoning.Summary != "" {
+	if explicitReasoning {
 		w.Reasoning = &wireReasoning{Effort: req.Reasoning.Effort, Summary: req.Reasoning.Summary}
-		// Reasoning is active, so ask for encrypted reasoning content: it round-trips
-		// the model's chain of thought across stateless tool turns (see buildInput).
 		w.Include = []string{reasoningInclude}
+	}
+	// Current OpenAI stateless responses include encrypted content by default.
+	// Keep the legacy include when replaying it for compatible older backends,
+	// without forcing an effort or enabling visible reasoning summaries.
+	if replayReasoning && len(w.Include) == 0 {
+		for _, item := range input {
+			if item.Type == "reasoning" {
+				w.Include = []string{reasoningInclude}
+				break
+			}
+		}
 	}
 
 	nativeToolSearch := toolSearchEnabled(req.Model, opts.baseURL, opts.toolSearch) && len(req.DeferredToolGroups) > 0
@@ -299,6 +334,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 		if nativeToolSearch && (t.Name == req.ToolSearchFallback || deferredNames[t.Name]) {
 			continue
 		}
+		t.Async = t.Async && canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model) && (req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn)
 		w.Tools = append(w.Tools, buildFunctionTool(t, false))
 	}
 	if nativeToolSearch {
@@ -309,6 +345,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 				Description: group.Description,
 			}
 			for _, deferred := range group.Tools {
+				deferred.Async = deferred.Async && canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model) && (req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn)
 				tool.Tools = append(tool.Tools, buildFunctionTool(deferred, true))
 			}
 			if len(tool.Tools) > 0 {
@@ -342,6 +379,7 @@ func buildFunctionTool(tool llm.ToolSchema, deferred bool) wireTool {
 		Parameters:   tool.Parameters,
 		Strict:       &strict,
 		DeferLoading: deferred,
+		Async:        tool.Async,
 	}
 }
 
@@ -359,7 +397,7 @@ func toolSearchEnabled(model, baseURL string, override *bool) bool {
 	if !canonicalOpenAIEndpoint(baseURL) {
 		return false
 	}
-	if name == "gpt-5.3-codex-spark" || strings.HasPrefix(name, "gpt-5.3-codex-spark-") {
+	if isAstraModel(name) || name == "gpt-5.3-codex-spark" || strings.HasPrefix(name, "gpt-5.3-codex-spark-") {
 		return true
 	}
 	if !strings.HasPrefix(name, "gpt-") {
@@ -392,6 +430,11 @@ func toolSearchEnabled(model, baseURL string, override *bool) bool {
 func normalizeToolSearchModel(model string) string {
 	name := strings.ToLower(strings.TrimSpace(model))
 	return strings.TrimPrefix(name, "openai:")
+}
+
+func isAstraModel(model string) bool {
+	name := normalizeToolSearchModel(model)
+	return name == "gpt-6-astra" || strings.HasPrefix(name, "gpt-6-astra-")
 }
 
 func canonicalCodexEndpoint(baseURL string) bool {
@@ -478,14 +521,29 @@ func inputMessageContainsOnlyImages(item wireInputItem) bool {
 }
 
 func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
-	out, _ := buildInputWithMessageEnds(messages, replayReasoning)
+	out, _ := buildInputWithMessageEnds(messages, replayReasoning, false, false)
 	return out
 }
 
-func buildInputWithMessageEnds(messages []llm.Message, replayReasoning bool) ([]wireInputItem, []int) {
+func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates, async bool) ([]wireInputItem, []int) {
 	var out []wireInputItem
 	ends := make([]int, 0, len(messages))
 	for _, m := range messages {
+		update := func() {
+			if state := m.ReasoningState; updates && state != nil && state.Active.Effort != "" {
+				// Reassert at every user boundary, including delta-only continuations.
+				// This makes replay deterministic without inferring remote active effort.
+				item := wireInputItem{Type: "configuration_update", Reasoning: &wireReasoning{Effort: state.Active.Effort}}
+				if len(out) > 0 && out[len(out)-1].Type == "configuration_update" {
+					out[len(out)-1] = item
+				} else {
+					out = append(out, item)
+				}
+			}
+		}
+		if m.Origin != llm.MessageOriginProviderCompaction {
+			update()
+		}
 		var text string
 		var parts []wireContentPart
 		var resultImages []wireContentPart
@@ -533,11 +591,8 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning bool) ([]
 			case llm.BlockReasoning:
 				// Replay the encrypted reasoning item verbatim, immediately before
 				// the message/function_call it preceded (reasoning blocks lead the
-				// assistant message). Skip it when reasoning is disabled for this
-				// request: buildRequest then omits Reasoning/Include, so a stray
-				// reasoning item would have no matching encrypted_content include and
-				// the provider rejects the asymmetry. Without an encrypted payload
-				// there is also nothing to round-trip, so the block is dropped.
+				// assistant message). Maintenance requests can omit replay explicitly.
+				// Without an encrypted payload there is nothing to round-trip.
 				if !replayReasoning || b.ReasoningEncrypted == "" {
 					continue
 				}
@@ -569,6 +624,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning bool) ([]
 					Name:      b.ToolName,
 					Namespace: b.ToolNamespace,
 					Arguments: args,
+					Async:     async && b.ToolAsync,
 				})
 			case llm.BlockToolResult:
 				flushMessage()
@@ -598,6 +654,9 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning bool) ([]
 				Content: resultImages,
 			})
 		}
+		if m.Origin == llm.MessageOriginProviderCompaction {
+			update()
+		}
 		ends = append(ends, len(out))
 	}
 	return out, ends
@@ -610,14 +669,14 @@ func promptCacheBreakpointsEnabled(model, baseURL string, cfg llm.PromptCacheCon
 	if !canonicalOpenAIEndpoint(baseURL) {
 		return false
 	}
-	model = strings.ToLower(strings.TrimSpace(model))
-	return model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
+	model = normalizeToolSearchModel(model)
+	return isAstraModel(model) || model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
 }
 
 // placePromptCacheBreakpoint maps the neutral stable-message count onto the
 // typed Responses input and marks the latest eligible input content part. It
 // never rewrites opaque provider items or string-shaped function outputs.
-func placePromptCacheBreakpoint(input []wireInputItem, messageEnds []int, stablePrefix int, contextText string) bool {
+func placePromptCacheBreakpoint(input []wireInputItem, messageEnds []int, stablePrefix int, contextText string, implicitTail bool) bool {
 	if stablePrefix <= 0 || len(input) == 0 || len(messageEnds) == 0 {
 		return false
 	}
@@ -625,7 +684,7 @@ func placePromptCacheBreakpoint(input []wireInputItem, messageEnds []int, stable
 	limit := messageEnds[stablePrefix-1]
 	if contextText != "" {
 		limit = min(limit, requestContextInsertIndex(input))
-	} else if limit == len(input) {
+	} else if implicitTail && limit == len(input) {
 		// The API's implicit tail breakpoint already covers this exact boundary.
 		return false
 	}

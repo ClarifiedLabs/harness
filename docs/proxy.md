@@ -267,3 +267,28 @@ This classification is observational only: Harness does not silently drop the
 image, resend altered text-only content, switch serializers, mutate target
 metadata, or learn a persistent endpoint quirk. Select a conforming image
 target or inspect the image outside that model call.
+
+## Native steering transport
+
+`POST /v1/steer` routes a submission to a currently active stream using the same
+API-key identity, target ID, and `proxy_session_id`. The body contains
+`target_id` and `submission` (`id`, `session_id`, optional `correlation_id`, and
+user `messages` containing text or images). The route shares ordinary proxy
+authentication. Identity is the authenticated credential hash, not its display
+name. Pooled transports use the same isolation, so different keys cannot share
+a live connection even when their names and session IDs match.
+A mismatched or ended binding returns `409`; an unknown target
+returns `404`. Both mean the client can retain ordinary queued delivery.
+
+A `202` confirms a local transport write, not provider acceptance or application.
+`EventLiveSteer` on `/v1/stream` reports accepted, applied, failed, or lost input.
+The capability is advertised only for public Astra Responses targets using
+WebSockets. These targets default to WebSockets when `responses_websocket` is
+unspecified; an explicit `false` keeps HTTP streaming and disables the capability.
+Harness enables `native_steering:true` on eligible streams by default, unless
+`astra_native_steering:false` disables it in Harness config.
+Native steering is connection-local: multi-instance deployments must route the
+steering request to the same instance as the active stream. A transport failure
+with uncertain delivery is retained in history rather than blindly retried;
+recovery rotates transport affinity before resending that history.
+Automatic successor responses are priced individually before usage aggregation.

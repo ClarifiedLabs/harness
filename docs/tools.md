@@ -710,3 +710,84 @@ placeholders, avoiding summary budget spent on a call that produced no evidence.
 
 Disabled optional CLI-backed default tools are reported on stderr at startup.
 These warnings are suppressed by `-q` / `--quiet` or `--log-level error`.
+
+## Experimental context management
+
+The top-level Harness config setting `codex_experimental_context_management` defaults
+to `true`, enabling context tools for **`openai-codex` targets only**, including
+aliases and service tiers. It applies to all models on that provider; set it to
+`false` to disable the tools and restore ordinary compaction.
+Other providers omit the tools and reject direct calls. Provider and agent
+switches re-evaluate eligibility; delegates use their own resolved provider and
+session directory. The implementation is local and uses the existing session
+storage, without calling Codex's private notes/history endpoints.
+
+- `task_notes`: `action` is `read`, `write`, `append`, `list`, or `search`.
+  Omitting `action` reads unless `text` is supplied, which replaces the note.
+  `path` defaults to `task-notes.md`; other relative names select files beneath
+  the session's `notes/` directory. Writes and appends use temp-file then rename.
+  Each file is capped at **1,000,000 UTF-8 bytes**. Reads return at most
+  `max_bytes` (default 4096, maximum 16384), with byte `offset`/`next_offset`
+  pagination. List/search accept `prefix`, `limit` (default 10, maximum 20),
+  and ordinal `offset`; search is a case-sensitive literal query with bounded
+  excerpts. Record objectives, constraints, decisions, failed approaches,
+  completed checks, next steps, and stable history IDs. Additional files hold
+  accumulated details without inflating the active context.
+- `history_search`: case-insensitive literal `query` over saved session-tree
+  messages. Returns at most 20 excerpts of 512 bytes, stable entry `id`,
+  `window_id`, `parent_id`, and byte `offset`. Filter with `window_id`, `role`,
+  or `tool_name`; `next_offset` resumes the scan.
+- `history_list`: the same saved-entry pagination and filters without requiring
+  a query. `windows:true` lists the initial window and compaction/reset entries.
+  A window uses its existing canonical tree ID; there is no separate index.
+- `history_read`: select a stable `id` or a returned byte `offset`, then
+  paginate the rendered entry using `text_offset` and `max_bytes` (default
+  4096, maximum 16384). IDs remain valid across subsequent saves and resets.
+  Provider reasoning and encrypted checkpoints are omitted; images appear as
+  markers. Existing full-output artifact references can be read with `read`.
+- `get_context_remaining`: estimated `tokens_left` before the working-window
+  threshold, its `limit`, and `estimated:true`. This uses the agent's existing
+  context estimator and compaction budgets, not a separate tokenizer or paid
+  counting call.
+- `new_context`: queue a fresh window after the complete tool round. Save notes
+  first. The agent runs the existing compaction hooks, archives the previous
+  window, then preserves original user inputs and a bounded note-recovery hint.
+  Previous assistant messages and tool rounds are retrieved on demand. Notes
+  do not recursively accumulate in the checkpoint. Failed archives leave the
+  active transcript unchanged.
+
+History lookup includes saved entries on other branches of this session; use
+parent/window IDs to distinguish their provenance. Newly generated items become
+searchable at the ordinary session checkpoint. Scans process at most roughly
+32 MiB of new entries per page, with the session reader's 64 MiB per-entry ceiling; reading the
+preceding tree metadata to resolve windows or locate a stable ID can require
+scanning the earlier file. Reads and search results remain bounded.
+
+The agent supplies incremental-note guidance, a low-context reminder, and an
+exhausted-window handoff prompt. Automatic and manual compaction use the same
+notes-based reset lifecycle while this mode is active; they do not call a
+summarization model. See [compaction internals](compaction.md#experimental-context-management)
+for thresholds, failure behavior, and the Codex comparison.
+
+## Experimental async reads
+
+`experimental_async_tools:true` enables Astra's async function declarations for
+`read` and `web_fetch` on the public Responses API. Eligible independent reads
+start when the provider finishes a function-call item, while the model continues
+generating. Calls behind a tool or stage barrier, hooks, duplicate calls,
+mutations, and `web_fetch` calls with `background:true` use ordinary scheduling.
+At most 32 reads are started early.
+
+Harness joins these reads at the response boundary and returns results under
+the original call IDs through the normal result, archive, and validation paths.
+Prefetched file reads share the final batch budget with ordinary reads; clipping
+preserves complete source lines, exact continuation offsets, and archive metadata
+without reading the file again.
+No unfinished async call is persisted across a process restart. Failed stream
+attempts cancel and discard their speculative reads, including reads queued for
+an execution slot. Work that should continue across model requests uses the
+existing `background:true` support on `shell`, `web_fetch`, and `delegate`.
+Completed job results are delivered automatically as request-only context;
+`background_jobs` with `action:"wait"` handles explicit dependencies.
+Tool display spans cover result consumption; use whole-turn timing to measure
+the overlap benefit.

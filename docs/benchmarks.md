@@ -186,3 +186,29 @@ The verdict is deliberately conservative:
 - Only then may the candidate promote, and only when median and nearest-rank p90 inclusive tokens and known USD cost do not regress; missing coverage remains `insufficient_data`, never a pass.
 
 Keep the two raw analyzer JSON reports with the benchmark evidence when reproducibility matters: they contain the byte counts and SHA-256 values that identify exactly which records were analyzed. The semantic comparison complements the paired benchmark; it does not replace transcript-backed correctness scoring.
+
+## Astra continuity and latency checks
+
+Use identical tasks and model/effort settings for paired runs, changing one
+feature at a time. Include an effort change followed by resume, native
+compaction with retained images, a transient compaction failure, and notes-based
+context refresh followed by historical evidence lookup. Check that the original
+objective, user steering, completed checks, and pending work survive each
+boundary. Count repeated file reads or repeated investigations alongside task
+completion quality.
+
+For async reads, use an independent slow read while the model continues its
+response, then verify a single result per call ID and measure complete turn
+latency. Compare total input, cache reads, cache writes, output, and maintenance
+tokens using the existing session/proxy accounting. Cache hits alone are not
+a cost result: include cache-write premiums and any long-context price tier.
+The deterministic regression suite uses fakes/httptest; live API performance
+and pricing require separate paired runs and are not asserted by those tests.
+
+For native steering, include automatic continuation after both normal completion
+and a steered incomplete response, a client-tool wait, rejected steering, and a
+connection drop after acceptance. Check input order, single delivery, transcript
+validity, and recovery before a later prompt. Price each automatic response
+separately, including a pair whose combined input crosses a long-context tier
+while each individual input stays below it. Measure submission-to-successor
+latency alongside total task time and cost; do not equate acceptance with use.

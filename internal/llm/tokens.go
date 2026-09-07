@@ -3,7 +3,9 @@ package llm
 const (
 	DefaultMaxTokensCap   = 1_000_000
 	estimateBytesPerToken = 4
-	estimateImageTokens   = 1600
+	// EstimatedImageTokens is the shared coarse per-image context weight.
+	// Actual provider usage depends on model, dimensions, and image detail.
+	EstimatedImageTokens = 1600
 )
 
 // EstimateInputTokens approximates the model-visible input footprint of req.
@@ -26,7 +28,7 @@ func EstimateInputTokens(req Request) int {
 		}
 	}
 	bytes += len(RequestContextText(req.RequestContext))
-	return bytes/estimateBytesPerToken + images*estimateImageTokens
+	return bytes/estimateBytesPerToken + images*EstimatedImageTokens
 }
 
 func estimateContentBlock(b ContentBlock) (bytes, images int) {

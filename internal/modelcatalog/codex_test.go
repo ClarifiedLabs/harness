@@ -62,6 +62,24 @@ func TestCodexFallbackSnapshotDecodes(t *testing.T) {
 	}
 }
 
+func TestCodexFallbackExposesAstra(t *testing.T) {
+	provider, err := CodexModelsFallback()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, ok := provider.Models["gpt-6-astra"]
+	if !ok {
+		t.Fatal("bundled Codex catalog must expose Astra")
+	}
+	if !model.Reasoning || model.Limit.Context != 272_000 {
+		t.Fatalf("Astra metadata = %+v", model)
+	}
+	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
+	if !ok || fast.Request.ServiceTier != "priority" || fast.Description != "2x speed, increased usage" {
+		t.Fatalf("Astra Fast tier = %+v", fast)
+	}
+}
+
 func TestDecodeCodexReleaseVersion(t *testing.T) {
 	version, err := DecodeCodexReleaseVersion([]byte(`{"tag_name":"rust-v1.23.4"}`))
 	if err != nil {

@@ -56,6 +56,9 @@ func (p *Provider) streamWebSocket(ctx context.Context, req llm.Request, yield f
 		yield(llm.StreamEvent{}, err)
 		return true
 	}
+	if req.NativeSteering && emitted {
+		err = &llm.APIError{Code: "native_steering_interrupted", Message: err.Error(), Retryable: false}
+	}
 	if emitted {
 		yield(llm.StreamEvent{}, err)
 		return true
@@ -97,7 +100,7 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 		if err != nil {
 			return &llm.APIError{Message: "marshal websocket request: " + err.Error()}
 		}
-		emitted, retryFresh, err := p.runWebSocketOnConn(ctx, conn, string(body), req.Purpose == llm.RequestPurposePrewarm, yield)
+		emitted, retryFresh, err := p.runWebSocketOnConn(ctx, conn, string(body), req.Purpose == llm.RequestPurposePrewarm, req.NativeSteering, yield)
 		if err == nil {
 			return nil
 		}
@@ -115,7 +118,10 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 	}
 }
 
-func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body string, prewarm bool, yield func(llm.StreamEvent, error) bool) (emitted bool, retryFresh bool, err error) {
+func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body string, prewarm, native bool, yield func(llm.StreamEvent, error) bool) (emitted bool, retryFresh bool, err error) {
+	p.beginLive(conn, native)
+	var terminal *llm.StreamEvent
+	toolCalls := 0
 	done := make(chan struct{})
 	go func() {
 		select {
@@ -129,7 +135,15 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 	wrappedYield := func(ev llm.StreamEvent, err error) bool {
 		if err == nil {
 			emitted = true
+			if ev.Kind == llm.EventToolCallDone {
+				toolCalls++
+			}
 			if ev.Kind == llm.EventDone {
+				if native {
+					copy := ev
+					terminal = &copy
+					return true
+				}
 				p.wsResponseID = ev.ResponseID
 				if prewarm {
 					zero := 0
@@ -140,6 +154,7 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 		return yield(ev, err)
 	}
 
+	defer func() { p.endLive(err != nil, wrappedYield) }()
 	if err := conn.SendText(body); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return emitted, false, ctxErr
@@ -164,6 +179,25 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 			continue
 		}
 		p.captureWebSocketTurnState(data)
+		if native {
+			handled, successor, stopped := p.handleLiveFrame(data, terminal, wrappedYield)
+			if stopped {
+				return emitted, false, nil
+			}
+			if successor {
+				decoder = newStreamDecoder()
+				terminal = nil
+				toolCalls = 0
+			}
+			if handled {
+				if terminal != nil && !p.liveTerminal() {
+					p.wsResponseID = terminal.ResponseID
+					yield(*terminal, nil)
+					return emitted, false, nil
+				}
+				continue
+			}
+		}
 		if apiErr := webSocketErrorEvent(data); apiErr != nil {
 			return emitted, false, &webSocketResponseError{err: apiErr}
 		}
@@ -172,6 +206,14 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 			return emitted, false, &webSocketResponseError{err: handleErr}
 		}
 		if streamDone {
+			if native && terminal != nil {
+				pending := p.liveTerminal()
+				if pending && toolCalls == 0 {
+					continue
+				}
+				p.wsResponseID = terminal.ResponseID
+				yield(*terminal, nil)
+			}
 			return emitted, false, nil
 		}
 	}

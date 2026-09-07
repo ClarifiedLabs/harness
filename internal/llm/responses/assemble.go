@@ -18,6 +18,8 @@ type pendingTool struct {
 	namespace string
 	args      []byte
 	started   bool
+	async     bool
+	ready     bool
 }
 
 func newToolAssembler() *toolAssembler {
@@ -109,6 +111,7 @@ func (a *toolAssembler) flush(yield func(llm.StreamEvent, error) bool) (ok bool,
 		}
 		if !yield(llm.StreamEvent{
 			Kind:              llm.EventToolCallDone,
+			ToolAsync:         t.async,
 			Index:             i,
 			ToolID:            toolID(t),
 			ToolName:          t.name,
@@ -151,6 +154,7 @@ func outputItemArguments(item *wireOutputItem) []byte {
 }
 
 func mergeItem(t *pendingTool, item *wireOutputItem) {
+	t.async = t.async || item.Async
 	if item.ID != "" {
 		t.itemID = item.ID
 	}
@@ -170,4 +174,17 @@ func toolID(t *pendingTool) string {
 		return t.callID
 	}
 	return t.itemID
+}
+
+func (a *toolAssembler) emitReady(index int, yield func(llm.StreamEvent, error) bool) bool {
+	t := a.pending[index]
+	if t == nil || !t.async || t.ready {
+		return true
+	}
+	t.ready = true
+	input, err := llm.NormalizeToolInputObject(t.args)
+	if err != nil {
+		return true
+	}
+	return yield(llm.StreamEvent{Kind: llm.EventToolCallReady, Index: index, ToolID: toolID(t), ToolName: t.name, ToolNamespace: t.namespace, ToolInput: input, ToolAsync: true}, nil)
 }

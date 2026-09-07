@@ -226,3 +226,30 @@ func reasoningModeForProviderConfig(pc llm.ProviderConfig) string {
 	}
 	return "openai"
 }
+
+// Configuration updates are currently documented only for Astra's public,
+// single-agent Responses API. Custom endpoints and Codex OAuth stay unchanged.
+func targetReasoningUpdates(pc llm.ProviderConfig, entry llm.ModelEntry) bool {
+	model := strings.ToLower(strings.TrimSpace(entry.Name))
+	return strings.EqualFold(pc.APIType, "responses") && strings.TrimRight(pc.BaseURL, "/") == "https://api.openai.com/v1" &&
+		(model == "gpt-6-astra" || strings.HasPrefix(model, "gpt-6-astra-"))
+}
+
+func (h *Handler) mapReasoningStates(target resolvedTarget, req llm.Request) llm.Request {
+	req.Messages = append([]llm.Message(nil), req.Messages...)
+	domain := reasoningReplayDomain(target.pc.Name, target.entry, target.baseTargetID)
+	for i := range req.Messages {
+		state := req.Messages[i].ReasoningState
+		req.Messages[i].ReasoningState = nil
+		if state == nil || !targetReasoningUpdates(target.pc, target.entry) || state.ReplayDomain != domain {
+			continue
+		}
+		mapped := *state
+		mapped.Baseline = h.reasoningForTarget(target, state.Baseline.Profile, state.Baseline)
+		mapped.Active = h.reasoningForTarget(target, state.Active.Profile, state.Active)
+		if mapped.Baseline.Effort != "" && mapped.Active.Effort != "" {
+			req.Messages[i].ReasoningState = &mapped
+		}
+	}
+	return req
+}

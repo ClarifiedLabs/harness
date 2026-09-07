@@ -5599,6 +5599,12 @@ func TestForkCommandCreatesChildSessionWithFreshUsage(t *testing.T) {
 	parentID := app.SessionTree.Header.ID
 	originalPath := app.SessionPath
 	app.finishPromptRun(&llm.APIError{Message: "failed"}, nil)
+	if err := os.MkdirAll(originalPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(originalPath, "task-notes.md"), []byte("Preserve the cache compatibility decision."), 0600); err != nil {
+		t.Fatal(err)
+	}
 	selected := app.SessionTree.Entries[2]
 	result := app.command("/fork "+selected.ID, func(string) (string, error) { return "n", nil })
 	if !result.prefillSet || result.prefill != "second" {
@@ -5606,6 +5612,10 @@ func TestForkCommandCreatesChildSessionWithFreshUsage(t *testing.T) {
 	}
 	if app.SessionPath == originalPath || app.usage.InputTokens != 0 {
 		t.Fatalf("fork path/usage = %q/%+v", app.SessionPath, app.usage)
+	}
+	notes, err := os.ReadFile(filepath.Join(app.SessionPath, "task-notes.md"))
+	if err != nil || string(notes) != "Preserve the cache compatibility decision." {
+		t.Fatalf("fork lost task notes: %s %v", notes, err)
 	}
 	if app.apiContinuationAvailable() {
 		t.Fatal("successful /fork preserved stale API continuation")

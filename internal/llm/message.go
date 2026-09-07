@@ -52,19 +52,30 @@ const (
 // rendered checkpoint text, and preserves deterministic compacted-history file
 // activity alongside the summary prose and its provenance.
 type CompactionMetadata struct {
-	Summary          string   `json:"summary"`
-	SummarySource    string   `json:"summary_source,omitempty"`
-	FallbackReason   string   `json:"fallback_reason,omitempty"`
-	Focus            string   `json:"focus,omitempty"`
-	ReadFiles        []string `json:"read_files,omitempty"`
-	ReadFilesOmitted int      `json:"read_files_omitted,omitempty"`
-	ModifiedFiles    []string `json:"modified_files,omitempty"`
+	UserInstructions []ContentBlock `json:"user_instructions,omitempty"`
+	Summary          string         `json:"summary"`
+	SummarySource    string         `json:"summary_source,omitempty"`
+	FallbackReason   string         `json:"fallback_reason,omitempty"`
+	Focus            string         `json:"focus,omitempty"`
+	ReadFiles        []string       `json:"read_files,omitempty"`
+	ReadFilesOmitted int            `json:"read_files_omitted,omitempty"`
+	ModifiedFiles    []string       `json:"modified_files,omitempty"`
 }
 
 // Message is one turn-fragment in a transcript: a role plus an ordered list of
 // content blocks. ParallelToolBatches is execution metadata set only on the user
 // message carrying the corresponding tool results; provider adapters ignore it.
+// ReasoningState records the request baseline and active effort at a user-input
+// boundary. It is replayed only by an explicitly capable target in the same domain.
+type ReasoningState struct {
+	ReplayDomain string          `json:"replay_domain"`
+	Baseline     ReasoningConfig `json:"baseline"`
+	Active       ReasoningConfig `json:"active"`
+}
+
 type Message struct {
+	SteerID             string              `json:"steer_id,omitempty"`
+	ReasoningState      *ReasoningState     `json:"reasoning_state,omitempty"`
 	Role                Role                `json:"role"`
 	Time                time.Time           `json:"time,omitempty"`
 	Phase               string              `json:"phase,omitempty"`
@@ -153,6 +164,7 @@ type ContentBlock struct {
 	// matching BlockToolResult for dialects that require it in the result.
 	ToolUseID     string          `json:"tool_use_id,omitempty"` // provider-issued call id
 	ToolName      string          `json:"tool_name,omitempty"`
+	ToolAsync     bool            `json:"tool_async,omitempty"`
 	ToolNamespace string          `json:"tool_namespace,omitempty"` // provider namespace for exact replay; local dispatch still uses ToolName
 	ToolInput     json.RawMessage `json:"tool_input,omitempty"`     // complete JSON object
 
@@ -203,6 +215,7 @@ type ContentBlock struct {
 // ToolCall is a flat view of a BlockToolUse, carried from the agent loop into
 // the tool layer.
 type ToolCall struct {
+	Async             bool
 	ID                string
 	Name              string
 	Namespace         string

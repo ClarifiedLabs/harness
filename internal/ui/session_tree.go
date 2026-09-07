@@ -12,6 +12,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
+	"harness/internal/taskcontext"
 	"harness/internal/trajectory"
 )
 
@@ -178,6 +179,10 @@ func (app *App) extractSession(source, target string, readLine func(string) (str
 		return false
 	}
 	path := session.DefaultPathForID(app.StateDir, created, tree.Header.ID)
+	if err := taskcontext.CopyNotes(context.Background(), app.SessionPath, path); err != nil {
+		fmt.Fprintf(app.Errw, "[%s failed: copy task notes: %v]\n", source, err)
+		return false
+	}
 	if app.BeforeSessionPathChange != nil {
 		if err := app.BeforeSessionPathChange(path); err != nil {
 			fmt.Fprintf(app.Errw, "[%s failed: lock new session: %v]\n", source, err)

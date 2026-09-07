@@ -127,12 +127,15 @@ func Registry(catalog protocol.Catalog) *llm.Registry {
 			continue
 		}
 		info := llm.ModelInfo{
-			ContextWindow:   target.ContextWindow,
-			OutputLimit:     target.OutputLimit,
-			InputModalities: append([]string(nil), target.InputModalities...),
-			ServerTools:     llm.NormalizeServerTools(target.ServerTools),
-			Price:           target.Price,
-			Reasoning:       proxyTargetReasoning(target),
+			ReasoningUpdates: target.ReasoningUpdates,
+			AsyncTools:       target.AsyncTools,
+			NativeSteering:   target.NativeSteering,
+			ContextWindow:    target.ContextWindow,
+			OutputLimit:      target.OutputLimit,
+			InputModalities:  append([]string(nil), target.InputModalities...),
+			ServerTools:      llm.NormalizeServerTools(target.ServerTools),
+			Price:            target.Price,
+			Reasoning:        proxyTargetReasoning(target),
 		}
 		models[target.ID] = info
 		for _, alias := range target.Aliases {

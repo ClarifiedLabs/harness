@@ -125,6 +125,7 @@ internal/sysprompt       embedded prompt files + environment context + AGENTS.md
 internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/model target) (§14)
 internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSubmit/Pre+PostToolUse/Pre+PostCompact/Stop)
 internal/skills          skill discovery + `$skillName` prompt expansion
+internal/taskcontext     durable note files and bounded canonical session-tree lookup (§9)
 internal/todo            advisory update_todos store and renderer (§9.13)
 internal/plan            immutable record_plan artifact and latest-plan store (§9.17)
 internal/handoff         /handoff request DTO shared by the interactive drivers (§14)
@@ -540,7 +541,7 @@ Edge cases:
 |---|---|---|---|---|
 | Endpoint default | `https://api.openai.com/v1/responses` | `https://api.openai.com/v1/chat/completions` | `https://api.anthropic.com/v1/messages` | `https://generativelanguage.googleapis.com/v1beta/interactions` |
 | Auth | `Authorization: Bearer <key>` | same | `x-api-key: <key>` + `anthropic-version: 2023-06-01` | `x-goog-api-key: <key>` |
-| Transport | HTTP SSE by default; provider configs may set `responses_websocket:true`, and the proxy defaults it on for `codex_oauth` Responses providers | HTTP SSE | HTTP SSE | HTTP SSE |
+| Transport | WebSockets by default for public OpenAI Astra targets and `codex_oauth` providers; HTTP SSE otherwise. Explicit `responses_websocket` settings take precedence | HTTP SSE | HTTP SSE | HTTP SSE |
 | Tool schemas | `tools[] = {type:"function", name, description, parameters, strict:false}`; native search also uses deferred functions inside `namespace` tools plus `tool_search` | `tools[].function = {name, description, parameters}` (`type:"function"`) | `tools[] = {name, description, input_schema}`; native search flattens deferred functions at top level with `defer_loading:true` | `tools[] = {type:"function", name, description, parameters}` |
 | Server tools | `web_search`, or OpenRouter `openrouter:web_search`; `tool_search` for native deferred namespaces | OpenRouter `openrouter:web_search`; MiMo `web_search`; Kimi `builtin_function.$web_search`; Z.AI nested `web_search` options | `web_search_20250305` named `web_search`; versioned BM25 or regex `tool_search_tool_*_20251119` | `google_search` |
 | Parallel tool hint | `parallel_tool_calls:true` when tools are present | `parallel_tool_calls:true` when tools are present | not sent | not sent |
@@ -681,8 +682,9 @@ endpoints that require `store:false`, or `responses_stateful:true` to explicitly
 advertise support. If a provider rejects `store:true` before streaming output,
 the agent disables stateful continuation for that agent, rebuilds the request,
 and retries once stateless. Responses providers can set `responses_websocket:true`
-to use the Responses WebSocket transport; the proxy defaults that on for
-`codex_oauth` Responses configs and preserves explicit true/false overrides.
+to use the Responses WebSocket transport; the proxy defaults that on for public
+OpenAI Astra targets and `codex_oauth` Responses configs, preserving explicit
+true/false overrides.
 The Codex WebSocket request always carries `store:false`; its response IDs are
 continuation handles scoped to the originating live socket rather than durable
 stored Responses objects. If a WebSocket request without a previous response
@@ -782,16 +784,26 @@ immediate prewarming. Submitting a real prompt cancels a pending delayed warmup
 before the turn starts.
 
 **Responses reasoning persistence.** On stateless or full-history fallback
-requests, the provider would otherwise re-derive chain-of-thought on every tool
-turn. For a reasoning request harness sends
-`include: ["reasoning.encrypted_content"]`,
-captures each reasoning item's id and `encrypted_content`, and persists it on the
+requests, harness preserves provider-owned reasoning even when effort and
+summary controls are unset (provider defaults). It captures each reasoning
+item's id and `encrypted_content`, and persists it on the
 transcript as a `BlockReasoning` content block (§4). On the next request
 `buildInput` re-emits that as a `reasoning` input item immediately before its
-`function_call`, so reasoning is replayed rather than recomputed. The replay is
-gated on the request itself being a reasoning request — a reasoning-off call
-(compaction summary, prewarm) drops the encrypted items, since a reasoning input
-item without the matching `include` is rejected.
+`function_call`. Current OpenAI stateless responses include encrypted content
+by default; harness also sends the legacy
+`include: ["reasoning.encrypted_content"]` when explicit reasoning controls or
+replayed reasoning are present, preserving compatible older backends. Replay
+does not force an effort or enable visible summaries. Textual compaction,
+branch-summary, and prewarm requests omit reasoning unless explicitly requested;
+native compaction always includes it to canonicalize provider state.
+
+Astra effort updates are advertised through proxy target and core model
+metadata. Each user boundary may carry transcript-only `ReasoningState` with
+baseline, active effort, and replay domain; the proxy maps portable profiles
+and Responses alone projects it into configuration updates. Full replay and
+continuation deltas retain the same request baseline. A native v2 checkpoint
+reasserts active effort after the canonical compacted window. Configuration
+updates are gated off for standalone compaction and textual maintenance calls.
 
 **Opaque reasoning replay domains.** The model catalog gives every base target
 a provider-local replay domain. The default is the exact base target ID;
@@ -1302,7 +1314,8 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   mixed old/new proxy fleet. Once complete, the stateless wire contract supports
   normal proxy-only rolling updates.
 - **Bounded Responses WebSocket pool.** The proxy keys pooled transports by
-  separately hashed connection configuration and `ProxySessionID`. Defaults are
+  separately hashed connection configuration, `ProxySessionID`, and authenticated
+  API-key identity. Defaults are
   64 connections, a one-hour idle TTL, no absolute-age cap, and a 30-second
   janitor tick. Acquisitions lease an entry; idle capacity pressure evicts LRU,
   while all-busy pressure creates an unpooled provider that closes on release.
@@ -1780,6 +1793,28 @@ prompt.
   prompt, so the input is never lost. `^C`/Esc-Esc cancel the in-flight prompt as
   usual; steering changes nothing about interrupt handling (§8.4).
 
+Native steering defaults on for capable targets; `astra_native_steering:false`
+opts out. Public OpenAI Astra targets default to WebSockets unless their provider
+explicitly sets `responses_websocket:false`. Runtime and catalog transport
+selection share the same target-aware resolver, so other public models keep
+their existing transport default.
+Core `LiveSteerer` and `EventLiveSteer` carry control metadata; the agent never
+imports Responses. The proxy binds a live stream to authenticated principal,
+target, and session; Responses alone writes `response.steer`. Queue acceptance
+and successor application are distinct events. Tool waits retain the same
+connection and close the ordinary call/result round before the applied steer
+enters the semantic transcript. Later input cannot overtake that pending steer.
+One native attempt per stream bounds automatic continuations. Cancellation of a
+blocked steer write aborts its partially written WebSocket connection.
+
+An automatic successor preserves the preceding assistant output and applied user
+input in transcript order. Delivery callbacks run only after those messages are
+installed and validated. Pending submissions are checkpointed with continuation
+state; resets recover unseen submission IDs into user history and retire the old
+connection. An interrupted native exchange suppresses blind stream retry. The
+proxy prices each response before summing usage, while context estimates use the
+last response's input size. All persistence uses existing session recorders.
+
 ### 8.2 Tool failure handling
 
 `Dispatch` never lets the loop crash. Each failure mode becomes an `is_error` result
@@ -1997,6 +2032,16 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
   OpenTelemetry is enabled; startup also prints a concise budget warning.
 
 ## 9. Tool set (`internal/tools`)
+
+Async read execution is opt-in and capability-gated. Responses emits a
+separate `EventToolCallReady` when an async function item finishes; the final
+ordered `EventToolCallDone` list remains authoritative. The agent speculates
+only approved read implementations in the first stage, joins workers before
+returning the stream, and reuses results only when call ID, name, and normalized
+input match. Detached background launches are never speculative. Once the final
+batch budget is known, `Registry.LimitResult` reapplies read-aware clipping to
+cached results without rerunning them, preserving continuation and archive data.
+Ordinary transcript call/result adjacency remains unchanged.
 
 The tool contract lives in `internal/tools/tool.go`. `Tool` is the required
 core — `Name`, one-line model-facing `Description`, hand-written JSON-Schema
@@ -2808,6 +2853,28 @@ keeps only the latest `plan.Plan` pointer for persistence, display, and user
 `independent`, default-inheriting custom agents, and `plan`), requires a live
 session directory, and is private per delegate child. The tool does not
 request implementation; `/handoff` is a user command (§10, §14).
+
+### 9.18 Experimental context tools
+
+`codex_experimental_context_management` exposes `task_notes`, `history_search`,
+`history_read`, `history_list`, `get_context_remaining`, and `new_context` only
+for resolved `openai-codex` targets. This top-level config setting defaults to
+`true` and can be disabled with `false`. Provider policy is resolved by the CLI;
+core agent code remains provider-neutral. Optional tool availability keeps the
+model-facing schema current after provider switches, and the tools reject calls
+when unavailable. Each delegate uses its own resolved policy and session store.
+
+Notes are working data, not a replacement for user instructions. The agent
+owns context estimates and the existing compaction lifecycle: low-budget
+reminders precede a bounded handoff buffer, then reset archives and validates
+the complete old window before replacing it with original user inputs and a
+small recovery hint. No summary call is made in this mode. Manual compaction and
+`new_context` share hooks and accounting. Existing session checkpoints preserve
+history before/after replacement; canonical tree entry IDs identify historical
+items and windows. `internal/sessionrec` remains the sole raw replay recorder.
+See [compaction.md](compaction.md#experimental-context-management) for budgets
+and the Codex comparison, and [tools.md](tools.md#experimental-context-management)
+for note-file and lookup operations.
 
 ## 10. CLI / REPL (`internal/ui`)
 

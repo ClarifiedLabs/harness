@@ -34,6 +34,13 @@ type Tool interface {
 	Run(ctx context.Context, input json.RawMessage) (string, error)
 }
 
+// AvailableTool is an optional runtime capability gate. Specs omits unavailable
+// tools; implementations also reject direct calls while unavailable. Unlike a
+// lazy schema filter, this follows provider or session changes.
+type AvailableTool interface {
+	Available() bool
+}
+
 // BackgroundProgressSnapshot is bounded, process-local live execution state.
 // It is display/diagnostic-only and is never persisted or model-facing.
 type BackgroundProgressSnapshot struct {
@@ -424,6 +431,9 @@ func (r *Registry) Remove(name string) bool {
 func (r *Registry) Specs() []llm.ToolSchema {
 	specs := make([]llm.ToolSchema, 0, len(r.order))
 	for _, name := range r.order {
+		if tool, ok := r.tools[name].(AvailableTool); ok && !tool.Available() {
+			continue
+		}
 		if r.specFilter != nil && !r.specFilter(name) {
 			continue
 		}
@@ -783,13 +793,7 @@ func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm
 		return res, completion
 	}
 
-	resolvedLimits := r.resultLimitsFor(call.Name)
-	if dispatchLimits.MaxResultBytes > 0 && dispatchLimits.MaxResultBytes < resolvedLimits.maxBytes {
-		resolvedLimits.maxBytes = dispatchLimits.MaxResultBytes
-	}
-	if dispatchLimits.MaxResultLines > 0 && dispatchLimits.MaxResultLines < resolvedLimits.maxLines {
-		resolvedLimits.maxLines = dispatchLimits.MaxResultLines
-	}
+	resolvedLimits := r.resultLimitsForDispatch(call.Name, dispatchLimits)
 
 	if r.dispatchGuard != nil {
 		guardCall := call
@@ -937,6 +941,35 @@ func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm
 	prepared.BackgroundJobID = backgroundJobID
 	prepared.Useless = useless
 	return prepared, completion
+}
+
+func (r *Registry) resultLimitsForDispatch(toolName string, dispatchLimits DispatchLimits) resultLimits {
+	limits := r.resultLimitsFor(toolName)
+	if dispatchLimits.MaxResultBytes > 0 && dispatchLimits.MaxResultBytes < limits.maxBytes {
+		limits.maxBytes = dispatchLimits.MaxResultBytes
+	}
+	if dispatchLimits.MaxResultLines > 0 && dispatchLimits.MaxResultLines < limits.maxLines {
+		limits.maxLines = dispatchLimits.MaxResultLines
+	}
+	return limits
+}
+
+// LimitResult tightens an already dispatched result without executing the tool
+// again. Speculative reads use it once the final batch allowance is known. It
+// preserves complete read lines, continuation receipts, and archival metadata.
+func (r *Registry) LimitResult(toolName string, result llm.ToolResult, dispatchLimits DispatchLimits) llm.ToolResult {
+	text, info := truncateToolResult(toolName, result.Text, r.resultLimitsForDispatch(toolName, dispatchLimits))
+	if !info.truncated {
+		return result
+	}
+	if result.OriginalText == "" {
+		result.OriginalText = result.Text
+	}
+	result.Text = text
+	result.Truncated = true
+	result.OriginalBytes = max(result.OriginalBytes, len(result.OriginalText))
+	result.ShownBytes = len(text)
+	return result
 }
 
 // PrepareResult applies the registry's configured limits and records the full

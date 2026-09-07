@@ -460,6 +460,11 @@ func TestBuildRequestPromptCacheBreakpointCapabilityGate(t *testing.T) {
 			CachePolicy: llm.CachePolicy{StableMessagePrefix: 1},
 		}
 	}
+	for _, model := range []string{"gpt-6-astra", "openai:gpt-6-astra", "gpt-6-astra-2026-09-03"} {
+		if got := countPromptCacheBreakpoints(buildRequest(request(model), 0, 0).Input); got != 1 {
+			t.Errorf("%s breakpoint count = %d, want 1", model, got)
+		}
+	}
 	if got := countPromptCacheBreakpoints(buildRequest(request("gpt-5.5"), 0, 0).Input); got != 0 {
 		t.Fatalf("older model breakpoint count = %d, want 0", got)
 	}
@@ -768,6 +773,10 @@ func TestToolSearchCapabilityGate(t *testing.T) {
 		{name: "codex spark supported", model: "gpt-5.3-codex-spark", baseURL: defaultBaseURL, want: true},
 		{name: "snapshot", model: "gpt-5.6-2026-08-01", baseURL: defaultBaseURL, want: true},
 		{name: "qualified", model: "openai:gpt-6.0", baseURL: defaultBaseURL, want: true},
+		{name: "astra", model: "gpt-6-astra", baseURL: defaultBaseURL, want: true},
+		{name: "qualified astra", model: "openai:gpt-6-astra", baseURL: defaultBaseURL, want: true},
+		{name: "astra snapshot", model: "gpt-6-astra-2026-09-03", baseURL: defaultBaseURL, want: true},
+		{name: "unknown astra suffix", model: "gpt-6-astral", baseURL: defaultBaseURL},
 		{name: "older", model: "gpt-5.3", baseURL: defaultBaseURL},
 		{name: "custom endpoint", model: "gpt-5.6", baseURL: "https://compatible.test/v1"},
 		{name: "compatible opt in", model: "custom", baseURL: "https://compatible.test/v1", override: &enabled, want: true},
@@ -890,16 +899,9 @@ func TestBuildInputDropsReasoningWithoutEncryptedContent(t *testing.T) {
 	}
 }
 
-// Compaction summary and prewarm send the full transcript with reasoning
-// disabled. A persisted encrypted reasoning block must NOT be replayed then:
-// buildRequest omits Reasoning/Include in that case, so a stray reasoning input
-// item would carry no matching encrypted_content include and the provider would
-// reject the asymmetry.
-func TestBuildInputSkipsReasoningWhenReasoningDisabled(t *testing.T) {
+func TestBuildInputReasoningReplayUsesRequestPurpose(t *testing.T) {
 	req := llm.Request{
-		Model: "gpt-5.5",
-		// Reasoning left empty (off), as compaction's streamSummary and
-		// PrewarmRequest set it.
+		Model: "gpt-6-astra",
 		Messages: []llm.Message{
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "hi"}}},
 			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
@@ -909,14 +911,36 @@ func TestBuildInputSkipsReasoningWhenReasoningDisabled(t *testing.T) {
 			{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "call_1", ResultText: "ok"}}},
 		},
 	}
-	w := buildRequest(req, 0, 0)
-	if len(w.Include) != 0 {
-		t.Fatalf("include = %v, want none when reasoning is off", w.Include)
-	}
-	for _, item := range w.Input {
-		if item.Type == "reasoning" {
-			t.Fatalf("reasoning item replayed on a reasoning-off request: %+v", item)
-		}
+	for _, tc := range []struct {
+		purpose    llm.RequestPurpose
+		wantReplay bool
+	}{
+		{"", true},
+		{llm.RequestPurposeTurn, true},
+		{llm.RequestPurposePrewarm, false},
+		{llm.RequestPurposeCompaction, false},
+		{llm.RequestPurposeBranchSummary, false},
+	} {
+		t.Run(string(tc.purpose), func(t *testing.T) {
+			req.Purpose = tc.purpose
+			w := buildRequest(req, 0, 0)
+			if w.Reasoning != nil {
+				t.Fatalf("provider default replaced with explicit controls: %+v", w.Reasoning)
+			}
+			replayed := false
+			for i, item := range w.Input {
+				if item.Type != "reasoning" {
+					continue
+				}
+				replayed = true
+				if item.ID != "rs_1" || item.EncryptedContent != "enc-abc" || i+1 >= len(w.Input) || w.Input[i+1].Type != "function_call" {
+					t.Fatalf("reasoning lost or reordered: %+v", w.Input)
+				}
+			}
+			if replayed != tc.wantReplay {
+				t.Fatalf("replayed = %v, want %v", replayed, tc.wantReplay)
+			}
+		})
 	}
 }
 
@@ -941,5 +965,128 @@ func TestBuildRequestUserImage(t *testing.T) {
 	}
 	if parts[1].Type != "input_text" || parts[1].Text != "describe it" {
 		t.Fatalf("second part = %+v", parts[1])
+	}
+}
+
+func TestExplicitOnlyCacheMarksStableTailAndOmitsMaintenanceOptions(t *testing.T) {
+	req := llm.Request{Model: "gpt-6-astra", Messages: []llm.Message{{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "stable tail"}}}}, CachePolicy: llm.CachePolicy{StableMessagePrefix: 1}}
+	opts := buildOptions{baseURL: defaultBaseURL, promptCache: llm.PromptCacheConfig{Mode: "explicit", TTL: "30m"}}
+	w := buildRequestWithOptions(req, 0, 0, opts)
+	if w.PromptCacheOptions == nil || w.PromptCacheOptions.Mode != "explicit" || w.PromptCacheOptions.TTL != "30m" || countPromptCacheBreakpoints(w.Input) != 1 {
+		t.Fatalf("explicit cache not established: %+v", w)
+	}
+	opts.disablePromptCacheBreakpoints = true
+	w = buildRequestWithOptions(req, 0, 0, opts)
+	if w.PromptCacheOptions != nil || countPromptCacheBreakpoints(w.Input) != 0 {
+		t.Fatal("maintenance request carried cache controls")
+	}
+	opts.disablePromptCacheBreakpoints = false
+	req.Model = "gpt-5.4"
+	if w = buildRequestWithOptions(req, 0, 0, opts); w.PromptCacheOptions != nil {
+		t.Fatal("unsupported model carried cache controls")
+	}
+	opts.baseURL = "https://compatible.test/v1"
+	req.Model = "gpt-6-astra"
+	if w = buildRequestWithOptions(req, 0, 0, opts); w.PromptCacheOptions != nil {
+		t.Fatal("custom endpoint implicitly enabled")
+	}
+	enabled := true
+	opts.promptCache.ExplicitBreakpoints = &enabled
+	if w = buildRequestWithOptions(req, 0, 0, opts); w.PromptCacheOptions == nil {
+		t.Fatal("explicit opt-in ignored")
+	}
+}
+
+func TestReasoningUpdatesPreserveCurrentSummary(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		historical string
+		current    string
+	}{
+		{name: "enable", current: "auto"},
+		{name: "disable", historical: "auto"},
+		{name: "change", historical: "auto", current: "detailed"},
+	} {
+		for _, delta := range []bool{false, true} {
+			mode := "full_history"
+			if delta {
+				mode = "delta"
+			}
+			t.Run(tc.name+"/"+mode, func(t *testing.T) {
+				baseline := llm.ReasoningConfig{Effort: "low", Summary: tc.historical}
+				current := llm.ReasoningConfig{Effort: "high", Summary: tc.current}
+				req := llm.Request{
+					Model:     "gpt-6-astra",
+					Reasoning: current,
+					Messages: []llm.Message{
+						{Role: llm.RoleUser, ReasoningState: &llm.ReasoningState{ReplayDomain: "astra", Baseline: baseline, Active: baseline}, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first turn"}}},
+						{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "first answer"}}},
+						{Role: llm.RoleUser, ReasoningState: &llm.ReasoningState{ReplayDomain: "astra", Baseline: baseline, Active: current}, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "next turn"}}},
+					},
+				}
+				wantEfforts := []string{"low", "high"}
+				if delta {
+					req.Messages = req.Messages[2:]
+					req.PreviousResponseID = "resp_previous"
+					wantEfforts = wantEfforts[1:]
+				}
+				w := buildRequest(req, 0, 0)
+				if w.Reasoning == nil || w.Reasoning.Effort != baseline.Effort || w.Reasoning.Summary != tc.current {
+					t.Fatalf("reasoning = %+v, want historical effort %q and current summary %q", w.Reasoning, baseline.Effort, tc.current)
+				}
+				if w.PreviousResponseID != req.PreviousResponseID {
+					t.Fatalf("previous_response_id = %q, want %q", w.PreviousResponseID, req.PreviousResponseID)
+				}
+				var efforts []string
+				for i, item := range w.Input {
+					if item.Type != "configuration_update" {
+						continue
+					}
+					if item.Reasoning == nil || item.Reasoning.Summary != "" || i+1 >= len(w.Input) || w.Input[i+1].Role != string(llm.RoleUser) {
+						t.Fatalf("invalid effort-only user-boundary update: %+v", w.Input)
+					}
+					efforts = append(efforts, item.Reasoning.Effort)
+				}
+				if strings.Join(efforts, ",") != strings.Join(wantEfforts, ",") {
+					t.Fatalf("boundary efforts = %v, want %v", efforts, wantEfforts)
+				}
+				data, err := json.Marshal(w)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var body struct {
+					Reasoning map[string]string `json:"reasoning"`
+				}
+				if err := json.Unmarshal(data, &body); err != nil {
+					t.Fatal(err)
+				}
+				summary, present := body.Reasoning["summary"]
+				if summary != tc.current || present != (tc.current != "") {
+					t.Fatalf("wire summary = %q (present %v), want %q", summary, present, tc.current)
+				}
+			})
+		}
+	}
+}
+
+func TestReasoningUpdatesPreserveBaselineAndCompactionOrder(t *testing.T) {
+	state := &llm.ReasoningState{ReplayDomain: "astra", Baseline: llm.ReasoningConfig{Effort: "low"}, Active: llm.ReasoningConfig{Effort: "high"}}
+	req := llm.Request{Model: "gpt-6-astra", Reasoning: llm.ReasoningConfig{Effort: "high"}, Messages: []llm.Message{
+		{Role: llm.RoleUser, Origin: llm.MessageOriginProviderCompaction, ReasoningState: state, Content: []llm.ContentBlock{{Kind: llm.BlockProviderCompaction, ProviderCompaction: []json.RawMessage{json.RawMessage(`{"type":"compaction","encrypted_content":"state"}`)}}}},
+		{Role: llm.RoleUser, ReasoningState: state, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "continue"}}},
+	}}
+	w := buildRequest(req, 0, 0)
+	if w.Reasoning.Effort != "low" || len(w.Input) != 3 || w.Input[0].Type != "compaction" || w.Input[1].Type != "configuration_update" || w.Input[1].Reasoning.Effort != "high" || w.Input[2].Type != "message" {
+		t.Fatalf("configuration replay %+v", w)
+	}
+	req.Model = "gpt-5.6"
+	w = buildRequest(req, 0, 0)
+	if w.Reasoning.Effort != "high" || len(w.Input) != 2 {
+		t.Fatal("unsupported model used updates")
+	}
+	req.Model = "gpt-6-astra"
+	req.Purpose = llm.RequestPurposeBranchSummary
+	if w = buildRequest(req, 0, 0); len(w.Input) != 2 {
+		t.Fatal("textual summary used updates")
 	}
 }

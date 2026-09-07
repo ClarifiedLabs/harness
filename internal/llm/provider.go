@@ -112,11 +112,12 @@ func NormalizeRequestPurpose(purpose RequestPurpose) RequestPurpose {
 
 // Request is one model call's worth of input, provider-neutral.
 type Request struct {
-	Model    string         `json:"model"`
-	Purpose  RequestPurpose `json:"purpose,omitempty"` // harness/model-proxy metadata; never forwarded upstream
-	System   string         `json:"system,omitempty"`
-	Messages []Message      `json:"messages,omitempty"`
-	Tools    []ToolSchema   `json:"tools,omitempty"`
+	NativeSteering bool           `json:"native_steering,omitempty"`
+	Model          string         `json:"model"`
+	Purpose        RequestPurpose `json:"purpose,omitempty"` // harness/model-proxy metadata; never forwarded upstream
+	System         string         `json:"system,omitempty"`
+	Messages       []Message      `json:"messages,omitempty"`
+	Tools          []ToolSchema   `json:"tools,omitempty"`
 	// DeferredToolGroups contains trusted local function schemas grouped by the
 	// integration that provides them. A capable provider may expose the functions
 	// through native tool search instead of loading them into the initial model
@@ -195,14 +196,16 @@ type CachePolicy struct {
 // previous_interaction_id; the neutral name keeps continuation bookkeeping out
 // of the agent's provider-specific code.
 type ResponseState struct {
-	PreviousResponseID string `json:"previous_response_id,omitempty"`
-	AnchorMessages     int    `json:"anchor_messages,omitempty"`
-	AnchorDigest       string `json:"anchor_digest,omitempty"`
+	PendingSteers      []SteerSubmission `json:"pending_steers,omitempty"`
+	PreviousResponseID string            `json:"previous_response_id,omitempty"`
+	AnchorMessages     int               `json:"anchor_messages,omitempty"`
+	AnchorDigest       string            `json:"anchor_digest,omitempty"`
 }
 
 // ToolSchema is the model-facing declaration of one tool. Parameters is the raw
 // JSON Schema object owned by the tool layer; it is passed through unchanged.
 type ToolSchema struct {
+	Async       bool            `json:"async,omitempty"`
 	Name        string          `json:"name"`
 	Description string          `json:"description,omitempty"`
 	Parameters  json.RawMessage `json:"parameters,omitempty"` // JSON Schema object, owned by the tool layer
@@ -254,6 +257,8 @@ const (
 	EventResponsesToolSearch                  // hidden complete hosted Responses tool-search item for stateless replay
 	EventAnthropicToolSearch                  // hidden complete hosted Anthropic tool-search block for replay
 	EventModelRequest                         // diagnostics-only request lifecycle metadata; never model content
+	EventToolCallReady                        // complete async call available before the final ordered call list
+	EventLiveSteer                            // native steering lifecycle or automatic response boundary
 )
 
 // ModelRequestState identifies one out-of-band model request lifecycle event.
@@ -329,7 +334,8 @@ const (
 // StreamEvent is one event in a provider stream. Which fields are populated
 // depends on Kind.
 type StreamEvent struct {
-	Kind EventKind `json:"kind"`
+	LiveSteer *LiveSteerEvent `json:"live_steer,omitempty"`
+	Kind      EventKind       `json:"kind"`
 
 	Text  string `json:"text,omitempty"` // EventTextDelta / EventReasoningSummary
 	Phase string `json:"phase,omitempty"`
@@ -369,7 +375,8 @@ type StreamEvent struct {
 	ToolName      string          `json:"tool_name,omitempty"`      // Start/Done
 	ToolNamespace string          `json:"tool_namespace,omitempty"` // Start/Done; hosted Responses namespace for replay
 	ArgsDelta     string          `json:"args_delta,omitempty"`     // Delta
-	ToolInput     json.RawMessage `json:"tool_input,omitempty"`     // Done only: complete JSON object
+	ToolAsync     bool            `json:"tool_async,omitempty"`
+	ToolInput     json.RawMessage `json:"tool_input,omitempty"` // Done only: complete JSON object
 	// InvalidInputError is set on EventToolCallDone when the provider streamed
 	// malformed tool-call JSON. ToolInput still contains a valid diagnostic
 	// object so the transcript can feed an error result back to the model.

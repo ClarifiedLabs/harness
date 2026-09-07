@@ -118,6 +118,18 @@ func TestDefaultDelegateMaxActive(t *testing.T) {
 	}
 }
 
+func TestContextManagementDefaultsOnAndCanBeDisabled(t *testing.T) {
+	result := load(t, nil, nil, "")
+	if !result.Config.CodexExperimentalContextManagement || result.Sources["codex_experimental_context_management"].Kind != configmeta.SourceDefault {
+		t.Fatalf("context management = %t source=%+v, want enabled default", result.Config.CodexExperimentalContextManagement, result.Sources["codex_experimental_context_management"])
+	}
+	path := writeConfig(t, `{"codex_experimental_context_management":false}`)
+	result = load(t, nil, nil, path)
+	if result.Config.CodexExperimentalContextManagement || result.Sources["codex_experimental_context_management"].Kind != configmeta.SourceFile {
+		t.Fatalf("context management = %t source=%+v, want disabled config", result.Config.CodexExperimentalContextManagement, result.Sources["codex_experimental_context_management"])
+	}
+}
+
 func TestRootMetaFlagsShortCircuitConfigResolution(t *testing.T) {
 	invalidConfig := writeConfig(t, `{"unknown_setting":true}`)
 	tests := []struct {
@@ -933,5 +945,18 @@ func TestStagnationNudgeDefaultsOnAndCanBeDisabled(t *testing.T) {
 	result = load(t, []string{"-stagnation-nudge=false"}, map[string]string{"HARNESS_STAGNATION_NUDGE": "true"}, path)
 	if result.Config.StagnationNudge || result.Sources["stagnation_nudge"].Kind != configmeta.SourceFlag {
 		t.Fatalf("flag stagnation nudge = %t source=%+v, want disabled flag", result.Config.StagnationNudge, result.Sources["stagnation_nudge"])
+	}
+}
+
+func TestNativeSteeringDefaultsOnAndCanBeDisabled(t *testing.T) {
+	result := load(t, nil, nil, "")
+	if !result.Config.AstraNativeSteering || result.Sources["astra_native_steering"].Kind != configmeta.SourceDefault {
+		t.Fatalf("native steering default = %t, source=%+v", result.Config.AstraNativeSteering, result.Sources["astra_native_steering"])
+	}
+
+	path := writeConfig(t, `{"astra_native_steering":false}`)
+	result = load(t, nil, nil, path)
+	if result.Config.AstraNativeSteering || result.Sources["astra_native_steering"].Kind != configmeta.SourceFile {
+		t.Fatalf("native steering opt-out = %t, source=%+v", result.Config.AstraNativeSteering, result.Sources["astra_native_steering"])
 	}
 }

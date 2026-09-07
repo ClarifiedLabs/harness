@@ -30,10 +30,15 @@ config-defined agents. Both commands exit before creating a session.
 
 `--models --format json` also shows each target's `api_type`,
 `continuation_stateful`, provider-native `native_compaction`, zero-generation
-`prewarm` support, `server_tools`, price, and variant relationship
+`prewarm` support, `reasoning_updates`, `async_tools`, `native_steering`,
+`server_tools`, price, and variant relationship
 (`base_target_id` / `variant`). When a target advertises `web_search`,
 `-web-search auto` lets harness declare the provider-hosted web search tool for
 model calls. The default is `off`.
+
+The reasoning-update, async-tool, and native-steering booleans report proxy
+capabilities explicitly, including `false`; they do not mean that an
+experimental feature is enabled in the current Harness configuration.
 
 ## Interactive Initial Prompt
 
@@ -629,8 +634,13 @@ environment variables, JSON paths, types, and defaults. The concise
 | `compact_keep_turns` | `integer` | - | - | - | `compact_keep_turns` | 0 (all retained) | no | Harness compact keep turns setting. |
 | `compact_keep_tokens` | `integer` | - | - | - | `compact_keep_tokens` | 20000 | no | Harness compact keep tokens setting. |
 | `compact_auto_enabled` | `boolean` | `true`, `false` | - | - | `compact_auto_enabled` | true | no | Harness compact auto enabled setting. |
+| `codex_experimental_context_management` | `boolean` | `true`, `false` | - | - | `codex_experimental_context_management` | true | no | Harness codex experimental context management setting. |
+| `experimental_async_tools` | `boolean` | `true`, `false` | - | - | `experimental_async_tools` | false | no | Harness experimental async tools setting. |
+| `astra_native_steering` | `boolean` | `true`, `false` | - | - | `astra_native_steering` | true | no | Harness astra native steering setting. |
 | `compact_trigger_percent` | `integer` | - | - | - | `compact_trigger_percent` | 78 | no | Harness compact trigger percent setting. |
 | `compact_target_percent` | `integer` | - | - | - | `compact_target_percent` | 65 | no | Harness compact target percent setting. |
+| `compact_input_tokens` | `integer` | - | - | - | `compact_input_tokens` | 0 (disabled) | no | Harness compact input tokens setting. |
+| `compact_growth_tokens` | `integer` | - | - | - | `compact_growth_tokens` | 0 (disabled) | no | Harness compact growth tokens setting. |
 | `compact_idle_after_seconds` | `integer` | - | - | - | `compact_idle_after_seconds` | 0 (disabled) | no | Harness compact idle after seconds setting. |
 | `compact_idle_trigger_percent` | `integer` | - | - | - | `compact_idle_trigger_percent` | 35 | no | Harness compact idle trigger percent setting. |
 | `compact_timeout_seconds` | `integer` | - | - | - | `compact_timeout_seconds` | 300 | no | Harness compact timeout seconds setting. |
@@ -706,6 +716,14 @@ environment variables, JSON paths, types, and defaults. The concise
   output includes `interactive_selectable` for every agent. `--models` prints
   the configured proxy model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
+- `codex_experimental_context_management` is a top-level config-file setting, enabled
+  by default for **all models on `openai-codex` only**. Set it to `false` to
+  restore ordinary compaction for that provider. Aliases and service
+  tiers follow their resolved provider; other providers retain ordinary
+  compaction. The agent saves/retrieves durable notes and history across fresh
+  windows, with budget reminders before automatic reset. `/compact` uses the
+  same notes-based reset while enabled. See [context tools](tools.md#experimental-context-management)
+  and [compaction internals](compaction.md#experimental-context-management).
 - Context-efficiency knobs are config-file-only except where noted:
   `agents_md_warn_bytes`, `compact_keep_turns`, `compact_keep_tokens`,
   `compact_auto_enabled`, `compact_trigger_percent`,
@@ -850,6 +868,14 @@ are controlled separately by `reasoning_summary` /
 displayed only when explicitly enabled. `-q` disables reasoning summary output
 unless `-reasoning-summary` is explicitly set on the CLI.
 
+Ordinary Responses turns preserve compatible encrypted reasoning with provider
+defaults as well as explicit effort settings, including full-history retries
+after a continuation reset. Displaying reasoning summaries is independent of
+that replay. Textual summary and prewarm requests omit it unless explicitly
+requested. On Responses, `none` omits reasoning controls; it cannot turn off
+reasoning on models such as Astra that always reason. Use `low` for an explicit
+low-effort request.
+
 Responses continuation is on by default for proxy providers that report both
 provider continuation support and `continuation_stateful:true` in the proxy
 catalog. This includes supported Responses and Gemini Interactions targets.
@@ -924,9 +950,11 @@ messages without `store` or a previous ID on every request.
 
 Responses provider configs may also set `responses_websocket:true` to have the
 model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
-defaults this on for `codex_oauth` Responses providers and preserves an explicit
-`responses_websocket:false` override. WebSocket connections live in a bounded
-per-pod lease pool. Harness sends its opaque session ID as
+defaults this on for public OpenAI Astra targets and `codex_oauth` Responses
+providers, and preserves an explicit `responses_websocket:false` override.
+Other models on the same public OpenAI provider keep their existing transport
+default. WebSocket connections live in a bounded per-pod lease pool. Harness
+sends its opaque session ID as
 `X-Harness-Session`, allowing a load balancer to keep that connection-affine
 traffic on one pod as a performance optimization. Correctness does not depend
 on stickiness: a pod/socket miss produces the reset-and-resend path above.
@@ -1227,16 +1255,21 @@ copy the same key into non-auth routing headers such as `x-session-id`. The
 proxy derives the provider-facing value as a SHA-256 hash of harness's local
 cache-affinity key, so providers do not receive the raw identifier.
 `explicit_breakpoints` is a tri-state Responses override: omitted enables one
-conservative stable-message breakpoint only for supported first-party OpenAI
-models, `false` disables it, and `true` opts a compatible Responses backend in.
-Harness leaves OpenAI's default implicit breakpoint enabled, keeps top-level
-`instructions` unchanged, and omits explicit markers from token-count and
-compaction requests.
+conservative stable-message breakpoint for GPT-5.6 and GPT-6 Astra on the
+canonical OpenAI API, `false` disables it, and `true` opts a compatible Responses
+backend in.
+`mode` may be `implicit` (the provider default) or `explicit`; `ttl` may be
+`30m`. These options use the same capability gate. Explicit mode disables the
+implicit tail cache: Harness marks the stable prefix even when it ends at the
+request tail. A request with no eligible stable content has no cache write in
+that mode. For example, `"prompt_cache":{"mode":"explicit","ttl":"30m"}`.
+Top-level `instructions` remain unchanged; token-count and compaction requests
+omit cache mode, TTL, and markers.
 
 Responses provider configs may set `responses_tool_search`. When omitted,
 Harness enables native hosted tool search on the canonical OpenAI API for
-GPT-5.4-or-newer models except GPT-5.4 Nano, and explicitly for GPT-5.3 Codex
-Spark. It is also enabled for the canonical ChatGPT Codex backend used by
+GPT-5.4-or-newer models including GPT-6 Astra, except GPT-5.4 Nano, and explicitly
+for GPT-5.3 Codex Spark. It is also enabled for the canonical ChatGPT Codex backend used by
 `openai-codex`, with the same Nano exclusion. Harness sends each complete
 deferred MCP-server or LSP group as
 one namespace tool, adds `{"type":"tool_search"}`, and omits the local
@@ -1681,6 +1714,34 @@ active-turn cancellation gestures.
 `-no-steer`, `HARNESS_NO_STEER`, or config `no_steer` disables steering and
 queues submitted input as the next prompt. Steering is available in the TTY REPL
 and interactive JSON mode, not one-shot mode.
+
+### Native steering
+
+Native steering is enabled by default for public OpenAI Astra targets that
+advertise `native_steering`. The proxy selects WebSockets for these targets when
+`responses_websocket` is unspecified. Stateful Responses continuation and
+ordinary steering must also be enabled. Unsupported targets and unavailable
+connections retain ordinary queued steering.
+
+Set `astra_native_steering:false` in Harness config to use ordinary
+queued steering.
+An explicit provider `responses_websocket:false` or Harness
+`responses_stateful:false` also disables native steering; `no_steer:true`
+disables both steering paths. Existing explicit opt-outs remain effective.
+
+Harness attempts one native input per stream; later input stays queued in
+submission order. Input carrying request-only context also uses the ordinary
+queue. `[native steer accepted]` means the provider queued the input;
+`[native steer applied]` means a successor response started consuming it. If the
+provider needs client tool results first, Harness returns them on the same
+connection before continuing. Already completed tool actions remain in effect.
+
+Automatic successor responses contribute their own tokens and cost. Context
+pressure uses the final response's input size. Turn/token/cost limits are checked
+at the next normal loop boundary, so one automatic successor may finish before
+those checks. A connection interruption retains unresolved input in history and
+stops automatic retry. Resuming or starting a later prompt rebuilds that history
+on a fresh connection; queued input is not assumed to survive a reconnect.
 
 ### Session goals
 
@@ -2260,3 +2321,10 @@ Keep the hook contract deterministic and typed, and keep direct invocation
 useful to a person diagnosing failures. The recipe never rewrites its own
 verifier, creates commits, or changes git history; candidate promotion remains
 an explicit user action.
+
+On the public Astra Responses API, effort changes between user prompts are
+recorded as `configuration_update` history items while the original request
+effort remains stable. This requires an explicit initial effort; provider-default
+effort and changes to reasoning summaries still use the ordinary request
+controls. Other models, custom endpoints, and Codex OAuth retain the existing
+behavior. Effort history survives resume and is scoped to its replay domain.

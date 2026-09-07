@@ -182,6 +182,28 @@ func (c *Conn) SendText(text string) error {
 	return c.writeFrame(opText, []byte(text), true)
 }
 
+// SendTextContext aborts the connection if a write is cancelled. A partially
+// written frame cannot safely be followed by another frame on this connection.
+func (c *Conn) SendTextContext(ctx context.Context, text string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	done := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		c.markClosed()
+		_ = c.conn.Close()
+		close(done)
+	})
+	err := c.SendText(text)
+	if !stop() {
+		<-done
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return err
+}
+
 // ReadText reads the next text message.
 func (c *Conn) ReadText(ctx context.Context) (string, error) {
 	if c == nil || c.readResults == nil {

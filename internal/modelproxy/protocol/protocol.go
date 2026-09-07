@@ -85,6 +85,9 @@ type ModelUsage struct {
 }
 
 type Target struct {
+	NativeSteering        bool      `json:"native_steering,omitempty"`
+	AsyncTools            bool      `json:"async_tools,omitempty"`
+	ReasoningUpdates      bool      `json:"reasoning_updates,omitempty"`
 	ID                    string    `json:"id"`
 	Aliases               []string  `json:"aliases,omitempty"`
 	DisplayName           string    `json:"display_name,omitempty"`
@@ -178,4 +181,9 @@ func (e *Error) APIError() *llm.APIError {
 		RetryAfter:      time.Duration(e.RetryAfterMS) * time.Millisecond,
 		Diagnostic:      e.Diagnostic,
 	}
+}
+
+type SteerRequest struct {
+	TargetID   string              `json:"target_id"`
+	Submission llm.SteerSubmission `json:"submission"`
 }

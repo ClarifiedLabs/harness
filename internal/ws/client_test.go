@@ -10,8 +10,39 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 )
+
+type signallingWriteConn struct {
+	net.Conn
+	started chan struct{}
+	once    sync.Once
+}
+
+func (c *signallingWriteConn) Write(p []byte) (int, error) {
+	c.once.Do(func() { close(c.started) })
+	return c.Conn.Write(p)
+}
+
+func TestSendTextContextCancelsBlockedWrite(t *testing.T) {
+	local, remote := net.Pipe()
+	defer remote.Close()
+	writing := &signallingWriteConn{Conn: local, started: make(chan struct{})}
+	c := &Conn{conn: writing, closed: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- c.SendTextContext(ctx, "blocked") }()
+	<-writing.started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("write error = %v", err)
+	}
+	if !c.Closed() {
+		t.Fatal("partial frame connection remained reusable")
+	}
+}
 
 func TestDialSendAndReadText(t *testing.T) {
 	var gotPath, gotToken string

@@ -42,6 +42,7 @@ import (
 	"harness/internal/sessionrec"
 	"harness/internal/skills"
 	"harness/internal/sysprompt"
+	"harness/internal/taskcontext"
 	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/internal/tracing"
@@ -345,13 +346,18 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		}
 		return acpDelegateLaunch(launch), nil
 	}
-	runner := delegate.NewRunner(state.Snapshot, resolveDelegate, delegate.Options{MaxTurns: cfg.DelegateMaxTurns, MaxDepth: cfg.DelegateMaxDepth, MaxActiveDescendants: cfg.DelegateMaxActive, CompactKeepTurns: cfg.CompactKeepTurns, CompactKeepTokens: cfg.CompactKeepTokens, CompactTriggerPercent: cfg.CompactTriggerPercent, CompactTargetPercent: cfg.CompactTargetPercent, DisableAutoCompaction: !cfg.CompactAutoEnabled, CompactSummaryMaxTokens: cfg.CompactSummaryMaxTokens, CompactTimeout: time.Duration(cfg.CompactTimeoutSeconds) * time.Second, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, RetentionKeepTurns: cfg.RetentionKeepTurns, RetentionResultHeadBytes: cfg.RetentionResultHeadBytes, RetentionPolicy: agent.RetentionPolicy(cfg.RetentionPolicy), ShowDiffs: cfg.ShowDiffs, Now: now, AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate { return delegateAgentCandidates(agents) }})
+	runner := delegate.NewRunner(state.Snapshot, resolveDelegate, delegate.Options{AstraNativeSteering: cfg.AstraNativeSteering, ExperimentalAsyncTools: cfg.ExperimentalAsyncTools, MaxTurns: cfg.DelegateMaxTurns, MaxDepth: cfg.DelegateMaxDepth, MaxActiveDescendants: cfg.DelegateMaxActive, CompactKeepTurns: cfg.CompactKeepTurns, CompactKeepTokens: cfg.CompactKeepTokens, CompactTriggerPercent: cfg.CompactTriggerPercent, CompactTargetPercent: cfg.CompactTargetPercent, CompactInputTokens: cfg.CompactInputTokens, CompactGrowthTokens: cfg.CompactGrowthTokens, DisableAutoCompaction: !cfg.CompactAutoEnabled, CompactSummaryMaxTokens: cfg.CompactSummaryMaxTokens, CompactTimeout: time.Duration(cfg.CompactTimeoutSeconds) * time.Second, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, RetentionKeepTurns: cfg.RetentionKeepTurns, RetentionResultHeadBytes: cfg.RetentionResultHeadBytes, RetentionPolicy: agent.RetentionPolicy(cfg.RetentionPolicy), ShowDiffs: cfg.ShowDiffs, Now: now, AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate { return delegateAgentCandidates(agents) }})
 	todos := todo.NewStore()
 	plans := plan.NewStore()
 	toolCatalog.Register(delegate.NewToolWithSessions(runner, agentSessions, jobs))
 	toolCatalog.Register(background.NewJobsTool(jobs))
 	toolCatalog.Register(todo.NewToolWithTextSanitizer(todos, acp.SanitizeModelFacingText))
 	toolCatalog.Register(plan.NewToolWithTextSanitizer(plans, func() string { return sessionPath }, acp.SanitizeModelFacingText))
+	if cfg.CodexExperimentalContextManagement {
+		manager := taskcontext.New(func() string { return sessionPath })
+		manager.SetEnabled(func() bool { return contextManagementForProvider(cfg, catalog, state.Snapshot().ProviderName) })
+		manager.Register(toolCatalog)
+	}
 	toolCatalog.Register(acptool.NewTool(agentSessions, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
 		return acpclient.NewFactory(acpclient.Options{Argv: append([]string{target.Command}, target.Args...), Env: acpTargetEnvironment(os.Environ(), target.Env), CWD: cwd, ClientInfo: &acp.Implementation{Name: "harness", Title: "Harness", Version: build.Version}, Logger: logger, LogStderr: func(line string) { logger.Warn("acp: child stderr: "+line, logging.Category("acp")) }})
 	}))
@@ -373,6 +379,9 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	ag.SetRequestSanitizer(sanitizeACPRequest)
 	state.Set(delegate.Runtime{Provider: proxyClient.Provider(cfg.Provider), ProviderName: cfg.Provider, Model: cfg.Model, ContextWindow: cfg.ContextWindow, MaxOutputTokens: cfg.MaxOutputTokens, Registry: registry, Reasoning: reasoning, ReasoningReplayDomain: selection.ReasoningReplayDomain, ServerTools: rootAgentCfg.ServerTools, ResponsesStateful: rootAgentCfg.ResponsesStateful, NativeCompaction: rootAgentCfg.NativeCompaction, System: systemPrompt, Agent: agentName, ToolNames: toolRegistry.Names(), SessionPath: sessionPath, CWD: request.CWD, CacheAffinityID: ag.CacheAffinityID(), MaxPromptTokens: cfg.MaxPromptTokens, MaxPromptCostUSD: cfg.MaxPromptCostUSD, Build: buildMeta, RuntimeProfile: runtimeProfile})
 	ag.SetTools(toolRegistry)
+	ag.SetCompactionArchiver(func(ctx context.Context, archive agent.CompactionArchive) (string, error) {
+		return session.SaveCompaction(sessionPath, session.Compaction{Time: now(), Messages: archive.Messages, Summary: archive.Summary, SummarySource: archive.SummarySource, FallbackReason: archive.FallbackReason, Usage: archive.Usage, Focus: archive.Focus, ReadFiles: archive.ReadFiles, ReadFilesOmitted: archive.ReadFilesOmitted, ModifiedFiles: archive.ModifiedFiles})
+	})
 
 	return &acpRootSession{agent: ag, cfg: cfg, registry: registry, registryModel: selection.RegistryModel, agentName: agentName, system: systemPrompt, path: sessionPath, cwd: request.CWD, created: created, now: now, build: buildMeta, runtime: runtimeProfile, todos: todos, plans: plans, jobs: jobs, agentSessions: agentSessions, lock: lock, cleanups: cleanups}, nil
 }

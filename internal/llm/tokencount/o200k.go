@@ -18,7 +18,7 @@ const (
 	chatMessageOverhead = 4
 	chatBlockOverhead   = 2
 	chatToolOverhead    = 8
-	imageTokenEstimate  = 1600
+	imageTokenEstimate  = llm.EstimatedImageTokens
 )
 
 //go:embed o200k_base.tiktoken

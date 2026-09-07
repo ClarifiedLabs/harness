@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -45,5 +46,18 @@ func TestApplyPromptCacheAffinityHeadersSkipsAuthHeaders(t *testing.T) {
 	}
 	if got := h.Get("x-api-key"); got != "" {
 		t.Fatalf("x-api-key = %q, want omitted", got)
+	}
+}
+
+func TestPromptCacheConfigValidation(t *testing.T) {
+	for _, body := range []string{`{"mode":"invalid"}`, `{"ttl":"1h"}`, `{"mode":"explicit","explicit_breakpoints":false}`} {
+		var cfg PromptCacheConfig
+		if err := json.Unmarshal([]byte(body), &cfg); err == nil {
+			t.Fatalf("accepted %s", body)
+		}
+	}
+	var cfg PromptCacheConfig
+	if err := json.Unmarshal([]byte(`{"mode":"explicit","ttl":"30m","future":true}`), &cfg); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -26,6 +26,7 @@ import (
 	"harness/internal/plan"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
+	"harness/internal/taskcontext"
 	"harness/internal/todo"
 	"harness/internal/tools"
 	"harness/prompts"
@@ -48,7 +49,7 @@ const (
 	continuationModeRetained   = "retained"
 	continuationModeCheckpoint = "compact_checkpoint"
 )
-const continuationFingerprintVersion = 6
+const continuationFingerprintVersion = 7
 
 var childSeq atomic.Uint64
 
@@ -81,6 +82,7 @@ type Runtime struct {
 
 // Launch is the fully resolved child-agent runtime for one delegate call.
 type Launch struct {
+	ContextManagement     bool
 	Provider              llm.Provider
 	ProviderName          string
 	Model                 string
@@ -142,6 +144,8 @@ func (s *State) Snapshot() Runtime {
 
 // Options configures the delegate tool.
 type Options struct {
+	AstraNativeSteering       bool
+	ExperimentalAsyncTools    bool
 	MaxTurns                  int
 	MaxDepth                  int
 	MaxActiveDescendants      int
@@ -149,6 +153,8 @@ type Options struct {
 	CompactKeepTokens         int
 	CompactTriggerPercent     int
 	CompactTargetPercent      int
+	CompactInputTokens        int
+	CompactGrowthTokens       int
 	DisableAutoCompaction     bool
 	CompactSummaryMaxTokens   int
 	CompactTimeout            time.Duration
@@ -648,6 +654,21 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if runtime.Depth+1 >= maxDepth {
 		toolNames = withoutTool(toolNames, delegateToolName)
 	}
+	// Bind context capabilities to the child's policy before fingerprinting.
+	// The parent registry may expose a different provider's available tools.
+	launch.Tools, err = launch.Tools.Subset(toolNames)
+	if err != nil {
+		return RunResult{}, err
+	}
+	childDir := runtime.SessionPath
+	for _, name := range taskcontext.Names {
+		if slices.Contains(toolNames, name) {
+			manager := taskcontext.New(func() string { return childDir })
+			manager.SetEnabled(func() bool { return launch.ContextManagement })
+			manager.Register(launch.Tools, toolNames...)
+			break
+		}
+	}
 	runtimeFingerprint, err := r.runtimeFingerprint(runtime, launch, req, maxTurns, toolNames)
 	if err != nil {
 		return RunResult{}, err
@@ -677,7 +698,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	defer releaseBudget()
 	created := r.now()
-	childDir, saveErr := r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0, nil)
+	var saveErr error
+	childDir, saveErr = r.saveChildMeta(runtime, launch, childID, req, maxTurns, runtimeFingerprint, session.ChildStatusRunning, created, created, agent.PromptUsage{}, nil, 0, nil)
 	completion := unknownCompletion(contract, session.ChildCompletionSourceHost, session.ChildCompletionValidationUnavailable)
 	result = RunResult{
 		Completion:        completion,
@@ -741,6 +763,14 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	}
 	defer finish()
 
+	if continuation != nil && launch.ContextManagement {
+		sourceDir := session.ChildSessionDir(runtime.SessionPath, req.ContinueChildID)
+		if err := taskcontext.CopyNotes(ctx, sourceDir, childDir); err != nil {
+			terminalErr = fmt.Errorf("delegate continuation notes: %w", err)
+			return result, terminalErr
+		}
+	}
+
 	childTodos := todo.NewStore()
 	childPlans := plan.NewStore()
 	if continuation != nil {
@@ -777,6 +807,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		childTools.Register(plan.NewToolWithTextSanitizer(childPlans, func() string { return childDir }, launch.StateTextSanitizer))
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
+		ExperimentalAsyncTools:    r.opts.ExperimentalAsyncTools,
+		AstraNativeSteering:       r.opts.AstraNativeSteering,
 		MaxTurns:                  maxTurns,
 		MaxPromptTokens:           runtime.MaxPromptTokens,
 		MaxOutputTokens:           launch.MaxOutputTokens,
@@ -794,6 +826,8 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		CompactKeepTokens:         r.opts.CompactKeepTokens,
 		CompactTriggerPercent:     r.opts.CompactTriggerPercent,
 		CompactTargetPercent:      r.opts.CompactTargetPercent,
+		CompactInputTokens:        r.opts.CompactInputTokens,
+		CompactGrowthTokens:       r.opts.CompactGrowthTokens,
 		DisableAutoCompaction:     r.opts.DisableAutoCompaction,
 		CompactSummaryMaxTokens:   r.opts.CompactSummaryMaxTokens,
 		CompactTimeout:            r.opts.CompactTimeout,
@@ -829,6 +863,15 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	// One tree per child run keeps tree.ndjson identity stable across the
 	// per-closed-turn checkpoints and the final consolidated save.
 	var childTree *session.Tree
+	if continuation != nil && launch.ContextManagement {
+		// Keep historical IDs referenced by notes, including archived windows
+		// absent from the active transcript, using the existing fork operation.
+		childTree, err = continuation.state.Tree.Extract(continuation.state.Tree.ActiveLeaf, created, runtime.CWD)
+		if err != nil {
+			terminalErr = fmt.Errorf("delegate continuation history: %w", err)
+			return result, terminalErr
+		}
+	}
 	ensureChildTree := func(messages []llm.Message) (*session.Tree, error) {
 		if childTree == nil {
 			tree, err := session.LinearTree(created, "", messages)
@@ -1422,6 +1465,8 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		contextWindow = launch.Registry.ContextWindow(launch.Model)
 	}
 	fingerprint := struct {
+		AstraNativeSteering    bool                  `json:"astra_native_steering"`
+		ExperimentalAsyncTools bool                  `json:"experimental_async_tools"`
 		Version                int                   `json:"version"`
 		Provider               string                `json:"provider"`
 		ProviderImplementation string                `json:"provider_implementation"`
@@ -1442,17 +1487,20 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ServerTools            []llm.ServerTool      `json:"server_tools,omitempty"`
 		ResponsesStateful      bool                  `json:"responses_stateful"`
 		NativeCompaction       bool                  `json:"native_compaction"`
+		ContextManagement      bool                  `json:"context_management"`
 		RetentionPolicy        agent.RetentionPolicy `json:"retention_policy"`
 		System                 string                `json:"system"`
 		Tools                  []llm.ToolSchema      `json:"tools"`
 		Compaction             struct {
-			KeepTurns          int  `json:"keep_turns"`
-			KeepTokens         int  `json:"keep_tokens"`
-			TriggerPercent     int  `json:"trigger_percent"`
-			TargetPercent      int  `json:"target_percent"`
-			Disabled           bool `json:"disabled"`
-			SummaryMaxTokens   int  `json:"summary_max_tokens"`
-			ToolResultMaxBytes int  `json:"tool_result_max_bytes"`
+			KeepTurns           int  `json:"keep_turns"`
+			KeepTokens          int  `json:"keep_tokens"`
+			TriggerPercent      int  `json:"trigger_percent"`
+			TargetPercent       int  `json:"target_percent"`
+			CompactInputTokens  int  `json:"compact_input_tokens"`
+			CompactGrowthTokens int  `json:"compact_growth_tokens"`
+			Disabled            bool `json:"disabled"`
+			SummaryMaxTokens    int  `json:"summary_max_tokens"`
+			ToolResultMaxBytes  int  `json:"tool_result_max_bytes"`
 		} `json:"compaction"`
 	}{
 		Version:                continuationFingerprintVersion,
@@ -1475,14 +1523,19 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ServerTools:            slices.Clone(launch.ServerTools),
 		ResponsesStateful:      launch.ResponsesStateful,
 		NativeCompaction:       launch.NativeCompaction,
+		ContextManagement:      launch.ContextManagement,
 		RetentionPolicy:        r.opts.RetentionPolicy,
 		System:                 launch.System,
 		Tools:                  toolRegistry.Specs(),
 	}
 	fingerprint.Compaction.KeepTurns = r.opts.CompactKeepTurns
 	fingerprint.Compaction.KeepTokens = r.opts.CompactKeepTokens
+	fingerprint.AstraNativeSteering = r.opts.AstraNativeSteering
+	fingerprint.ExperimentalAsyncTools = r.opts.ExperimentalAsyncTools
 	fingerprint.Compaction.TriggerPercent = r.opts.CompactTriggerPercent
 	fingerprint.Compaction.TargetPercent = r.opts.CompactTargetPercent
+	fingerprint.Compaction.CompactInputTokens = r.opts.CompactInputTokens
+	fingerprint.Compaction.CompactGrowthTokens = r.opts.CompactGrowthTokens
 	fingerprint.Compaction.Disabled = r.opts.DisableAutoCompaction
 	fingerprint.Compaction.SummaryMaxTokens = r.opts.CompactSummaryMaxTokens
 	fingerprint.Compaction.ToolResultMaxBytes = r.opts.CompactToolResultMaxBytes

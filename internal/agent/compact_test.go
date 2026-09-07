@@ -2557,3 +2557,61 @@ func TestCompactionFixtureContextReduction(t *testing.T) {
 		t.Fatalf("write inputs: %d receipts, %d verbatim; want 3 receipts and 1 verbatim", receipts, verbatim)
 	}
 }
+
+func TestNativeCompactionTransientFailureRecoversAfterCooldown(t *testing.T) {
+	for _, failure := range []error{context.DeadlineExceeded, &llm.APIError{StatusCode: 429, RetryAfter: 2 * time.Minute}, &llm.APIError{StatusCode: 503}} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			now := time.Unix(100, 0)
+			provider := &nativeCompactionProvider{FakeProvider: llmtest.New("responses", summaryStep("recovery", 10, 2)), result: llm.CompactedContext{Items: nativeCompactedItems()}}
+			a := newAgent(provider, tools.Default(), Options{Model: "gpt-6-astra", ReasoningReplayDomain: "astra", NativeCompaction: true, Now: func() time.Time { return now }})
+			a.SetTranscript(makeTurns(10))
+			if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+				t.Fatal(err)
+			}
+			provider.err = failure
+			if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+				t.Fatal(err)
+			}
+			if hasProviderCompaction(provider.FakeProvider.Requests[0].Messages) || a.nativeCompactionAvailable() {
+				t.Fatal("stale checkpoint or missing cooldown")
+			}
+			if a.disabledNativeCompaction["astra"] {
+				t.Fatal("transient failure permanently disabled capability")
+			}
+			now = now.Add(3 * time.Minute)
+			provider.err = nil
+			if !a.nativeCompactionAvailable() {
+				t.Fatal("capability did not recover")
+			}
+			if _, err := a.Compact(context.Background(), &recordSink{}); err != nil {
+				t.Fatal(err)
+			}
+			if !hasProviderCompaction(a.Transcript()) {
+				t.Fatal("native checkpoint not restored")
+			}
+			if err := llm.ValidateTranscript(a.Transcript()); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestCompactionSoftThresholdsKeepTotalWindowGuard(t *testing.T) {
+	a := newAgent(llmtest.New("fake"), tools.Default(), Options{ContextWindow: 100000, CompactInputTokens: 50000, CompactGrowthTokens: 10000})
+	a.SetTranscript([]llm.Message{{Role: llm.RoleUser, Origin: llm.MessageOriginCompactionCheckpoint, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: strings.Repeat("x", 60000)}}}})
+	if a.overThreshold(40000) {
+		t.Fatal("checkpoint counted as body growth")
+	}
+	if !a.overThreshold(50000) {
+		t.Fatal("absolute budget ignored")
+	}
+	a.transcript = append(a.transcript, userText(strings.Repeat("x", 50000)))
+	if !a.overThreshold(40000) {
+		t.Fatal("body growth ignored")
+	}
+	a.compactInputTokens = 0
+	a.compactGrowthTokens = 200000
+	if !a.overThreshold(78000) {
+		t.Fatal("growth policy bypassed total-window guard")
+	}
+}

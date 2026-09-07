@@ -50,11 +50,33 @@ const compactTargetPct = 65
 // overThreshold reports whether tokens crosses the compaction trigger for the
 // current window.
 func (a *Agent) overThreshold(tokens int) bool {
-	return tokens*100 >= a.window()*a.triggerPercent()
+	if a.contextManager() != nil {
+		buffer := min(contextFallbackTokens, a.window()/10)
+		return a.contextRemaining(tokens) <= -buffer || tokens >= a.window()
+	}
+	if tokens*100 >= a.window()*a.triggerPercent() || (a.compactInputTokens > 0 && tokens >= a.compactInputTokens) {
+		return true
+	}
+	if a.compactGrowthTokens <= 0 {
+		return false
+	}
+	return a.contextGrowth() >= a.compactGrowthTokens
+}
+
+// compactTargetTokens leaves hysteresis below the absolute input budget too.
+func (a *Agent) compactTargetTokens() int {
+	target := a.window() * a.targetPercent() / 100
+	if a.compactInputTokens > 0 {
+		target = min(target, a.compactInputTokens*a.targetPercent()/a.triggerPercent())
+	}
+	if a.compactGrowthTokens > 0 {
+		target = min(target, a.compactGrowthTokens*a.targetPercent()/a.triggerPercent())
+	}
+	return target
 }
 
 func (a *Agent) compactBudget() int {
-	target := a.window() * a.targetPercent() / 100
+	target := a.compactTargetTokens()
 	overhead := estimateRequest(llm.Request{
 		System:      a.system,
 		Tools:       a.toolSpecs,
@@ -161,7 +183,7 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 	if triggerPercent < 1 || triggerPercent > 99 {
 		return nil, false, fmt.Errorf("idle compaction trigger percent must be between 1 and 99")
 	}
-	if !a.autoCompactionEnabled() || a.compactionHooksConfigured() {
+	if !a.autoCompactionEnabled() || a.compactionHooksConfigured() || a.contextManager() != nil {
 		return nil, false, nil
 	}
 	// Native checkpoints preserve the semantic transcript and are installed by
@@ -200,6 +222,8 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 		CompactKeepTokens:         a.compactKeepTokens,
 		CompactTriggerPercent:     a.compactTriggerPercent,
 		CompactTargetPercent:      a.compactTargetPercent,
+		CompactInputTokens:        a.compactInputTokens,
+		CompactGrowthTokens:       a.compactGrowthTokens,
 		CompactSummaryMaxTokens:   a.compactSummaryMaxTokens,
 		CompactTimeout:            a.compactTimeout,
 		CompactToolResultMaxBytes: a.compactToolResultMaxBytes,
@@ -472,6 +496,9 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 	}
 
 	before := a.estimateContext(nil).Total
+	if a.contextManager() != nil {
+		return a.compactFromNotes(ctx, sink, opts, before)
+	}
 	nativeUsage := llm.Usage{}
 	if a.nativeCompactionEligible(trigger, collapseAll, focus) {
 		usage, changed, handled, err := a.compactNative(ctx, sink, trigger, before)
@@ -546,7 +573,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 		// Keeping one in the suffix would let a resumed same-domain session skip
 		// the new textual checkpoint and replay stale provider state instead.
 		compacted = withoutProviderCompactionMessages(compacted)
-		if collapseAll || a.estimateContextForTranscript(nil, compacted).Total <= a.window()*a.targetPercent()/100 {
+		if collapseAll || a.estimateContextForTranscript(nil, compacted).Total <= a.compactTargetTokens() {
 			break
 		}
 		next, ok := nextCompactionBoundary(turns, boundary)
@@ -559,7 +586,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 
 	// Once only the newest round remains, local degradation is the only safe
 	// lower rung. It mutates deep copies and cannot silently discard a round.
-	if !collapseAll && a.estimateContextForTranscript(nil, compacted).Total > a.window()*a.targetPercent()/100 {
+	if !collapseAll && a.estimateContextForTranscript(nil, compacted).Total > a.compactTargetTokens() {
 		a.trimToolResults(compacted, sink)
 		truncateUntilFits(compacted, a.compactBudget())
 	}
@@ -629,6 +656,9 @@ func (a *Agent) nativeCompactionAvailable() bool {
 	if a.disabledNativeCompaction[a.reasoningReplayDomain] {
 		return false
 	}
+	if a.now().Before(a.nativeCompactionRetryAt[a.reasoningReplayDomain]) {
+		return false
+	}
 	_, ok := a.provider.(llm.ContextCompactor)
 	return ok
 }
@@ -659,7 +689,7 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
 		ServerTools:          cloneServerTools(a.serverTools),
-		Reasoning:            a.reasoning,
+		Reasoning:            a.requestReasoning(),
 		ProxySessionID:       a.proxySessionID,
 		CacheAffinityID:      a.cacheAffinityID,
 		CachePolicy:          a.cachePolicyForTranscript(visible, 0, true),
@@ -671,17 +701,26 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		if ctx.Err() != nil {
 			return usage, false, true, ctx.Err()
 		}
-		// The textual fallback and subsequent requests must use the preserved
-		// semantic transcript rather than an older native checkpoint. A future
-		// process may try the advertised capability again after a transient error.
-		a.disableCurrentNativeCompaction()
+		// Discard stale checkpoints before the textual fallback, but only disable
+		// the capability for a permanent rejection. Transport failures and quota
+		// pressure should not disable native compaction for the entire session.
+		if nativeCompactionTransient(compactErr) {
+			if a.nativeCompactionRetryAt == nil {
+				a.nativeCompactionRetryAt = make(map[string]time.Time)
+			}
+			a.nativeCompactionRetryAt[a.reasoningReplayDomain] = a.now().Add(max(time.Minute, streamRetryAfter(compactErr)))
+			a.discardCurrentNativeCompaction()
+		} else {
+			a.disableCurrentNativeCompaction()
+		}
 		sink.Notice(fmt.Sprintf("[native compact failed: %v; using textual compaction]", compactErr))
 		return usage, false, false, nil
 	}
 	checkpoint := llm.Message{
-		Role:   llm.RoleUser,
-		Time:   a.now(),
-		Origin: llm.MessageOriginProviderCompaction,
+		ReasoningState: a.newReasoningState(),
+		Role:           llm.RoleUser,
+		Time:           a.now(),
+		Origin:         llm.MessageOriginProviderCompaction,
 		Content: []llm.ContentBlock{{
 			Kind:                  llm.BlockProviderCompaction,
 			ReasoningReplayDomain: a.reasoningReplayDomain,
@@ -706,6 +745,17 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 	sink.Notice(fmt.Sprintf("[native compacted: canonical provider window · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
 	a.runPostCompactHook(ctx, sink, trigger, "")
 	return usage, true, true, nil
+}
+
+func nativeCompactionTransient(err error) bool {
+	if errors.Is(err, llm.ErrContextCompactionUnsupported) {
+		return false
+	}
+	var apiErr *llm.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Retryable || retry.RetryableStatus(apiErr.StatusCode)
+	}
+	return true
 }
 
 func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
@@ -822,6 +872,10 @@ func cloneMessages(msgs []llm.Message) []llm.Message {
 			out[i].ParallelToolBatches[j].ToolUseIDs = append([]string(nil), m.ParallelToolBatches[j].ToolUseIDs...)
 		}
 		out[i].Compaction = cloneCompactionMetadata(m.Compaction)
+		if m.ReasoningState != nil {
+			state := *m.ReasoningState
+			out[i].ReasoningState = &state
+		}
 	}
 	return out
 }
@@ -876,6 +930,7 @@ func cloneCompactionMetadata(meta *llm.CompactionMetadata) *llm.CompactionMetada
 		return nil
 	}
 	out := *meta
+	out.UserInstructions = append([]llm.ContentBlock(nil), meta.UserInstructions...)
 	out.ReadFiles = append([]string(nil), meta.ReadFiles...)
 	out.ModifiedFiles = append([]string(nil), meta.ModifiedFiles...)
 	return &out
@@ -1801,7 +1856,7 @@ func truncateLargestBlock(msgs []llm.Message, dropBytes int) bool {
 // yet costs the model a roughly fixed ~1.6k tokens, so counting its raw bytes at
 // bytesPerToken wildly overstates it and would make every transcript with one
 // image look near-overflow (design §12, r22).
-const imageTokenEstimate = 1600
+const imageTokenEstimate = llm.EstimatedImageTokens
 
 // estimateTokens approximates the token footprint of a message list. Text is
 // counted by byte size; images are counted at a flat per-image weight rather
