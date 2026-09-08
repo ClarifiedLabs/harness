@@ -12,6 +12,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/buildinfo"
+	"harness/internal/execution"
 	"harness/internal/llm"
 	"harness/internal/skills"
 	"harness/internal/tools"
@@ -215,7 +216,7 @@ func TestSink_Detailed(t *testing.T) {
 	}
 }
 
-func TestSink_PromptCompleteRecordsTotalPromptInput(t *testing.T) {
+func TestSink_SourceUsageRecordsTotalPromptInput(t *testing.T) {
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ = io.ReadAll(r.Body)
@@ -228,9 +229,9 @@ func TestSink_PromptCompleteRecordsTotalPromptInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := NewSink(exp, nil, "openai", "gpt-5.6", "auto", false)
-	sink.PromptComplete(agent.PromptUsage{Usage: llm.Usage{
+	sink.ObserveModel(execution.ModelEvent{Identity: sink.Scope().Identity, Phase: execution.ModelUsageDelta, Usage: llm.Usage{
 		InputTokens: 1000, CacheReadTokens: 3000, CacheWriteTokens: 4000, CacheWrite1hTokens: 6000,
-	}}, time.Second)
+	}})
 	if err := exp.Export(context.Background()); err != nil {
 		t.Fatal(err)
 	}

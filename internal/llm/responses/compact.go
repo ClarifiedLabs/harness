@@ -44,6 +44,7 @@ type compactResponse struct {
 // compaction_trigger. Other Responses providers retain the standalone
 // /responses/compact v1 contract.
 func (p *Provider) CompactContext(ctx context.Context, req llm.Request) (llm.CompactedContext, error) {
+	ctx = llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Purpose: llm.RequestPurposeCompaction, Provider: p.providerName, Model: req.Model, API: "responses", Transport: "http"})
 	if p.usesCompactionV2() {
 		return p.compactContextV2(ctx, req)
 	}
@@ -53,7 +54,7 @@ func (p *Provider) CompactContext(ctx context.Context, req llm.Request) (llm.Com
 // compactContextV1 calls the standalone Responses compaction endpoint. The
 // returned output array is opaque and canonical: harness validates only the
 // envelope needed for safe persistence, then replays every item in order.
-func (p *Provider) compactContextV1(ctx context.Context, req llm.Request) (llm.CompactedContext, error) {
+func (p *Provider) compactContextV1(ctx context.Context, req llm.Request) (result llm.CompactedContext, retErr error) {
 	base, input := p.compactionRequestBase(req)
 	w := compactRequest{
 		Model:              base.Model,
@@ -76,10 +77,22 @@ func (p *Provider) compactContextV1(ctx context.Context, req llm.Request) (llm.C
 		return llm.CompactedContext{}, err
 	}
 	defer resp.Body.Close()
+	source := llm.ResponseAttempt(resp)
+	ctx = source.Context(ctx)
+	defer func() {
+		if retErr != nil {
+			source.Finish(llm.AttemptFailed, retErr)
+		} else {
+			source.Finish(llm.AttemptSucceeded, nil)
+		}
+	}()
 
 	var out compactResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return llm.CompactedContext{}, llm.NewResponseDecodeError("decode compacted response", err, nil)
+	}
+	if out.Usage != nil {
+		source.Usage(normalizeUsage(out.Usage))
 	}
 	if out.Object != "response.compaction" {
 		return llm.CompactedContext{}, &llm.APIError{Message: fmt.Sprintf("responses: compact object type %q is not supported", out.Object)}
@@ -88,14 +101,14 @@ func (p *Provider) compactContextV1(ctx context.Context, req llm.Request) (llm.C
 	if err := validateCompactedItems(items); err != nil {
 		return llm.CompactedContext{}, err
 	}
-	result := llm.CompactedContext{Items: items}
+	result = llm.CompactedContext{Items: items}
 	if out.Usage != nil {
 		result.Usage = normalizeUsage(out.Usage)
 	}
 	return result, nil
 }
 
-func (p *Provider) compactContextV2(ctx context.Context, req llm.Request) (llm.CompactedContext, error) {
+func (p *Provider) compactContextV2(ctx context.Context, req llm.Request) (result llm.CompactedContext, retErr error) {
 	w, input := p.compactionRequestBase(req)
 	w.Input = append(slices.Clone(input), wireInputItem{Type: "compaction_trigger"})
 	w.Store = false
@@ -112,6 +125,15 @@ func (p *Provider) compactContextV2(ctx context.Context, req llm.Request) (llm.C
 		return llm.CompactedContext{}, err
 	}
 	defer resp.Body.Close()
+	source := llm.ResponseAttempt(resp)
+	ctx = source.Context(ctx)
+	defer func() {
+		if retErr != nil {
+			source.Finish(llm.AttemptFailed, retErr)
+		} else {
+			source.Finish(llm.AttemptSucceeded, nil)
+		}
+	}()
 
 	compactionItem, usage, err := decodeCompactionV2(ctx, resp.Body)
 	if err != nil {
@@ -200,6 +222,11 @@ func decodeCompactionV2(ctx context.Context, r io.Reader) (json.RawMessage, llm.
 		}
 		if err := json.Unmarshal([]byte(data), &event); err != nil {
 			return nil, usage, llm.NewResponseDecodeError("decode compaction v2 stream event", err, []byte(data))
+		}
+		if event.Response != nil && event.Response.Usage != nil {
+			usage = normalizeUsage(event.Response.Usage)
+			usage.ServiceTier = event.Response.ServiceTier
+			llm.AttemptFromContext(ctx).Usage(usage)
 		}
 		switch event.Type {
 		case "response.output_item.done":

@@ -15,6 +15,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/buildinfo"
+	"harness/internal/execution"
 	"harness/internal/llm"
 	"harness/internal/logging"
 )
@@ -96,8 +97,10 @@ func TestExporterResourceIdentityStaysProcessStable(t *testing.T) {
 	}
 	sink := NewSink(exp, nil, "old-provider", "old-model", "old-agent", false)
 	sink.SetIdentity("session-a", "provider-a", "model-a", "agent-a")
+	sink.ObservePrompt(execution.PromptEvent{Identity: sink.Scope().Identity})
 	sink.RecordSession(1, 10)
 	sink.SetIdentity("session-b", "provider-b", "model-b", "agent-b")
+	sink.ObservePrompt(execution.PromptEvent{Identity: sink.Scope().Identity})
 	sink.RecordSession(2, 20)
 
 	payload, err := exp.BuildPayloadForTest()
@@ -116,13 +119,21 @@ func TestExporterResourceIdentityStaysProcessStable(t *testing.T) {
 	if gotResource["service.name"] != "harness" || gotResource["service.version"] != "test" || gotResource["host.name"] != "runtime-host" || gotResource["fleet"] != "test" {
 		t.Fatalf("resource attributes = %#v", gotResource)
 	}
-	for _, forbidden := range []string{"harness.session_id", "harness.provider", "harness.model", "harness.agent", "service.instance.id"} {
+	for _, forbidden := range []string{"harness.session_id", "harness.provider", "harness.model", "harness.agent"} {
 		if _, ok := gotResource[forbidden]; ok {
 			t.Fatalf("dynamic identity %q leaked into process resource: %#v", forbidden, gotResource)
 		}
 	}
+	if gotResource["service.instance.id"] != processInstanceID || processInstanceID == "" {
+		t.Fatalf("unstable instance identity: %#v", gotResource)
+	}
 	text := string(payload)
-	for _, identity := range []string{"session-a", "provider-a", "model-a", "agent-a", "session-b", "provider-b", "model-b", "agent-b"} {
+	for _, forbidden := range []string{"session_id", "session-a", "session-b", "old-session"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("session identity leaked: %s", text)
+		}
+	}
+	for _, identity := range []string{"provider-a", "model-a", "agent-a", "provider-b", "model-b", "agent-b"} {
 		if !strings.Contains(text, identity) {
 			t.Fatalf("metric points missing identity %q: %s", identity, text)
 		}
@@ -215,18 +226,17 @@ func TestExporterQueueCountsRetainedPointsAcrossMetricKinds(t *testing.T) {
 		exp.RecordSum("harness.queue", "{point}", 1, map[string]string{"id": strconv.Itoa(i)})
 	}
 	exp.RecordHistogram("harness.queue.histogram", "ms", 1, nil, []float64{1, 5})
-
-	if exp.pointCount != maxQueuePoints {
-		t.Fatalf("pointCount = %d, want %d", exp.pointCount, maxQueuePoints)
+	if got := metricIntTotal(t, exp, "harness.queue"); got != maxQueuePoints {
+		t.Fatalf("sum=%d", got)
 	}
-	if got := len(exp.metrics["harness.queue"].points); got != maxQueuePoints {
-		t.Fatalf("number points = %d, want %d", got, maxQueuePoints)
+	if exp.regularPoints != maxSeriesPerMetric+1 || exp.pointCount != maxSeriesPerMetric+2 {
+		t.Fatalf("regular=%d all=%d", exp.regularPoints, exp.pointCount)
 	}
-	if _, ok := exp.metrics["harness.queue.histogram"]; ok {
-		t.Fatal("queue admitted a metric without capacity for its first point")
+	if exp.metrics["harness.queue"].points[overflowFingerprint] == nil || exp.metrics["harness.queue.histogram"] == nil {
+		t.Fatal("overflow or independent family lost")
 	}
-	if got := exp.Dropped(); got != 1 {
-		t.Fatalf("Dropped = %d, want 1", got)
+	if exp.Dropped() != 0 || exp.Health().Overflow != maxQueuePoints-maxSeriesPerMetric {
+		t.Fatalf("health=%+v", exp.Health())
 	}
 }
 
@@ -283,61 +293,35 @@ func TestExporterGaugeReplacesPriorSample(t *testing.T) {
 func TestSinkIdentitySwitchDoesNotReattributeOldParallelBatches(t *testing.T) {
 	exp := newTestExporter(t, "http://collector.invalid")
 	sink := NewSink(exp, nil, "provider-a", "model-a", "agent", false)
-	sink.SetIdentity("session", "provider-a", "model-a", "agent")
-	sink.RecordParallel([][]string{{"old-a", "old-b", "old-c"}})
+	old := sink.Scope()
+	old.Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkStart, Count: 1})
 	sink.SetIdentity("session", "provider-b", "model-b", "agent")
-	sink.RecordParallel([][]string{{"old-a", "old-b", "old-c"}, {"new-a", "new-b"}})
-
-	if got := metricIntTotal(t, exp, "harness.parallel.batches"); got != 2 {
-		t.Fatalf("parallel batches = %d, want old and new batches recorded once", got)
-	}
+	old.Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkFinish, Count: 1, BatchSize: 3})
+	sink.Scope().Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkStart, Count: 1})
+	sink.Scope().Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkFinish, Count: 1, BatchSize: 2})
+	requireNumber(t, exp, "harness.parallel.batches", 2, nil)
+	requireNumber(t, exp, "harness.parallel.calls", 3, map[string]string{"model": "model-a"})
+	requireNumber(t, exp, "harness.parallel.calls", 2, map[string]string{"model": "model-b"})
+	sink.RecordParallel([][]string{{"old-a", "old-b"}})
+	requireNumber(t, exp, "harness.parallel.batches", 2, nil)
 }
-
 func TestSinkParallelLargestBatchIsMaximum(t *testing.T) {
 	exp := newTestExporter(t, "http://collector.invalid")
 	sink := NewSink(exp, nil, "provider", "model", "agent", false)
-	sink.RecordParallel([][]string{{"a", "b", "c", "d"}})
-	sink.RecordParallel([][]string{{"e", "f"}, {"g", "h", "i"}})
-
-	if got := metricIntTotal(t, exp, "harness.parallel.largest_batch"); got != 4 {
-		t.Fatalf("largest batch = %d, want 4", got)
+	for _, size := range []int{4, 2, 3} {
+		sink.Scope().Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkFinish, BatchSize: size})
 	}
+	requireNumber(t, exp, "harness.parallel.largest_batch", 4, nil)
 }
 
-func TestSinkModelRequestLifecycleAccounting(t *testing.T) {
+func TestSinkLegacyModelDiagnosticsAreNonBilling(t *testing.T) {
 	exp := newTestExporter(t, "http://collector.invalid")
 	sink := NewSink(exp, nil, "provider", "model", "agent", false)
-
 	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestAccepted, Purpose: llm.RequestPurposeTurn})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestCompleted, Purpose: llm.RequestPurposeTurn})
-
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestAccepted, Purpose: llm.RequestPurposeCompaction})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestUpstreamAttemptFailed, Outcome: llm.ModelRequestOutcomeRetrying, Purpose: llm.RequestPurposeCompaction})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Purpose: llm.RequestPurposeCompaction})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestCompleted, Purpose: llm.RequestPurposeCompaction})
+	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestFailed, Purpose: llm.RequestPurposeTurn})
 	sink.MaintenanceComplete(agent.MaintenanceUsage{Purpose: string(llm.RequestPurposeCompaction), Usage: llm.Usage{InputTokens: 1}})
-
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestAccepted, Purpose: llm.RequestPurposeTurn})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestUpstreamAttemptFailed, Outcome: llm.ModelRequestOutcomeTerminal, Purpose: llm.RequestPurposeTurn})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestAccepted, Purpose: llm.RequestPurposeTurn})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestCancelled, Outcome: llm.ModelRequestOutcomeTerminal, Purpose: llm.RequestPurposeTurn})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestAccepted, Purpose: llm.RequestPurposeTurn})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{State: llm.ModelRequestFailed, Outcome: llm.ModelRequestOutcomeTerminal, Purpose: llm.RequestPurposeTurn})
-
-	if got := metricIntTotal(t, exp, "harness.model.requests"); got != 5 {
-		t.Fatalf("model requests = %d, want 5", got)
-	}
-	if got := metricIntTotal(t, exp, "harness.model.request.errors"); got != 3 {
-		t.Fatalf("terminal model request errors = %d, want 3", got)
-	}
-}
-
-func TestSinkMaintenanceCompleteFallsBackWithoutLifecycleEvent(t *testing.T) {
-	exp := newTestExporter(t, "http://collector.invalid")
-	sink := NewSink(exp, nil, "provider", "model", "agent", false)
-	sink.MaintenanceComplete(agent.MaintenanceUsage{Purpose: string(llm.RequestPurposeCompaction), Usage: llm.Usage{InputTokens: 1}})
-	if got := metricIntTotal(t, exp, "harness.model.requests"); got != 1 {
-		t.Fatalf("model requests = %d, want 1", got)
+	if len(exp.metrics) != 0 {
+		t.Fatal("legacy diagnostics counted source requests")
 	}
 }
 

@@ -223,7 +223,13 @@ as a normal `notice` event; one-shot mode keeps only its existing final aggregat
 summary. Background delegates are join-required: after one useful parent turn,
 harness waits for them and makes the parent synthesize their reports before ending
 the prompt. Ordinary background commands remain detached. Jobs live only in the
-current harness process and are abandoned when that process exits.
+current harness process and are abandoned when that process exits. Shutdown
+atomically closes background admission before canceling existing jobs; late
+launches are rejected (`background.ErrClosed` internally). `/clear` resets the
+job table and reopens admission, but an already-canceled launch context cannot
+start stale work in the fresh table. This context check is admission-only:
+accepted jobs remain detached from later launcher cancellation and use the
+manager's job cancellation/shutdown controls.
 Completion is normally delivered automatically. When later work has a strict
 dependency, `background_jobs {"action":"wait"}` waits on manager notifications
 instead of polling `get` or `list`; add `id` to target one job, use `ids` with

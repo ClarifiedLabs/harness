@@ -113,6 +113,9 @@ func (p *Provider) handleLiveFrame(data string, terminal *llm.StreamEvent, yield
 					usage = terminal.Usage
 				}
 				ev := liveEvent("applied", pending, terminal != nil, usage)
+				if terminal != nil {
+					ev.UsageReported = terminal.UsageReported
+				}
 				output = &ev
 				p.live.pending = nil
 				p.live.appliedThisStream = true

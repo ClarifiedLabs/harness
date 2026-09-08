@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"harness/internal/execution"
 	"harness/internal/httpx"
 )
 
@@ -100,8 +101,10 @@ func (t webFetch) Run(ctx context.Context, input json.RawMessage) (string, error
 		maxBytes := args.MaxBytes
 		timeoutSeconds := args.TimeoutSeconds
 		info, err := t.background.StartBackgroundJob(BackgroundJobRequest{
-			Kind:        "web_fetch",
-			Description: url,
+			Kind:             "web_fetch",
+			Execution:        execution.FromContext(ctx),
+			AdmissionContext: ctx,
+			Description:      url,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
 				out, err := doWebFetch(ctx, url, maxBytes, timeoutSeconds)
 				return BackgroundJobResult{Text: out}, err

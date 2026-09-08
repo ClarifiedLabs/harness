@@ -13,6 +13,7 @@ import (
 )
 
 type promptCall struct {
+	ctx    context.Context
 	prompt Prompt
 	sink   EventSink
 }
@@ -39,7 +40,7 @@ func newFakeRuntime() *fakeRuntime {
 }
 
 func (r *fakeRuntime) Prompt(ctx context.Context, prompt Prompt, sink EventSink) (Outcome, error) {
-	r.calls <- promptCall{prompt: prompt, sink: sink}
+	r.calls <- promptCall{ctx: ctx, prompt: prompt, sink: sink}
 	select {
 	case outcome := <-r.releases:
 		return outcome, nil
@@ -161,6 +162,9 @@ func TestManagerSequentialReuseCreatesDistinctJobs(t *testing.T) {
 	first.sink.Publish(Event{Progress: tools.BackgroundProgressSnapshot{Phase: "replying", Detail: "one"}})
 	runtime.releases <- Outcome{Reusable: true, Result: tools.BackgroundJobResult{Text: "first result"}}
 	waitState(t, manager, start.Session.ID, StateIdle)
+	// Idle describes runtime reuse, not the background manager's later lease
+	// release and terminal bookkeeping after Run returns.
+	waitSessionJobs(t, jobs, start.Job.ID)
 
 	second, err := manager.Prompt(context.Background(), PromptRequest{SessionID: start.Session.ID, Prompt: "second"})
 	if err != nil {
@@ -178,6 +182,7 @@ func TestManagerSequentialReuseCreatesDistinctJobs(t *testing.T) {
 	if snapshot.LastJobID != second.Job.ID || snapshot.Operation != 2 {
 		t.Fatalf("final snapshot = %+v", snapshot)
 	}
+	waitSessionJobs(t, jobs, second.Job.ID)
 	firstJob, _ := jobs.Get(start.Job.ID)
 	secondJob, _ := jobs.Get(second.Job.ID)
 	if firstJob.Status != background.StatusCompleted || secondJob.Status != background.StatusCompleted {

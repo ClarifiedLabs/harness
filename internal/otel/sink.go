@@ -2,35 +2,30 @@ package otel
 
 import (
 	"context"
-	"encoding/json"
-	"maps"
 	"strings"
 	"sync"
 	"time"
 
 	"harness/internal/agent"
+	"harness/internal/execution"
 	"harness/internal/llm"
 	"harness/internal/skills"
 	"harness/internal/tools"
 )
 
-var jsonUnmarshal = json.Unmarshal
-
 // Sink observes agent and UI lifecycle events and records OTLP metrics.
 
 type Sink struct {
-	exp                 *Exporter
-	delegate            bool
-	registry            *tools.Registry
-	sessionID           string
-	provider            string
-	model               string
-	agentName           string
-	parallelSeen        map[string]struct{}
-	parallelLargest     int
-	maintenanceAccepted map[string]int
-	maintenanceRequests map[string]int
-	mu                  sync.Mutex
+	exp             *Exporter
+	delegate        bool
+	registry        *tools.Registry
+	workGroup       *execution.Group
+	sessionID       string
+	provider        string
+	model           string
+	agentName       string
+	sessionRecorded bool
+	mu              sync.Mutex
 }
 
 func NewSink(exp *Exporter, registry *tools.Registry, provider, model, agentName string, delegate bool) *Sink {
@@ -48,8 +43,8 @@ func (s *Sink) delegateLabel() string {
 }
 
 // SetIdentity updates the dynamic metric-point identity used after REPL
-// model/agent switches and /clear session rotation. Identity-local dedup and
-// maximum state resets so the new series starts independently.
+// model/agent switches and /clear session rotation. Session completion dedup
+// resets only for a new session; the session ID never leaves this sink.
 func (s *Sink) SetIdentity(sessionID, provider, model, agentName string) {
 	if s == nil {
 		return
@@ -65,21 +60,15 @@ func (s *Sink) SetIdentity(sessionID, provider, model, agentName string) {
 	s.model = model
 	s.agentName = agentName
 	if sessionChanged {
-		s.parallelSeen = nil
+		s.sessionRecorded = false
 	}
-	s.parallelLargest = 0
-	s.maintenanceAccepted = nil
-	s.maintenanceRequests = nil
 }
 
 func (s *Sink) baseAttrs(extra map[string]string) map[string]string {
 	s.mu.Lock()
-	sessionID, provider, model, agentName := s.sessionID, s.provider, s.model, s.agentName
+	provider, model, agentName := s.provider, s.model, s.agentName
 	s.mu.Unlock()
 	m := map[string]string{"delegate": s.delegateLabel()}
-	if sessionID != "" {
-		m["session_id"] = truncate(sessionID, 64)
-	}
 	if provider != "" {
 		m["provider"] = truncate(provider, 64)
 	}
@@ -95,42 +84,21 @@ func (s *Sink) baseAttrs(extra map[string]string) map[string]string {
 	return m
 }
 
+// ToolResultWithName is a compatibility adapter. Worker duration belongs only
+// to WorkFinish; a returned timeout does not mean its worker has finished.
 func (s *Sink) ToolResultWithName(toolName string, result llm.ToolResult, durationMS int64, activity tools.Activity) {
-	if s == nil || s.exp == nil {
+	if s == nil {
 		return
 	}
-	tool := sanitizeToolName(toolName)
-	ac := string(activity.Class)
-	if ac == "" {
-		ac = "other"
-	}
-	attrs := s.baseAttrs(map[string]string{"tool": tool, "activity_class": ac})
-	s.exp.RecordSum("harness.tool.calls", "{call}", 1, attrs)
+	outcome := "completed"
 	if result.IsError {
-		ek := string(result.ErrorKind)
-		if ek == "" {
-			ek = "result_error"
-		}
-		attrsErr := s.baseAttrs(map[string]string{"tool": tool, "activity_class": ac, "error_kind": truncate(ek, 64)})
-		s.exp.RecordSum("harness.tool.errors", "{error}", 1, attrsErr)
+		outcome = "failed"
 	}
-	if result.Truncated {
-		s.exp.RecordSum("harness.tool.truncations", "{truncation}", 1, s.baseAttrs(map[string]string{"tool": tool}))
+	e := execution.WorkEvent{Identity: s.Scope().Identity, Kind: execution.WorkTool, Phase: execution.WorkResult, Tool: toolName, Outcome: outcome, Activity: string(activity.Class), ErrorKind: string(result.ErrorKind), Count: 1, ResultBytes: max(result.ShownBytes, len(result.Text)), OriginalBytes: result.OriginalBytes, Truncated: result.Truncated}
+	if result.BackgroundJobID == "" {
+		e.Metrics = result.Metrics
 	}
-	if durationMS >= 0 {
-		s.exp.RecordHistogram("harness.tool.duration", "ms", float64(durationMS), s.baseAttrs(map[string]string{"tool": tool, "activity_class": ac}), []float64{1, 5, 10, 50, 100, 250, 500, 1000, 5000, 30000})
-	}
-	if result.ShownBytes > 0 || result.OriginalBytes > 0 {
-		bytesVal := result.ShownBytes
-		if bytesVal == 0 {
-			bytesVal = result.OriginalBytes
-		}
-		s.exp.RecordHistogram("harness.tool.results.bytes", "By", float64(bytesVal), s.baseAttrs(map[string]string{"tool": tool}), []float64{256, 1024, 4096, 16384, 65536, 262144, 1048576})
-	}
-	// Single-tool turn counters for parity with session stats.
-	if tool == "update_todos" {
-		// Will be de-duplicated at turn level when ToolCalls==1; keeping per-call here would overcount batched.
-	}
+	s.ObserveWork(e)
 }
 
 func sanitizeToolName(name string) string {
@@ -139,13 +107,16 @@ func sanitizeToolName(name string) string {
 		return "unknown"
 	}
 	known := map[string]bool{
-		"read": true, "view_image": true, "edit": true, "write": true, "shell": true, "web_fetch": true, "delegate": true, "background_jobs": true, "update_todos": true, "record_plan": true,
+		"read": true, "view_image": true, "edit": true, "write": true, "shell": true, "web_fetch": true, "delegate": true, "background_jobs": true, "update_todos": true, "record_plan": true, "agent_sessions": true, "acp": true, "tool_catalog": true, "task_notes": true, "history_search": true, "history_read": true, "history_list": true, "get_context_remaining": true, "new_context": true,
 	}
 	if known[name] {
 		return truncate(name, 64)
 	}
-	if strings.HasPrefix(name, "mcp_") || strings.HasPrefix(name, "lsp_") {
-		return truncate(name, 64)
+	if strings.HasPrefix(name, "mcp_") {
+		return "mcp"
+	}
+	if strings.HasPrefix(name, "lsp_") {
+		return "lsp"
 	}
 	return "other"
 }
@@ -195,32 +166,13 @@ func isSingleInspectTurn(toolNames []string) bool {
 	}
 }
 
-// TurnProgress records inspection/steer metrics.
+// TurnProgress is a compatibility adapter. Production turn observations arrive
+// from the core with their captured execution identity.
 func (s *Sink) TurnProgress(p agent.TurnProgress) {
-	if s == nil || s.exp == nil {
+	if s == nil {
 		return
 	}
-	ac := dominantActivity(p.Activity)
-	if p.ToolCalls > 0 {
-		s.exp.RecordHistogram("harness.tools_per_turn", "{tool}", float64(p.ToolCalls), s.baseAttrs(map[string]string{"activity_class": ac}), []float64{1, 2, 3, 4, 8, 16})
-	}
-	if p.Operations > 0 {
-		s.exp.RecordHistogram("harness.operations_per_turn", "{operation}", float64(p.Operations), s.baseAttrs(map[string]string{"activity_class": ac}), []float64{1, 2, 3, 4, 8, 16, 32})
-	}
-	if p.SingleLookupCount == 1 && p.ToolCalls == 1 {
-		s.exp.RecordSum("harness.single_lookup_turns", "{turn}", 1, s.baseAttrs(nil))
-	}
-	if p.InspectionNoProgressRun > 0 {
-		s.exp.RecordHistogram("harness.inspection_no_progress_streak", "{turn}", float64(p.InspectionNoProgressRun), s.baseAttrs(nil), []float64{1, 2, 3, 5, 8, 12, 20})
-	}
-	if p.SteerReason != "" {
-		s.exp.RecordSum("harness.guard.steers", "{steer}", 1, s.baseAttrs(map[string]string{"reason": string(p.SteerReason)}))
-	}
-	// Solo-todo and inspect-only single-lookup turns for stats parity.
-	if p.ToolCalls == 1 {
-		// We don't have tool name here, but TurnProgress alone can't tell update_todos vs inspect.
-		// Solo-todo is tracked in ToolResultWithName fallback; largest_batch via RecordParallel.
-	}
+	s.ObserveTurn(execution.TurnEvent{Identity: s.Scope().Identity, ToolCalls: p.ToolCalls, Operations: p.Operations, SingleLookupCount: p.SingleLookupCount, InspectionNoProgressRun: p.InspectionNoProgressRun, Activity: dominantActivity(p.Activity), SteerReason: string(p.SteerReason)})
 }
 
 func dominantActivity(a agent.ToolActivityCounts) string {
@@ -248,313 +200,90 @@ func dominantActivity(a agent.ToolActivityCounts) string {
 	return dom
 }
 
-// PromptComplete records prompt-level fleet metrics.
+// PromptComplete is a non-billing compatibility summary. Source observations
+// own all exclusive requests, usage, retries, and applied compactions.
 func (s *Sink) PromptComplete(usage agent.PromptUsage, duration time.Duration) {
-	if s == nil || s.exp == nil {
+	if s == nil {
 		return
 	}
-	term := sanitizeTerminationReason(string(usage.TerminationReason))
-	closure := strings.TrimSpace(string(usage.ClosureTrigger))
-	if closure != "" {
-		closure = truncate(closure, 32)
-	}
-	attrs := s.baseAttrs(map[string]string{"termination_reason": truncate(term, 64), "closure_trigger": closure})
-	s.exp.RecordSum("harness.prompt.total", "{prompt}", 1, attrs)
-	s.exp.RecordHistogram("harness.prompt.turns", "{turn}", float64(usage.Turns), attrs, []float64{1, 2, 3, 5, 10, 20, 50})
-	if duration > 0 {
-		s.exp.RecordHistogram("harness.prompt.duration", "s", duration.Seconds(), attrs, []float64{1, 5, 10, 30, 60, 120, 300, 600})
-	}
-	u := usage.Usage
-	costKnown := "false"
-	if u.CostKnown {
-		costKnown = "true"
-	}
-	tokAttrs := s.baseAttrs(map[string]string{"cost_known": costKnown})
-	s.exp.RecordSum("harness.tokens.input", "{token}", int64(u.InputTokens), tokAttrs)
-	s.exp.RecordSum("harness.tokens.output", "{token}", int64(u.OutputTokens), tokAttrs)
-	s.exp.RecordSum("harness.tokens.cache_read", "{token}", int64(u.CacheReadTokens), tokAttrs)
-	s.exp.RecordSum("harness.tokens.cache_write", "{token}", int64(u.CacheWriteTokens), tokAttrs)
-	s.exp.RecordSum("harness.tokens.cache_write_1h", "{token}", int64(u.CacheWrite1hTokens), tokAttrs)
-	s.exp.RecordSum("harness.tokens.prompt_input", "{token}", int64(llm.PromptInputTokens(u)), tokAttrs)
-	s.exp.RecordSum("harness.tokens.reasoning", "{token}", int64(u.ReasoningTokens), tokAttrs)
-	total := u.InputTokens + u.OutputTokens + u.CacheReadTokens + u.CacheWriteTokens + u.CacheWrite1hTokens + u.ReasoningTokens
-	s.exp.RecordSum("harness.tokens.total", "{token}", int64(total), tokAttrs)
-	if u.CostKnown {
-		s.exp.RecordSumFloat("harness.cost.usd", "USD", u.CostUSD, s.baseAttrs(map[string]string{"cost_known": "true"}))
-	} else {
-		s.exp.RecordSum("harness.cost.unpriced_calls", "{call}", 1, s.baseAttrs(nil))
-	}
-	s.exp.RecordSum("harness.compactions.total", "{compaction}", int64(usage.Compactions), s.baseAttrs(nil))
-	// Wasted (retried) token cost
-	if w := usage.Wasted; w.InputTokens > 0 || w.OutputTokens > 0 || w.CacheReadTokens > 0 || w.CacheWriteTokens > 0 {
-		s.exp.RecordSum("harness.retries.total", "{retry}", 1, s.baseAttrs(nil))
-	}
+	s.ObservePrompt(execution.PromptEvent{Identity: s.Scope().Identity, Duration: duration, Turns: usage.Turns, Termination: string(usage.TerminationReason), ClosureTrigger: string(usage.ClosureTrigger)})
 }
 
-// MaintenanceComplete records a maintenance model call when no accepted
-// lifecycle event already accounted for it.
-func (s *Sink) MaintenanceComplete(usage agent.MaintenanceUsage) {
-	if s == nil || s.exp == nil {
-		return
-	}
-	purpose := string(llm.NormalizeRequestPurpose(llm.RequestPurpose(usage.Purpose)))
-	s.mu.Lock()
-	if s.maintenanceRequests[purpose] > 0 {
-		s.maintenanceRequests[purpose]--
-		s.mu.Unlock()
-		return
-	}
-	s.mu.Unlock()
-	s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(purpose, 32)}))
-}
+// MaintenanceComplete and ModelRequestEvent are legacy diagnostics, not physical
+// source observations. They cannot safely count or price model requests.
+func (s *Sink) MaintenanceComplete(agent.MaintenanceUsage) {}
 
-func (s *Sink) RecordParallel(batches [][]string) {
-	if s == nil || s.exp == nil || len(batches) == 0 {
-		return
-	}
-	s.mu.Lock()
-	if s.parallelSeen == nil {
-		s.parallelSeen = make(map[string]struct{})
-	}
-	var toRecord [][]string
-	largest := s.parallelLargest
-	for _, ids := range batches {
-		if len(ids) < 2 {
-			continue
-		}
-		key := strings.Join(ids, ",")
-		if _, ok := s.parallelSeen[key]; ok {
-			continue
-		}
-		s.parallelSeen[key] = struct{}{}
-		toRecord = append(toRecord, ids)
-		if len(ids) > largest {
-			largest = len(ids)
-		}
-	}
-	largestChanged := largest > s.parallelLargest
-	if largestChanged {
-		s.parallelLargest = largest
-	}
-	s.mu.Unlock()
-	for _, ids := range toRecord {
-		size := len(ids)
-		s.exp.RecordSum("harness.parallel.batches", "{batch}", 1, s.baseAttrs(nil))
-		s.exp.RecordSum("harness.parallel.calls", "{call}", int64(size), s.baseAttrs(nil))
-		s.exp.RecordHistogram("harness.parallel.batch_size", "{call}", float64(size), s.baseAttrs(nil), []float64{2, 3, 4, 6, 8, 12})
-	}
-	if largestChanged {
-		s.exp.RecordGauge("harness.parallel.largest_batch", "{call}", int64(largest), s.baseAttrs(nil))
-	}
-}
+// RecordParallel does not reconstruct physical execution from transcripts.
+// WorkParallel supplies batch count and final actual size directly.
+func (s *Sink) RecordParallel([][]string) {}
 
-// RecordCommands records harness.commands.* from a decoded shell payload.
-func (s *Sink) RecordCommands(input []byte) {
-	if s == nil || s.exp == nil || len(input) == 0 {
-		return
-	}
-	type step struct {
-		Command string   `json:"command"`
-		Argv    []string `json:"argv"`
-	}
-	type payload struct {
-		Command    string   `json:"command"`
-		Argv       []string `json:"argv"`
-		Background bool     `json:"background"`
-		Steps      []step   `json:"steps"`
-	}
-	var p payload
-	if err := jsonUnmarshal(input, &p); err != nil {
-		return
-	}
-	mode := "foreground"
-	if p.Background {
-		mode = "background"
-	}
-	kind := "shell"
-	if p.Command == "" && len(p.Argv) > 0 {
-		kind = "argv"
-	}
-	s.exp.RecordSum("harness.commands.total", "{command}", 1, s.baseAttrs(map[string]string{"mode": mode, "kind": kind}))
-	if len(p.Steps) > 0 {
-		s.exp.RecordHistogram("harness.commands.steps_per_batch", "{step}", float64(len(p.Steps)), s.baseAttrs(nil), []float64{1, 2, 3, 5, 8})
-	}
-}
+// RecordCommands no longer reconstructs execution from a launch payload.
+// WorkCommand observations count only commands actually executed.
+func (s *Sink) RecordCommands([]byte) {}
 
-// RecordSkillCatalog records startup catalog budget pressure without paths,
-// names, descriptions, or other prompt content.
+// RecordSkillCatalog records startup catalog budget pressure, not an activation.
 func (s *Sink) RecordSkillCatalog(report skills.CatalogReport) {
-	if s == nil || s.exp == nil {
+	if s == nil {
 		return
 	}
-	attrs := s.baseAttrs(nil)
-	if report.Omitted > 0 {
-		s.exp.RecordSum("harness.skill.catalog_omitted", "{skill}", int64(report.Omitted), attrs)
-	}
-	if report.TruncatedCount > 0 {
-		s.exp.RecordSum("harness.skill.catalog_truncated", "{skill}", int64(report.TruncatedCount), attrs)
-	}
+	s.ObserveSkill(execution.SkillEvent{Identity: s.Scope().Identity, Source: "startup", Status: "catalog", Omitted: report.Omitted, Truncated: report.TruncatedCount})
 }
 
-// RecordSkill records harness.skill.activations.
+// RecordSkill is the compatibility entry point for actual root UI injections.
 func (s *Sink) RecordSkill(source, status string) {
-	if s == nil || s.exp == nil {
+	if s == nil {
 		return
 	}
-	source = strings.TrimSpace(source)
-	if source == "" {
-		source = "unknown"
-	}
-	s.exp.RecordSum("harness.skill.activations", "{activation}", 1, s.baseAttrs(map[string]string{"source": truncate(source, 32)}))
-	_ = status
+	s.ObserveSkill(execution.SkillEvent{Identity: s.Scope().Identity, Source: source, Status: status})
 }
 
 func (s *Sink) RecordTurnSummary(toolNames []string) {
-	if s == nil || s.exp == nil {
+	if s == nil {
 		return
 	}
-	if len(toolNames) == 0 {
-		return
-	}
-	names := make([]string, 0, len(toolNames))
-	for _, n := range toolNames {
-		sanitized := sanitizeToolName(n)
-		if sanitized == "other" {
-			// Preserve unknown as "other" bucket but keep count correct
-		}
-		names = append(names, sanitized)
-	}
-	if isSoloTodoTurn(names) {
-		s.exp.RecordSum("harness.solo_todo_turns", "{turn}", 1, s.baseAttrs(nil))
-	}
-	if isSingleInspectTurn(names) {
-		s.exp.RecordSum("harness.single_inspect_turns", "{turn}", 1, s.baseAttrs(nil))
-	}
+	s.ObserveTurn(execution.TurnEvent{Identity: s.Scope().Identity, ToolNames: toolNames})
 }
 
-// RecordSession emits harness.session.* gauges at session-exit.
+// RecordSession records inclusive root-session distributions, never fleet
+// billing. A session may span many configured identities, so none is attached.
 func (s *Sink) RecordSession(costUSD float64, totalTokens int) {
-	if s == nil || s.exp == nil {
+	if s == nil || s.exp == nil || s.delegate {
 		return
 	}
-	s.exp.RecordGaugeFloat("harness.session.cost", "USD", costUSD, s.baseAttrs(nil))
-	s.exp.RecordGauge("harness.session.tokens", "{token}", int64(totalTokens), s.baseAttrs(nil))
-}
-
-// RecordDelegate records harness.delegate.* for one ChildMeta.
-func (s *Sink) RecordDelegate(agentName, status, terminationReason string, turns int, usage llm.Usage, compactions int) {
-	if s == nil || s.exp == nil {
+	attrs := map[string]string{"scope": "root_session_inclusive", "delegate": "false"}
+	s.mu.Lock()
+	if s.sessionRecorded {
+		s.mu.Unlock()
 		return
 	}
-	agentName = truncate(strings.TrimSpace(agentName), 64)
-	if agentName == "" {
-		agentName = "unknown"
-	}
-	status = sanitizeStatus(status)
-	term := sanitizeTerminationReason(terminationReason)
-	attrs := map[string]string{"agent": agentName, "delegate": "true", "status": status, "termination_reason": term}
-	s.exp.RecordSum("harness.delegate.sessions", "{session}", 1, s.baseAttrs(attrs))
-	delegateAttrs := map[string]string{"agent": agentName, "delegate": "true", "status": status}
-	s.exp.RecordHistogram("harness.delegate.turns", "{turn}", float64(turns), s.baseAttrs(delegateAttrs), []float64{1, 2, 5, 10, 20})
-	totalTokens := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheWriteTokens + usage.CacheWrite1hTokens + usage.ReasoningTokens
-	s.exp.RecordSum("harness.delegate.tokens", "{token}", int64(totalTokens), s.baseAttrs(delegateAttrs))
-	if usage.CostKnown {
-		costAttrs := maps.Clone(delegateAttrs)
-		costAttrs["cost_known"] = "true"
-		s.exp.RecordSumFloat("harness.delegate.cost", "USD", usage.CostUSD, s.baseAttrs(costAttrs))
-	}
-	if compactions > 0 {
-		s.exp.RecordSum("harness.delegate.compactions", "{compaction}", int64(compactions), s.baseAttrs(map[string]string{"agent": agentName, "delegate": "true"}))
-	}
+	s.sessionRecorded = true
+	s.mu.Unlock()
+	s.exp.RecordSum("harness.session.total", "{session}", 1, attrs)
+	s.exp.RecordHistogram("harness.session.cost", "USD", costUSD, attrs, []float64{0, .01, .1, 1, 5, 10, 50, 100})
+	s.exp.RecordHistogram("harness.session.tokens", "{token}", float64(max(0, totalTokens)), attrs, tokenBounds)
 }
 
-type ContextComposition struct {
-	Messages             int
-	Blocks               int
-	UserTextBytes        int
-	AssistantTextBytes   int
-	ToolInputBytes       int
-	ToolResultBytes      int
-	ReasoningTextBytes   int
-	ReasoningOpaqueBytes int
-	ImageEncodedBytes    int
-}
+// RecordDelegate deliberately ignores inclusive child metadata. Child execution
+// observations carry the actual model and exclusive billing instead.
+func (s *Sink) RecordDelegate(string, string, string, int, llm.Usage, int) {}
 
+// ContextComposition remains an alias for compatibility; the execution
+// contract is the canonical owner of the numeric request snapshot.
+type ContextComposition = execution.ContextComposition
+
+// RecordContext is a compatibility adapter. Production request snapshots arrive
+// through ObserveContext with the caller's captured identity.
 func (s *Sink) RecordContext(c ContextComposition) {
 	if s == nil || s.exp == nil {
 		return
 	}
-	s.exp.RecordGauge("harness.context.messages", "{message}", int64(c.Messages), s.baseAttrs(nil))
-	s.exp.RecordGauge("harness.context.blocks", "{block}", int64(c.Blocks), s.baseAttrs(nil))
-	by := func(x int) int64 { return int64(x) }
-	s.exp.RecordGauge("harness.context.bytes", "By", by(c.UserTextBytes), s.baseAttrs(map[string]string{"component": "user_text"}))
-	s.exp.RecordGauge("harness.context.bytes", "By", by(c.AssistantTextBytes), s.baseAttrs(map[string]string{"component": "assistant_text"}))
-	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ToolInputBytes), s.baseAttrs(map[string]string{"component": "tool_input"}))
-	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ToolResultBytes), s.baseAttrs(map[string]string{"component": "tool_result"}))
-	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ReasoningTextBytes), s.baseAttrs(map[string]string{"component": "reasoning_text"}))
-	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ReasoningOpaqueBytes), s.baseAttrs(map[string]string{"component": "reasoning_opaque"}))
-	s.exp.RecordGauge("harness.context.bytes", "By", by(c.ImageEncodedBytes), s.baseAttrs(map[string]string{"component": "image"}))
+	s.recordContextComposition(s.Scope().Identity, c)
 }
 
-// RetentionApplied records retention epochs.
-func (s *Sink) RetentionApplied(event agent.RetentionEvent) {
-	if s == nil || s.exp == nil {
-		return
-	}
-	policy := string(event.Policy)
-	if policy == "" {
-		policy = "unknown"
-	}
-	trigger := string(event.Trigger)
-	if trigger == "" {
-		trigger = "unknown"
-	}
-	s.exp.RecordSum("harness.retention.epochs", "{epoch}", 1, s.baseAttrs(map[string]string{"policy": truncate(policy, 32), "trigger": truncate(trigger, 32)}))
-}
-
-// ModelRequestEvent records each request once at acceptance and records only
-// terminal lifecycle failures as request errors.
-func (s *Sink) ModelRequestEvent(event llm.ModelRequestEvent) {
-	if s == nil || s.exp == nil {
-		return
-	}
-	purpose := string(llm.NormalizeRequestPurpose(event.Purpose))
-	maintenancePurpose := purpose != string(llm.RequestPurposeTurn)
-	if event.State == llm.ModelRequestAccepted {
-		if maintenancePurpose {
-			s.mu.Lock()
-			if s.maintenanceAccepted == nil {
-				s.maintenanceAccepted = make(map[string]int)
-			}
-			s.maintenanceAccepted[purpose]++
-			s.mu.Unlock()
-		}
-		s.exp.RecordSum("harness.model.requests", "{request}", 1, s.baseAttrs(map[string]string{"purpose": truncate(purpose, 32), "api_type": truncate(event.APIType, 32)}))
-	}
-
-	terminalError := event.State == llm.ModelRequestFailed || event.State == llm.ModelRequestCancelled ||
-		(event.State == llm.ModelRequestUpstreamAttemptFailed && event.Outcome == llm.ModelRequestOutcomeTerminal)
-	if maintenancePurpose && (event.State == llm.ModelRequestCompleted || terminalError) {
-		s.mu.Lock()
-		if s.maintenanceAccepted[purpose] > 0 {
-			s.maintenanceAccepted[purpose]--
-			if event.State == llm.ModelRequestCompleted {
-				if s.maintenanceRequests == nil {
-					s.maintenanceRequests = make(map[string]int)
-				}
-				s.maintenanceRequests[purpose]++
-			}
-		}
-		s.mu.Unlock()
-	}
-	if terminalError {
-		s.exp.RecordSum("harness.model.request.errors", "{error}", 1, s.baseAttrs(map[string]string{
-			"stage": truncate(string(event.Stage), 32),
-			"code":  truncate(event.Code, 64),
-			"state": truncate(string(event.State), 32),
-		}))
-	}
-}
+// RetentionApplied is retained for interface compatibility. ObserveContext is
+// the canonical retention observation, including actual reclamation and resets.
+func (s *Sink) RetentionApplied(agent.RetentionEvent)   {}
+func (s *Sink) ModelRequestEvent(llm.ModelRequestEvent) {}
 
 func (s *Sink) Flush(ctx context.Context) error {
 	if s == nil || s.exp == nil {

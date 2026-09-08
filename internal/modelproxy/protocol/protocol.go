@@ -108,10 +108,26 @@ type Target struct {
 	ReasoningReplayDomain string    `json:"reasoning_replay_domain,omitempty"`
 }
 
+// CallerAttempt carries only the caller's inherited retry/continuation origin.
+// Target identity and purpose remain server-resolved. Dialect and proxy retries
+// may replace this origin; it is not an override applied to each emitted fact.
+type CallerAttempt struct {
+	Cause      llm.AttemptCause `json:"cause"`
+	RetryLayer llm.RetryLayer   `json:"retry_layer"`
+}
+
+func (a CallerAttempt) Normalized() CallerAttempt {
+	event := llm.NormalizeAttemptEvent(llm.AttemptEvent{AttemptMetadata: llm.AttemptMetadata{
+		Cause: a.Cause, RetryLayer: a.RetryLayer,
+	}})
+	return CallerAttempt{Cause: event.Cause, RetryLayer: event.RetryLayer}
+}
+
 type StreamRequest struct {
-	TargetID         string      `json:"target_id"`
-	Request          llm.Request `json:"request"`
-	ReasoningProfile string      `json:"reasoning_profile,omitempty"`
+	TargetID         string         `json:"target_id"`
+	Request          llm.Request    `json:"request"`
+	ReasoningProfile string         `json:"reasoning_profile,omitempty"`
+	CallerAttempt    *CallerAttempt `json:"caller_attempt,omitempty"`
 }
 
 type TokenCountRequest struct {
@@ -126,17 +142,21 @@ type TokenCountResponse struct {
 }
 
 type CompactRequest struct {
-	TargetID string      `json:"target_id"`
-	Request  llm.Request `json:"request"`
+	TargetID      string         `json:"target_id"`
+	Request       llm.Request    `json:"request"`
+	CallerAttempt *CallerAttempt `json:"caller_attempt,omitempty"`
 }
 
 type CompactResponse struct {
-	Context llm.CompactedContext `json:"context"`
+	Context  llm.CompactedContext `json:"context"`
+	Attempts []llm.AttemptEvent   `json:"attempts,omitempty"`
+	Error    *Error               `json:"error,omitempty"`
 }
 
 type StreamEnvelope struct {
-	Event *llm.StreamEvent `json:"event,omitempty"`
-	Error *Error           `json:"error,omitempty"`
+	Event   *llm.StreamEvent  `json:"event,omitempty"`
+	Error   *Error            `json:"error,omitempty"`
+	Attempt *llm.AttemptEvent `json:"attempt,omitempty"`
 }
 
 type Error struct {

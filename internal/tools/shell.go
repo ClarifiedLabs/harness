@@ -15,6 +15,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"harness/internal/execution"
 	"harness/internal/llm"
 )
 
@@ -200,6 +201,7 @@ func (t shell) Schema() json.RawMessage {
 func (shell) ReadOnly(json.RawMessage) bool { return false }
 
 type shellArgs struct {
+	executionStep   bool
 	Command         string      `json:"command"`
 	Argv            []string    `json:"argv"`
 	Steps           []shellStep `json:"steps"`
@@ -289,10 +291,12 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 			return RunResult{}, err
 		}
 		info, err := t.background.StartBackgroundJob(BackgroundJobRequest{
-			Kind:        "shell",
-			Description: shellDescription(args),
-			ResourceKey: resourceKey,
-			Access:      access,
+			Kind:             "shell",
+			Execution:        execution.FromContext(ctx),
+			AdmissionContext: ctx,
+			Description:      shellDescription(args),
+			ResourceKey:      resourceKey,
+			Access:           access,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
 				var result RunResult
 				var err error
@@ -656,7 +660,40 @@ func commandOutputTail(output string, maxBytes, maxLines int) (string, bool) {
 	return tail, clipped
 }
 
-func shellArgsProcess(ctx context.Context, args shellArgs) (processResult, error) {
+func shellArgsProcess(ctx context.Context, args shellArgs) (result processResult, err error) {
+	started := time.Now()
+	scope := execution.FromContext(ctx)
+	kind, mode, trigger := "shell", "foreground", "single"
+	if len(args.Argv) > 0 {
+		kind = "argv"
+	}
+	if args.Background {
+		mode = "background"
+	}
+	if args.executionStep {
+		trigger = "step"
+	}
+	scope.Work(execution.WorkEvent{Kind: execution.WorkCommand, Phase: execution.WorkStart,
+		Tool: kind, Mode: mode, Trigger: trigger, Count: 1})
+	defer func() {
+		duration := time.Since(started)
+		outcome := executionOutcome(ctx, err)
+		var metrics map[string]int
+		if err == nil {
+			metrics = commandProcessMetrics(result)
+			switch {
+			case result.Status == processTimedOut:
+				outcome = "timeout"
+			case result.Status == processCancelled:
+				outcome = "canceled"
+			case !result.success():
+				outcome = "failed"
+			}
+		}
+		scope.Work(execution.WorkEvent{Kind: execution.WorkCommand, Phase: execution.WorkFinish,
+			Tool: kind, Mode: mode, Trigger: trigger, Outcome: outcome, Count: 1,
+			RunDuration: &duration, Metrics: metrics})
+	}()
 	if len(args.Argv) == 0 {
 		cmd := shellCommand(args.Command)
 		cmd.Dir = args.Cwd
@@ -664,7 +701,7 @@ func shellArgsProcess(ctx context.Context, args shellArgs) (processResult, error
 		if args.Stdin != "" {
 			cmd.Stdin = strings.NewReader(args.Stdin)
 		}
-		result, err := runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
+		result, err = runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
 		if err != nil {
 			return processResult{}, fmt.Errorf("failed to start shell: %w", err)
 		}
@@ -675,7 +712,7 @@ func shellArgsProcess(ctx context.Context, args shellArgs) (processResult, error
 	if args.Stdin != "" {
 		cmd.Stdin = strings.NewReader(args.Stdin)
 	}
-	result, err := runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
+	result, err = runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
 	if err != nil {
 		return processResult{}, fmt.Errorf("%s: %w", args.Argv[0], err)
 	}
@@ -695,6 +732,8 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 	for i, step := range args.Steps {
 		name := fmt.Sprintf("step %d", i+1)
 		resolved := shellArgs{
+			Background:     args.Background,
+			executionStep:  true,
 			Command:        step.Command,
 			Argv:           append([]string(nil), step.Argv...),
 			Stdin:          step.Stdin,

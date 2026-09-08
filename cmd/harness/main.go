@@ -38,6 +38,7 @@ import (
 	"harness/internal/config"
 	"harness/internal/configmeta"
 	"harness/internal/delegate"
+	"harness/internal/execution"
 	"harness/internal/goal"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
@@ -47,7 +48,6 @@ import (
 	"harness/internal/mcptools"
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
-	"harness/internal/otel"
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
 	"harness/internal/runstream"
@@ -945,6 +945,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
 		snap.NativeCompaction = nativeCompactionForProvider(catalog, next.Provider)
 		snap.Agent = a.Name
+		snap.Execution = snap.Execution.Rebind(execution.Identity{Provider: next.Provider, Model: next.Model, Agent: a.Name, Delegate: "false"})
 		snap.ToolNames = reg.Names()
 		delegateState.Set(snap)
 		return ui.AgentSelection{
@@ -1088,6 +1089,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		snap.ServerTools = webSearchServerToolsForModel(next.Provider, modelRegistry, next.RegistryModel, cfg.WebSearch)
 		snap.ResponsesStateful = responsesStatefulForProvider(cfg, catalog, next.Provider)
 		snap.NativeCompaction = nativeCompactionForProvider(catalog, next.Provider)
+		snap.Execution = snap.Execution.Rebind(execution.Identity{Provider: next.Provider, Model: next.Model, Agent: snap.Agent, Delegate: "false"})
 		delegateState.Set(snap)
 		reasoning = nextReasoning
 		serverTools = snap.ServerTools
@@ -1386,58 +1388,31 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 		return ref, nil
 	})
-	// OTEL exporter: opt-in. Hostname defaults to the short OS hostname;
-	// an explicitly empty otel.hostname disables host.name.
-	hostname := cfg.OTel.Hostname
-	if cfg.OTel.Enabled && !cfg.OTel.HostnameSet {
-		if h, err := os.Hostname(); err == nil {
-			h = strings.TrimSpace(h)
-			if h != "" {
-				if idx := strings.Index(h, "."); idx != -1 {
-					h = h[:idx]
-				}
-				hostname = strings.TrimSpace(h)
-			}
-		}
+	telemetry, err := newRootTelemetry(cfg, logger)
+	if err != nil {
+		return fail(stderr, ui.ExitUsage, "otel: %v", err)
 	}
-	if cfg.OTel.Enabled {
-		otelCfg := otel.Config{
-			Enabled:            cfg.OTel.Enabled,
-			Endpoint:           cfg.OTel.Endpoint,
-			Protocol:           cfg.OTel.Protocol,
-			Timeout:            time.Duration(cfg.OTel.TimeoutSeconds) * time.Second,
-			ServiceName:        cfg.OTel.ServiceName,
-			Hostname:           hostname,
-			Headers:            cfg.OTel.Headers,
-			ResourceAttributes: cfg.OTel.ResourceAttributes,
-		}
-		if otelCfg.Protocol == "" {
-			otelCfg.Protocol = "http/json"
-		}
-		if otelCfg.ServiceName == "" {
-			otelCfg.ServiceName = "harness"
-		}
-		sessionID := ""
-		if sessionPath != "" {
-			sessionID = filepath.Base(sessionPath)
-		}
-		exp, err := otel.NewExporter(otelCfg, buildinfo.Current(), sessionID, cfg.Provider, cfg.Model, agentName, cfg.OTel.ResourceAttributes)
-		if err != nil {
-			return fail(stderr, ui.ExitUsage, "otel: %v", err)
-		}
-		otelSink := otel.NewSink(exp, toolRegistry, cfg.Provider, cfg.Model, agentName, false)
-		otelSink.SetIdentity(sessionID, cfg.Provider, cfg.Model, agentName)
+	if telemetry != nil {
+		otelSink := telemetry.NewSink(toolRegistry, cfg.Provider, cfg.Model, agentName)
+		otelSink.SetIdentity(filepath.Base(sessionPath), cfg.Provider, cfg.Model, agentName)
 		otelSink.RecordSkillCatalog(skillCatalogReport)
 		app.SetOTel(otelSink)
+		snapshot := delegateState.Snapshot()
+		snapshot.Execution = otelSink.Scope()
+		delegateState.Set(snapshot)
 		defer func() {
-			ctx, cancel := context.WithTimeout(context.Background(), otel.ShutdownExportTimeout)
+			// The UI normally already stopped these managers. Their idempotent
+			// cleanup also covers startup exits and joins force-exit workers before
+			// taking the final snapshot, without repeating UI diagnostics.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_ = exp.Export(ctx)
+			if err := agentSessionManager.CloseAll(ctx); err != nil {
+				logger.Warn("otel: close agent sessions", "err", err)
+			}
+			deadline, _ := ctx.Deadline()
+			backgroundManager.ShutdownAndWait(min(time.Second, max(0, time.Until(deadline))))
+			telemetry.Finalize(ctx, app.RecordOTelSession)
 		}()
-		periodicCtx, cancelPeriodic := context.WithCancel(context.Background())
-		defer cancelPeriodic()
-		exp.SetPeriodic(periodicCtx, logger)
-		defer app.RecordOTelSession()
 	}
 
 	app.SetUsage(totals)
@@ -1619,7 +1594,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			if modelKey == "" {
 				modelKey = app.Model
 			}
+			finish := app.TrackOTel()
 			go func() {
+				defer finish()
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				result := warm(ctx)

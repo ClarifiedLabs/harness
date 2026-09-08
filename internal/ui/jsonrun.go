@@ -77,6 +77,8 @@ type jsonActivePrompt struct {
 }
 
 func (d *jsonDriver) run() int {
+	finishOwner := d.app.TrackOTel()
+	defer finishOwner()
 	defer func() {
 		// Forced exit deliberately leaves a possibly stuck prompt goroutine behind;
 		// do not race it through background/session state. Graceful EOF, shutdown,
@@ -458,7 +460,9 @@ func (d *jsonDriver) startPrompt(req jsonPromptRequest) {
 	}
 	sink := newREPLSink(app.Renderer, app, promptID)
 	d.active = &jsonActivePrompt{id: req.id, cause: req.cause, promptID: promptID, started: app.clock()(), cancel: cancel, sink: sink}
+	finishPrompt := app.TrackOTel()
 	go func() {
+		defer finishPrompt()
 		d.done <- jsonPromptDone{err: app.Agent.RunAdmittedPromptWithContext(ctx, admission, app.promptHookContext(promptContext), promptID, sink)}
 	}()
 }

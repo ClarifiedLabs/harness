@@ -571,19 +571,46 @@ built-in prompt or materialize built-in agents. `config check` strictly decodes 
 semantic dependencies such as agents, hooks, and `@file` references, then names
 the checked path on success. Explicitly selected missing files are errors.
 
-OTLP/HTTP JSON metrics are opt-in through `otel.enabled`; enabling them requires
-an absolute HTTP(S) `otel.endpoint`. A base endpoint has `/v1/metrics` appended,
-while an endpoint already ending in `/v1/metrics` is used as-is. Harness exports
-cumulative metrics every 30 seconds in every run mode and once more at shutdown;
-collector failures are retried on bounded transient errors and never fail a
-prompt. `otel.headers` may come from JSON, `OTEL_EXPORTER_OTLP_HEADERS`, or
+### OpenTelemetry metrics
+
+Metrics export is opt-in through `otel.enabled`; enabling it requires an absolute
+HTTP(S) `otel.endpoint` without URL user info or a fragment. A base endpoint has
+`/v1/metrics` appended; an endpoint already ending there is used as-is.
+`otel.protocol` supports only `http/json` (the default), not gRPC/protobuf.
+`otel.timeout_seconds` is 1–30 seconds, default 5, for the whole export including
+serialization waits, batches, and retries. Cumulative metrics export every 30
+seconds across one-shot, REPL, and ACP execution, with a final bounded shutdown
+export. Transient Collector failures receive bounded retries and never change
+a prompt result; invalid enabled exporter configuration fails startup.
+
+`otel.headers` may come from JSON, `OTEL_EXPORTER_OTLP_HEADERS`, or
 `HARNESS_OTEL_HEADERS` (in increasing precedence), and `${NAME}` references are
-expanded before use. Header values are always redacted from config output. The
-`host.name` resource defaults to the short OS hostname; explicitly setting
-`otel.hostname` to an empty string disables it. Prompt-cache reporting exports
-`harness.tokens.cache_read` and the write-inclusive denominator
-`harness.tokens.prompt_input`; divide their sums to obtain the token-weighted
-cache-read ratio.
+expanded before use. Header values are redacted from config output.
+`otel.service_name` defaults to `harness`. The `host.name` resource defaults to
+the short OS hostname; explicitly setting `otel.hostname` to an empty string
+disables it. A process-stable `service.instance.id` distinguishes cumulative
+streams; session IDs are not exported. `otel.resource_attributes` adds
+user-controlled resource metadata: keep it non-sensitive and low-cardinality.
+Exact flags and environment controls remain in the
+[parameter matrix](#harness-configuration-parameters).
+
+See [telemetry.md](telemetry.md) for the metric catalog, migration table,
+exclusive parent/delegate billing, timing/usage coverage, privacy and size
+limits, exporter-health metrics, and dashboard recipes. The token-weighted
+cache-read ratio is the ratio of summed `harness.tokens.cache_read` to the
+write-inclusive `harness.tokens.prompt_input`, not an average of request ratios.
+The [remote config example](../examples/harness/otel-config.json) shows endpoint
+and authentication setup. A separately managed durable Collector can improve
+crash resilience; the CLI has no disk spool and can lose its last in-memory window or
+late observations beyond bounded cleanup. The terminal's five-second cleanup
+budget includes actual-worker and complete-owner settlement; if it expires,
+Harness warns and skips unsafe mutable session aggregation but still attempts
+to export completed facts within the separate two-second export budget. See
+[shutdown details](telemetry.md#orderly-bounded-shutdown) for ACP construction
+and root settlement. Existing `trace_proxy` headers support correlation
+separately; this exporter adds no traces.
+
+### Other invocation controls
 
 `HARNESS_RESUME` and `HARNESS_SESSION` are invocation-only counterparts to
 `-resume` and `-session`, not persistent settings. `HARNESS_REPL_INPUT_TRACE` is

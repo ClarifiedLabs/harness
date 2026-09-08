@@ -4,6 +4,7 @@ package background
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"harness/internal/execution"
 	"harness/internal/llm"
 	"harness/internal/toolresult"
 	"harness/internal/tools"
@@ -23,6 +25,10 @@ const (
 	StatusCanceled  = "canceled"
 	StatusAbandoned = "abandoned"
 )
+
+// ErrClosed reports that shutdown has closed background admission. Clear
+// explicitly reopens the manager for a new session.
+var ErrClosed = errors.New("background manager is closed")
 
 var jobSeq atomic.Uint64
 
@@ -39,6 +45,7 @@ type ResultPreparer func(toolName, resultID, text, original string) llm.ToolResu
 // Manager owns the process-local background job table.
 type Manager struct {
 	mu            sync.Mutex
+	closed        bool
 	jobs          map[string]*Job
 	order         []string
 	changed       chan struct{}
@@ -97,6 +104,8 @@ type detachedWaitOutcome struct {
 
 // Job is one background run.
 type Job struct {
+	execution   execution.Scope
+	observation *jobObservation
 	ID          string
 	Kind        string
 	Task        string
@@ -225,6 +234,8 @@ func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.Back
 		access,
 		req.WaitForPrompt,
 		req.Progress,
+		req.Execution,
+		req.AdmissionContext,
 		req.Run,
 	)
 	if err != nil {
@@ -244,6 +255,8 @@ func (m *Manager) start(
 	kind, task, agent, sessionID string, operation int, resourceKey, access string,
 	waitForPrompt bool,
 	progress tools.BackgroundProgress,
+	scope execution.Scope,
+	admission context.Context,
 	run func(context.Context, string) (tools.BackgroundJobResult, error),
 ) (Snapshot, error) {
 	if m == nil {
@@ -252,9 +265,10 @@ func (m *Manager) start(
 	if run == nil {
 		return Snapshot{}, fmt.Errorf("background job runner is not initialized")
 	}
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(execution.WithScope(context.Background(), scope))
 	started := m.now()
 	job := &Job{
+		execution:     scope,
 		ID:            backgroundID(started),
 		Kind:          strings.TrimSpace(kind),
 		Task:          strings.TrimSpace(task),
@@ -271,54 +285,83 @@ func (m *Manager) start(
 		done:          make(chan struct{}),
 		waitForPrompt: waitForPrompt,
 	}
+	job.observation = &jobObservation{events: []execution.WorkEvent{{Kind: execution.WorkBackground, Phase: execution.WorkStart,
+		Tool: backgroundExecutionKind(job.Kind), Mode: "background", Count: 1}}}
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		cancel()
+		return Snapshot{}, ErrClosed
+	}
+	if admission != nil && admission.Err() != nil {
+		err := admission.Err()
+		m.mu.Unlock()
+		cancel()
+		return Snapshot{}, err
+	}
 	if conflict := m.leaseConflictLocked(resourceKey, access); conflict != nil {
 		m.mu.Unlock()
 		cancel()
 		return Snapshot{}, conflict
 	}
+	// Rejected leases never register. Accepted detached workers retain root
+	// ownership until actual return, even after cancellation or abandonment.
+	workerDone := job.execution.Track()
 	m.jobs[job.ID] = job
 	m.order = append(m.order, job.ID)
 	snap := snapshotJob(job)
 	m.signalLocked()
 	m.mu.Unlock()
 
+	job.observe(nil)
 	go func() {
-		result, err := run(ctx, job.ID)
-		result.Metrics = maps.Clone(result.Metrics)
-		finished := m.now()
-		m.mu.Lock()
-		if job.Status == StatusAbandoned {
+		defer workerDone()
+		started := time.Now()
+		var result tools.BackgroundJobResult
+		var err error
+		defer cancel()
+		defer close(job.done)
+		defer func() {
+			if rec := recover(); rec != nil {
+				err = tools.WithKind(fmt.Errorf("background job panicked: %v", rec), llm.ToolErrorPanic)
+			}
+			duration := time.Since(started)
+			result.Metrics = maps.Clone(result.Metrics)
+			finished := m.now()
+			m.mu.Lock()
+			if job.Status == StatusAbandoned {
+				job.Result = result
+				job.Updated = finished
+				if result.Progress != nil {
+					job.progress = result.Progress
+				}
+				m.signalLocked()
+				m.mu.Unlock()
+				return // Shutdown already emitted the exclusive terminal event.
+			}
 			job.Result = result
-			job.Updated = finished
 			if result.Progress != nil {
 				job.progress = result.Progress
 			}
+			job.Updated = finished
+			job.cancel = nil
+			job.finished = true
+			switch {
+			case ctx.Err() != nil || job.Status == StatusCanceled:
+				job.Status = StatusCanceled
+				job.Error = "canceled"
+			case err == nil:
+				job.Status = StatusCompleted
+			default:
+				job.Status = StatusFailed
+				job.Error = err.Error()
+			}
+			event := job.finishObservation(&duration)
 			m.signalLocked()
 			m.mu.Unlock()
-			close(job.done)
-			return
-		}
-		job.Result = result
-		if result.Progress != nil {
-			job.progress = result.Progress
-		}
-		job.Updated = finished
-		job.cancel = nil
-		job.finished = true
-		switch {
-		case ctx.Err() != nil:
-			job.Status = StatusCanceled
-			job.Error = ctx.Err().Error()
-		case err == nil:
-			job.Status = StatusCompleted
-		default:
-			job.Status = StatusFailed
-			job.Error = err.Error()
-		}
-		m.signalLocked()
-		m.mu.Unlock()
-		close(job.done)
+			job.observe(&event)
+		}()
+		result, err = run(ctx, job.ID)
 	}()
 
 	return snap, nil
@@ -507,8 +550,12 @@ func (m *Manager) shutdown() []<-chan struct{} {
 		return nil
 	}
 	m.mu.Lock()
+	// Close admission atomically with the cancellation snapshot. A launcher
+	// already running outside this lock must not create an uncanceled orphan.
+	m.closed = true
 	m.invalidateDetachedWaitsLocked()
 	var cancels []context.CancelFunc
+	var abandoned []*Job
 	var done []<-chan struct{}
 	for _, job := range m.jobs {
 		if job.done != nil {
@@ -520,6 +567,7 @@ func (m *Manager) shutdown() []<-chan struct{} {
 		if job.cancel != nil {
 			cancels = append(cancels, job.cancel)
 		}
+		abandoned = append(abandoned, job)
 		job.Status = StatusAbandoned
 		job.Updated = m.now()
 		job.Error = "abandoned on harness exit"
@@ -530,6 +578,11 @@ func (m *Manager) shutdown() []<-chan struct{} {
 	m.mu.Unlock()
 	for _, cancel := range cancels {
 		cancel()
+	}
+	for _, job := range abandoned {
+		event := execution.WorkEvent{Kind: execution.WorkBackground, Phase: execution.WorkFinish,
+			Tool: backgroundExecutionKind(job.Kind), Mode: "background", Outcome: StatusAbandoned, Count: 1}
+		job.observe(&event)
 	}
 	return done
 }
@@ -543,6 +596,7 @@ func (m *Manager) Clear() {
 	m.invalidateDetachedWaitsLocked()
 	m.jobs = make(map[string]*Job)
 	m.order = nil
+	m.closed = false
 	m.signalLocked()
 }
 
@@ -1197,7 +1251,7 @@ func (t *JobsTool) RunResult(ctx context.Context, input json.RawMessage) (tools.
 		if err != nil {
 			return tools.RunResult{}, err
 		}
-		result, err := t.manager.WaitFor(ctx, ids, args.Until, timeout)
+		result, err := t.waitObserved(ctx, ids, args.Until, timeout)
 		if err != nil {
 			return tools.RunResult{}, err
 		}
@@ -1412,3 +1466,78 @@ var _ tools.Tool = (*JobsTool)(nil)
 var _ tools.ResultTool = (*JobsTool)(nil)
 var _ tools.SelfTimeouter = (*JobsTool)(nil)
 var _ tools.BackgroundJobStarter = (*Manager)(nil)
+
+type jobObservation struct {
+	mu       sync.Mutex
+	draining bool
+	events   []execution.WorkEvent
+}
+
+// observe serializes a job's events without holding locks across callbacks.
+// Start is queued before publishing the job, so a racing or reentrant Shutdown
+// cannot observe finish before start. A callback may safely call manager methods.
+func (job *Job) observe(event *execution.WorkEvent) {
+	state := job.observation
+	state.mu.Lock()
+	if event != nil {
+		state.events = append(state.events, *event)
+	}
+	if state.draining {
+		state.mu.Unlock()
+		return
+	}
+	state.draining = true
+	for len(state.events) > 0 {
+		next := state.events[0]
+		state.events = state.events[1:]
+		state.mu.Unlock()
+		job.execution.Work(next)
+		state.mu.Lock()
+	}
+	state.draining = false
+	state.mu.Unlock()
+}
+
+func backgroundExecutionKind(kind string) string {
+	switch kind {
+	case "shell", "web_fetch", "delegate", "agent_sessions", "acp":
+		return kind
+	default:
+		return "other"
+	}
+}
+
+// finishObservation is called under Manager.mu; the returned copy is emitted outside it.
+func (job *Job) finishObservation(duration *time.Duration) execution.WorkEvent {
+	return execution.WorkEvent{Kind: execution.WorkBackground, Phase: execution.WorkFinish,
+		Tool: backgroundExecutionKind(job.Kind), Mode: "background", Outcome: job.Status,
+		Count: 1, RunDuration: duration, Metrics: tools.ExecutionProcessMetrics(job.Result.Metrics)}
+}
+
+// Only explicit tool waits are observed here. Parent prompt joins use WaitFor
+// directly and own their distinct observation, avoiding duplicate wait timing.
+func (t *JobsTool) waitObserved(ctx context.Context, ids []string, until string, timeout time.Duration) (result WaitResult, err error) {
+	scope := execution.FromContext(ctx)
+	started := time.Now()
+	scope.Work(execution.WorkEvent{Kind: execution.WorkWait, Phase: execution.WorkStart,
+		Tool: "background_jobs", Mode: "explicit", Count: 1})
+	defer func() {
+		duration := time.Since(started)
+		outcome := "completed"
+		switch {
+		case errors.Is(err, context.Canceled):
+			outcome = "canceled"
+		case errors.Is(err, context.DeadlineExceeded), result.TimedOut:
+			outcome = "timeout"
+		case err != nil:
+			outcome = "failed"
+		case result.Detached:
+			outcome = "detached"
+		case result.NoRunning:
+			outcome = "no_running"
+		}
+		scope.Work(execution.WorkEvent{Kind: execution.WorkWait, Phase: execution.WorkFinish,
+			Tool: "background_jobs", Mode: "explicit", Outcome: outcome, Count: 1, RunDuration: &duration})
+	}()
+	return t.manager.WaitFor(ctx, ids, until, timeout)
+}

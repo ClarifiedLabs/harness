@@ -882,12 +882,19 @@ func (h *Handler) handleCompact(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	result, err := compactor.CompactContext(r.Context(), req.Request)
-	if err != nil {
-		writeError(cw, http.StatusBadGateway, protocol.ErrorFrom(err))
-		return
+	var attempts []llm.AttemptEvent
+	var attemptsMu sync.Mutex
+	ctx := llm.WithAttemptObserver(r.Context(), llm.AttemptObserverFunc(func(event llm.AttemptEvent) {
+		event = h.priceAttempt(target, req.Request, event)
+		attemptsMu.Lock()
+		defer attemptsMu.Unlock()
+		attempts = append(attempts, event)
+	}))
+	ctx = withTargetAttemptMetadata(ctx, target, opts.Provider, req.Request.Purpose, req.CallerAttempt)
+	result, compactErr := compactor.CompactContext(ctx, req.Request)
+	if !result.Usage.CostKnown && result.Usage.CostUSD == 0 {
+		result.Usage = h.priceUsage(target.targetID, req.Request, result.Usage)
 	}
-	result.Usage = h.priceUsage(target.targetID, req.Request, result.Usage)
 	usage = result.Usage
 	if usage.CostKnown {
 		h.recordUsage(target.targetID, usage, usage.CostUSD)
@@ -898,10 +905,16 @@ func (h *Handler) handleCompact(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cw.Header().Set("content-type", "application/json")
-	if err := json.NewEncoder(cw).Encode(protocol.CompactResponse{Context: result}); err != nil {
+	if compactErr != nil {
+		cw.WriteHeader(http.StatusBadGateway)
+	}
+	attemptsMu.Lock()
+	out := protocol.CompactResponse{Context: result, Attempts: append([]llm.AttemptEvent(nil), attempts...), Error: protocol.ErrorFrom(compactErr)}
+	attemptsMu.Unlock()
+	if err := json.NewEncoder(cw).Encode(out); err != nil {
 		return
 	}
-	failed = false
+	failed = compactErr != nil
 }
 
 func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
@@ -1139,11 +1152,17 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	cw.WriteHeader(http.StatusOK)
 	var flusher http.Flusher = cw
 	enc := json.NewEncoder(cw)
-	flush := func() {
+	// A single writer preserves fact/event ordering without making a source
+	// observer wait for client I/O, or entering diagnostic fallback buffers.
+	wire := newAttemptWriter(func(envelope protocol.StreamEnvelope) error {
+		err := enc.Encode(envelope)
 		if flusher != nil {
 			flusher.Flush()
 		}
-	}
+		return err
+	})
+	defer wire.close()
+	writeEnvelope := wire.write
 	enrichModelRequestEvent := func(event llm.ModelRequestEvent) llm.ModelRequestEvent {
 		eventSequence++
 		event.Sequence = eventSequence
@@ -1175,11 +1194,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			h.logger.Info("model request cancelled", modelRequestEventLogAttrs(event)...)
 		}
 		streamEvent := llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: &event}
-		if err := enc.Encode(protocol.StreamEnvelope{Event: &streamEvent}); err != nil {
+		if err := writeEnvelope(protocol.StreamEnvelope{Event: &streamEvent}); err != nil {
 			streamErr = err.Error()
 			return false
 		}
-		flush()
 		return true
 	}
 
@@ -1188,11 +1206,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 	})
 	h.logger.Info("model request started", modelRequestEventLogAttrs(accepted)...)
 	acceptedEvent := llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: &accepted}
-	if err := enc.Encode(protocol.StreamEnvelope{Event: &acceptedEvent}); err != nil {
+	if err := writeEnvelope(protocol.StreamEnvelope{Event: &acceptedEvent}); err != nil {
 		streamErr = err.Error()
 		return
 	}
-	flush()
 	stopCancellationLog := context.AfterFunc(r.Context(), func() {
 		cancelled := accepted
 		cancelled.State = llm.ModelRequestCancelled
@@ -1208,9 +1225,16 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		streamRetryMinOutputTokens
 		streamRetryWebSocketReconnect
 	)
+	// Install exactly once: compatibility and proxy retries must not reset
+	// the physical attempt sequence namespace inherited by the dialect.
+	attemptCtx := llm.WithAttemptObserver(r.Context(), llm.AttemptObserverFunc(func(event llm.AttemptEvent) {
+		event = h.priceAttempt(target, req.Request, event)
+		wire.observe(protocol.StreamEnvelope{Attempt: &event})
+	}))
+	attemptCtx = withTargetAttemptMetadata(attemptCtx, target, apiType, purpose, req.CallerAttempt)
 	retryMinOutputTokens := 0
 	webSocketConnectionLimitRetried := false
-	streamAttempt := func(request, semanticRequest llm.Request) streamRetry {
+	streamAttempt := func(ctx context.Context, request, semanticRequest llm.Request) streamRetry {
 		attemptStart := time.Now()
 		semanticRequest.StoreResponse = request.StoreResponse
 		semanticRequest.PreviousResponseID = request.PreviousResponseID
@@ -1225,7 +1249,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		var responseUsage, carriedUsage llm.Usage
 		var pendingTerminalEvent *llm.ModelRequestEvent
 		cancelEventSent := false
-		for ev, err := range provider.Stream(r.Context(), request) {
+		for ev, err := range provider.Stream(ctx, request) {
 			if err != nil {
 				rawErr := err
 				if errors.Is(rawErr, context.Canceled) || errors.Is(rawErr, context.DeadlineExceeded) {
@@ -1238,8 +1262,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 							Message: rawErr.Error(),
 						})
 					}
-					_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(rawErr)})
-					flush()
+					_ = writeEnvelope(protocol.StreamEnvelope{Error: protocol.ErrorFrom(rawErr)})
 					return streamRetryNone
 				}
 				webSocketConnectionLimit := !sentEvents && webSocketConnectionLimitReached(rawErr)
@@ -1296,7 +1319,7 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				if pendingTerminalEvent != nil {
 					issue = mergeModelRequestFailure(*pendingTerminalEvent, issue)
 				}
-				if retryKind != streamRetryNone {
+				if retryKind != streamRetryNone && !sentEvents {
 					issue.State = llm.ModelRequestUpstreamAttemptFailed
 					issue.Outcome = llm.ModelRequestOutcomeRetrying
 					if !writeModelRequestEvent(issue) {
@@ -1310,13 +1333,17 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 					if !writeModelRequestEvent(retryEvent) {
 						return streamRetryNone
 					}
+					// These proxy-owned transitions have no backoff. Observe the
+					// zero-delay wait separately from a subsequent physical start;
+					// cancellation here must not invent another upstream request.
+					reason, _ := llm.ClassifyAttemptError(rawErr, 0)
+					_ = llm.ObserveRetryWait(attemptCtx, 0, llm.RetryLayerProxy, reason, attemptCtx.Err)
 					return retryKind
 				}
 				if !writeModelRequestEvent(issue) {
 					return streamRetryNone
 				}
-				_ = enc.Encode(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
-				flush()
+				_ = writeEnvelope(protocol.StreamEnvelope{Error: protocol.ErrorFrom(err)})
 				return streamRetryNone
 			}
 			if ev.Kind == llm.EventModelRequest && ev.ModelRequest != nil {
@@ -1361,11 +1388,10 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			event := ev
-			if err := enc.Encode(protocol.StreamEnvelope{Event: &event}); err != nil {
+			if err := writeEnvelope(protocol.StreamEnvelope{Event: &event}); err != nil {
 				streamErr = err.Error()
 				return streamRetryNone
 			}
-			flush()
 		}
 		if pendingTerminalEvent != nil {
 			if !writeModelRequestEvent(*pendingTerminalEvent) {
@@ -1374,8 +1400,19 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 		}
 		return streamRetryNone
 	}
+	trackedStreamAttempt := func(request, semanticRequest llm.Request) streamRetry {
+		ctx, attempts := llm.TrackAttempts(attemptCtx)
+		retry := streamAttempt(ctx, request, semanticRequest)
+		// A retry is returned only when !sentEvents proves the entire
+		// subgroup's usage was omitted. Wait until streamAttempt returns so
+		// provider iterator defers have emitted their final physical facts.
+		if retry != streamRetryNone {
+			attempts.Discard(llm.AttemptDiscardProxyRetry)
+		}
+		return retry
+	}
 	attemptRequest := req.Request
-	retry := streamAttempt(attemptRequest, semanticRequest)
+	retry := trackedStreamAttempt(attemptRequest, semanticRequest)
 	for retry != streamRetryNone {
 		switch retry {
 		case streamRetryServerTools:
@@ -1390,7 +1427,8 @@ func (h *Handler) handleStream(w http.ResponseWriter, r *http.Request) {
 			retry = streamRetryNone
 			continue
 		}
-		retry = streamAttempt(attemptRequest, semanticRequest)
+		attemptCtx = llm.WithAttemptCause(attemptCtx, llm.AttemptRetry, llm.RetryLayerProxy)
+		retry = trackedStreamAttempt(attemptRequest, semanticRequest)
 	}
 	if streamErr == "" {
 		if req.Request.PreviousResponseID != "" {

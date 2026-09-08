@@ -152,6 +152,7 @@ func supportsToolSearch(model string) bool {
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		ctx := llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Purpose: req.Purpose, Provider: "", API: "anthropic", Model: req.Model, Transport: "http"})
 		wireReq := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
 			reasoningReplay: p.reasoningReplay,
 			toolSearch:      p.resolvedToolSearch(req.Model),
@@ -164,17 +165,32 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 				yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})
 				return
 			}
-			resp, err := p.connect(ctx, body, req.Betas, yield)
+			attemptCtx := ctx
+			if continuations > 0 {
+				attemptCtx = llm.WithAttemptCause(ctx, llm.AttemptContinuation, llm.RetryLayerProvider)
+			}
+			resp, err := p.connect(attemptCtx, body, req.Betas, yield)
 			if err != nil || resp == nil {
 				return
 			}
+			source := llm.ResponseAttempt(resp)
 			indexBase := contentIndexBase
-			result, consumed, decodeErr := p.decode(ctx, resp.Body, aggregate, func(ev llm.StreamEvent, err error) bool {
+			result, consumed, decodeErr := p.decode(source.Context(attemptCtx), resp.Body, aggregate, func(ev llm.StreamEvent, err error) bool {
+				physical := ev
+				physical.Usage = nil // decoder records physical usage, not continuation aggregate
+				source.ObserveStream(physical, err)
 				if anthropicContentEvent(ev.Kind) {
 					ev.Index += indexBase
 				}
 				return yield(ev, err)
 			})
+			if decodeErr != nil {
+				source.Finish(llm.AttemptFailed, decodeErr)
+			} else if consumed {
+				source.Finish(llm.AttemptSucceeded, nil)
+			} else {
+				source.Finish(llm.AttemptIncomplete, nil)
+			}
 			_ = resp.Body.Close()
 			if decodeErr != nil {
 				yield(llm.StreamEvent{}, llm.WithUpstreamRequestID(decodeErr, resp.Header))
@@ -186,10 +202,12 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			contentIndexBase += result.nextContentIndex
 			total := addAnthropicUsage(aggregate, result.usage)
 			if result.stopReason != "pause_turn" {
+				reported := false // message_stop contains no new provider usage
 				yield(llm.StreamEvent{
-					Kind:       llm.EventDone,
-					Usage:      &total,
-					StopReason: normalizeStopReason(result.stopReason),
+					Kind:          llm.EventDone,
+					Usage:         &total,
+					UsageReported: &reported,
+					StopReason:    normalizeStopReason(result.stopReason),
 				}, nil)
 				return
 			}
@@ -321,10 +339,16 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 		switch data.Type {
 		case "message_start":
 			if data.Message != nil {
-				rawUsage = mergeWireUsage(rawUsage, data.Message.Usage)
+				reported := data.Message.Usage != nil
+				if reported {
+					rawUsage = mergeWireUsage(rawUsage, *data.Message.Usage)
+				}
 				usage = normalizeAnthropicUsage(rawUsage, p.usageInputIncludesCache)
+				if reported {
+					llm.AttemptFromContext(ctx).Usage(usage)
+				}
 				u := addAnthropicUsage(base, usage)
-				if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
+				if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u, UsageReported: &reported}, nil) {
 					return streamDecodeResult{}, false, nil
 				}
 			}
@@ -343,6 +367,9 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 					err,
 					data.ContentBlock,
 				)
+			}
+			if start.Text != "" || start.Thinking != "" || (start.Type == "server_tool_use" && start.Name != "") {
+				llm.AttemptFromContext(ctx).Generated()
 			}
 			block := &streamedBlock{content: wireContent{
 				Type:      start.Type,
@@ -403,6 +430,9 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 					return streamDecodeResult{}, false, nil
 				}
 			case "thinking_delta":
+				if data.Delta.Thinking != "" {
+					llm.AttemptFromContext(ctx).Generated()
+				}
 				if block.content.Type != "thinking" {
 					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
 				}
@@ -415,6 +445,9 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			case "input_json_delta":
 				if block.content.Type != "tool_use" && block.content.Type != "server_tool_use" {
 					return streamDecodeResult{}, true, deltaTypeMismatch(data.Index, data.Delta.Type, block.content.Type)
+				}
+				if data.Delta.PartialJSON != "" {
+					llm.AttemptFromContext(ctx).Generated()
 				}
 				block.args.WriteString(data.Delta.PartialJSON)
 				if block.content.Type == "tool_use" {
@@ -518,9 +551,11 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, base llm.Usage, yiel
 			if data.Usage != nil {
 				rawUsage = mergeWireUsage(rawUsage, *data.Usage)
 				usage = normalizeAnthropicUsage(rawUsage, p.usageInputIncludesCache)
+				llm.AttemptFromContext(ctx).Usage(usage)
 			}
 			u := addAnthropicUsage(base, usage)
-			if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
+			reported := data.Usage != nil
+			if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u, UsageReported: &reported}, nil) {
 				return streamDecodeResult{}, false, nil
 			}
 

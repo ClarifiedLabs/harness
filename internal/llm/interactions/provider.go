@@ -59,6 +59,7 @@ func (p *Provider) Name() string { return "interactions" }
 
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		ctx := llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Purpose: req.Purpose, Provider: "", API: "interactions", Model: req.Model, Transport: "http"})
 		wire, err := buildRequest(req, p.contextWindow, p.outputLimit)
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "build request: " + err.Error()})
@@ -88,6 +89,10 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			return
 		}
 		defer resp.Body.Close()
+		source := llm.ResponseAttempt(resp)
+		defer source.Finish(llm.AttemptIncomplete, nil)
+		ctx = source.Context(ctx)
+		yield = source.WrapYield(yield)
 		decode(ctx, resp.Body, func(event llm.StreamEvent, err error) bool {
 			return yield(event, llm.WithUpstreamRequestID(err, resp.Header))
 		})
@@ -171,6 +176,7 @@ type pendingStep struct {
 }
 
 type streamDecoder struct {
+	source     *llm.AttemptSource
 	pending    map[int]*pendingStep
 	usage      llm.Usage
 	responseID string
@@ -184,6 +190,7 @@ func newStreamDecoder() *streamDecoder {
 
 func decode(ctx context.Context, reader io.Reader, yield func(llm.StreamEvent, error) bool) {
 	decoder := newStreamDecoder()
+	decoder.source = llm.AttemptFromContext(ctx)
 	for frame, err := range sse.Read(ctx, reader) {
 		if err != nil {
 			yield(llm.StreamEvent{}, err)
@@ -211,6 +218,11 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 	var event wireEvent
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
 		return false, llm.NewResponseDecodeError("decode stream event", err, []byte(data))
+	}
+	if event.Interaction != nil && event.Interaction.Usage != nil {
+		u := normalizeUsage(event.Interaction.Usage)
+		u.ServiceTier = event.Interaction.ServiceTier
+		d.source.Usage(u)
 	}
 	eventType := event.EventType
 	if eventType == "" {
@@ -292,6 +304,9 @@ func (d *streamDecoder) start(index int, raw json.RawMessage, yield func(llm.Str
 		if json.Unmarshal(raw, &base) == nil {
 			for _, content := range base.Summary {
 				if content.Type == "text" && content.Text != nil {
+					if *content.Text != "" {
+						d.source.Generated()
+					}
 					step.summary.WriteString(*content.Text)
 				}
 			}
@@ -341,6 +356,9 @@ func (d *streamDecoder) delta(index int, raw json.RawMessage, yield func(llm.Str
 	case "thought_summary":
 		var content wireContent
 		if json.Unmarshal(delta.Content, &content) == nil && content.Text != nil {
+			if *content.Text != "" {
+				d.source.Generated()
+			}
 			step.summary.WriteString(*content.Text)
 		}
 	case "thought_signature":
@@ -474,14 +492,16 @@ func (d *streamDecoder) finish(interaction *wireInteraction, yield func(llm.Stre
 		stop = llm.StopToolUse
 	}
 	u := d.usage
-	if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u}, nil) {
+	reported := interaction != nil && interaction.Usage != nil
+	if !yield(llm.StreamEvent{Kind: llm.EventUsage, Usage: &u, UsageReported: &reported}, nil) {
 		return nil
 	}
 	yield(llm.StreamEvent{
-		Kind:       llm.EventDone,
-		Usage:      &u,
-		StopReason: stop,
-		ResponseID: d.responseID,
+		Kind:          llm.EventDone,
+		Usage:         &u,
+		UsageReported: &reported,
+		StopReason:    stop,
+		ResponseID:    d.responseID,
 	}, nil)
 	return nil
 }

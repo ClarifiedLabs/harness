@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"harness/internal/execution"
 	"harness/internal/llm"
 )
 
@@ -103,13 +104,18 @@ type RichResult struct {
 // ticker can read it mid-run. SessionID and Operation are optional correlation
 // metadata and do not change job lifecycle semantics.
 type BackgroundJobRequest struct {
-	Kind        string
-	Description string
-	Agent       string
-	SessionID   string
-	Operation   int
-	ResourceKey string
-	Access      string
+	// Execution pins observations to the launching execution across detachment.
+	Execution execution.Scope
+	// AdmissionContext is checked only when accepting the job. Its cancellation
+	// rejects stale launchers after a reset, but never cancels accepted work.
+	AdmissionContext context.Context
+	Kind             string
+	Description      string
+	Agent            string
+	SessionID        string
+	Operation        int
+	ResourceKey      string
+	Access           string
 	// WaitForPrompt marks work whose result must be incorporated before the parent
 	// agent may finish its current prompt. Ordinary background commands leave this
 	// false; background delegates set it so the parent joins and synthesizes them.
@@ -771,6 +777,34 @@ func (r *Registry) DispatchWithCompletion(parent context.Context, call llm.ToolC
 // DispatchWithCompletionLimits is DispatchWithCompletion with an optional
 // per-call result allowance. It can only tighten configured registry limits.
 func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm.ToolCall, dispatchLimits DispatchLimits) (res llm.ToolResult, completion <-chan struct{}) {
+	scope := execution.FromContext(parent)
+	toolName := "unknown"
+	if registered, ok := r.Lookup(call.Name); ok {
+		toolName = registered.Name()
+	}
+	activity := ActivityOther
+	defer func() {
+		event := execution.WorkEvent{Kind: execution.WorkTool, Phase: execution.WorkResult,
+			Tool: toolName, Mode: "foreground", Outcome: "completed", Count: 1,
+			Activity: string(activity), ResultBytes: len(res.Text),
+			OriginalBytes: max(len(res.Text), res.OriginalBytes), Truncated: res.Truncated}
+		if res.IsError {
+			switch res.ErrorKind {
+			case llm.ToolErrorCancelled:
+				event.Outcome = "cancelled"
+			case llm.ToolErrorTimeout:
+				event.Outcome = "timeout"
+			default:
+				event.Outcome = "failed"
+			}
+			event.ErrorKind = executionErrorKind(res.ErrorKind)
+		}
+		// A launch receipt describes admission, never a completed command.
+		if res.BackgroundJobID == "" {
+			event.Metrics = ExecutionProcessMetrics(res.Metrics)
+		}
+		scope.Work(event)
+	}()
 	completed := make(chan struct{})
 	close(completed)
 	completion = completed
@@ -793,6 +827,8 @@ func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm
 		return res, completion
 	}
 
+	toolName = t.Name() // registered/configured name, never an unknown caller string
+	activity = r.CallActivity(call).Class
 	resolvedLimits := r.resultLimitsForDispatch(call.Name, dispatchLimits)
 
 	if r.dispatchGuard != nil {
@@ -839,22 +875,40 @@ func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm
 	done := make(chan outcome, 1) // buffered: an abandoned Run can still send and exit
 	actualCompletion := make(chan struct{})
 	completion = actualCompletion
+	// Register before launch; a logical timeout must not release the worker's
+	// final observations or completion ownership from the root's drain group.
+	workerDone := scope.Track()
 	go func() {
+		defer workerDone()
 		defer close(actualCompletion)
+		started := time.Now()
+		var queued *time.Duration
+		if admitted := execution.ToolQueued(parent); !admitted.IsZero() {
+			d := max(time.Duration(0), started.Sub(admitted))
+			queued = &d
+		}
+		scope.Work(execution.WorkEvent{Kind: execution.WorkTool, Phase: execution.WorkStart,
+			Tool: toolName, Mode: "foreground", Count: 1, QueueDuration: queued})
+		var o outcome
 		defer func() {
 			if rec := recover(); rec != nil {
 				log.Printf("tool %q panicked: %v", call.Name, rec)
-				done <- outcome{err: WithKind(fmt.Errorf("tool panicked: %v", rec), llm.ToolErrorPanic)}
+				o.err = WithKind(fmt.Errorf("tool panicked: %v", rec), llm.ToolErrorPanic)
 			}
+			duration := time.Since(started)
+			outcome := executionOutcome(ctx, o.err)
+			scope.Work(execution.WorkEvent{Kind: execution.WorkTool, Phase: execution.WorkFinish,
+				Tool: toolName, Mode: "foreground", Outcome: outcome, Count: 1, RunDuration: &duration})
+			done <- o
 		}()
 		if rich, ok := t.(RichTool); ok {
 			result, err := rich.RunRich(ctx, input)
-			done <- outcome{out: result.Text, content: result.Content, usage: result.Usage, useless: result.Useless, err: err}
+			o = outcome{out: result.Text, content: result.Content, usage: result.Usage, useless: result.Useless, err: err}
 			return
 		}
 		if rt, ok := t.(ResultTool); ok {
 			result, err := rt.RunResult(ctx, input)
-			done <- outcome{
+			o = outcome{
 				out: result.Text, original: result.OriginalText, usage: result.Usage,
 				metrics: result.Metrics, backgroundJobID: result.BackgroundJobID, err: err,
 				useless: result.Useless,
@@ -863,11 +917,10 @@ func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm
 		}
 		if mt, ok := t.(MeteredTool); ok {
 			result, err := mt.RunMetered(ctx, input)
-			done <- outcome{out: result.Text, usage: result.Usage, backgroundJobID: result.BackgroundJobID, err: err}
+			o = outcome{out: result.Text, usage: result.Usage, backgroundJobID: result.BackgroundJobID, err: err}
 			return
 		}
-		out, err := t.Run(ctx, input)
-		done <- outcome{out: out, err: err}
+		o.out, o.err = t.Run(ctx, input)
 	}()
 
 	var out string

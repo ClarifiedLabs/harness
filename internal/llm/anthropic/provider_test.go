@@ -881,7 +881,12 @@ func TestStreamContinuesPauseTurnWithCumulativeUsage(t *testing.T) {
 
 	req := llmtest.SimpleRequest("claude")
 	req.Betas = []string{"web-search-beta"}
-	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(context.Background(), req))
+	facts := &llmtest.AttemptRecorder{}
+	events, err := llmtest.Drain(testProvider(t, srv, nil).Stream(facts.Context(context.Background()), req))
+	physical := facts.Finished()
+	if len(physical) != 2 || physical[0].Usage.InputTokens != 10 || physical[1].Usage.InputTokens != 20 || physical[1].Usage.OutputTokens != 6 || physical[1].Cause != llm.AttemptContinuation || physical[1].Sequence != 2 {
+		t.Fatalf("physical=%+v", physical)
+	}
 	if err != nil {
 		t.Fatal(err)
 	}

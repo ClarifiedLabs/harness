@@ -22,14 +22,12 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/background"
-	"harness/internal/buildinfo"
 	"harness/internal/goal"
 	"harness/internal/handoff"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
-	"harness/internal/otel"
 	"harness/internal/plan"
 	"harness/internal/runstream"
 	"harness/internal/session"
@@ -1390,14 +1388,7 @@ func TestOTelForwardingAndLifecycleReachConcreteSink(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	skill := testSkill(t, "telemetry", "Test telemetry", "PRIVATE SKILL BODY")
 	app.Skills = map[string]skills.Skill{"telemetry": skill}
-	exp, err := otel.NewExporter(
-		otel.Config{Enabled: true, Endpoint: "http://collector.invalid", Timeout: time.Second},
-		buildinfo.Metadata{Version: "test"}, "", "", "", "", nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	app.SetOTel(otel.NewSink(exp, nil, app.Provider, app.Model, app.AgentName, false))
+	exp := testUIExporter(t, app)
 
 	if code := OneShot(app, "private prompt using $telemetry"); code != ExitOK {
 		t.Fatalf("OneShot exit = %d, stderr = %s", code, errw.String())
@@ -1410,7 +1401,7 @@ func TestOTelForwardingAndLifecycleReachConcreteSink(t *testing.T) {
 	text := string(payload)
 	for _, metric := range []string{
 		"harness.prompt.total", "harness.tokens.input", "harness.session.tokens",
-		"harness.context.messages", "harness.context.bytes", "harness.skill.activations",
+		"harness.skill.activations",
 	} {
 		if !strings.Contains(text, metric) {
 			t.Fatalf("OTEL payload missing %q: %s", metric, text)
@@ -1422,8 +1413,11 @@ func TestOTelForwardingAndLifecycleReachConcreteSink(t *testing.T) {
 	if strings.Contains(text, "private prompt") || strings.Contains(text, "PRIVATE SKILL BODY") || strings.Contains(text, "answer") {
 		t.Fatalf("OTEL payload leaked transcript content: %s", text)
 	}
-	if !strings.Contains(text, filepath.Base(app.SessionPath)) || !strings.Contains(text, app.Model) {
-		t.Fatalf("OTEL payload missing dynamic session/model identity: %s", text)
+	if strings.Contains(text, `"key":"session_id"`) {
+		t.Fatalf("OTEL payload leaked session identity: %s", text)
+	}
+	if !strings.Contains(text, app.Model) {
+		t.Fatalf("OTEL payload missing configured model identity: %s", text)
 	}
 }
 
@@ -1431,14 +1425,7 @@ func TestAgentSwitchRefreshesCompleteOTelIdentity(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
-	exp, err := otel.NewExporter(
-		otel.Config{Enabled: true, Endpoint: "http://collector.invalid", Timeout: time.Second},
-		buildinfo.Metadata{Version: "test"}, "", "", "", "", nil,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	app.SetOTel(otel.NewSink(exp, nil, app.Provider, app.Model, app.AgentName, false))
+	exp := testUIExporter(t, app)
 	app.SwitchAgent = func(string) (AgentSelection, error) {
 		return AgentSelection{
 			Name: "plan", System: "plan prompt", Provider: "new-provider",
@@ -1448,7 +1435,9 @@ func TestAgentSwitchRefreshesCompleteOTelIdentity(t *testing.T) {
 	if err := app.applyAgentSwitch("plan"); err != nil {
 		t.Fatal(err)
 	}
-	app.otelSink.RecordSession(0, 1)
+	if code := OneShot(app, "new model prompt"); code != ExitOK {
+		t.Fatalf("OneShot exit = %d", code)
+	}
 	payload, err := exp.BuildPayloadForTest()
 	if err != nil {
 		t.Fatal(err)

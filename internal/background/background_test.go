@@ -608,7 +608,7 @@ func TestManagerResourceLeaseReleaseLifecycle(t *testing.T) {
 		awaitJobDone(t, m, afterCancel.ID)
 	})
 
-	t.Run("abandonment releases lease", func(t *testing.T) {
+	t.Run("clear reopens admission after abandonment", func(t *testing.T) {
 		m := NewManager(Options{})
 		startedRun := make(chan struct{})
 		cancelObserved := make(chan struct{})
@@ -628,10 +628,6 @@ func TestManagerResourceLeaseReleaseLifecycle(t *testing.T) {
 		if got, _ := m.Get(started.ID); got.Status != StatusAbandoned || !got.ContextPending {
 			t.Fatalf("abandoned snapshot = %+v", got)
 		}
-		afterAbandon := startImmediate(t, m, func(context.Context, string) (tools.BackgroundJobResult, error) {
-			return tools.BackgroundJobResult{}, nil
-		})
-		awaitJobDone(t, m, afterAbandon.ID)
 		m.mu.Lock()
 		done := m.jobs[started.ID].done
 		m.mu.Unlock()
@@ -641,6 +637,11 @@ func TestManagerResourceLeaseReleaseLifecycle(t *testing.T) {
 		if got, _ := m.Get(started.ID); got.Status != StatusAbandoned || !strings.Contains(got.Result.Text, "host/unavailable") {
 			t.Fatalf("late abandoned result = %+v", got)
 		}
+		m.Clear()
+		afterAbandon := startImmediate(t, m, func(context.Context, string) (tools.BackgroundJobResult, error) {
+			return tools.BackgroundJobResult{}, nil
+		})
+		awaitJobDone(t, m, afterAbandon.ID)
 	})
 }
 

@@ -44,7 +44,8 @@ func (p *Provider) streamWebSocket(ctx context.Context, req llm.Request, yield f
 		}
 		return yield(ev, err)
 	}
-	err := p.runWebSocket(ctx, req, wrappedYield)
+	attemptCtx, attempts := llm.TrackAttempts(ctx)
+	err := p.runWebSocket(attemptCtx, req, wrappedYield)
 	if err == nil {
 		return true
 	}
@@ -75,6 +76,14 @@ func (p *Provider) streamWebSocket(ctx context.Context, req llm.Request, yield f
 			return true
 		}
 	}
+	// The failed WebSocket subgroup produced no logical stream output/usage.
+	// Nested compatibility retries already discarded are deduped per sequence.
+	attempts.Discard(llm.AttemptDiscardCompatibility)
+	// This crossover has no backoff policy: observe the immediate scheduling
+	// boundary without adding a sleep or attributing a proxy HTTP request.
+	reason, _ := llm.ClassifyAttemptError(err, 0)
+	waitCtx := llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Scope: llm.AttemptScopeUpstream, Transport: "websocket"})
+	_ = llm.ObserveRetryWait(waitCtx, 0, llm.RetryLayerProvider, reason, func() error { return nil })
 	return false
 }
 
@@ -85,40 +94,82 @@ func (p *Provider) runWebSocket(ctx context.Context, req llm.Request, yield func
 }
 
 func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) error {
+	meta := llm.AttemptMetadataFromContext(ctx)
+	meta.Transport = "websocket"
+	meta.Scope = llm.AttemptScopeUpstream
+	ctx = llm.WithAttemptMetadata(ctx, meta)
 	req = p.withToolSearchDowngrade(req)
 	if !webSocketContinuesToolTurn(req) {
 		p.wsTurnState = ""
 	}
 	freshRetries := 0
 	for {
-		nativeToolSearch := p.nativeToolSearchActive(req)
-		conn, reused, err := p.webSocketConnLocked(ctx, req)
-		if err != nil {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
+		nativeToolSearch := p.nativeToolSearchActive(req)
+		// Local serialization failures are not physical upstream attempts.
 		body, err := json.Marshal(p.buildWebSocketRequest(req))
 		if err != nil {
 			return &llm.APIError{Message: "marshal websocket request: " + err.Error()}
 		}
-		emitted, retryFresh, err := p.runWebSocketOnConn(ctx, conn, string(body), req.Purpose == llm.RequestPurposePrewarm, req.NativeSteering, yield)
+		turnState := p.wsTurnState
+		groupCtx, attempts := llm.TrackAttempts(ctx)
+		source := llm.StartAttempt(groupCtx)
+		attemptCtx := source.Context(groupCtx)
+		conn, reused, err := p.webSocketConnLocked(attemptCtx, req)
+		if err != nil {
+			source.Finish(llm.AttemptFailed, err)
+			return err
+		}
+		if p.wsTurnState != turnState {
+			// Opening a fresh connection clears connection-scoped turn state.
+			// Keep that existing wire behavior after preflight validation.
+			body, err = json.Marshal(p.buildWebSocketRequest(req))
+			if err != nil {
+				source.Finish(llm.AttemptFailed, err)
+				return &llm.APIError{Message: "marshal websocket request: " + err.Error()}
+			}
+		}
+		emitted, retryFresh, err := p.runWebSocketOnConn(attemptCtx, conn, string(body), req.Purpose == llm.RequestPurposePrewarm, req.NativeSteering, yield)
 		if err == nil {
+			source.Finish(llm.AttemptIncomplete, nil)
 			return nil
 		}
+		source.Finish(llm.AttemptFailed, err)
+		ctx = llm.WithAttemptCause(ctx, llm.AttemptRetry, llm.RetryLayerProvider)
 		if !emitted && nativeToolSearch && nativeToolSearchRejected(err) {
-			p.rememberToolSearchDowngrade(req.Model)
-			req.DeferredToolGroups = nil
+			attempts.Discard(llm.AttemptDiscardCompatibility)
+			_ = llm.ObserveRetryWait(ctx, 0, llm.RetryLayerProvider, llm.AttemptErrorRequest, func() error {
+				p.rememberToolSearchDowngrade(req.Model)
+				req.DeferredToolGroups = nil
+				return nil
+			})
+			continue
+		}
+		if reused && !emitted && retryFresh && freshRetries == 0 {
+			attempts.Discard(llm.AttemptDiscardCompatibility)
+			_ = llm.ObserveRetryWait(ctx, 0, llm.RetryLayerProvider, llm.AttemptErrorTransport, func() error {
+				p.closeWebSocketLocked()
+				freshRetries++
+				return nil
+			})
 			continue
 		}
 		p.closeWebSocketLocked()
-		if reused && !emitted && retryFresh && freshRetries == 0 {
-			freshRetries++
-			continue
-		}
 		return err
 	}
 }
 
 func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body string, prewarm, native bool, yield func(llm.StreamEvent, error) bool) (emitted bool, retryFresh bool, err error) {
+	source := llm.AttemptFromContext(ctx)
+	defer func() {
+		if err != nil {
+			source.Finish(llm.AttemptFailed, err)
+		} else {
+			source.Finish(llm.AttemptIncomplete, nil)
+		}
+	}()
 	p.beginLive(conn, native)
 	var terminal *llm.StreamEvent
 	toolCalls := 0
@@ -133,6 +184,9 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 	defer close(done)
 
 	wrappedYield := func(ev llm.StreamEvent, err error) bool {
+		if ev.Kind != llm.EventLiveSteer {
+			source.ObserveStream(ev, err)
+		}
 		if err == nil {
 			emitted = true
 			if ev.Kind == llm.EventToolCallDone {
@@ -163,6 +217,7 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 	}
 
 	decoder := newStreamDecoder()
+	decoder.source = source
 	for {
 		text, err := conn.ReadText(ctx)
 		if err != nil {
@@ -185,7 +240,10 @@ func (p *Provider) runWebSocketOnConn(ctx context.Context, conn *ws.Conn, body s
 				return emitted, false, nil
 			}
 			if successor {
+				source.Finish(llm.AttemptIncomplete, nil)
+				source = llm.StartAttemptUnknown(llm.WithAttemptCause(ctx, llm.AttemptContinuation, llm.RetryLayerProvider))
 				decoder = newStreamDecoder()
+				decoder.source = source
 				terminal = nil
 				toolCalls = 0
 			}
@@ -237,7 +295,7 @@ func (p *Provider) webSocketConnLocked(ctx context.Context, req llm.Request) (*w
 			defer resp.Body.Close()
 			return nil, false, parseErrorResponse(resp)
 		}
-		return nil, false, &llm.APIError{Message: "websocket connect: " + err.Error(), Retryable: true}
+		return nil, false, &llm.APIError{Message: "websocket connect: " + err.Error(), Retryable: true, Stage: llm.APIErrorStageUpstreamConnect}
 	}
 	p.wsConn = conn
 	return conn, false, nil

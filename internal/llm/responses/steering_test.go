@@ -75,6 +75,20 @@ func TestNativeSteeringAutomaticContinuationAndDisconnect(t *testing.T) {
 			req.NativeSteering = true
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			facts := &llmtest.AttemptRecorder{}
+			ctx = facts.Context(ctx)
+			defer func() {
+				physical := facts.Finished()
+				if disconnect {
+					if len(physical) != 1 || physical[0].Outcome != llm.AttemptFailed {
+						t.Fatalf("disconnect facts=%+v", physical)
+					}
+					return
+				}
+				if len(physical) != 2 || physical[0].Usage.InputTokens != 100 || physical[1].Usage.InputTokens != 120 || physical[1].Cause != llm.AttemptContinuation || physical[1].Duration != nil || physical[1].TTFT != nil {
+					t.Fatalf("boundary facts=%+v", physical)
+				}
+			}()
 			submitted := false
 			accepted, applied, lost, done := 0, 0, 0, 0
 			var streamErr error

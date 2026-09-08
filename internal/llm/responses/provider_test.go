@@ -381,7 +381,14 @@ func TestStreamFallsBackToCatalogWhenNativeToolSearchRejected(t *testing.T) {
 
 	enabled := true
 	p := New(Config{APIKey: "k", BaseURL: srv.URL, ToolSearch: &enabled, Sleep: func(time.Duration) {}})
-	events, err := llmtest.Drain(p.Stream(context.Background(), nativeToolSearchTestRequest("openai:gpt-5.4-nano")))
+	facts := &llmtest.AttemptRecorder{}
+	events, err := llmtest.Drain(p.Stream(facts.Context(context.Background()), nativeToolSearchTestRequest("openai:gpt-5.4-nano")))
+	assertImmediateRetryWait(t, facts, llm.AttemptErrorRequest, "http")
+	assertAttemptDiscards(t, facts, 1)
+	physical := facts.Finished()
+	if len(physical) != 2 || physical[0].StatusCode != 400 || physical[1].Usage.InputTokens != 2 || physical[1].Cause != llm.AttemptRetry {
+		t.Fatalf("physical=%+v", physical)
+	}
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -486,6 +493,10 @@ func TestStreamWebSocketFallsBackToCatalogWhenNativeToolSearchRejected(t *testin
 			}
 			requests <- request
 			if i == 1 {
+				if err := ws.WriteServerText(conn, `{"type":"response.in_progress","response":{"usage":{"input_tokens":7,"output_tokens":3}}}`); err != nil {
+					t.Errorf("write hidden usage: %v", err)
+					return
+				}
 				if err := ws.WriteServerText(conn, `{"type":"error","status_code":400,"error":{"type":"invalid_request_error","code":"unsupported_value","message":"unsupported hosted tool","param":"tools"}}`); err != nil {
 					t.Errorf("write rejection: %v", err)
 				}
@@ -514,8 +525,21 @@ func TestStreamWebSocketFallsBackToCatalogWhenNativeToolSearchRejected(t *testin
 	req := nativeToolSearchTestRequest("gpt-5.4")
 	req.StoreResponse = true
 	req.PreviousResponseID = "resp_initial"
-	if _, err := llmtest.Drain(p.Stream(context.Background(), req)); err != nil {
+	facts := &llmtest.AttemptRecorder{}
+	logical, err := llmtest.Drain(p.Stream(facts.Context(context.Background()), req))
+	if err != nil {
 		t.Fatalf("fallback Stream: %v", err)
+	}
+	assertImmediateRetryWait(t, facts, llm.AttemptErrorRequest, "websocket")
+	assertAttemptDiscards(t, facts, 1)
+	physical := facts.Finished()
+	if len(physical) != 2 || physical[0].Usage == nil || physical[0].Usage.InputTokens != 7 || physical[0].Usage.OutputTokens != 3 || physical[1].Sequence != 2 {
+		t.Fatalf("physical=%+v", physical)
+	}
+	for _, event := range logical {
+		if event.Usage != nil && event.Usage.InputTokens != 2 {
+			t.Fatalf("hidden usage escaped: %+v", event)
+		}
 	}
 	req.PreviousResponseID = "resp_fallback"
 	if _, err := llmtest.Drain(p.Stream(context.Background(), req)); err != nil {
@@ -589,7 +613,9 @@ func TestStreamDoesNotFallbackAfterWebSocketOutput(t *testing.T) {
 
 	enabled := true
 	p := New(Config{APIKey: "k", BaseURL: srv.URL + "/v1", UseWebSocket: true, ToolSearch: &enabled, Sleep: func(time.Duration) {}})
-	events, err := llmtest.Drain(p.Stream(context.Background(), nativeToolSearchTestRequest("gpt-5.4")))
+	facts := &llmtest.AttemptRecorder{}
+	events, err := llmtest.Drain(p.Stream(facts.Context(context.Background()), nativeToolSearchTestRequest("gpt-5.4")))
+	assertAttemptDiscards(t, facts)
 	if err == nil {
 		t.Fatal("post-output rejection unexpectedly succeeded")
 	}
@@ -1336,7 +1362,12 @@ func TestStreamWebSocketResponseCreate(t *testing.T) {
 	req := llmtest.SimpleRequest("gpt-5.4")
 	req.StoreResponse = true
 	req.PreviousResponseID = "resp_prev"
-	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	facts := &llmtest.AttemptRecorder{}
+	events, err := llmtest.Drain(p.Stream(facts.Context(context.Background()), req))
+	physical := facts.Finished()
+	if len(physical) != 1 || physical[0].Transport != "websocket" || physical[0].TTFT == nil || physical[0].Duration == nil || physical[0].Usage.InputTokens != 3 {
+		t.Fatalf("physical=%+v", physical)
+	}
 	if err != nil {
 		t.Fatalf("Stream: %v", err)
 	}
@@ -1430,7 +1461,10 @@ func TestStreamWebSocketFailureFallsBackToStatelessHTTP(t *testing.T) {
 	req := llmtest.SimpleRequest("gpt-5.4")
 	req.StoreResponse = true
 
-	events, err := llmtest.Drain(p.Stream(context.Background(), req))
+	facts := &llmtest.AttemptRecorder{}
+	events, err := llmtest.Drain(p.Stream(facts.Context(context.Background()), req))
+	assertImmediateRetryWait(t, facts, llm.AttemptErrorServer, "websocket")
+	assertAttemptDiscards(t, facts, 1)
 	if err != nil {
 		t.Fatalf("fallback Stream: %v", err)
 	}
@@ -1822,6 +1856,10 @@ func TestStreamWebSocketReconnectsStaleReusedConnection(t *testing.T) {
 			if err := ws.WriteServerText(conn, `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`); err != nil {
 				t.Fatalf("write first completed: %v", err)
 			}
+			// Keep the socket live until the second call actually reuses it.
+			if _, err := ws.ReadClientText(rw.Reader); err != nil {
+				t.Errorf("read stale request: %v", err)
+			}
 			return
 		}
 		if err := ws.WriteServerText(conn, `{"type":"response.output_text.delta","delta":"fresh","output_index":0,"content_index":0}`); err != nil {
@@ -1837,7 +1875,14 @@ func TestStreamWebSocketReconnectsStaleReusedConnection(t *testing.T) {
 	if _, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4"))); err != nil {
 		t.Fatalf("first Stream: %v", err)
 	}
-	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
+	facts := &llmtest.AttemptRecorder{}
+	events, err := llmtest.Drain(p.Stream(facts.Context(context.Background()), llmtest.SimpleRequest("gpt-5.4")))
+	assertImmediateRetryWait(t, facts, llm.AttemptErrorTransport, "websocket")
+	assertAttemptDiscards(t, facts, 1)
+	physical := facts.Finished()
+	if len(physical) != 2 || physical[0].Outcome != llm.AttemptFailed || physical[0].TTFT != nil || physical[1].Cause != llm.AttemptRetry || physical[1].Usage.InputTokens != 1 {
+		t.Fatalf("physical=%+v", physical)
+	}
 	if err != nil {
 		t.Fatalf("second Stream: %v", err)
 	}

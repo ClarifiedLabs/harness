@@ -21,6 +21,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/agentsession"
+	"harness/internal/execution"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/plan"
@@ -55,6 +56,8 @@ var childSeq atomic.Uint64
 
 // Runtime is the parent agent state a delegate call needs to start a child.
 type Runtime struct {
+	// Execution is process-local observation state, copied by value, never persisted.
+	Execution             execution.Scope `json:"-"`
 	Provider              llm.Provider
 	ProviderName          string
 	Model                 string
@@ -443,8 +446,11 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 			return tools.MeteredResult{}, err
 		}
 		req.leaseAcquired = true
+		prepared.req = req
+		if err := t.runner.prepareExecution(ctx, &prepared); err != nil {
+			return tools.MeteredResult{}, err
+		}
 		if req.Interactive {
-			prepared.req = req
 			return t.startInteractive(ctx, prepared)
 		}
 		// Create the progress here so its closure is available to the parent wait
@@ -453,25 +459,26 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 		progress := NewProgress()
 		// Background jobs own independent cancellation while preserving
 		// prompt-scoped values from the scheduling context.
-		parentValues := context.WithoutCancel(ctx)
+		parentValues := execution.WithScope(context.WithoutCancel(ctx), prepared.runtime.Execution)
 		jobAgent := req.Agent
 		if prepared.continuation != nil {
 			jobAgent = prepared.continuation.meta.Agent
 		}
 		info, err := t.background.StartBackgroundJob(tools.BackgroundJobRequest{
-			Kind:          "delegate",
-			Description:   req.Task,
-			Agent:         jobAgent,
-			ResourceKey:   req.ResourceKey,
-			Access:        req.Access,
-			WaitForPrompt: true,
-			Progress:      progress.Closure(),
+			AdmissionContext: ctx,
+			Kind:             "delegate",
+			Execution:        prepared.runtime.Execution,
+			Description:      req.Task,
+			Agent:            jobAgent,
+			ResourceKey:      req.ResourceKey,
+			Access:           req.Access,
+			WaitForPrompt:    true,
+			Progress:         progress.Closure(),
 			Run: func(ctx context.Context, childID string) (tools.BackgroundJobResult, error) {
-				ctx = inheritedValuesContext{Context: ctx, values: parentValues}
-				childReq := req
-				childReq.Background = false
-				childReq.ChildID = childID
-				result, err := t.runner.Run(ctx, childReq, progress)
+				ctx = execution.WithScope(inheritedValuesContext{Context: ctx, values: parentValues}, prepared.runtime.Execution)
+				childRun := prepared
+				childRun.req.ChildID = childID
+				result, err := t.runner.runPrepared(ctx, childRun, progress)
 				return toBackgroundJobResult(result), annotateRunError(ctx, err)
 			},
 		})
@@ -617,31 +624,32 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 	if r == nil {
 		return RunResult{}, fmt.Errorf("delegate runner is not initialized")
 	}
-	if progress == nil {
-		progress = NewProgress()
-	}
 	prepared, err := r.prepareRun(req)
 	if err != nil {
 		return RunResult{}, err
 	}
-	req = prepared.req
+	if err := r.prepareExecution(ctx, &prepared); err != nil {
+		return RunResult{}, err
+	}
+	return r.runPrepared(ctx, prepared, progress)
+}
+
+// runPrepared uses only the launch snapshot captured before scheduling. In
+// particular, detached jobs must not follow a subsequent parent model switch.
+func (r *Runner) runPrepared(ctx context.Context, prepared preparedRun, progress *Progress) (result RunResult, retErr error) {
+	if progress == nil {
+		progress = NewProgress()
+	}
+	req := prepared.req
 	runtime := prepared.runtime
 	maxTurns := prepared.maxTurns
 	continuation := prepared.continuation
 	maxDepth := r.maxDepth()
-	if r.resolve == nil {
-		return RunResult{}, fmt.Errorf("delegate resolver is not initialized")
-	}
-	launch, err := r.resolve(runtime, req.Agent)
-	if err != nil {
-		return RunResult{}, err
-	}
-	if launch.Provider == nil {
-		return RunResult{}, fmt.Errorf("delegate provider is not initialized")
-	}
-	if launch.Tools == nil {
-		return RunResult{}, fmt.Errorf("delegate tool registry is not initialized")
-	}
+	launch := *prepared.launch
+	ctx = execution.WithScope(ctx, runtime.Execution)
+	work := startDelegateWork(runtime.Execution, delegateWorkMode(req))
+	defer func() { work.finish(result, retErr, "") }()
+	var err error
 	launch.System = childBudgetSystemPrompt(childSystemPrompt(withoutChildBudget(launch.System)), maxTurns)
 	if req.Mode == ModeImplementation {
 		launch.System = implementationSystemPrompt(launch.System)
@@ -807,6 +815,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 		childTools.Register(plan.NewToolWithTextSanitizer(childPlans, func() string { return childDir }, launch.StateTextSanitizer))
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
+		Execution:                 runtime.Execution,
 		ExperimentalAsyncTools:    r.opts.ExperimentalAsyncTools,
 		AstraNativeSteering:       r.opts.AstraNativeSteering,
 		MaxTurns:                  maxTurns,
@@ -1117,6 +1126,7 @@ func (r *Runner) Run(ctx context.Context, req RunRequest, progress *Progress) (r
 }
 
 type preparedRun struct {
+	launch       *Launch
 	req          RunRequest
 	runtime      Runtime
 	maxTurns     int
@@ -1577,6 +1587,7 @@ func (r *Runner) childToolsWithCacheAffinity(parent Runtime, launch Launch, chil
 		return nil, err
 	}
 	childRuntime := Runtime{
+		Execution:         childExecution(context.Background(), parent.Execution, launch),
 		Provider:          launch.Provider,
 		ProviderName:      launch.ProviderName,
 		Model:             launch.Model,

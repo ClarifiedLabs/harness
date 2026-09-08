@@ -382,9 +382,16 @@ type StreamEvent struct {
 	// object so the transcript can feed an error result back to the model.
 	InvalidInputError string `json:"invalid_input_error,omitempty"`
 
-	Usage      *Usage     `json:"usage,omitempty"`       // EventUsage / EventDone
-	StopReason StopReason `json:"stop_reason,omitempty"` // EventDone
-	ResponseID string     `json:"response_id,omitempty"` // EventDone, provider continuation id
+	Usage *Usage `json:"usage,omitempty"` // EventUsage / EventDone
+	// UsageReported distinguishes an authoritative provider usage snapshot from
+	// a decoder's synthetic placeholder or replay. Explicit false leaves Usage
+	// available for legacy logical accounting, but telemetry must ignore it: it
+	// neither establishes reported usage nor replaces an earlier real snapshot.
+	// Nil preserves the legacy contract (a non-nil Usage is reported); true also
+	// accepts a reported all-zero snapshot. This flag never changes transcripts.
+	UsageReported *bool      `json:"usage_reported,omitempty"`
+	StopReason    StopReason `json:"stop_reason,omitempty"` // EventDone
+	ResponseID    string     `json:"response_id,omitempty"` // EventDone, provider continuation id
 	// ResponseIDAnchor is meaningful only on EventDone. A nil value means the
 	// response ID must not be installed as an out-of-band prewarm anchor.
 	ResponseIDAnchor *int `json:"response_id_anchor,omitempty"`
@@ -392,6 +399,13 @@ type StreamEvent struct {
 	// ModelRequest carries EventModelRequest telemetry. It is intentionally
 	// separate from every content-bearing field above.
 	ModelRequest *ModelRequestEvent `json:"model_request,omitempty"`
+}
+
+// HasReportedUsage reports whether this event carries an authoritative usage
+// snapshot, including a provider-reported zero. A nil Usage is always absent;
+// an explicit false UsageReported marks synthetic logical accounting only.
+func (e StreamEvent) HasReportedUsage() bool {
+	return e.Usage != nil && (e.UsageReported == nil || *e.UsageReported)
 }
 
 // StopReason is the normalized reason a turn ended.

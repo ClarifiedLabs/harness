@@ -138,7 +138,7 @@ func TestRunOTel_FailureDoesNotFailPrompt(t *testing.T) {
 	}))
 	defer srv.Close()
 	fp := llmtest.New("fake", okStep())
-	env, _, _, _, _ := fakeProviderEnvWithProxy(t, []string{"-model", "claude-opus-4-8"}, fp, "")
+	env, _, errw, _, _ := fakeProviderEnvWithProxy(t, []string{"-model", "claude-opus-4-8"}, fp, "")
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
 	cfg := map[string]any{"otel": map[string]any{"enabled": true, "endpoint": srv.URL}}
@@ -149,5 +149,8 @@ func TestRunOTel_FailureDoesNotFailPrompt(t *testing.T) {
 	env.args = append(env.args, "--config", cfgPath, "-p", "hi")
 	if code := run(env); code != 0 {
 		t.Fatalf("exit %d, want 0 despite otel 500", code)
+	}
+	if !strings.Contains(errw.String(), "final OTEL export failed") {
+		t.Fatalf("missing nonfatal terminal export warning: %s", errw.String())
 	}
 }

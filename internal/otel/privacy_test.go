@@ -12,6 +12,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/buildinfo"
+	"harness/internal/execution"
 	"harness/internal/llm"
 	"harness/internal/tools"
 )
@@ -30,9 +31,30 @@ func TestPrivacy_NoTranscriptLeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	sink := NewSink(exp, nil, "openai", "gpt-4", "auto", false)
+	sink.SetIdentity("secret-session", "openai", "gpt-4", "auto")
+	scope := sink.Scope()
+	secret := "secret ToolInput ResultText prompt text ImageData"
+	scope.Context(execution.ContextEvent{Reason: "request_attempt", Composition: &execution.ContextComposition{
+		Messages: 1, Blocks: 2, SystemTextBytes: len(secret), UserTextBytes: len(secret), AssistantTextBytes: len(secret),
+		ToolInputBytes: len(secret), ToolResultBytes: len(secret), ToolSchemaBytes: len(secret), ReasoningTextBytes: len(secret),
+		ReasoningOpaqueBytes: len(secret), ProviderStateBytes: len(secret), ImageEncodedBytes: len(secret),
+	}})
+	scope.Work(execution.WorkEvent{Kind: execution.WorkTool, Phase: execution.WorkResult, Tool: "mcp_" + secret, Mode: secret, Outcome: "failed", Activity: secret, ErrorKind: secret, Trigger: secret, Metrics: map[string]int{secret: 1}, Count: 1})
+	scope.Context(execution.ContextEvent{Reason: "retention", Policy: secret, DecisionSource: secret, PreviousRequestMode: secret, NextRequestMode: secret, ResponseStateReset: true, Limit: 1})
+	scope.Prompt(execution.PromptEvent{Termination: secret, ClosureTrigger: secret})
+	scope.Discard(llm.Usage{InputTokens: 1}, llm.RequestPurpose(secret), secret)
+	sink.ObserveModel(execution.ModelEvent{Identity: scope.Identity, Phase: execution.ModelRetry, Attempt: llm.AttemptEvent{AttemptMetadata: llm.AttemptMetadata{API: secret, Transport: secret, RetryLayer: llm.RetryLayer(secret)}, ErrorClass: llm.AttemptErrorClass(secret), Outcome: llm.AttemptOutcome(secret), Duration: new(time.Duration)}})
+	sink.RecordSkill(secret, secret)
+	scope.Skill(execution.SkillEvent{Source: secret, Status: "injected"})
+	scope.Skill(execution.SkillEvent{Source: secret, Status: secret, Omitted: 1, Truncated: 1})
+	scope.Turn(execution.TurnEvent{ToolNames: []string{"mcp_" + secret, secret}, ToolCalls: 2, Operations: 2, Activity: secret, SteerReason: secret})
+	sink.ObserveModel(execution.ModelEvent{Identity: scope.Identity, Phase: execution.ModelDiscard, Attempt: llm.AttemptEvent{ErrorClass: llm.AttemptErrorClass(secret), DiscardReason: llm.AttemptDiscardReason(secret)}, Usage: llm.Usage{InputTokens: 1}})
+	sink.TurnProgress(agent.TurnProgress{SteerReason: agent.GuardSteerReason(secret)})
+	sink.RecordSession(0, 0)
 	// Only bounded labels should appear; never raw prompt/tool input.
 	sink.ToolResultWithName("read", llm.ToolResult{}, 10, tools.Activity{Class: tools.ActivityInspect})
 	sink.PromptComplete(agent.PromptUsage{TerminationReason: agent.TerminationModelCompleted}, 0)
+	requireCompositionGauge(t, exp, "harness.context.bytes", int64(len(secret)), map[string]string{"component": "system"})
 	if err := exp.Export(t.Context()); err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -41,7 +63,7 @@ func TestPrivacy_NoTranscriptLeak(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	text := string(payload)
-	for _, leak := range []string{"ToolInput", "ResultText", "prompt text", "ImageData", "secret"} {
+	for _, leak := range []string{"ToolInput", "ResultText", "prompt text", "ImageData", "secret", "session_id"} {
 		if strings.Contains(text, leak) {
 			t.Fatalf("payload contains forbidden %q", leak)
 		}
@@ -64,6 +86,11 @@ func TestPrivacy_NoTranscriptLeak(t *testing.T) {
 				}
 				if m.Sum != nil {
 					for _, dp := range m.Sum.DataPoints {
+						checkPoints(dp.Attributes)
+					}
+				}
+				if m.Gauge != nil {
+					for _, dp := range m.Gauge.DataPoints {
 						checkPoints(dp.Attributes)
 					}
 				}

@@ -9,6 +9,7 @@ import (
 
 	"harness/internal/agent"
 	"harness/internal/agentsession"
+	"harness/internal/execution"
 	"harness/internal/tools"
 )
 
@@ -86,12 +87,16 @@ func (t *Tool) startInteractive(ctx context.Context, prepared preparedRun) (tool
 	base.ContinueChildID = ""
 	fixedRuntime := cloneRuntime(prepared.runtime)
 	runner := t.runner.Rebind(func() Runtime { return cloneRuntime(fixedRuntime) })
+	fixedLaunch := *prepared.launch
+	runner.resolve = func(Runtime, string) (Launch, error) { return fixedLaunch, nil }
+	ctx = execution.WithScope(ctx, fixedRuntime.Execution)
 	label := base.Agent
 	if prepared.continuation != nil {
 		label = prepared.continuation.meta.Agent
 	}
 
 	started, err := t.agentSessions.Start(ctx, agentsession.StartRequest{
+		Execution:     fixedRuntime.Execution,
 		Kind:          "delegate",
 		Label:         label,
 		Prompt:        prepared.req.Task,
@@ -100,6 +105,7 @@ func (t *Tool) startInteractive(ctx context.Context, prepared preparedRun) (tool
 		WaitForPrompt: true,
 		Factory: func(context.Context, agentsession.SessionInfo) (agentsession.Runtime, error) {
 			return &interactiveRuntime{
+				work:    startDelegateWork(fixedRuntime.Execution, "interactive_session"),
 				runner:  runner,
 				runtime: fixedRuntime,
 				base:    base,
@@ -132,6 +138,7 @@ func (t *Tool) startInteractive(ctx context.Context, prepared preparedRun) (tool
 type interactiveRuntime struct {
 	mu sync.Mutex
 
+	work    *delegateWork
 	runner  *Runner
 	runtime Runtime
 	base    RunRequest
@@ -165,6 +172,7 @@ func (r *interactiveRuntime) Prompt(ctx context.Context, prompt agentsession.Pro
 	}()
 
 	progress := NewProgress()
+	ctx = execution.WithScope(ctx, r.runtime.Execution)
 	result, runErr := r.runner.Run(ctx, req, progress)
 	jobResult := toBackgroundJobResult(result)
 	if jobResult.Progress != nil {
@@ -214,8 +222,14 @@ func (r *interactiveRuntime) Steer(ctx context.Context, text string) error {
 
 func (r *interactiveRuntime) Close(context.Context) error {
 	r.mu.Lock()
+	abandoned := r.active != ""
 	r.closed = true
 	r.active = ""
 	r.mu.Unlock()
+	outcome := "success"
+	if abandoned {
+		outcome = "abandoned"
+	}
+	r.work.finish(RunResult{}, nil, outcome)
 	return nil
 }

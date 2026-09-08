@@ -6,6 +6,7 @@ import (
 	"harness/internal/agent"
 	"harness/internal/background"
 	"harness/internal/config"
+	"harness/internal/execution"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/tools"
@@ -32,6 +33,7 @@ func newRootToolCatalog(cfg config.Config, jobs *background.Manager) *tools.Regi
 }
 
 type rootAgentConfig struct {
+	Execution             execution.Scope
 	Config                config.Config
 	Registry              *llm.Registry
 	Reasoning             llm.ReasoningConfig
@@ -50,6 +52,7 @@ type rootAgentConfig struct {
 func newRootAgent(provider llm.Provider, registry *tools.Registry, in rootAgentConfig) *agent.Agent {
 	cfg := in.Config
 	ag := agent.New(provider, registry, agent.Options{
+		Execution:                 in.Execution,
 		MaxTurns:                  cfg.MaxTurns,
 		MaxPromptTokens:           cfg.MaxPromptTokens,
 		MaxOutputTokens:           cfg.MaxOutputTokens,

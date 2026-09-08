@@ -11,6 +11,7 @@ import (
 
 	"harness/internal/agentsession"
 	"harness/internal/config"
+	"harness/internal/execution"
 	"harness/internal/tools"
 )
 
@@ -150,7 +151,11 @@ func (t *Tool) start(ctx context.Context, args toolArgs) (tools.RunResult, error
 	if factory == nil {
 		return tools.RunResult{}, fmt.Errorf("ACP runtime factory builder returned nil for target %q", name)
 	}
+	// ACP does not identify the upstream provider/model. Preserve observation,
+	// but do not attribute this remote runtime to the caller's model or agent.
+	scope := execution.FromContext(ctx).Rebind(execution.Identity{Agent: name, Delegate: "true"})
 	started, err := t.manager.Start(ctx, agentsession.StartRequest{
+		Execution:     scope,
 		Kind:          "acp",
 		Label:         name,
 		Prompt:        args.Prompt,

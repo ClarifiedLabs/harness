@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"time"
 
+	"harness/internal/execution"
 	"harness/internal/llm"
 	"harness/internal/tools"
 )
@@ -41,6 +43,8 @@ type asyncReadResult struct {
 	foldGuard  bool
 }
 type asyncReads struct {
+	scope   execution.Scope
+	started time.Time
 	agent   *Agent
 	ctx     context.Context
 	cancel  context.CancelFunc
@@ -52,8 +56,8 @@ type asyncReads struct {
 }
 
 func (a *Agent) newAsyncReads(ctx context.Context, req llm.Request) *asyncReads {
-	ctx, cancel := context.WithCancel(ctx)
-	batch := &asyncReads{agent: a, ctx: ctx, cancel: cancel, allowed: map[string]bool{}, jobs: map[string]<-chan asyncReadResult{}, seen: map[failKey]bool{}, prefix: true}
+	ctx, cancel := context.WithCancel(execution.WithScope(ctx, a.executionScope()))
+	batch := &asyncReads{scope: a.executionScope(), agent: a, ctx: ctx, cancel: cancel, allowed: map[string]bool{}, jobs: map[string]<-chan asyncReadResult{}, seen: map[failKey]bool{}, prefix: true}
 	if a.experimentalAsyncTools {
 		for _, spec := range req.Tools {
 			if spec.Async && asyncReadName(spec.Name) {
@@ -97,10 +101,15 @@ func (b *asyncReads) start(ev llm.StreamEvent) {
 	if b.seen[key] {
 		return
 	}
+	if len(b.jobs) == 0 {
+		b.started = time.Now()
+		b.scope.Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkStart, Mode: "async", Count: 1, BatchSize: 1})
+	}
 	b.seen[key] = true
 	done := make(chan asyncReadResult, 1)
 	b.jobs[call.ID] = done
 	b.wg.Add(1)
+	queuedCtx := execution.WithToolQueued(b.ctx, time.Now())
 	go func() {
 		defer b.wg.Done()
 		select {
@@ -109,7 +118,7 @@ func (b *asyncReads) start(ev llm.StreamEvent) {
 			done <- asyncReadResult{name: call.Name, inputHash: key.inputHash, result: llm.ToolResult{ForID: call.ID, IsError: true, Text: "async read cancelled before execution", ErrorKind: llm.ToolErrorCancelled}}
 			return
 		}
-		result, completion, fold := b.agent.dispatchToolDirect(b.ctx, call)
+		result, completion, fold := b.agent.dispatchToolDirect(queuedCtx, call)
 		<-b.agent.toolRunSem
 		done <- asyncReadResult{name: call.Name, inputHash: key.inputHash, result: result, completion: completion, foldGuard: fold}
 	}()
@@ -119,6 +128,14 @@ func (b *asyncReads) finish(failed bool) map[string]asyncReadResult {
 		b.cancel()
 	}
 	b.wg.Wait()
+	if len(b.jobs) > 0 {
+		duration := time.Since(b.started)
+		outcome := "success"
+		if failed {
+			outcome = "discarded"
+		}
+		b.scope.Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkFinish, Mode: "async", Outcome: outcome, Count: 1, BatchSize: len(b.jobs), RunDuration: &duration})
+	}
 	defer b.cancel()
 	if failed {
 		return nil

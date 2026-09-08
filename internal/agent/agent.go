@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"harness/internal/diff"
+	"harness/internal/execution"
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
@@ -487,6 +488,8 @@ type ContextEstimate struct {
 // Options configures an Agent. The zero value is valid; MaxTurns <= 0 means
 // unlimited.
 type Options struct {
+	// Execution observes caller-owned work without wrapping provider capabilities.
+	Execution              execution.Scope
 	AstraNativeSteering    bool
 	ExperimentalAsyncTools bool
 	MaxTurns               int
@@ -599,6 +602,7 @@ type Options struct {
 // Agent drives the turn loop against one provider and tool registry, owning the
 // running transcript.
 type Agent struct {
+	execution                 execution.Scope
 	astraNativeSteering       bool
 	nativePending             map[string]nativeSteerJob
 	recoveredSteers           []SteerInput
@@ -709,6 +713,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		now = time.Now
 	}
 	a := &Agent{
+		execution:                 opts.Execution,
 		provider:                  provider,
 		tools:                     registry,
 		toolSpecs:                 registry.Specs(),
@@ -810,6 +815,11 @@ func (a *Agent) SetTools(registry *tools.Registry) {
 	}
 }
 
+// SetExecution replaces the execution scope for subsequent work. Background
+// snapshots retain their captured value. Like other setters, call on the owner
+// goroutine, not concurrently with foreground prompt execution.
+func (a *Agent) SetExecution(scope execution.Scope) { a.execution = scope }
+
 // SetProvider replaces the provider used for subsequent model calls.
 func (a *Agent) SetProvider(provider llm.Provider) {
 	if provider != nil {
@@ -826,6 +836,7 @@ func (a *Agent) SetProvider(provider llm.Provider) {
 // is the same override as Options.ContextWindow: zero means use the registry.
 func (a *Agent) SetModel(model string, contextWindow int) {
 	a.model = model
+	a.execution.Identity.Model = model
 	a.contextWindow = contextWindow
 	a.compactionRuntimeVersion++
 	a.observedContextWindow = 0
@@ -1217,10 +1228,14 @@ func (a *Agent) PrewarmFunc() (func(context.Context) PrewarmResult, bool) {
 		return nil, false
 	}
 	provider := a.provider
+	scope := a.executionScope()
+	window := a.window()
 	epoch := a.responseStateEpoch
 	proxySessionID := a.proxySessionID
 	transcript := cloneMessages(a.transcript)
 	return func(ctx context.Context) PrewarmResult {
+		done := scope.Track()
+		defer done()
 		result := PrewarmResult{
 			ResponseStateEpoch: epoch,
 			ProxySessionID:     proxySessionID,
@@ -1229,8 +1244,21 @@ func (a *Agent) PrewarmFunc() (func(context.Context) PrewarmResult, bool) {
 		if err := validateRequestImageContent(req.Messages); err != nil {
 			return result
 		}
+		ctx, call := observeModelCall(ctx, scope, req, window)
+		var streamErr error
+		defer func() {
+			call.Finish(result.Usage, streamErr)
+			if streamErr != nil {
+				call.Discard("error")
+			}
+		}()
 		for event, err := range provider.Stream(ctx, req) {
+			call.ObserveStream(event)
+			if event.Usage != nil {
+				result.Usage = mergeUsage(result.Usage, *event.Usage)
+			}
 			if err != nil {
+				streamErr = err
 				// Best-effort: a failed warm-up just means the first real request
 				// pays the cold-cache cost. Preserve usage already reported before
 				// the failure because those tokens may still be billed.
@@ -1364,6 +1392,7 @@ type turnResult struct {
 	toolCalls       []llm.ToolCall
 	phase           string
 	usage           llm.Usage
+	modelCall       *execution.ModelCall // exact physical lineage for nonbilling disposition
 	stopReason      llm.StopReason
 	responseID      string
 	attempts        int
@@ -1399,12 +1428,13 @@ type TurnAttemptAbandonSink interface {
 // continuous across request-shape rebuilds within one logical turn. Each rebuilt
 // request receives a fresh local transport-retry budget.
 type turnAttemptCoordinator struct {
-	agent     *Agent
-	sink      EventSink
-	turn      int
-	next      int
-	wasted    llm.Usage
-	abandoned map[int]bool
+	agent       *Agent
+	sink        EventSink
+	turn        int
+	next        int
+	wasted      llm.Usage
+	abandoned   map[int]bool
+	retryReason llm.AttemptErrorClass
 }
 
 func newTurnAttemptCoordinator(a *Agent, sink EventSink, turn int) *turnAttemptCoordinator {
@@ -1420,6 +1450,7 @@ func newTurnAttemptCoordinator(a *Agent, sink EventSink, turn int) *turnAttemptC
 func (c *turnAttemptCoordinator) request(ctx context.Context, req llm.Request, estimate ContextEstimate) (turnResult, error) {
 	res, wasted, err := c.agent.streamWithRetry(ctx, req, c.sink, c.turn, c.next, estimate)
 	c.wasted = add(c.wasted, wasted)
+	c.retryReason, _ = llm.ClassifyAttemptError(err, 0)
 	if res.attempts >= c.next {
 		c.next = res.attempts + 1
 	}
@@ -1427,7 +1458,7 @@ func (c *turnAttemptCoordinator) request(ctx context.Context, req llm.Request, e
 }
 
 func (c *turnAttemptCoordinator) rerun(ctx context.Context, previous turnResult, req llm.Request, estimate ContextEstimate) (turnResult, error) {
-	if err := ctx.Err(); err != nil {
+	if err := c.agent.retryWait(ctx, req.Purpose, 0, c.retryReason, ctx.Err); err != nil {
 		return previous, err
 	}
 	c.abandon(previous)
@@ -1440,6 +1471,7 @@ func (c *turnAttemptCoordinator) abandon(res turnResult) {
 	}
 	c.abandoned[res.attempts] = true
 	c.wasted = add(c.wasted, res.usage)
+	res.modelCall.Discard("request_rebuild")
 	if abandon, ok := c.sink.(TurnAttemptAbandonSink); ok {
 		abandon.TurnAttemptAbandoned(c.turn, res.attempts)
 	}
@@ -1931,6 +1963,11 @@ func (a *Agent) ContinuePromptWithContext(ctx context.Context, extraContext []st
 }
 
 func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, initialPromptPending bool, extraContext []string, promptID int, sink EventSink) (retErr error) {
+	scope := a.executionScope()
+	done := scope.Track()
+	defer done()
+	ctx = execution.WithScope(ctx, scope)
+	started := time.Now()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 
 	var total llm.Usage
@@ -2038,6 +2075,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 		terminationReason = reason
 		workflowStatus = currentWorkflowStatus()
+		scope.Prompt(execution.PromptEvent{Duration: time.Since(started), Turns: turns, Termination: string(reason), ClosureTrigger: string(closureTrigger)})
 		sink.PromptComplete(promptUsage())
 	}()
 	// Stop notifies session coordinators on every prompt exit. The normal
@@ -2207,6 +2245,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if retention.observed {
 			retention.event.NextRequestStateful = modelReq.usedPrevious
 			retention.event.NextRequestMode = a.retentionRequestMode(modelReq.usedPrevious)
+			a.observeRetention(retention.event)
 			reportRetention(sink, retention.event)
 		}
 		checkpoint(PromptCheckpointRequestBoundary)
@@ -2313,6 +2352,11 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			// assistant message; drop the message entirely if nothing streamed.
 			// Un-executed tool calls are never appended.
 			cancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+			// Retained cancellation text and completed native prefixes remain
+			// useful. Only the wholly rejected terminal response is waste.
+			if !cancelled || res.text == "" {
+				res.modelCall.Discard("error")
+			}
 			if cancelled && res.text != "" {
 				a.transcript = append(a.transcript, a.partialAssistantMessage(res))
 				completeTurn()
@@ -2475,11 +2519,11 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if (pendingBeforeRequest || (!unlimited && turns >= a.maxTurns)) && pendingPromptWork(sink) {
 			usage, waitErr := waitForPromptWork(ctx, sink)
 			total = add(total, usage)
+			reportTurnProgress(scope, sink, progress, executionCalls)
 			if waitErr != nil {
 				return waitErr
 			}
 			forcePromptWorkSynthesis = true
-			reportTurnProgress(sink, progress)
 			continue
 		}
 
@@ -2522,7 +2566,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// Hard stop: an unrelenting error storm. Finalize with a tools-disabled
 		// summary so the turn ends on an assistant message, not a dangling result.
 		if guard.shouldBreakErrors() {
-			reportTurnProgress(sink, progress)
+			reportTurnProgress(scope, sink, progress, executionCalls)
 			startClosure(ClosureTriggerErrorGuard, turns)
 			terminationReason = TerminationErrorGuard
 			sink.Notice(errorStormNotice(guard.errorRuns))
@@ -2536,7 +2580,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// steering. Finalize the same way so the turn ends on an assistant message
 		// (the success-loop analogue of the error-storm break).
 		if guard.shouldBreakRepeat() || guard.shouldBreakCommandRepeat() {
-			reportTurnProgress(sink, progress)
+			reportTurnProgress(scope, sink, progress, executionCalls)
 			startClosure(ClosureTriggerRepeatGuard, turns)
 			terminationReason = TerminationRepeatGuard
 			if guard.shouldBreakRepeat() {
@@ -2553,7 +2597,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// Token budget: stop before the next (paid) request. No final summary —
 		// the whole point is to stop spending.
 		if a.maxPromptTokens > 0 && totalTokens(total) >= a.maxPromptTokens {
-			reportTurnProgress(sink, progress)
+			reportTurnProgress(scope, sink, progress, executionCalls)
 			terminationReason = TerminationTokenLimit
 			sink.Notice(promptTokenBudgetNotice(a.maxPromptTokens))
 			break
@@ -2564,7 +2608,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// silently has no cost ceiling.
 		if a.maxPromptCostUSD > 0 {
 			if total.CostKnown && total.CostUSD >= a.maxPromptCostUSD {
-				reportTurnProgress(sink, progress)
+				reportTurnProgress(scope, sink, progress, executionCalls)
 				terminationReason = TerminationCostLimit
 				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))
 				break
@@ -2581,7 +2625,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				return err
 			}
 		}
-		reportTurnProgress(sink, progress)
+		reportTurnProgress(scope, sink, progress, executionCalls)
 		if unlimited || turns < a.maxTurns {
 			if changed, err := a.applyContextEpoch(ctx, sink); err != nil {
 				sink.Notice("[work context checkpoint failed; continuing current context: " + err.Error() + "]")
@@ -2671,7 +2715,20 @@ func reportClosure(sink EventSink, event ClosureEvent) {
 	}
 }
 
-func reportTurnProgress(sink EventSink, progress TurnProgress) {
+func reportTurnProgress(scope execution.Scope, sink EventSink, progress TurnProgress, calls []llm.ToolCall) {
+	// This is a logical completed turn, not a tool-run or inclusive usage event.
+	// Keep it at the core boundary so non-UI sinks receive the same diagnostics.
+	if progress.ToolCalls > 0 {
+		names := make([]string, len(calls))
+		for i, call := range calls {
+			names[i] = call.Name
+		}
+		scope.Turn(execution.TurnEvent{
+			ToolNames: names, ToolCalls: progress.ToolCalls, Operations: progress.Operations,
+			SingleLookupCount: progress.SingleLookupCount, InspectionNoProgressRun: progress.InspectionNoProgressRun,
+			Activity: dominantActivity(progress.Activity), SteerReason: string(progress.SteerReason),
+		})
+	}
 	if progressSink, ok := sink.(TurnProgressSink); ok {
 		progressSink.TurnProgress(progress)
 	}
@@ -2879,6 +2936,7 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 	wasted := attempts.wasted
 	usage := add(res.usage, wasted)
 	if err != nil {
+		res.modelCall.Discard("error")
 		a.resetResponseState()
 		return usage, wasted, modelReq.estimate, false
 	}
@@ -2887,6 +2945,8 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 		msg.Phase = llm.AssistantPhaseFinal
 		a.transcript = append(a.transcript, msg)
 		a.updateResponseState(res)
+	} else {
+		res.modelCall.Discard("summary_replaced")
 	}
 	sink.TurnComplete(TurnUsage{Turn: turn, Attempts: res.attempts, Usage: usage, Wasted: wasted, Context: modelReq.estimate})
 	return usage, wasted, modelReq.estimate, true
@@ -3023,6 +3083,9 @@ func (a *Agent) readResultBatchByteBudget(liveInputTokens int) int {
 // hook-barrier, and mutation-dependency scheduler within each stage. Sink events
 // and returned blocks remain in global emission order (design §8).
 func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptID, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
+	// All calls are queued before stage/dependency/semaphore waits. Reused
+	// speculative results never enter Registry.Run again.
+	ctx = execution.WithToolQueued(execution.WithScope(ctx, a.executionScope()), time.Now())
 	executionCalls, stages, planErr := planToolStages(calls)
 	blocks := make([]llm.ContentBlock, len(calls))
 	if planErr != nil {
@@ -3299,6 +3362,17 @@ type scheduledToolResult struct {
 }
 
 func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall, dependencies [][]int, awaitActual []bool, blocks []llm.ContentBlock, sink EventSink, richEncodedBytes *int, globalStart int, crossStageDependencies [][]int, actualCompletions []<-chan struct{}) llm.Usage {
+	scope := a.executionScope()
+	started := time.Now()
+	count := 0
+	for _, call := range calls {
+		if !cachedAsyncCall(ctx, call) {
+			count++
+		}
+	}
+	if count > 0 {
+		scope.Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkStart, Mode: "sync", Count: 1, BatchSize: count})
+	}
 	for _, call := range calls {
 		startToolProgress(a.tools, call, sink)
 		sink.ToolStart(call)
@@ -3352,6 +3426,23 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 		}(i, call)
 	}
 	wg.Wait()
+	if count > 0 {
+		duration := time.Since(started)
+		completed, failed, cancelled := 0, 0, 0
+		for i, result := range results {
+			if cachedAsyncCall(ctx, calls[i]) {
+				continue
+			}
+			if result.result.ErrorKind == llm.ToolErrorCancelled {
+				cancelled++
+			} else if result.result.IsError {
+				failed++
+			} else {
+				completed++
+			}
+		}
+		scope.Work(execution.WorkEvent{Kind: execution.WorkParallel, Phase: execution.WorkFinish, Mode: "sync", Outcome: executionOutcome(ctx.Err()), Count: 1, BatchSize: count, Completed: completed, Failed: failed, Cancelled: cancelled, RunDuration: &duration})
+	}
 
 	var total llm.Usage
 	for i, scheduled := range results {
@@ -3737,7 +3828,7 @@ func pendingPromptWork(sink EventSink) bool {
 	return ok && coordinator.PendingPromptWork()
 }
 
-func waitForPromptWork(ctx context.Context, sink EventSink) (llm.Usage, error) {
+func waitForPromptWork(ctx context.Context, sink EventSink) (usage llm.Usage, err error) {
 	coordinator, ok := sink.(PromptWorkCoordinator)
 	if !ok {
 		return llm.Usage{}, nil
@@ -3746,6 +3837,13 @@ func waitForPromptWork(ctx context.Context, sink EventSink) (llm.Usage, error) {
 		progress.PromptWorkWaitStart()
 		defer progress.PromptWorkWaitComplete()
 	}
+	scope := execution.FromContext(ctx)
+	started := time.Now()
+	scope.Work(execution.WorkEvent{Kind: execution.WorkWait, Phase: execution.WorkStart, Mode: "prompt_join", Count: 1})
+	defer func() {
+		duration := time.Since(started)
+		scope.Work(execution.WorkEvent{Kind: execution.WorkWait, Phase: execution.WorkFinish, Mode: "prompt_join", Outcome: executionOutcome(err), Count: 1, RunDuration: &duration})
+	}()
 	return coordinator.WaitForPromptWork(ctx)
 }
 
@@ -3905,7 +4003,12 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		}
 		physicalAttempt := startAttempt + attempt
 		sink.TurnAttemptStart(turn, physicalAttempt, estimate)
-		res, err = a.stream(ctx, req, sink)
+		attemptCtx := ctx
+		if physicalAttempt > 1 {
+			attemptCtx = llm.WithAttemptCause(ctx, llm.AttemptRetry, llm.RetryLayerAgent)
+		}
+		observeRequestContext(a.executionScope(), req, estimate.Total, a.window())
+		res, err = a.stream(attemptCtx, req, sink)
 		res.attempts = physicalAttempt
 		sink.TurnAttemptComplete(TurnAttemptUsage{Turn: turn, Attempt: physicalAttempt, Usage: res.usage})
 		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
@@ -3916,6 +4019,7 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 			return res, wasted, err
 		}
 		wasted = add(wasted, res.usage)
+		res.modelCall.Discard("stream_retry")
 		delay := retry.Next(attempt, retryAfter)
 		retryEvent := modelRequestEventFromError(err, llm.ModelRequestRetryScheduled)
 		retryEvent.Outcome = ""
@@ -3931,7 +4035,8 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 			discarded = fmt.Sprintf("; discarded ~%d tokens", n)
 		}
 		sink.Notice(fmt.Sprintf("[stream interrupted: %v; retrying turn in %s%s]", err, delay, discarded))
-		if serr := a.sleep(ctx, delay); serr != nil {
+		reason, _ := llm.ClassifyAttemptError(err, 0)
+		if serr := a.retryWait(ctx, req.Purpose, delay, reason, func() error { return a.sleep(ctx, delay) }); serr != nil {
 			// This physical attempt was already abandoned and moved into wasted.
 			// Preserve its terminal attempt/response metadata for diagnostics, but
 			// clear discarded output and usage so final accounting cannot count it
@@ -4099,16 +4204,26 @@ func stopReasonNotice(reason llm.StopReason) string {
 // usage and stop reason. A terminal stream error is returned with whatever
 // partial text streamed so far (for cancel repair).
 func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (res turnResult, retErr error) {
+	ctx, call := a.executionScope().ModelCall(ctx, req.Purpose)
+	res.modelCall = call
 	bridge := a.newNativeSteerBridge(ctx, req)
 	var previousUsage llm.Usage
 	defer func() {
+		prefixLen, hadText := len(res.contextPrefix), res.text != ""
 		bridge.finish(&res, &retErr, sink)
+		if hadText && res.text == "" && len(res.contextPrefix) > prefixLen {
+			// Uncertain native delivery can retain the terminal partial answer
+			// while moving pending steering into history instead of retrying.
+			call.Retain()
+		}
 		currentInput := res.usage.InputTokens + res.usage.CacheReadTokens + res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
 		res.contextInput = &currentInput
 		res.usage = add(previousUsage, res.usage)
 	}()
 	reads := a.newAsyncReads(ctx, req)
 	defer func() { res.asyncResults = reads.finish(retErr != nil) }()
+	// Close the provider invocation before joining speculative tool work.
+	defer func() { call.Finish(add(previousUsage, res.usage), retErr) }()
 	var text []byte
 	textBlocks := make(map[int][]byte)
 	orderedBlocks := make(map[int]llm.ContentBlock)
@@ -4116,7 +4231,11 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 	terminalModelEventSeen := false
 
 	for ev, err := range a.provider.Stream(ctx, req) {
+		call.ObserveStream(ev)
 		if err != nil {
+			if ev.Usage != nil {
+				res.usage = mergeUsage(res.usage, *ev.Usage)
+			}
 			if !terminalModelEventSeen {
 				state := llm.ModelRequestFailed
 				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -4136,6 +4255,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 			sink.Notice("[native steer " + ev.LiveSteer.Status + "]")
 			if ev.LiveSteer.Status == "applied" {
 				if ev.LiveSteer.Boundary {
+					call.Retain()
 					if ev.Usage != nil {
 						res.usage = mergeUsage(res.usage, *ev.Usage)
 					}

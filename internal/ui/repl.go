@@ -353,8 +353,9 @@ type App struct {
 	usage        session.UsageTotals            // cumulative aggregate across the session
 	usageByModel map[string]session.UsageTotals // per model target cumulative, for accurate per-model cost
 
-	maintenanceMu      sync.Mutex
-	pendingMaintenance []queuedMaintenanceUsage
+	maintenanceMu        sync.Mutex
+	pendingMaintenance   []queuedMaintenanceUsage
+	settleIdleCompaction func() // REPL-owned: discard/drain before session rotation
 
 	// lastPromptInterrupted is set by the run closure when a prompt ends because
 	// of context cancellation. It is read by the REPL loop to pause an active goal
@@ -490,6 +491,8 @@ func run(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool) int
 }
 
 func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromptEditor bool, initialPrompt *string) int {
+	finishOwner := app.TrackOTel()
+	defer finishOwner()
 	// Renderer callbacks and host-side notices can run concurrently while a
 	// prompt is active. Make the renderer's coordinator the App-wide output
 	// owner even for embedders that supplied the same raw writers separately.
@@ -721,7 +724,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		loop.idleCompactionTrigger = trigger
 		loop.idleCompactionContext = app.Agent.EstimateContext().Total
 		loop.idleCompactionMessages = len(app.Agent.Transcript())
+		finishPreparation := app.TrackOTel()
 		go func() {
+			defer finishPreparation()
 			result, err := work(ctx)
 			done <- idleCompactionFinished{result: result, err: err}
 		}()
@@ -763,10 +768,12 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			app.addMaintenanceUsageForModel("idle_compaction", finished.result.Usage, modelKey)
 		}
 		if !allowApply || discard {
+			app.Agent.DiscardIdleCompaction(finished.result)
 			record("discarded", 0, 0)
 			return false
 		}
 		if finished.err != nil {
+			app.Agent.DiscardIdleCompaction(finished.result)
 			record("failed", 0, 0)
 			if !errors.Is(finished.err, context.Canceled) && !errors.Is(finished.err, context.DeadlineExceeded) {
 				app.renderHookNotices([]string{"[idle compact failed: " + finished.err.Error() + "]"})
@@ -774,6 +781,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return false
 		}
 		if !finished.result.Prepared {
+			app.Agent.DiscardIdleCompaction(finished.result)
 			record("no_change", contextBefore, messagesBefore)
 			return false
 		}
@@ -783,6 +791,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		app.addCompactions(app.Agent.CompactionCount() - compactionsBefore)
 		sink.FlushEvents()
 		if err != nil {
+			app.Agent.DiscardIdleCompaction(finished.result)
 			record("failed", 0, 0)
 			app.renderHookNotices([]string{"[idle compact failed: " + err.Error() + "]"})
 			return false
@@ -802,6 +811,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 	// branch instead of touching that shared state on the select goroutine.
 	deferredIdleEvents := []session.Event{}
 	deferIdleCompaction := func(finished idleCompactionFinished) {
+		app.Agent.DiscardIdleCompaction(finished.result)
 		modelKey := loop.idleCompactionModelKey
 		started := loop.idleCompactionStarted
 		trigger := loop.idleCompactionTrigger
@@ -842,6 +852,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		case finished := <-loop.idleCompactionDone:
 			finishIdleCompaction(finished, false)
 		default:
+			// Keep shutdown non-blocking, but settle a late candidate on its
+			// captured core scope without touching UI/session state.
+			app.discardIdleCompactionWhenReady(loop.idleCompactionDone)
 			app.recordEvent(session.Event{
 				Type:       session.EventIdleCompaction,
 				Prompt:     app.PromptNumber,
@@ -863,6 +876,16 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			loop.idleCompactionMessages = 0
 		}
 	}
+
+	app.settleIdleCompaction = finishOutstandingIdleCompaction
+	defer func() {
+		app.settleIdleCompaction = nil
+		// Forced exit cannot touch app/session state while a prompt owns it,
+		// but a completed private candidate still needs terminal disposition.
+		if done := loop.idleCompactionDone; done != nil {
+			app.discardIdleCompactionWhenReady(done)
+		}
+	}()
 
 	requestRead := func(req replReadRequest) {
 		if loop.readPending || loop.inputEnded {
@@ -889,6 +912,7 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			app.Renderer.finishAssistantLine()
 		}
 		app.stopBackgroundJobs()
+		app.drainMaintenanceUsage()
 		app.saveOrWarn(app.SessionPath)
 		app.printExitUsageSummary()
 		return code
@@ -946,7 +970,9 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			enableActivePromptTerm()
 		}
 		loop.promptDone = done
+		finishPrompt := app.TrackOTel()
 		go func() {
+			defer finishPrompt()
 			run()
 			promptBoundary.Lock()
 			done <- struct{}{}
@@ -4141,11 +4167,17 @@ func (app *App) clear() {
 		}
 	}
 	app.clearAPIContinuation()
-	app.RecordOTelSession()
+	if app.settleIdleCompaction != nil {
+		app.settleIdleCompaction()
+	}
 	app.resetAgentSessions()
 	if app.Background != nil {
 		app.stopBackgroundJobsOnly()
-		app.saveOrWarn(app.SessionPath)
+	}
+	app.drainMaintenanceUsage()
+	app.RecordOTelSession()
+	app.saveOrWarn(app.SessionPath)
+	if app.Background != nil {
 		app.Background.Clear()
 	}
 	// Echo the totals being discarded so a /clear never silently wipes the
@@ -5701,13 +5733,10 @@ type accumulatingSink struct {
 	reasoningOutput             bool
 	promptUsage                 agent.PromptUsage // last PromptComplete, priced; JSON run modes report it in prompt_end
 	pendingNames                map[string]string
-	pendingOTel                 map[string]pendingOTelTool
-	otelToolNames               []string
 	todoTurn                    int
 	turn                        int
 	attempt                     int
 	inMaintenance               bool
-	promptStart                 time.Time
 	terminalModelErrorDisplayed bool
 	attemptText                 strings.Builder
 	finalText                   string
@@ -5721,138 +5750,66 @@ func (app *App) SetOTel(sink *otel.Sink) {
 }
 
 func (app *App) refreshOTelIdentity() {
-	if app == nil || app.otelSink == nil {
+	if app == nil {
 		return
 	}
 	app.otelSink.SetIdentity(filepath.Base(app.SessionPath), app.Provider, app.Model, app.AgentName)
+	if app.Agent != nil {
+		app.Agent.SetExecution(app.otelSink.Scope())
+	}
 }
 
-// RecordOTelSession emits one final lifecycle snapshot for the current session.
-// It is safe to call from both /clear and process shutdown.
+// TrackOTel registers a complete owner before it is launched. The returned
+// function must run after its last observation and App/session mutation, not
+// merely after its last model call. The Sink and its group are installed before
+// work starts; tracking never consults the concurrently running Agent.
+func (app *App) TrackOTel() func() {
+	if app == nil {
+		return func() {}
+	}
+	return app.otelSink.Scope().Track()
+}
+
+// WaitOTel waits for complete owners using the caller's shutdown budget. Call
+// after closing admission. On error, the caller must skip mutable App/Agent
+// aggregates; a force-exited foreground owner may still be updating them.
+func (app *App) WaitOTel(ctx context.Context) error {
+	if app == nil {
+		return nil
+	}
+	return app.otelSink.Scope().Group.Wait(ctx)
+}
+
+// discardIdleCompactionWhenReady transfers exclusive result ownership before
+// the REPL exits. The tracked disposer never touches live App/Agent/session state.
+func (app *App) discardIdleCompactionWhenReady(done <-chan idleCompactionFinished) {
+	owner := app.Agent
+	finishDisposition := app.TrackOTel()
+	go func() {
+		defer finishDisposition()
+		finished := <-done
+		owner.DiscardIdleCompaction(finished.result)
+	}()
+}
+
+// RecordOTelSession emits only the root inclusive session aggregate. Physical
+// child work and model usage are observed at their source, never rebuilt here.
+// Call on the owner goroutine (/clear), or after WaitOTel succeeds at shutdown.
+// Terminal recording must never rebind a potentially active Agent's scope.
 func (app *App) RecordOTelSession() {
 	if app == nil || app.otelSink == nil || app.SessionPath == "" || app.otelRecordedSession == app.SessionPath {
 		return
 	}
-	app.refreshOTelIdentity()
 	app.otelRecordedSession = app.SessionPath
 	usage := app.usage.Usage
 	totalTokens := usage.InputTokens + usage.OutputTokens + usage.CacheReadTokens + usage.CacheWriteTokens + usage.CacheWrite1hTokens + usage.ReasoningTokens
 	app.otelSink.RecordSession(app.usage.CostUSD, totalTokens)
-	if app.Agent != nil {
-		app.otelSink.RecordContext(otelContextComposition(app.Agent.Transcript()))
-	}
-	if app.Background == nil {
-		return
-	}
-	for _, job := range app.Background.List() {
-		if job.Kind != "delegate" {
-			continue
-		}
-		status, terminationReason := job.Status, job.Status
-		agentName := job.Agent
-		usage := job.Result.Usage
-		turns, compactions := 0, 0
-		if job.Progress != nil {
-			turns = job.Progress().Turn
-		}
-		if job.Result.TranscriptPath != "" {
-			if raw, err := os.ReadFile(filepath.Join(job.Result.TranscriptPath, "meta.json")); err == nil {
-				var meta session.ChildMeta
-				if json.Unmarshal(raw, &meta) == nil {
-					status, terminationReason, turns, usage = meta.Status, meta.TerminationReason, meta.TurnsUsed, meta.Usage
-					if meta.Agent != "" {
-						agentName = meta.Agent
-					}
-				}
-			}
-			if child, err := session.Load(job.Result.TranscriptPath); err == nil {
-				compactions = child.Usage.Compactions
-			}
-		}
-		if status == "" || status == "running" {
-			status, terminationReason = "abandoned", "abandoned"
-		} else if terminationReason == "" {
-			terminationReason = status
-		}
-		if job.Error != "" && terminationReason == status {
-			terminationReason = "error"
-		}
-		app.otelSink.RecordDelegate(agentName, status, terminationReason, turns, usage, compactions)
-	}
-}
-
-func otelContextComposition(messages []llm.Message) otel.ContextComposition {
-	composition := otel.ContextComposition{Messages: len(messages)}
-	var addBlock func(llm.Role, llm.ContentBlock)
-	addBlock = func(role llm.Role, block llm.ContentBlock) {
-		composition.Blocks++
-		switch block.Kind {
-		case llm.BlockText:
-			if role == llm.RoleAssistant {
-				composition.AssistantTextBytes += len(block.Text)
-			} else {
-				composition.UserTextBytes += len(block.Text)
-			}
-		case llm.BlockImage:
-			if block.ImageEncodedBytes > 0 {
-				composition.ImageEncodedBytes += block.ImageEncodedBytes
-			} else {
-				composition.ImageEncodedBytes += len(block.ImageData)
-			}
-		case llm.BlockToolUse:
-			composition.ToolInputBytes += len(block.ToolInput)
-		case llm.BlockToolResult:
-			composition.ToolResultBytes += len(block.ResultText)
-			for _, nested := range block.ResultContent {
-				addBlock(role, nested)
-			}
-		case llm.BlockThinking:
-			composition.ReasoningTextBytes += len(block.Thinking)
-			composition.ReasoningOpaqueBytes += len(block.ThinkingSignature)
-		case llm.BlockRedactedThinking:
-			composition.ReasoningOpaqueBytes += len(block.RedactedData)
-		case llm.BlockReasoning:
-			composition.ReasoningOpaqueBytes += len(block.ReasoningID) + len(block.ReasoningEncrypted)
-		case llm.BlockInteractionThought:
-			composition.ReasoningTextBytes += len(block.InteractionThoughtSummary)
-			composition.ReasoningOpaqueBytes += len(block.InteractionThoughtSignature)
-		case llm.BlockInteractionStep:
-			composition.ReasoningOpaqueBytes += len(block.InteractionStep)
-		case llm.BlockResponsesToolSearch:
-			composition.ReasoningOpaqueBytes += len(block.ResponsesToolSearch)
-		case llm.BlockAnthropicToolSearch:
-			composition.ReasoningOpaqueBytes += len(block.AnthropicToolSearch)
-		case llm.BlockProviderCompaction:
-			for _, item := range block.ProviderCompaction {
-				composition.ReasoningOpaqueBytes += len(item)
-			}
-		}
-	}
-	for _, message := range messages {
-		for _, block := range message.Content {
-			addBlock(message.Role, block)
-		}
-	}
-	return composition
-}
-
-type pendingOTelTool struct {
-	name     string
-	started  time.Time
-	activity tools.Activity
-	input    json.RawMessage
 }
 
 func newAccumulatingSink(r *Renderer, app *App, prompt int) *accumulatingSink {
 	s := &accumulatingSink{
 		r: r, app: app, prompt: prompt,
 		pendingNames: make(map[string]string),
-		pendingOTel:  make(map[string]pendingOTelTool),
-	}
-	if app != nil && app.Now != nil {
-		s.promptStart = app.Now()
-	} else {
-		s.promptStart = time.Now()
 	}
 	if app != nil {
 		s.otel = app.otelSink
@@ -5986,7 +5943,6 @@ func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.Context
 		s.todoTurn = turn
 	}
 	s.attemptText.Reset()
-	s.otelToolNames = nil
 	s.turn = turn
 	s.attempt = attempt
 	s.r.TurnAttemptStart(turn, attempt, ctx)
@@ -6007,9 +5963,6 @@ func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 	line := s.r.ModelRequestEvent(event)
 	if line != "" && event.Outcome == llm.ModelRequestOutcomeTerminal {
 		s.terminalModelErrorDisplayed = true
-	}
-	if s.otel != nil {
-		s.otel.ModelRequestEvent(event)
 	}
 	s.rec.ModelRequestEvent(event)
 	if s.app.DiagnosticLogger == nil {
@@ -6069,14 +6022,6 @@ func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
 
 func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
 	s.pendingNames[c.ID] = c.Name
-	s.otelToolNames = append(s.otelToolNames, c.Name)
-	if s.otel != nil || (s.app != nil && s.app.Agent != nil) {
-		activity := tools.Activity{Class: tools.ActivityOther, OperationCount: 1}
-		if s.app != nil && s.app.Agent != nil {
-			activity = s.app.Agent.ToolActivity(c)
-		}
-		s.pendingOTel[c.ID] = pendingOTelTool{name: c.Name, started: time.Now(), activity: activity, input: append(json.RawMessage(nil), c.Input...)}
-	}
 	s.r.ToolStart(c)
 	s.rec.ToolStart(c)
 }
@@ -6093,24 +6038,6 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 				APIType:     identity.APIType,
 				Model:       identity.Model,
 			})
-		}
-	}
-	pendingOTel := s.pendingOTel[res.ForID]
-	delete(s.pendingOTel, res.ForID)
-	if s.otel != nil {
-		input := append(json.RawMessage(nil), pendingOTel.input...)
-		timeSince := time.Since(pendingOTel.started).Milliseconds()
-		durMS := int64(-1)
-		if !pendingOTel.started.IsZero() {
-			durMS = timeSince
-		}
-		toolName := name
-		if toolName == "" {
-			toolName = pendingOTel.name
-		}
-		s.otel.ToolResultWithName(toolName, res, durMS, pendingOTel.activity)
-		if toolName == "shell" && len(input) > 0 {
-			s.otel.RecordCommands(input)
 		}
 	}
 	s.r.ToolResult(res)
@@ -6259,9 +6186,6 @@ func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
 	if !u.Usage.CostKnown {
 		u.Usage.CostUSD, u.Usage.CostKnown = s.app.Registry.Cost(s.app.usageKey(), u.Usage)
 	}
-	if s.otel != nil {
-		s.otel.RecordTurnSummary(s.otelToolNames)
-	}
 	s.r.TurnComplete(u)
 	s.rec.TurnComplete(u)
 }
@@ -6276,9 +6200,6 @@ func (s *accumulatingSink) FinalText() string {
 }
 
 func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
-	if s.otel != nil {
-		s.otel.MaintenanceComplete(u)
-	}
 	s.rec.MaintenanceComplete(u)
 }
 
@@ -6328,9 +6249,6 @@ func (s *accumulatingSink) ClosureStarted(event agent.ClosureEvent) {
 }
 
 func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
-	if s.otel != nil {
-		s.otel.TurnProgress(progress)
-	}
 	s.rec.TurnProgress(progress)
 }
 
@@ -6358,9 +6276,6 @@ func (s *accumulatingSink) WorkflowStatus() agent.WorkflowStatus {
 }
 
 func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
-	if s.otel != nil {
-		s.otel.RetentionApplied(event)
-	}
 	s.recordEvent(session.Event{
 		Type:      session.EventRetention,
 		Prompt:    s.prompt,
@@ -6478,21 +6393,6 @@ func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
 		}
 	}
 	s.r.SetPromptCost(cost, costKnown)
-	if s.otel != nil {
-		s.otel.PromptComplete(u, time.Since(s.promptStart))
-		if s.app != nil && s.app.Agent != nil {
-			all := s.app.Agent.Transcript()
-			var batches [][]string
-			for _, m := range all {
-				for _, b := range m.ParallelToolBatches {
-					if len(b.ToolUseIDs) >= 2 {
-						batches = append(batches, append([]string(nil), b.ToolUseIDs...))
-					}
-				}
-			}
-			s.otel.RecordParallel(batches)
-		}
-	}
 	s.r.PromptComplete(u)
 	s.app.addUsage(u)
 	s.rec.PromptComplete(u)

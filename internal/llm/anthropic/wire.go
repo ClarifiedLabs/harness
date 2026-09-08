@@ -250,7 +250,7 @@ type wireEvent struct {
 
 	// message_start
 	Message *struct {
-		Usage wireUsage `json:"usage"`
+		Usage *wireUsage `json:"usage"`
 	} `json:"message"`
 
 	// content_block_start / content_block_delta / content_block_stop

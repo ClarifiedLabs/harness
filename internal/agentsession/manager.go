@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode"
 
+	"harness/internal/execution"
 	"harness/internal/tools"
 )
 
@@ -74,6 +75,9 @@ type Snapshot struct {
 
 // StartRequest creates a runtime and starts its first finite prompt operation.
 type StartRequest struct {
+	// Execution pins the resolved runtime identity and observer for every prompt.
+	// A zero scope inherits the starting context; later callers cannot rebind it.
+	Execution     execution.Scope
 	Kind          string
 	Label         string
 	Prompt        string
@@ -136,6 +140,7 @@ type session struct {
 	resourceKey   string
 	access        string
 	waitForPrompt bool
+	execution     execution.Scope // Immutable after Start, including across follow-up prompts.
 	operationDone chan struct{}
 }
 
@@ -209,6 +214,10 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 		return StartResult{}, fmt.Errorf("agent session runtime factory is required")
 	}
 
+	scope := req.Execution
+	if scope.Observer == nil && scope.Identity == (execution.Identity{}) {
+		scope = execution.FromContext(ctx)
+	}
 	now := m.now()
 	m.mu.Lock()
 	if !m.accepting {
@@ -235,6 +244,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 		resourceKey:   req.ResourceKey,
 		access:        req.Access,
 		waitForPrompt: req.WaitForPrompt,
+		execution:     scope,
 		operationDone: make(chan struct{}),
 	}
 	s.progress = newOperationProgress(req.Kind, req.Label)
@@ -249,6 +259,7 @@ func (m *Manager) Start(ctx context.Context, req StartRequest) (StartResult, err
 		m.mu.Lock()
 		if current := m.sessions[s.id]; current == s && current.generation == generation && current.operation == operation {
 			current.state = StateFailed
+			current.factory = nil
 			current.operationDone = nil
 			current.lastError = boundedText(err.Error(), 2048)
 			current.updated = m.now()
@@ -360,22 +371,34 @@ func (m *Manager) Prompt(ctx context.Context, req PromptRequest) (PromptResult, 
 
 func (m *Manager) registerOperation(parent context.Context, s *session, generation uint64, operation int, text string, opening bool, operationDone chan struct{}) (tools.BackgroundJobInfo, error) {
 	parentValues := context.WithoutCancel(parent)
+	scope := s.execution
 	progress := s.progress
-	return m.background.StartBackgroundJob(tools.BackgroundJobRequest{
-		Kind:          s.kind,
-		Description:   text,
-		Agent:         s.label,
-		SessionID:     s.id,
-		Operation:     operation,
-		ResourceKey:   s.resourceKey,
-		Access:        s.access,
-		WaitForPrompt: s.waitForPrompt,
-		Progress:      progress.Source(),
+	job, err := m.background.StartBackgroundJob(tools.BackgroundJobRequest{
+		AdmissionContext: parent,
+		Execution:        scope,
+		Kind:             s.kind,
+		Description:      text,
+		Agent:            s.label,
+		SessionID:        s.id,
+		Operation:        operation,
+		ResourceKey:      s.resourceKey,
+		Access:           s.access,
+		WaitForPrompt:    s.waitForPrompt,
+		Progress:         progress.Source(),
 		Run: func(ctx context.Context, jobID string) (tools.BackgroundJobResult, error) {
-			ctx = inheritedValuesContext{Context: ctx, values: parentValues}
+			ctx = execution.WithScope(inheritedValuesContext{Context: ctx, values: parentValues}, scope)
 			return m.runOperation(ctx, s, generation, operation, jobID, text, opening, progress, operationDone)
 		},
 	})
+	if err != nil {
+		// Rejection never invokes Run, so retire the provisional operation here.
+		// A concurrent Close may already be waiting on this exact channel.
+		progress.Finish()
+		if operationDone != nil {
+			close(operationDone)
+		}
+	}
+	return job, err
 }
 
 func (m *Manager) runOperation(ctx context.Context, s *session, generation uint64, operation int, jobID, text string, opening bool, progress *operationProgress, operationDone chan struct{}) (result tools.BackgroundJobResult, retErr error) {

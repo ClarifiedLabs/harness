@@ -29,6 +29,7 @@ import (
 	"harness/internal/cli"
 	"harness/internal/config"
 	"harness/internal/delegate"
+	"harness/internal/execution"
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/logging"
@@ -37,6 +38,7 @@ import (
 	"harness/internal/mcptools"
 	modelclient "harness/internal/modelproxy/client"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/otel"
 	"harness/internal/plan"
 	"harness/internal/session"
 	"harness/internal/sessionrec"
@@ -63,8 +65,15 @@ type acpRootFactory struct {
 	launchCWD string
 	build     acpRootBuilder
 
-	mu       sync.Mutex
-	boundCWD string
+	mu                   sync.Mutex
+	boundCWD             string
+	telemetry            *rootTelemetry
+	telemetryInitialized bool
+	roots                []*acpTrackedRoot
+	closed               bool
+	closeDone            chan struct{}
+	construct            chan struct{}
+	pending              map[*acpConstruction]struct{}
 }
 
 func runACPServe(env environment, invocation cli.Invocation) int {
@@ -83,6 +92,11 @@ func runACPServe(env environment, invocation cli.Invocation) int {
 	factory := acpagent.Factory(&acpRootFactory{env: env, flags: invocation.Flags, logger: logger, launchCWD: launchCWD})
 	if env.acpRootFactory != nil {
 		factory = env.acpRootFactory(invocation)
+	}
+	// The factory joins any root cleanup that outlives Serve's close deadline
+	// before the shared process exporter sends its terminal snapshot.
+	if closer, ok := factory.(interface{ Close() }); ok {
+		defer closer.Close()
 	}
 	ctx, cancel, interrupted := signalCancelContext(env.sigCh)
 	defer cancel()
@@ -104,8 +118,11 @@ type acpCommandConn struct {
 func (*acpCommandConn) Close() error { return nil }
 
 func (f *acpRootFactory) New(ctx context.Context, request acpagent.SessionConfig) (acpagent.RootSession, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
+	ctx, finish, err := f.beginConstruction(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 
 	cwd, err := filepath.EvalSymlinks(request.CWD)
 	if err != nil {
@@ -139,6 +156,16 @@ func (f *acpRootFactory) New(ctx context.Context, request acpagent.SessionConfig
 		}
 		return nil, errors.New("ACP root configuration is invalid; see server stderr")
 	}
+	telemetry, err := f.telemetryFor(result.Config)
+	if err != nil {
+		if f.logger != nil {
+			f.logger.Error("acp serve: telemetry configuration invalid", "err", err)
+		}
+		return nil, errors.New("ACP root telemetry configuration is invalid; see server stderr")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if err := os.Chdir(cwd); err != nil {
 		return nil, fmt.Errorf("set ACP cwd %s: %w", cwd, err)
 	}
@@ -149,13 +176,39 @@ func (f *acpRootFactory) New(ctx context.Context, request acpagent.SessionConfig
 	build := f.build
 	if build == nil {
 		build = func(ctx context.Context, env environment, request acpagent.SessionConfig, logger *slog.Logger, result config.Result) (acpagent.RootSession, error) {
-			return newACPRootSession(ctx, env, request, logger, result)
+			return newACPRootSession(ctx, env, request, logger, result, telemetry)
 		}
 	}
-	return build(ctx, f.env, request, f.logger, result)
+	root, err := build(ctx, f.env, request, f.logger, result)
+	f.mu.Lock()
+	if f.closed || ctx.Err() != nil {
+		f.mu.Unlock()
+		if root != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), acpRootCloseTimeout)
+			defer cancel()
+			_ = closeTrackedACPRoot(cleanupCtx, root)
+		}
+		return nil, errors.Join(err, errors.New("ACP root factory closed during construction"))
+	}
+	defer f.mu.Unlock()
+	if root == nil {
+		return nil, err
+	}
+	tracked := trackACPRoot(root)
+	// Completed sessions must not accumulate in a long-lived ACP process.
+	pending := f.roots[:0]
+	for _, previous := range f.roots {
+		select {
+		case <-previous.settled:
+		default:
+			pending = append(pending, previous)
+		}
+	}
+	f.roots = append(pending, tracked)
+	return tracked, err
 }
 
-func newACPRootSession(ctx context.Context, env environment, request acpagent.SessionConfig, logger *slog.Logger, result config.Result) (_ *acpRootSession, retErr error) {
+func newACPRootSession(ctx context.Context, env environment, request acpagent.SessionConfig, logger *slog.Logger, result config.Result, telemetry *rootTelemetry) (_ *acpRootSession, retErr error) {
 	now := env.now
 	if now == nil {
 		now = time.Now
@@ -330,15 +383,23 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	for _, warning := range skillWarnings {
 		logger.Warn("skills: " + warning)
 	}
-	skillCatalog, _ := skills.BuildCatalogBudgeted(discoveredSkills, skills.CatalogBudget(llm.EffectiveContextWindow(cfg.ContextWindow, registry.ContextWindow(selection.RegistryModel))))
+	skillCatalog, skillReport := skills.BuildCatalogBudgeted(discoveredSkills, skills.CatalogBudget(llm.EffectiveContextWindow(cfg.ContextWindow, registry.ContextWindow(selection.RegistryModel))))
 	buildSystem := func(agentPrompt string) string {
 		return acp.SanitizeModelFacingText(sysprompt.Build(sysprompt.Options{StaticPrompt: configuredSystem, NoEnv: cfg.NoEnv, UserAgentsMD: userAgents, ProjectAgentsMD: projectAgents, SkillsCatalog: skillCatalog, RuntimeHints: runtimeHints, AgentPrompt: agentPrompt, Env: sysprompt.EnvOptions{Dir: request.CWD}}))
 	}
 
+	var otelSink *otel.Sink
+	var scope execution.Scope
+	if telemetry != nil {
+		otelSink = telemetry.NewSink(toolCatalog, cfg.Provider, cfg.Model, agentName)
+		otelSink.SetIdentity(recordingID, cfg.Provider, cfg.Model, agentName)
+		otelSink.RecordSkillCatalog(skillReport)
+		scope = otelSink.Scope()
+	}
 	build := buildinfo.Current()
 	buildMeta := session.BuildMetadata{Version: build.Version, Commit: build.Commit, Date: build.Date, Modified: build.Modified}
 	runtimeProfile := session.RuntimeProfile{RetentionPolicy: cfg.RetentionPolicy, ContextWindow: cfg.ContextWindow, ToolResultMaxBytes: cfg.ToolResultMaxBytes, ToolResultMaxLines: cfg.ToolResultMaxLines, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, CompactTimeoutSeconds: cfg.CompactTimeoutSeconds, ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), DelegateMaxTurns: cfg.DelegateMaxTurns, DelegateMaxActive: cfg.DelegateMaxActive, SearchBackend: searchBackend(), StagnationNudge: cfg.StagnationNudge}
-	state := delegate.NewState(delegate.Runtime{ProviderName: cfg.Provider, Model: cfg.Model, ReasoningReplayDomain: selection.ReasoningReplayDomain, ContextWindow: cfg.ContextWindow, MaxOutputTokens: cfg.MaxOutputTokens, Registry: registry, Reasoning: reasoning, ServerTools: webSearchServerToolsForModel(cfg.Provider, registry, selection.RegistryModel, cfg.WebSearch), ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), Agent: agentName, SessionPath: sessionPath, CWD: request.CWD, MaxPromptTokens: cfg.MaxPromptTokens, MaxPromptCostUSD: cfg.MaxPromptCostUSD, Build: buildMeta, RuntimeProfile: runtimeProfile})
+	state := delegate.NewState(delegate.Runtime{Execution: scope, ProviderName: cfg.Provider, Model: cfg.Model, ReasoningReplayDomain: selection.ReasoningReplayDomain, ContextWindow: cfg.ContextWindow, MaxOutputTokens: cfg.MaxOutputTokens, Registry: registry, Reasoning: reasoning, ServerTools: webSearchServerToolsForModel(cfg.Provider, registry, selection.RegistryModel, cfg.WebSearch), ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), Agent: agentName, SessionPath: sessionPath, CWD: request.CWD, MaxPromptTokens: cfg.MaxPromptTokens, MaxPromptCostUSD: cfg.MaxPromptCostUSD, Build: buildMeta, RuntimeProfile: runtimeProfile})
 	resolveDelegate := func(runtime delegate.Runtime, name string) (delegate.Launch, error) {
 		launch, err := resolveDelegateLaunch(runtime, name, agents, toolCatalog, nil, catalog, proxyClient, buildSystem, cfg)
 		if err != nil {
@@ -372,18 +433,18 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		hookRunner = &hooks.Runner{Config: cfg.Hooks, CWD: request.CWD, Model: cfg.Model}
 		hookRunner.SetSession(sessionPath)
 	}
-	rootAgentCfg := rootAgentConfig{Config: cfg, Registry: registry, Reasoning: reasoning, ReasoningReplayDomain: selection.ReasoningReplayDomain, ServerTools: webSearchServerToolsForModel(cfg.Provider, registry, selection.RegistryModel, cfg.WebSearch), Hooks: hookRunner, Interactive: true, Now: now, Sleep: env.agentSleep, ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider)}
+	rootAgentCfg := rootAgentConfig{Execution: scope, Config: cfg, Registry: registry, Reasoning: reasoning, ReasoningReplayDomain: selection.ReasoningReplayDomain, ServerTools: webSearchServerToolsForModel(cfg.Provider, registry, selection.RegistryModel, cfg.WebSearch), Hooks: hookRunner, Interactive: true, Now: now, Sleep: env.agentSleep, ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider)}
 	ag := newRootAgent(proxyClient.Provider(cfg.Provider), toolRegistry, rootAgentCfg)
 	ag.SetSystem(systemPrompt)
 	ag.SetTranscriptSanitizer(sanitizeACPTranscript)
 	ag.SetRequestSanitizer(sanitizeACPRequest)
-	state.Set(delegate.Runtime{Provider: proxyClient.Provider(cfg.Provider), ProviderName: cfg.Provider, Model: cfg.Model, ContextWindow: cfg.ContextWindow, MaxOutputTokens: cfg.MaxOutputTokens, Registry: registry, Reasoning: reasoning, ReasoningReplayDomain: selection.ReasoningReplayDomain, ServerTools: rootAgentCfg.ServerTools, ResponsesStateful: rootAgentCfg.ResponsesStateful, NativeCompaction: rootAgentCfg.NativeCompaction, System: systemPrompt, Agent: agentName, ToolNames: toolRegistry.Names(), SessionPath: sessionPath, CWD: request.CWD, CacheAffinityID: ag.CacheAffinityID(), MaxPromptTokens: cfg.MaxPromptTokens, MaxPromptCostUSD: cfg.MaxPromptCostUSD, Build: buildMeta, RuntimeProfile: runtimeProfile})
+	state.Set(delegate.Runtime{Execution: scope, Provider: proxyClient.Provider(cfg.Provider), ProviderName: cfg.Provider, Model: cfg.Model, ContextWindow: cfg.ContextWindow, MaxOutputTokens: cfg.MaxOutputTokens, Registry: registry, Reasoning: reasoning, ReasoningReplayDomain: selection.ReasoningReplayDomain, ServerTools: rootAgentCfg.ServerTools, ResponsesStateful: rootAgentCfg.ResponsesStateful, NativeCompaction: rootAgentCfg.NativeCompaction, System: systemPrompt, Agent: agentName, ToolNames: toolRegistry.Names(), SessionPath: sessionPath, CWD: request.CWD, CacheAffinityID: ag.CacheAffinityID(), MaxPromptTokens: cfg.MaxPromptTokens, MaxPromptCostUSD: cfg.MaxPromptCostUSD, Build: buildMeta, RuntimeProfile: runtimeProfile})
 	ag.SetTools(toolRegistry)
 	ag.SetCompactionArchiver(func(ctx context.Context, archive agent.CompactionArchive) (string, error) {
 		return session.SaveCompaction(sessionPath, session.Compaction{Time: now(), Messages: archive.Messages, Summary: archive.Summary, SummarySource: archive.SummarySource, FallbackReason: archive.FallbackReason, Usage: archive.Usage, Focus: archive.Focus, ReadFiles: archive.ReadFiles, ReadFilesOmitted: archive.ReadFilesOmitted, ModifiedFiles: archive.ModifiedFiles})
 	})
 
-	return &acpRootSession{agent: ag, cfg: cfg, registry: registry, registryModel: selection.RegistryModel, agentName: agentName, system: systemPrompt, path: sessionPath, cwd: request.CWD, created: created, now: now, build: buildMeta, runtime: runtimeProfile, todos: todos, plans: plans, jobs: jobs, agentSessions: agentSessions, lock: lock, cleanups: cleanups}, nil
+	return &acpRootSession{otel: otelSink, agent: ag, cfg: cfg, registry: registry, registryModel: selection.RegistryModel, agentName: agentName, system: systemPrompt, path: sessionPath, cwd: request.CWD, created: created, now: now, build: buildMeta, runtime: runtimeProfile, todos: todos, plans: plans, jobs: jobs, agentSessions: agentSessions, lock: lock, cleanups: cleanups}, nil
 }
 
 // acpDelegateLaunch extends the ACP host-boundary sanitizers to delegate child
@@ -519,6 +580,7 @@ type acpRootSession struct {
 	mu sync.Mutex
 
 	agent         *agent.Agent
+	otel          *otel.Sink
 	cfg           config.Config
 	registry      *llm.Registry
 	registryModel string
@@ -588,6 +650,9 @@ func (r *acpRootSession) Close(ctx context.Context) error {
 		errs = append(errs, err)
 	}
 	r.jobs.ShutdownAndWait(time.Second)
+	if r.otel != nil {
+		r.otel.RecordSession(r.usage.CostUSD, llm.PromptInputTokens(r.usage.Usage)+r.usage.OutputTokens+r.usage.ReasoningTokens)
+	}
 	for i := len(r.cleanups) - 1; i >= 0; i-- {
 		r.cleanups[i](ctx)
 	}

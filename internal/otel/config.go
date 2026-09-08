@@ -15,6 +15,18 @@ const (
 	ShutdownExportTimeout  = 2 * time.Second
 )
 
+// ResourceMetadataError rejects configurations whose encoded resource/scope
+// envelope leaves insufficient wire space for metric points. Only byte counts
+// are exposed; attribute names, values, and other configuration stay private.
+type ResourceMetadataError struct {
+	EncodedBytes int
+	LimitBytes   int
+}
+
+func (e *ResourceMetadataError) Error() string {
+	return fmt.Sprintf("otel configuration: encoded resource metadata is %d bytes; limit is %d bytes", e.EncodedBytes, e.LimitBytes)
+}
+
 // Config is the exporter configuration derived from config.OTelConfig and runtime resource.
 type Config struct {
 	Enabled            bool
@@ -58,7 +70,8 @@ func normalizeEndpoint(raw string) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil {
-		return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL: %w", err)
+		// url.Parse errors may include credentials or query secrets from raw.
+		return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL")
 	}
 	if parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" {
 		return "", fmt.Errorf("otel endpoint must be an absolute http(s) URL")
@@ -76,7 +89,7 @@ func normalizeEndpoint(raw string) (string, error) {
 	}
 	decodedPath, err := url.PathUnescape(path)
 	if err != nil {
-		return "", fmt.Errorf("otel endpoint has an invalid path: %w", err)
+		return "", fmt.Errorf("otel endpoint has an invalid path")
 	}
 	parsed.Path = decodedPath
 	parsed.RawPath = path

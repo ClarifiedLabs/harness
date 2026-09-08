@@ -10,7 +10,10 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"time"
+
+	"harness/internal/execution"
 
 	"harness/internal/hooks"
 	"harness/internal/llm"
@@ -150,6 +153,11 @@ type IdleCompactionResult struct {
 }
 
 type idleCompactionCandidate struct {
+	scope       execution.Scope
+	ledger      *maintenanceLedger
+	preparedAt  time.Time
+	observed    sync.Once
+	consumed    bool // terminal disposition; accessed only by the owning goroutine
 	owner       *Agent
 	fingerprint [sha256.Size]byte
 	transcript  []llm.Message
@@ -211,6 +219,7 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 		disabledReasoningReplay: cloneBoolMap(a.disabledReasoningReplay),
 	}
 	worker := New(a.provider, a.tools, Options{
+		Execution:                 a.executionScope(),
 		Model:                     a.model,
 		ReasoningReplayDomain:     snapshot.reasoningReplayDomain,
 		ContextWindow:             a.contextWindow,
@@ -238,7 +247,13 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 	worker.observedContextWindow = a.observedContextWindow
 	worker.sleep = a.sleep
 
+	scope := worker.executionScope()
 	return func(ctx context.Context) (IdleCompactionResult, error) {
+		done := scope.Track()
+		defer done()
+		// This speculative operation owns a separate lineage, never a prompt's.
+		ledger := &maintenanceLedger{}
+		ctx = context.WithValue(ctx, maintenanceLedgerKey{}, ledger)
 		var archived CompactionArchive
 		worker.SetCompactionArchiver(func(_ context.Context, archive CompactionArchive) (string, error) {
 			archived = cloneCompactionArchive(archive)
@@ -251,9 +266,11 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 			return result, err
 		}
 		if len(archived.Messages) == 0 {
+			ledger.discardFrom(0, "error")
 			return result, fmt.Errorf("idle compaction produced no archive metadata")
 		}
 		result.candidate = &idleCompactionCandidate{
+			scope: worker.executionScope(), ledger: ledger, preparedAt: time.Now(),
 			owner:       a,
 			fingerprint: fingerprint,
 			transcript:  cloneMessages(worker.transcript),
@@ -265,6 +282,22 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 	}, true, nil
 }
 
+// DiscardIdleCompaction disposes completed background work that its owner will
+// not apply (for example after a session switch or shutdown). It does not change
+// the transcript, archive, or public Usage. Copies share one candidate, so this
+// is idempotent and cannot discard already-applied usage. The captured result
+// owns its scope, so disposal remains valid after replacing the active Agent.
+// It consults no mutable Agent state and is safe off the Agent's goroutine once
+// preparation has completed and the caller exclusively owns the result. Do not
+// race it with ApplyIdleCompaction or another disposal of the same candidate.
+func (*Agent) DiscardIdleCompaction(result IdleCompactionResult) {
+	candidate := result.candidate
+	if candidate == nil || candidate.consumed {
+		return
+	}
+	candidate.discard()
+}
+
 // ApplyIdleCompaction installs a prepared candidate only while the exact source
 // transcript and relevant compaction runtime remain unchanged. A stale
 // candidate is silently discarded with applied=false. Archive persistence and
@@ -272,7 +305,11 @@ func (a *Agent) PrepareIdleCompaction(triggerPercent int) (work func(context.Con
 // goroutine.
 func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result IdleCompactionResult) (applied bool, err error) {
 	candidate := result.candidate
-	if candidate == nil || candidate.owner != a || a.compactionHooksConfigured() {
+	if candidate == nil || candidate.owner != a || candidate.consumed {
+		return false, nil
+	}
+	defer func() { candidate.observeResult(a, applied, err) }()
+	if a.compactionHooksConfigured() {
 		return false, nil
 	}
 	fingerprint, err := a.idleCompactionFingerprint()
@@ -466,7 +503,16 @@ func (a *Agent) compactTriggered(ctx context.Context, sink EventSink, trigger st
 	return a.compactInternal(ctx, sink, compactOptions{trigger: trigger, forceCurrent: true})
 }
 
-func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compactOptions) (llm.Usage, bool, error) {
+func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compactOptions) (resultUsage llm.Usage, changed bool, retErr error) {
+	ctx, ledger, _ := trackMaintenance(ctx)
+	mark := ledger.mark()
+	defer func() {
+		if !changed {
+			ledger.discardFrom(mark, "error")
+		}
+	}()
+	observation := a.startCompaction(opts)
+	defer func() { observation.finish(a, changed, retErr) }()
 	trigger := opts.trigger
 	forceCurrent := opts.forceCurrent
 	collapseAll := opts.collapseAll
@@ -497,15 +543,20 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 
 	before := a.estimateContext(nil).Total
 	if a.contextManager() != nil {
+		observation.mode = "task_notes"
 		return a.compactFromNotes(ctx, sink, opts, before)
 	}
 	nativeUsage := llm.Usage{}
 	if a.nativeCompactionEligible(trigger, collapseAll, focus) {
+		observation.mode = "native"
 		usage, changed, handled, err := a.compactNative(ctx, sink, trigger, before)
 		nativeUsage = usage
 		if handled {
 			return usage, changed, err
 		}
+		observation.mode = "textual"
+		observation.fallback = "native"
+		ledger.discardFrom(mark, "compaction_fallback")
 	}
 	turns := completedTurnSpans(a.transcript)
 	boundary := len(a.transcript)
@@ -516,6 +567,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 				return llm.Usage{}, false, nil
 			}
 			if len(turns) < 2 {
+				observation.mode = "local"
 				changed, err := a.degradeCurrent(sink, trigger)
 				return llm.Usage{}, changed, err
 			}
@@ -541,6 +593,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 	var readFilesOmitted int
 	var compacted []llm.Message
 	for {
+		summaryMark := ledger.mark()
 		older = a.transcript[:boundary]
 		kept = a.transcript[boundary:]
 		prior := priorCompactionMetadata(older)
@@ -556,12 +609,14 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 					sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
 					return usage, false, err
 				}
+				ledger.discardFrom(summaryMark, "compaction_fallback")
 				fallbackUsed = true
 				summarySource = compactionSummarySourceDeterministic
 				fallbackReason = compactionFallbackProviderError
 				if errors.Is(summaryCtx.Err(), context.DeadlineExceeded) {
 					fallbackReason = compactionFallbackTimeout
 				}
+				observation.fallback = fallbackReason
 				summary = deterministicCompactionSummary(fallbackReason)
 				fallbackNotice = a.deterministicCompactionNotice(fallbackReason)
 			} else {
@@ -579,6 +634,13 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 		next, ok := nextCompactionBoundary(turns, boundary)
 		if !ok {
 			break
+		}
+		if !fallbackUsed {
+			if waitErr := a.retryWait(ctx, llm.RequestPurposeCompaction, 0, llm.AttemptErrorRequest, ctx.Err); waitErr != nil {
+				return usage, false, waitErr
+			}
+			ledger.discardFrom(summaryMark, "summary_replaced")
+			summaryCtx = llm.WithAttemptCause(summaryCtx, llm.AttemptRetry, llm.RetryLayerAgent)
 		}
 		boundary = next
 	}
@@ -680,7 +742,7 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 	// A native compacted window becomes the new stateless baseline. Do not bind
 	// it to an expiring previous_response_id even when ordinary turns use one.
 	a.resetResponseState()
-	result, compactErr := compactor.CompactContext(compactCtx, llm.Request{
+	req := llm.Request{
 		Model:                a.model,
 		Purpose:              llm.RequestPurposeCompaction,
 		System:               a.system,
@@ -695,11 +757,22 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		CachePolicy:          a.cachePolicyForTranscript(visible, 0, true),
 		EstimatedInputTokens: before,
 		ContextWindowHint:    a.window(),
-	})
+	}
+	compactCtx, call := observeModelCall(compactCtx, a.executionScope(), req, a.window())
+	var callErr error
+	defer func() { call.Finish(usage, callErr) }()
+	result, compactErr := compactor.CompactContext(compactCtx, req)
 	usage = result.Usage
+	callErr = compactErr
+	call.Finish(usage, compactErr)
+	recordMaintenanceCall(ctx, call)
 	if compactErr != nil {
 		if ctx.Err() != nil {
 			return usage, false, true, ctx.Err()
+		}
+		reason, _ := llm.ClassifyAttemptError(compactErr, 0)
+		if waitErr := a.retryWait(ctx, llm.RequestPurposeCompaction, 0, reason, ctx.Err); waitErr != nil {
+			return usage, false, true, waitErr
 		}
 		// Discard stale checkpoints before the textual fallback, but only disable
 		// the capability for a permanent rejection. Transport failures and quota
@@ -728,6 +801,9 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		}},
 	}
 	if err := llm.ValidateMessageContent([]llm.Message{checkpoint}); err != nil {
+		if waitErr := a.retryWait(ctx, llm.RequestPurposeCompaction, 0, llm.AttemptErrorRequest, ctx.Err); waitErr != nil {
+			return usage, false, true, waitErr
+		}
 		sink.Notice(fmt.Sprintf("[native compact failed: invalid provider checkpoint: %v; using textual compaction]", err))
 		return usage, false, false, nil
 	}
@@ -949,7 +1025,14 @@ func (a *Agent) GenerateBranchSummary(ctx context.Context, messages []llm.Messag
 
 // summarize runs one tool-less model call over the older messages, with the
 // given system instruction, and returns the summary text and the call's usage.
-func (a *Agent) summarize(ctx context.Context, system string, older []llm.Message, purpose llm.RequestPurpose) (string, llm.Usage, error) {
+func (a *Agent) summarize(ctx context.Context, system string, older []llm.Message, purpose llm.RequestPurpose) (result string, resultUsage llm.Usage, retErr error) {
+	ctx, ledger, _ := trackMaintenance(ctx)
+	mark := ledger.mark()
+	defer func() {
+		if retErr != nil {
+			ledger.discardFrom(mark, "error")
+		}
+	}()
 	older = a.providerVisibleMessages(older)
 	prepared := prepareSummaryMessages(older, a.summaryToolResultMaxBytes())
 	chunks := splitSummaryChunks(prepared, a.summaryChunkBudget())
@@ -979,7 +1062,13 @@ func (a *Agent) summarize(ctx context.Context, system string, older []llm.Messag
 // branch/handoff summarization. A structured prior checkpoint is archived and
 // preserved for active-instruction extraction, but is not re-summarized as
 // ordinary conversation.
-func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, prior *llm.CompactionMetadata, readFiles []string, readFilesOmitted int, modifiedFiles []string, focus string) (string, llm.Usage, error) {
+func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, prior *llm.CompactionMetadata, readFiles []string, readFilesOmitted int, modifiedFiles []string, focus string) (result string, resultUsage llm.Usage, retErr error) {
+	ctx, ledger, owned := trackMaintenance(ctx)
+	defer func() {
+		if owned && retErr != nil {
+			ledger.discardFrom(0, "error")
+		}
+	}()
 	newlyAged := older
 	if prior != nil {
 		newlyAged = make([]llm.Message, 0, len(older)-1)
@@ -1057,10 +1146,17 @@ func compactionSummaryMetadataMessage(now time.Time, prior *llm.CompactionMetada
 	return message, nil
 }
 
-func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Message, purpose llm.RequestPurpose) (string, llm.Usage, error) {
+func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Message, purpose llm.RequestPurpose) (result string, resultUsage llm.Usage, retErr error) {
+	ctx, ledger, owned := trackMaintenance(ctx)
+	defer func() {
+		if owned && retErr != nil {
+			ledger.discardFrom(0, "error")
+		}
+	}()
 	budget := a.summaryMaxTokens()
 	var total llm.Usage
 	for bumped := false; ; {
+		mark := ledger.mark()
 		text, usage, stop, err := a.streamSummary(ctx, system, older, budget, purpose)
 		total = add(total, usage)
 		if err != nil {
@@ -1069,7 +1165,12 @@ func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Mes
 		// r33: a max-tokens-truncated summary silently loses its tail; grant a
 		// larger budget and retry once before accepting the truncated result.
 		if stop == llm.StopMaxTokens && !bumped {
+			if waitErr := a.retryWait(ctx, purpose, 0, llm.AttemptErrorRequest, ctx.Err); waitErr != nil {
+				return "", total, waitErr
+			}
+			ledger.discardFrom(mark, "summary_replaced")
 			bumped = true
+			ctx = llm.WithAttemptCause(ctx, llm.AttemptRetry, llm.RetryLayerAgent)
 			budget *= 2
 			continue
 		}
@@ -1082,7 +1183,13 @@ func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Mes
 // abort compaction near the threshold. Reasoning is disabled: a summary needs no
 // thinking budget (r13, mirrors PrewarmRequest). It returns the assembled text,
 // usage, and the stop reason.
-func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Message, maxTokens int, purpose llm.RequestPurpose) (string, llm.Usage, llm.StopReason, error) {
+func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Message, maxTokens int, purpose llm.RequestPurpose) (result string, resultUsage llm.Usage, stopReason llm.StopReason, retErr error) {
+	ctx, ledger, owned := trackMaintenance(ctx)
+	defer func() {
+		if owned && retErr != nil {
+			ledger.discardFrom(0, "error")
+		}
+	}()
 	proxySessionID, cacheAffinityID := a.maintenanceIdentities(purpose)
 	original := older
 	var total llm.Usage
@@ -1105,18 +1212,31 @@ func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Me
 			return "", total, "", fmt.Errorf("validate compaction request images: %w", err)
 		}
 		for attempt := 0; ; attempt++ {
-			text, usage, stop, err := a.collectSummary(ctx, req)
+			attemptCtx := ctx
+			if attempt > 0 || fallbackUsed {
+				attemptCtx = llm.WithAttemptCause(ctx, llm.AttemptRetry, llm.RetryLayerAgent)
+			}
+			mark := ledger.mark()
+			text, usage, stop, err := a.collectSummary(attemptCtx, req)
 			total = add(total, usage)
 			if err == nil {
 				return text, total, stop, nil
 			}
 			if attempt < streamRetries && retryableStreamError(err) {
-				if serr := a.sleep(ctx, retry.Next(attempt, streamRetryAfter(err))); serr != nil {
+				ledger.discardFrom(mark, "summary_retry")
+				delay := retry.Next(attempt, streamRetryAfter(err))
+				reason, _ := llm.ClassifyAttemptError(err, 0)
+				if serr := a.retryWait(ctx, purpose, delay, reason, func() error { return a.sleep(ctx, delay) }); serr != nil {
 					return "", total, stop, serr
 				}
 				continue
 			}
 			if !fallbackUsed && hasProviderOwnedReasoning(req.Messages) && invalidEncryptedContent(err) {
+				reason, _ := llm.ClassifyAttemptError(err, 0)
+				if waitErr := a.retryWait(ctx, purpose, 0, reason, ctx.Err); waitErr != nil {
+					return "", total, stop, waitErr
+				}
+				ledger.discardFrom(mark, "request_rebuild")
 				fallbackUsed = true
 				a.disableCurrentReasoningReplay()
 				break
@@ -1137,11 +1257,18 @@ func (a *Agent) maintenanceIdentities(purpose llm.RequestPurpose) (proxySessionI
 		"harness-cache-" + fmt.Sprintf("%x", cacheDigest[:8])
 }
 
-func (a *Agent) collectSummary(ctx context.Context, req llm.Request) (string, llm.Usage, llm.StopReason, error) {
+func (a *Agent) collectSummary(ctx context.Context, req llm.Request) (result string, usage llm.Usage, stop llm.StopReason, retErr error) {
+	ctx, call := observeModelCall(ctx, a.executionScope(), req, a.window())
+	defer func() {
+		call.Finish(usage, retErr)
+		recordMaintenanceCall(ctx, call)
+	}()
 	var text []byte
-	var usage llm.Usage
-	var stop llm.StopReason
 	for ev, err := range a.provider.Stream(ctx, req) {
+		call.ObserveStream(ev)
+		if ev.Usage != nil {
+			usage = mergeUsage(usage, *ev.Usage)
+		}
 		if err != nil {
 			return "", usage, stop, err
 		}

@@ -89,6 +89,7 @@ func (p *Provider) Name() string { return "openai" }
 // every attempt and sleep.
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		ctx := llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Purpose: req.Purpose, Provider: p.providerName, API: "openai", Model: req.Model, Transport: "http"})
 		body, err := json.Marshal(buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
 			reasoningMode:   p.reasoningMode,
 			promptCache:     p.promptCache,
@@ -107,6 +108,10 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			return
 		}
 		defer resp.Body.Close()
+		source := llm.ResponseAttempt(resp)
+		defer source.Finish(llm.AttemptIncomplete, nil)
+		ctx = source.Context(ctx)
+		yield = source.WrapYield(yield)
 
 		p.decode(ctx, resp.Body, func(event llm.StreamEvent, err error) bool {
 			return yield(event, llm.WithUpstreamRequestID(err, resp.Header))
@@ -175,7 +180,10 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 		if data == "[DONE]" {
 			completed = true
 			u := usage
-			yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop}, nil)
+			// [DONE] carries no raw usage; preserve the logical cumulative replay
+			// without letting it establish or replace a physical usage snapshot.
+			reported := false
+			yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, UsageReported: &reported, StopReason: stop}, nil)
 			return
 		}
 
@@ -183,6 +191,11 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 		if jsonErr := json.Unmarshal([]byte(data), &chunk); jsonErr != nil {
 			yield(llm.StreamEvent{}, llm.NewResponseDecodeError("decode stream chunk", jsonErr, []byte(data)))
 			return
+		}
+		if chunk.Usage != nil {
+			u := normalizeUsage(chunk.Usage)
+			u.ServiceTier = chunk.ServiceTier
+			llm.AttemptFromContext(ctx).Usage(u)
 		}
 		if chunk.Error != nil {
 			yield(llm.StreamEvent{}, streamError(chunk.Error, []byte(data)))
@@ -212,9 +225,11 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 				return
 			}
 			if choice.Delta.Reasoning != "" {
+				llm.AttemptFromContext(ctx).Generated()
 				reasoning.WriteString(choice.Delta.Reasoning)
 			}
 			if choice.Delta.ReasoningContent != "" {
+				llm.AttemptFromContext(ctx).Generated()
 				reasoning.WriteString(choice.Delta.ReasoningContent)
 			}
 			if choice.Delta.Refusal != "" {

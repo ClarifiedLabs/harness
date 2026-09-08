@@ -49,6 +49,8 @@ func promptExitCode(err error) int {
 // and errors go to app.Errw. The return value is the process exit code:
 // 0 completed, 1 runtime error, 130 interrupted.
 func OneShot(app *App, prompt string) int {
+	finishOwner := app.TrackOTel()
+	defer finishOwner()
 	if forceExitRequested(app.ForceExit) {
 		return ExitInterrupt
 	}
@@ -134,7 +136,9 @@ func OneShot(app *App, prompt string) int {
 	sink := newAccumulatingSink(app.Renderer, app, promptID)
 	promptContext := append([]string(nil), promptHook.AdditionalContext...)
 	done := make(chan error, 1)
+	finishPrompt := app.TrackOTel()
 	go func() {
+		defer finishPrompt()
 		done <- app.Agent.RunPromptContentWithContext(ctx, prompt, imageBlocks(images), app.promptHookContext(promptContext), promptID, sink)
 	}()
 	var err error

@@ -117,6 +117,7 @@ func (p *Provider) CanContinueResponse(responseID string) bool {
 
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		ctx := llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Purpose: req.Purpose, Provider: p.providerName, API: "responses", Model: req.Model, Transport: "http"})
 		req = p.withToolSearchDowngrade(req)
 		if p.useWebSocket {
 			if p.streamWebSocket(ctx, req, yield) {
@@ -154,7 +155,8 @@ func (p *Provider) streamWithToolSearchFallback(ctx context.Context, req llm.Req
 	var terminalErr error
 	outputStarted := false
 
-	attempt(ctx, req, func(event llm.StreamEvent, err error) bool {
+	attemptCtx, attempts := llm.TrackAttempts(ctx)
+	attempt(attemptCtx, req, func(event llm.StreamEvent, err error) bool {
 		if outputStarted {
 			return yield(event, err)
 		}
@@ -178,10 +180,17 @@ func (p *Provider) streamWithToolSearchFallback(ctx context.Context, req llm.Req
 		return
 	}
 	if nativeToolSearchRejected(terminalErr) {
-		p.rememberToolSearchDowngrade(req.Model)
+		// No logical output/usage escaped the diagnostic buffer. Only this
+		// proven suppression boundary may discard the completed subgroup.
+		attempts.Discard(llm.AttemptDiscardCompatibility)
 		fallback := req
-		fallback.DeferredToolGroups = nil
-		attempt(ctx, fallback, yield)
+		waitCtx := llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Scope: llm.AttemptScopeUpstream})
+		_ = llm.ObserveRetryWait(waitCtx, 0, llm.RetryLayerProvider, llm.AttemptErrorRequest, func() error {
+			p.rememberToolSearchDowngrade(req.Model)
+			fallback.DeferredToolGroups = nil
+			return nil
+		})
+		attempt(llm.WithAttemptCause(ctx, llm.AttemptRetry, llm.RetryLayerProvider), fallback, yield)
 		return
 	}
 	for _, item := range pending {
@@ -236,6 +245,7 @@ func nativeToolSearchRejected(err error) bool {
 // ID must not be exposed as the next WebSocket anchor. streamWebSocket only
 // permits this crossover before output and when there is no previous response.
 func (p *Provider) streamHTTPFallback(ctx context.Context, req llm.Request, yield func(llm.StreamEvent, error) bool) {
+	ctx = llm.WithAttemptCause(ctx, llm.AttemptRetry, llm.RetryLayerProvider)
 	req.StoreResponse = false
 	req.PreviousResponseID = ""
 	p.streamHTTP(ctx, req, func(event llm.StreamEvent, err error) bool {
@@ -266,6 +276,10 @@ func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(l
 		return
 	}
 	defer resp.Body.Close()
+	source := llm.ResponseAttempt(resp)
+	defer source.Finish(llm.AttemptIncomplete, nil)
+	ctx = source.Context(ctx)
+	yield = source.WrapYield(yield)
 
 	p.decode(ctx, resp.Body, func(event llm.StreamEvent, err error) bool {
 		return yield(event, llm.WithUpstreamRequestID(err, resp.Header))
@@ -295,6 +309,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, promptCacheKey stri
 
 func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.StreamEvent, error) bool) {
 	decoder := newStreamDecoder()
+	decoder.source = llm.AttemptFromContext(ctx)
 
 	for ev, err := range sse.Read(ctx, r) {
 		if err != nil {
@@ -323,6 +338,7 @@ func (p *Provider) decode(ctx context.Context, r io.Reader, yield func(llm.Strea
 }
 
 type streamDecoder struct {
+	source     *llm.AttemptSource
 	asm        *toolAssembler
 	text       *textAssembler
 	reasoning  *reasoningAssembler
@@ -348,6 +364,11 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		return false, llm.NewResponseDecodeError("decode stream event", jsonErr, []byte(data))
 	}
 
+	if event.Response != nil && event.Response.Usage != nil {
+		u := normalizeUsage(event.Response.Usage)
+		u.ServiceTier = event.Response.ServiceTier
+		d.source.Usage(u)
+	}
 	switch event.Type {
 	case "response.output_text.delta":
 		return !d.text.textDelta(event, yield), nil
@@ -380,6 +401,9 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		return !d.asm.outputItemAdded(event.OutputIndex, event.Item, yield), nil
 
 	case "response.reasoning_summary_text.delta":
+		if event.Delta != "" {
+			d.source.Generated()
+		}
 		return !d.reasoning.summaryDelta(event), nil
 
 	case "response.reasoning_summary_text.done":
@@ -449,7 +473,8 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		if event.Response != nil {
 			responseID = event.Response.ID
 		}
-		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop, ResponseID: responseID}, nil)
+		reported := event.Response != nil && event.Response.Usage != nil
+		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, UsageReported: &reported, StopReason: stop, ResponseID: responseID}, nil)
 		return true, nil
 
 	case "response.incomplete":
@@ -485,7 +510,8 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		if event.Response != nil {
 			responseID = event.Response.ID
 		}
-		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: stop, ResponseID: responseID}, nil)
+		reported := event.Response != nil && event.Response.Usage != nil
+		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, UsageReported: &reported, StopReason: stop, ResponseID: responseID}, nil)
 		return true, nil
 
 	case "response.failed":

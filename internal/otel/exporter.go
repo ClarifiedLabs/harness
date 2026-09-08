@@ -3,11 +3,13 @@ package otel
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/rand"
 	"net"
 	"net/http"
@@ -38,19 +40,29 @@ type Exporter struct {
 	approxBytes      int
 	waitRetry        func(context.Context, time.Duration) error
 	retryJitter      func(time.Duration) time.Duration
-	periodicOnce     sync.Once
+	exportGate       chan struct{}
+	health           Health
+	regularPoints    int
+	lifecycleMu      sync.Mutex
+	periodicCancel   context.CancelFunc
+	periodicDone     chan struct{}
+	shutdownDone     chan struct{}
+	shutdownErr      error
+	closed           bool
 	periodicInterval time.Duration
 }
 
 type aggregatedMetric struct {
-	name        string
-	unit        string
-	kind        string // sum, gauge, histogram
-	monotonic   bool
-	temporality int                     // 2 = cumulative
-	points      map[string]*numberPoint // keyed by attribute fingerprint
-	histPoints  map[string]*histPoint
-	histBounds  []float64
+	name          string
+	unit          string
+	kind          string // sum, gauge, histogram
+	monotonic     bool
+	temporality   int                     // 2 = cumulative
+	points        map[string]*numberPoint // keyed by attribute fingerprint
+	histPoints    map[string]*histPoint
+	residentBytes int
+	regularPoints int
+	histBounds    []float64
 }
 
 type numberPoint struct {
@@ -70,12 +82,37 @@ type histPoint struct {
 
 const (
 	aggTemporalityCumulative = 2
-	maxQueuePoints           = 1024
-	maxPayloadBytes          = 64 * 1024
+	// Policy: 128 families, each with up to 64 ordinary series and one reserved
+	// overflow series; ordinary series also share a 1024-series global cap.
+	// Each family's 16KiB resident-size estimate includes metadata and reserves
+	// overflow storage (2MiB total). Self metrics bypass these ordinary budgets.
+	// No cumulative series is evicted/reset.
+	maxQueuePoints         = 1024
+	maxMetricFamilies      = 128
+	maxSeriesPerMetric     = 64
+	maxResidentBytes       = 2 * 1024 * 1024
+	maxMetricResidentBytes = maxResidentBytes / maxMetricFamilies
+	maxHistogramBounds     = 128
+	maxMetricAttributes    = 16
+	maxResponseBytes       = 8 * 1024
+	selfMetricPrefix       = "harness.otel.export."
+	overflowKey            = "otel.metric.overflow"
+	overflowFingerprint    = "overflow"
+	maxPayloadBytes        = 64 * 1024
+	// Reserve half the wire budget for metric points, including fixed self metrics.
+	// Validate the complete encoded resource/scope envelope, not raw string sizes.
+	maxResourceMetadataBytes = maxPayloadBytes / 2
 	maxExportAttempts        = 3
 	baseRetryDelay           = 100 * time.Millisecond
 	maxRetryDelay            = 5 * time.Second
 )
+
+var processInstanceID = func() string {
+	var id [16]byte
+	// crypto/rand.Read always fills its buffer or terminates on entropy failure.
+	_, _ = cryptorand.Read(id[:])
+	return hex.EncodeToString(id[:])
+}()
 
 func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, model, agent string, resourceAttrs map[string]string) (*Exporter, error) {
 	if err := cfg.Validate(); err != nil {
@@ -94,15 +131,16 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 	// Provider, model, agent, and session identity can change inside a long-lived
 	// REPL. Keep the OTLP resource process-stable and put dynamic identity on
 	// metric points in Sink.baseAttrs instead of relabeling cumulative data.
-	ra := make([]keyValue, 0, len(resourceAttrs)+3)
+	ra := make([]keyValue, 0, len(resourceAttrs)+4)
 	for k, v := range resourceAttrs {
 		switch k {
-		case "service.name", "service.version", "host.name":
+		case "service.name", "service.version", "host.name", "service.instance.id":
 			continue
 		}
 		ra = append(ra, stringAttr(k, truncate(v, 128)))
 	}
 	ra = append(ra,
+		stringAttr("service.instance.id", processInstanceID),
 		stringAttr("service.name", truncate(cfg.ServiceName, 64)),
 		stringAttr("service.version", truncate(build.Version, 64)),
 	)
@@ -110,7 +148,7 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 		ra = append(ra, stringAttr("host.name", truncate(cfg.Hostname, 64)))
 	}
 	ra = sortedAttrs(ra)
-	return &Exporter{
+	exporter := &Exporter{
 		cfg:           cfg,
 		client:        &http.Client{},
 		endpoint:      normalized,
@@ -118,40 +156,110 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 		resourceAttrs: ra,
 		startNano:     strconv.FormatInt(time.Now().UnixNano(), 10),
 		metrics:       make(map[string]*aggregatedMetric),
+		exportGate:    make(chan struct{}, 1),
+		shutdownDone:  make(chan struct{}),
 		waitRetry:     waitForRetry,
 		retryJitter:   randomJitter,
-	}, nil
+	}
+	metadata, err := exporter.marshalMetrics(nil)
+	if err != nil {
+		return nil, err
+	}
+	if len(metadata) > maxResourceMetadataBytes {
+		return nil, &ResourceMetadataError{EncodedBytes: len(metadata), LimitBytes: maxResourceMetadataBytes}
+	}
+	return exporter, nil
 }
 
-// SetPeriodic starts one process-lifetime export loop. Callers own cancellation
-// and still perform the final synchronous Export during shutdown.
+// SetPeriodic starts at most one worker. Shutdown cancels and joins it before
+// the final export; canceling ctx also stops the worker without closing Export.
 func (e *Exporter) SetPeriodic(ctx context.Context, logger *slog.Logger) {
 	if e == nil {
 		return
 	}
-	e.periodicOnce.Do(func() {
-		go func() {
-			interval := e.periodicInterval
-			if interval <= 0 {
-				interval = PeriodicExportInterval
-			}
-			ticker := time.NewTicker(interval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					exportCtx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
-					err := e.Export(exportCtx)
-					cancel()
-					if err != nil && logger != nil {
+	e.lifecycleMu.Lock()
+	defer e.lifecycleMu.Unlock()
+	if e.closed || e.periodicDone != nil {
+		return
+	}
+	ctx, e.periodicCancel = context.WithCancel(ctx)
+	e.periodicDone = make(chan struct{})
+	go func() {
+		defer close(e.periodicDone)
+		interval := e.periodicInterval
+		if interval <= 0 {
+			interval = PeriodicExportInterval
+		}
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		var dropped, overflow uint64
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				err := e.Export(ctx)
+				h := e.Health()
+				if logger != nil && ctx.Err() == nil {
+					if err != nil {
 						logger.Warn("periodic OTEL export failed", logging.Category("otel"), "err", err)
+					} else if h.Dropped > dropped || h.Overflow > overflow {
+						logger.Warn("periodic OTEL export lost metric detail", logging.Category("otel"), "dropped", h.Dropped-dropped, "overflow", h.Overflow-overflow)
 					}
 				}
+				dropped, overflow = h.Dropped, h.Overflow
 			}
-		}()
-	})
+		}
+	}()
+}
+
+var ErrExporterShutdown = errors.New("otel exporter is shut down")
+
+// Shutdown stops and joins the periodic worker, then performs one final export.
+// The entire operation is bounded by ctx and ShutdownExportTimeout. Concurrent
+// callers share the final result; a caller's wait still respects its own budget.
+// Record calls should be quiesced by the owner before calling Shutdown.
+func (e *Exporter) Shutdown(ctx context.Context) error {
+	if e == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, ShutdownExportTimeout)
+	defer cancel()
+	e.lifecycleMu.Lock()
+	if e.closed {
+		done := e.shutdownDone
+		e.lifecycleMu.Unlock()
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+		}
+		e.lifecycleMu.Lock()
+		defer e.lifecycleMu.Unlock()
+		return e.shutdownErr
+	}
+	e.closed = true
+	if e.periodicCancel != nil {
+		e.periodicCancel()
+	}
+	done := e.periodicDone
+	e.lifecycleMu.Unlock()
+	var err error
+	if done != nil {
+		select {
+		case <-done:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+	}
+	if err == nil {
+		err = e.export(ctx, true)
+	}
+	e.lifecycleMu.Lock()
+	e.shutdownErr = err
+	close(e.shutdownDone)
+	e.lifecycleMu.Unlock()
+	return err
 }
 
 // Record helpers -----------------------------------------------------------
@@ -192,49 +300,45 @@ func (e *Exporter) RecordHistogram(name, unit string, value float64, attrs map[s
 }
 
 func (e *Exporter) recordNumber(name, unit, kind string, monotonic bool, intVal int64, floatVal *float64, hasFloat bool, attrs map[string]string) {
-	kv := attrsFromMap(sanitizeAttrs(attrs))
-	fp := fingerprint(kv)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	m, metricExists := e.metrics[name]
-	if metricExists && m.kind != kind {
-		return // Kind mismatch: keep the first kind.
-	}
-	if metricExists {
-		if pt, ok := m.points[fp]; ok {
-			e.updateNumberPoint(pt, kind, intVal, floatVal, hasFloat)
-			return
-		}
-	}
-
-	charge := pointApproxBytes(fp)
-	if !metricExists {
-		charge += metricApproxBytes(name, unit)
-	}
-	if e.pointCount >= maxQueuePoints || e.approxBytes+charge > maxPayloadBytes {
+	if hasFloat && (math.IsNaN(*floatVal) || math.IsInf(*floatVal, 0)) {
 		e.dropped++
 		return
 	}
-	if !metricExists {
-		m = &aggregatedMetric{
-			name:        name,
-			unit:        unit,
-			kind:        kind,
-			monotonic:   monotonic,
-			temporality: aggTemporalityCumulative,
-			points:      make(map[string]*numberPoint),
-		}
-		e.metrics[name] = m
+	m := e.metricLocked(name, unit, kind, monotonic, nil)
+	if m == nil {
+		return
 	}
-	pt := &numberPoint{attrs: append([]keyValue(nil), kv...)}
-	m.points[fp] = pt
-	e.pointCount++
-	e.approxBytes += charge
+	kv, fp := e.pointIdentityLocked(m, attrs)
+	pt := m.points[fp]
+	if pt == nil {
+		pt = &numberPoint{attrs: kv}
+		m.points[fp] = pt
+		e.chargePointLocked(m, fp)
+	}
 	e.updateNumberPoint(pt, kind, intVal, floatVal, hasFloat)
 }
 
 func (e *Exporter) updateNumberPoint(pt *numberPoint, kind string, intVal int64, floatVal *float64, hasFloat bool) {
+	if kind == "sum" {
+		if hasFloat || pt.hasFloat {
+			old, added := float64(pt.intValue), float64(intVal)
+			if pt.hasFloat {
+				old = *pt.floatValue
+			}
+			if hasFloat {
+				added = *floatVal
+			}
+			if math.IsInf(old+added, 0) {
+				e.dropped++
+				return
+			}
+		} else if (intVal > 0 && pt.intValue > math.MaxInt64-intVal) || (intVal < 0 && pt.intValue < math.MinInt64-intVal) {
+			e.dropped++
+			return
+		}
+	}
 	if kind == "gauge" {
 		pt.intValue = intVal
 		pt.floatValue = nil
@@ -272,49 +376,112 @@ func metricApproxBytes(name, unit string) int { return len(name) + len(unit) + 3
 func pointApproxBytes(fp string) int          { return len(fp) + 16 }
 
 func (e *Exporter) recordHistogram(name, unit string, value float64, attrs map[string]string, bounds []float64) {
-	kv := attrsFromMap(sanitizeAttrs(attrs))
-	fp := fingerprint(kv)
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	m, metricExists := e.metrics[name]
-	if metricExists && m.kind != "histogram" {
-		return
-	}
-	if metricExists {
-		if pt, ok := m.histPoints[fp]; ok {
-			updateHistogramPoint(pt, value)
-			return
-		}
-	}
-
-	charge := pointApproxBytes(fp)
-	if !metricExists {
-		charge += metricApproxBytes(name, unit)
-	}
-	if e.pointCount >= maxQueuePoints || e.approxBytes+charge > maxPayloadBytes {
+	if math.IsNaN(value) || math.IsInf(value, 0) || len(bounds) > maxHistogramBounds {
 		e.dropped++
 		return
 	}
-	if !metricExists {
-		m = &aggregatedMetric{
-			name:       name,
-			unit:       unit,
-			kind:       "histogram",
-			histPoints: make(map[string]*histPoint),
-			histBounds: append([]float64(nil), bounds...),
+	for i, bound := range bounds {
+		if math.IsNaN(bound) || math.IsInf(bound, 0) || (i > 0 && bounds[i-1] >= bound) {
+			e.dropped++
+			return
 		}
-		e.metrics[name] = m
 	}
-	pt := &histPoint{
-		attrs:   append([]keyValue(nil), kv...),
-		bounds:  append([]float64(nil), m.histBounds...),
-		buckets: make([]uint64, len(m.histBounds)+1),
+	m := e.metricLocked(name, unit, "histogram", false, bounds)
+	if m == nil {
+		return
 	}
-	m.histPoints[fp] = pt
+	kv, fp := e.pointIdentityLocked(m, attrs)
+	pt := m.histPoints[fp]
+	if pt == nil {
+		pt = &histPoint{attrs: kv, bounds: m.histBounds, buckets: make([]uint64, len(m.histBounds)+1)}
+		m.histPoints[fp] = pt
+		e.chargePointLocked(m, fp)
+	}
+	if math.IsInf(pt.sum+value, 0) || pt.count == math.MaxUint64 {
+		e.dropped++
+		return
+	}
+	updateHistogramPoint(pt, value)
+}
+
+func (e *Exporter) metricLocked(name, unit, kind string, monotonic bool, bounds []float64) *aggregatedMetric {
+	if name == "" || len(name) > 256 || len(unit) > 64 || strings.HasPrefix(name, selfMetricPrefix) {
+		e.dropped++
+		return nil
+	}
+	if m := e.metrics[name]; m != nil {
+		if m.kind != kind || m.unit != unit {
+			e.dropped++
+			return nil
+		}
+		if kind == "histogram" {
+			if len(bounds) != len(m.histBounds) {
+				e.dropped++
+				return nil
+			}
+			for i := range bounds {
+				if bounds[i] != m.histBounds[i] {
+					e.dropped++
+					return nil
+				}
+			}
+		}
+		return m
+	}
+	if len(e.metrics) >= maxMetricFamilies {
+		e.dropped++
+		return nil
+	}
+	m := &aggregatedMetric{name: name, unit: unit, kind: kind, monotonic: monotonic,
+		temporality: aggTemporalityCumulative, points: make(map[string]*numberPoint),
+		histPoints: make(map[string]*histPoint), histBounds: append([]float64(nil), bounds...)}
+	e.metrics[name] = m
+	m.residentBytes = metricApproxBytes(name, unit) + 8*len(bounds)
+	e.approxBytes += m.residentBytes
+	return m
+}
+
+// An overflow point loses labels, not measurements: sums and histograms merge;
+// gauges retain the last overflow sample. Its reserved storage is independent
+// of ordinary budgets so a hot family cannot starve all later families.
+func (e *Exporter) pointIdentityLocked(m *aggregatedMetric, attrs map[string]string) ([]keyValue, string) {
+	valid := len(attrs) <= maxMetricAttributes
+	for key := range attrs {
+		if len(key) > 64 || strings.TrimSpace(key) == overflowKey {
+			valid = false
+		}
+	}
+	var kv []keyValue
+	var fp string
+	if valid {
+		kv = attrsFromMap(sanitizeAttrs(attrs))
+		fp = fingerprint(kv)
+		if m.points[fp] != nil || m.histPoints[fp] != nil {
+			return kv, fp
+		}
+		charge := pointApproxBytes(fp) + 8*(len(m.histBounds)+1)
+		overflowReserve := pointApproxBytes(overflowFingerprint) + 8*(len(m.histBounds)+1)
+		valid = m.regularPoints < maxSeriesPerMetric && e.regularPoints < maxQueuePoints && m.residentBytes+charge+overflowReserve <= maxMetricResidentBytes
+	}
+	if valid {
+		return kv, fp
+	}
+	e.health.Overflow++
+	yes := true
+	return []keyValue{{Key: overflowKey, Value: anyValue{BoolValue: &yes}}}, overflowFingerprint
+}
+
+func (e *Exporter) chargePointLocked(m *aggregatedMetric, fp string) {
+	charge := pointApproxBytes(fp) + 8*(len(m.histBounds)+1)
 	e.pointCount++
 	e.approxBytes += charge
-	updateHistogramPoint(pt, value)
+	if fp != overflowFingerprint {
+		e.regularPoints++
+		m.regularPoints++
+		m.residentBytes += charge
+	}
 }
 
 func updateHistogramPoint(pt *histPoint, value float64) {
@@ -339,22 +506,9 @@ func fingerprint(attrs []keyValue) string {
 	if len(attrs) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	for i, kv := range attrs {
-		if i > 0 {
-			b.WriteString("|")
-		}
-		b.WriteString(kv.Key)
-		b.WriteString("=")
-		b.WriteString(kv.Value.StringValue)
-		if kv.Value.IntValue != "" {
-			b.WriteString(kv.Value.IntValue)
-		}
-		if kv.Value.DoubleValue != nil {
-			b.WriteString(strconv.FormatFloat(*kv.Value.DoubleValue, 'g', -1, 64))
-		}
-	}
-	return b.String()
+	// JSON framing avoids collisions from delimiters inside keys and values.
+	data, _ := json.Marshal(attrs)
+	return string(data)
 }
 
 func sanitizeAttrs(in map[string]string) map[string]string {
@@ -378,24 +532,84 @@ func sanitizeAttrs(in map[string]string) map[string]string {
 	return out
 }
 
-// Export builds an OTLP payload from aggregated points and POSTs it.
-func (e *Exporter) Export(ctx context.Context) error {
+// Export serializes the entire cumulative snapshot/retry sequence. Waiting for
+// another exporter consumes the same context budget as the network operation.
+func (e *Exporter) Export(ctx context.Context) error { return e.export(ctx, false) }
+
+func (e *Exporter) export(ctx context.Context, final bool) (result error) {
 	if e == nil {
 		return nil
 	}
-	exportCtx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
+	ctx, cancel := context.WithTimeout(ctx, e.cfg.Timeout)
 	defer cancel()
-
+	select {
+	case e.exportGate <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-e.exportGate }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	e.lifecycleMu.Lock()
+	closed := e.closed
+	e.lifecycleMu.Unlock()
+	if closed && !final {
+		return ErrExporterShutdown
+	}
+	started := time.Now()
+	defer func() {
+		e.mu.Lock()
+		e.health.Duration += time.Since(started)
+		if result == nil {
+			e.health.LastSuccess = time.Now()
+		}
+		e.mu.Unlock()
+	}()
 	e.mu.Lock()
-	payload, err := e.buildPayloadLocked()
+	metrics := e.snapshotMetricsLocked()
+	e.mu.Unlock()
+	payloads, skipped, err := e.buildPayloads(ctx, metrics)
+	e.mu.Lock()
+	e.dropped += skipped
 	e.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	if len(payload) == 0 {
-		return nil
+	// Bound the final diagnostic independently of the number of chunks. Preserve
+	// total partial rejections, one representative failure, and local wire loss.
+	var partial *PartialSuccessError
+	var firstErr error
+	for _, payload := range payloads {
+		if err := e.post(ctx, payload); err != nil {
+			var p *PartialSuccessError
+			if errors.As(err, &p) {
+				if partial == nil {
+					partial = &PartialSuccessError{}
+				}
+				partial.RejectedDataPoints = int64(addRejected(uint64(partial.RejectedDataPoints), uint64(p.RejectedDataPoints)))
+				partial.HasErrorMessage = partial.HasErrorMessage || p.HasErrorMessage
+			} else if firstErr == nil {
+				firstErr = err
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				// Context identity matters even when another chunk failed earlier.
+				firstErr = err
+				break
+			}
+		}
 	}
-	return e.post(exportCtx, payload)
+	var errs []error
+	if skipped > 0 {
+		errs = append(errs, &PayloadSizeError{DroppedDataPoints: skipped})
+	}
+	if partial != nil {
+		errs = append(errs, partial)
+	}
+	if firstErr != nil {
+		errs = append(errs, firstErr)
+	}
+	return errors.Join(errs...)
 }
 
 func (e *Exporter) BuildPayloadForTest() ([]byte, error) {
@@ -414,10 +628,7 @@ func (e *Exporter) MetricsForTest() map[string]*aggregatedMetric {
 	return out
 }
 
-func (e *Exporter) buildPayloadLocked() ([]byte, error) {
-	if len(e.metrics) == 0 {
-		return nil, nil
-	}
+func (e *Exporter) snapshotMetricsLocked() []metric {
 	nowNano := strconv.FormatInt(time.Now().UnixNano(), 10)
 	var metrics []metric
 	for _, m := range e.metrics {
@@ -431,7 +642,8 @@ func (e *Exporter) buildPayloadLocked() ([]byte, error) {
 					TimeUnixNano:      nowNano,
 				}
 				if pt.hasFloat {
-					dp.AsDouble = pt.floatValue
+					value := *pt.floatValue
+					dp.AsDouble = &value
 				} else {
 					dp.AsInt = strconv.FormatInt(pt.intValue, 10)
 				}
@@ -454,7 +666,8 @@ func (e *Exporter) buildPayloadLocked() ([]byte, error) {
 					TimeUnixNano: nowNano,
 				}
 				if pt.hasFloat {
-					dp.AsDouble = pt.floatValue
+					value := *pt.floatValue
+					dp.AsDouble = &value
 				} else {
 					dp.AsInt = strconv.FormatInt(pt.intValue, 10)
 				}
@@ -493,18 +706,73 @@ func (e *Exporter) buildPayloadLocked() ([]byte, error) {
 			})
 		}
 	}
+	metrics = append(metrics, e.healthMetricsLocked(nowNano)...)
 	sort.Slice(metrics, func(i, j int) bool { return metrics[i].Name < metrics[j].Name })
+	return metrics
+}
+
+func (e *Exporter) marshalMetrics(metrics []metric) ([]byte, error) {
 	payload, err := buildPayload(e.resourceAttrs, []scopeMetrics{{Scope: scope{Name: "harness", Version: e.buildVersion}, Metrics: metrics}})
 	if err != nil {
-		return nil, err
+		return nil, &ExportError{Operation: "encode payload"}
 	}
-	// Validate it is JSON
-	var tmp json.RawMessage
-	if err := json.Unmarshal(payload, &tmp); err != nil {
-		return nil, err
-	}
-	// Keep metrics for next export (cumulative); do not clear
 	return payload, nil
+}
+
+func (e *Exporter) buildPayloadLocked() ([]byte, error) {
+	return e.marshalMetrics(e.snapshotMetricsLocked())
+}
+
+// Chunk complete data points, preserving all families and cumulative start times.
+// Wire limits are measured on the actual JSON, not resident-size estimates.
+func (e *Exporter) buildPayloadsLocked() ([][]byte, int, error) {
+	return e.buildPayloads(context.Background(), e.snapshotMetricsLocked())
+}
+
+func (e *Exporter) buildPayloads(ctx context.Context, metrics []metric) ([][]byte, int, error) {
+	var payloads [][]byte
+	var current []metric
+	var encoded []byte
+	skipped := 0
+	for _, m := range metrics {
+		for offset := 0; offset < metricPointCount(m); {
+			remaining := metricPointCount(m) - offset
+			best := 0
+			var bestPayload []byte
+			for low, high := 1, remaining; low <= high; {
+				if err := ctx.Err(); err != nil {
+					return nil, skipped, err
+				}
+				n := low + (high-low)/2
+				candidate := append(current, metricPart(m, offset, offset+n))
+				data, err := e.marshalMetrics(candidate)
+				if err != nil {
+					return nil, skipped, err
+				}
+				if len(data) <= maxPayloadBytes {
+					best, bestPayload, low = n, data, n+1
+				} else {
+					high = n - 1
+				}
+			}
+			if best > 0 {
+				current = append(current, metricPart(m, offset, offset+best))
+				encoded = bestPayload
+				offset += best
+			} else if len(current) == 0 {
+				skipped++ // Keep resident cumulative data; count this omitted wire point.
+				offset++
+			}
+			if best < remaining && len(current) > 0 {
+				payloads = append(payloads, encoded)
+				current, encoded = nil, nil
+			}
+		}
+	}
+	if len(current) > 0 {
+		payloads = append(payloads, encoded)
+	}
+	return payloads, skipped, nil
 }
 
 func (e *Exporter) post(ctx context.Context, payload []byte) error {
@@ -515,38 +783,58 @@ func (e *Exporter) post(ctx context.Context, payload []byte) error {
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, e.endpoint, bytes.NewReader(payload))
 		if err != nil {
-			return err
+			return &ExportError{Operation: "create request", cause: err}
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("User-Agent", "harness/"+e.buildVersion)
 		for k, v := range e.cfg.Headers {
 			req.Header.Set(k, v)
 		}
-
+		e.mu.Lock()
+		e.health.Attempts++
+		e.health.PayloadBytes += uint64(len(payload))
+		if attempt > 0 {
+			e.health.Retries++
+		}
+		e.mu.Unlock()
 		resp, err := e.client.Do(req)
 		var retryHeader string
+		retryable := false
 		if err == nil {
-			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4<<10))
-			_ = resp.Body.Close()
-			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-				return nil
-			}
-			lastErr = fmt.Errorf("otel export failed: %s", resp.Status)
-			if !isRetryableStatus(resp.StatusCode) {
-				return lastErr
-			}
 			retryHeader = resp.Header.Get("Retry-After")
-		} else {
-			lastErr = fmt.Errorf("otel export failed: %w", err)
-			if !isTransientTransportError(err) {
-				return lastErr
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				lastErr = parseExportResponse(resp.Body)
+				// A truncated response is a transport failure, not confirmed acceptance.
+				// Parse/partial-success errors have no transient cause and remain final.
+				retryable = isTransientTransportError(lastErr)
+			} else {
+				_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxResponseBytes))
+				lastErr = &ExportError{Operation: "HTTP response", StatusCode: resp.StatusCode}
+				retryable = isRetryableStatus(resp.StatusCode)
 			}
+			_ = resp.Body.Close()
+		} else {
+			lastErr = &ExportError{Operation: "transport", cause: err}
+			retryable = isTransientTransportError(err)
 		}
-		if attempt == maxExportAttempts-1 {
-			break
+		if lastErr == nil {
+			return nil
 		}
-
+		e.mu.Lock()
+		e.health.Failures++
+		var partial *PartialSuccessError
+		if errors.As(lastErr, &partial) {
+			e.health.Rejected = addRejected(e.health.Rejected, uint64(partial.RejectedDataPoints))
+		}
+		e.mu.Unlock()
+		if !retryable || attempt == maxExportAttempts-1 {
+			return lastErr
+		}
 		delay := retryDelay(attempt, retryAfter(retryHeader), e.retryJitter)
+		// Never retry ahead of the collector's requested delay just to fit a budget.
+		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) <= delay {
+			return errors.Join(lastErr, context.DeadlineExceeded)
+		}
 		wait := e.waitRetry
 		if wait == nil {
 			wait = waitForRetry
@@ -556,6 +844,15 @@ func (e *Exporter) post(ctx context.Context, payload []byte) error {
 		}
 	}
 	return lastErr
+}
+
+// OTLP integer sums are signed 64-bit. Saturate untrusted rejection counters
+// rather than wrap a cumulative health series or create an invalid wire value.
+func addRejected(current, added uint64) uint64 {
+	if added > math.MaxInt64-current {
+		return math.MaxInt64
+	}
+	return current + added
 }
 
 func isRetryableStatus(status int) bool {
@@ -580,17 +877,15 @@ func retryDelay(attempt int, retryAfterDelay time.Duration, jitter func(time.Dur
 	if delay > maxRetryDelay {
 		delay = maxRetryDelay
 	}
-	if retryAfterDelay > delay {
-		delay = retryAfterDelay
-	}
-	if delay > maxRetryDelay {
-		delay = maxRetryDelay
-	}
 	if jitter != nil {
 		delay += jitter(delay / 2)
 		if delay > maxRetryDelay {
 			delay = maxRetryDelay
 		}
+	}
+	// Retry-After is a server minimum, not exponential backoff subject to our cap.
+	if retryAfterDelay > delay {
+		delay = retryAfterDelay
 	}
 	return delay
 }
@@ -618,7 +913,18 @@ func retryAfter(header string) time.Duration {
 	if header == "" {
 		return 0
 	}
-	if secs, err := strconv.Atoi(header); err == nil {
+	allDigits := true
+	for _, r := range header {
+		if r < '0' || r > '9' {
+			allDigits = false
+			break
+		}
+	}
+	if allDigits {
+		secs, err := strconv.ParseUint(header, 10, 64)
+		if err != nil || secs > uint64(math.MaxInt64/int64(time.Second)) {
+			return time.Duration(math.MaxInt64)
+		}
 		return time.Duration(secs) * time.Second
 	}
 	if t, err := http.ParseTime(header); err == nil {
@@ -631,8 +937,7 @@ func retryAfter(header string) time.Duration {
 	return 0
 }
 
-// Flush is a convenience that exports with a 5s timeout in background. Callers
-// should use Export directly when they need ctx control.
+// Flush is an alias for Export; use Shutdown to stop periodic work and flush.
 func (e *Exporter) Flush(ctx context.Context) error {
 	if e == nil {
 		return nil
@@ -640,7 +945,8 @@ func (e *Exporter) Flush(ctx context.Context) error {
 	return e.Export(ctx)
 }
 
-// Dropped returns the number of points dropped due to queue caps.
+// Dropped returns discarded measurements plus oversized wire-point omissions.
+// Overflow measurements retain their values and are counted separately.
 func (e *Exporter) Dropped() int {
 	if e == nil {
 		return 0

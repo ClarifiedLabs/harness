@@ -168,6 +168,15 @@ func (p *Provider) Name() string {
 	return "model-proxy"
 }
 
+func callerAttempt(ctx context.Context) *protocol.CallerAttempt {
+	meta := llm.AttemptMetadataFromContext(ctx)
+	origin := (protocol.CallerAttempt{Cause: meta.Cause, RetryLayer: meta.RetryLayer}).Normalized()
+	if origin.Cause == llm.AttemptInitial && origin.RetryLayer == llm.RetryLayerNone {
+		return nil
+	}
+	return &origin
+}
+
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
 		profile := req.Reasoning.Profile
@@ -175,6 +184,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			TargetID:         p.targetID,
 			Request:          req,
 			ReasoningProfile: profile,
+			CallerAttempt:    callerAttempt(ctx),
 		})
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal proxy request: " + err.Error()})
@@ -235,6 +245,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 				}
 				yield(llm.StreamEvent{}, apiErr)
 				return
+			}
+			if env.Attempt != nil {
+				llm.EmitAttempt(ctx, *env.Attempt)
 			}
 			if env.Error != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
@@ -347,8 +360,9 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 
 func (p *Provider) CompactContext(ctx context.Context, req llm.Request) (llm.CompactedContext, error) {
 	body, err := json.Marshal(protocol.CompactRequest{
-		TargetID: p.targetID,
-		Request:  req,
+		TargetID:      p.targetID,
+		Request:       req,
+		CallerAttempt: callerAttempt(ctx),
 	})
 	if err != nil {
 		return llm.CompactedContext{}, fmt.Errorf("marshal proxy compact request: %w", err)
@@ -370,22 +384,39 @@ func (p *Provider) CompactContext(ctx context.Context, req llm.Request) (llm.Com
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		err := readHTTPError(resp)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+		var out protocol.CompactResponse
+		if json.Unmarshal(body, &out) == nil {
+			for _, event := range out.Attempts {
+				llm.EmitAttempt(ctx, event)
+			}
+		}
+		err := httpErrorBody(resp, body)
 		var apiErr *llm.APIError
 		if errors.As(err, &apiErr) && apiErr.Code == "context_compaction_unsupported" {
-			return llm.CompactedContext{}, llm.ErrContextCompactionUnsupported
+			return out.Context, llm.ErrContextCompactionUnsupported
 		}
-		return llm.CompactedContext{}, err
+		return out.Context, err
 	}
 	var out protocol.CompactResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return llm.CompactedContext{}, fmt.Errorf("decode proxy compact response: %w", err)
+	}
+	for _, event := range out.Attempts {
+		llm.EmitAttempt(ctx, event)
+	}
+	if out.Error != nil {
+		return out.Context, out.Error.APIError()
 	}
 	return out.Context, nil
 }
 
 func readHTTPError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodyBytes))
+	return httpErrorBody(resp, body)
+}
+
+func httpErrorBody(resp *http.Response, body []byte) error {
 	var env protocol.StreamEnvelope
 	if json.Unmarshal(body, &env) == nil && env.Error != nil {
 		return env.Error.APIError()

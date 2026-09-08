@@ -60,7 +60,11 @@ func Connect(ctx context.Context, opts ConnectOptions, body []byte, yield func(S
 			return nil, err
 		}
 
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, opts.URL, bytes.NewReader(body))
+		sourceCtx := ctx
+		if attempt > 0 {
+			sourceCtx = WithAttemptCause(ctx, AttemptRetry, RetryLayerConnect)
+		}
+		httpReq, err := http.NewRequestWithContext(sourceCtx, http.MethodPost, opts.URL, bytes.NewReader(body))
 		if err != nil {
 			apiErr := &APIError{Message: "build request: " + err.Error()}
 			yield(modelRequestFailureEvent(apiErr, attempt, 0, ModelRequestOutcomeTerminal, 0), nil)
@@ -70,28 +74,35 @@ func Connect(ctx context.Context, opts ConnectOptions, body []byte, yield func(S
 		httpReq.Header.Set("content-type", "application/json")
 		opts.Header(httpReq)
 
+		source := StartAttempt(sourceCtx)
+		httpReq = httpReq.WithContext(source.Context(sourceCtx))
 		attemptStart := time.Now()
 		resp, err := opts.Client.Do(httpReq)
 		attemptDuration := time.Since(attemptStart)
 		if err != nil {
 			// A cancelled context wins over transport-error classification.
 			if ctxErr := ctx.Err(); ctxErr != nil {
+				source.Finish(AttemptCancelled, ctxErr)
 				yield(modelRequestCancelledEvent(attempt), nil)
 				yield(StreamEvent{}, ctxErr)
 				return nil, ctxErr
 			}
 			apiErr := &APIError{Message: err.Error(), Retryable: true, Stage: APIErrorStageUpstreamConnect}
+			source.Finish(AttemptFailed, apiErr)
 			if !connectBackoff(ctx, opts.Sleep, attempt, 0, attemptDuration, apiErr, yield) {
 				return nil, apiErr
 			}
 			continue
 		}
 
+		source.Status(resp.StatusCode)
 		if resp.StatusCode == http.StatusOK {
+			resp.Request = httpReq
 			return resp, nil
 		}
 
 		apiErr := opts.ParseError(resp)
+		source.Finish(AttemptFailed, apiErr)
 		resp.Body.Close()
 		if !apiErr.Retryable {
 			yield(modelRequestFailureEvent(apiErr, attempt, attemptDuration, ModelRequestOutcomeTerminal, 0), nil)
@@ -137,7 +148,15 @@ func connectBackoff(ctx context.Context, sleep func(time.Duration), attempt int,
 	}, nil) {
 		return false
 	}
-	if !sleepCtx(ctx, sleep, delay) {
+	reason, _ := ClassifyAttemptError(apiErr, 0)
+	waitCtx := WithAttemptMetadata(ctx, AttemptMetadata{Scope: AttemptScopeUpstream})
+	waitErr := ObserveRetryWait(waitCtx, delay, RetryLayerConnect, reason, func() error {
+		if !sleepCtx(ctx, sleep, delay) {
+			return ctx.Err()
+		}
+		return nil
+	})
+	if waitErr != nil {
 		yield(modelRequestCancelledEvent(attempt), nil)
 		yield(StreamEvent{}, ctx.Err())
 		return false

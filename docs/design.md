@@ -98,7 +98,8 @@ internal/cli             immutable nested command/flag catalogs, presence-aware 
 internal/modelproxy      proxy protocol, client Provider, server handler
 internal/modelproxy/config model-proxy top-level setting catalog, source resolution, and safe projections
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
-internal/llm             provider-agnostic types, Provider interface, model/price registry
+internal/llm             provider-agnostic types, Provider interface, model/price registry, and content-free physical attempt/retry/discard source facts
+internal/execution       neutral typed Observer/Scope for model, work, prompt, context, turn, and skill observations; ModelCall owns exact physical usage/discard lineage and legacy response segments; Group tracks actual workers and complete owners without wrapping Provider capabilities
 internal/llm/openai      Chat Completions dialect: wire structs, request builder, stream decode, tool-call assembly
 internal/llm/responses   OpenAI Responses dialect: same responsibilities
 internal/llm/anthropic   Messages dialect: same responsibilities
@@ -136,7 +137,7 @@ internal/mcp             tools-only MCP slice: schema, client, server, stdio + s
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
 internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
-internal/otel            stdlib-only cumulative OTLP/HTTP JSON metrics exporter and live sink: `harness.prompt.*`, `harness.tokens.*`/`harness.cost.*`, `harness.tool.*`/`harness.tools_per_turn`/`harness.parallel.*`/`harness.commands.*`/`harness.skill.*`/`harness.retention.*`/`harness.model.*`, plus `harness.session.*`/`harness.context.*`/`harness.delegate.*` at session exit (fleet + debug telemetry; see `internal/otel/sink.go`)
+internal/otel            stdlib-only cumulative OTLP/HTTP JSON exporter and execution.Observer sink; exclusive physical billing, work/context diagnostics, root-inclusive session distributions, bounded cardinality/payloads, retry/partial-response handling, and exporter self-health (see telemetry.md)
 internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
 internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, agent-oriented code-intelligence tools (§15a)
 internal/lsptools        harness-side adapter exposing short `lsp_*` tools over the LSP manager (§15a)
@@ -150,6 +151,60 @@ small leaf packages (`inputimage`, `markdown`, `replprompt`, `httpserve`, `httpx
 In the main CLI, the only runtime provider is `modelproxy/client.Provider`; concrete
 OpenAI/Anthropic dialects are constructed inside `harness-model-proxy` via
 `internal/llm/factory`.
+
+Execution telemetry is a separate, frontend-independent observation path.
+`internal/llm` owns physical attempt facts at transport/provider boundaries;
+`internal/modelproxy/server` prices complete snapshots with the resolved target
+and forwards them through `internal/modelproxy/protocol`/`client`. The proxy
+connection is not an invented upstream request. Its `attemptWriter` coalesces
+interim usage by sequence within an ordering segment and caps pending interim
+entries at 256 across all segments, plus at most one envelope in flight. This
+is not a cap on the whole queue: authoritative finishes and control/lifecycle
+facts are not dropped by that policy; their volume is governed by actual
+attempt/continuation budgets and synchronous logical-write barriers. Network
+failure can still prevent delivery. `internal/execution` imports
+only the neutral `llm` contract and standard library: typed scopes capture
+configured identity, and `ModelCall` commits exact complete physical snapshots
+and tracks retained/discarded lineage rather than reconstructing usage from
+logical high-water totals. `StreamEvent.UsageReported` separates real snapshots
+(including reported zero) from synthetic logical accounting. When source facts
+are unavailable, accepted independent response segments are sealed and combined
+into one explicit `provider_call` fallback, without invented upstream requests
+or TTFT. `execution.Group` tracks actual worker and complete-owner settlement.
+The package neither wraps providers nor depends on agent, tools, UI, or OTel.
+Core `llm` does not import execution, dialects, or factory.
+
+`internal/agent` observes logical requests, prompts/turns, retries, context,
+retention, and maintenance. `execution.ComposeRequest` supplies numeric
+pre-dialect request composition through `ContextEvent.Composition` for normal,
+compatibility-rebuilt, native-compaction, and maintenance requests, including
+child execution. `otel.Sink.ObserveContext` records those sizes/counts with the
+event's captured identity; they are not wire bytes or token occupancy and retain
+no payload content. `internal/tools` owns actual dispatch/command boundaries;
+`internal/delegate`, `internal/background`, and
+`internal/agentsession` observe child, job, wait, and reusable-runtime lifecycles.
+`internal/otel.Sink` consumes those typed observations; UI callbacks are not the
+source of exclusive billing. `cmd/harness/root_telemetry.go` owns one process
+exporter and execution group for terminal roots and the ACP factory. Registry
+and background workers, complete UI/foreground owners, prewarm, and idle
+preparation/disposition remain tracked through their final observations and
+owner mutations. Terminal managed cleanup and group settlement share five
+seconds, followed by a separately bounded two-second export. Failed settlement
+warns and skips mutable terminal-session aggregation while already-recorded
+facts still flush. `cmd/harness/acp_lifecycle.go` separates construction admission
+from the lifecycle mutex, so close remains bounded even with OTel disabled;
+its final one-second budget covers roots, constructors, and group settlement.
+Logical tool results, job abandonment, and expired settlement budgets never
+manufacture actual worker/child completion. Root inclusive session distributions
+never rebill child/model usage. Detailed semantics, coverage limits, and the
+metric catalog live in [telemetry.md](telemetry.md).
+
+This adds no core import cycles or telemetry dependency to `internal/mcp` or
+`internal/mcp/jsonrpc`. Existing invariants remain: system prompts travel on
+`llm.Request.System`, not history; `internal/sessionrec` is the sole canonical
+`raw.ndjson` recorder; session writes use temp-file then rename; ANSI escapes
+remain TTY/color-gated terminal-display output, never transcript, log, tool
+result, or model-facing text.
 
 Two optional capabilities run outside that core path. Remote MCP support lives behind
 the `harness-mcp-proxy` daemon (§15); LSP code intelligence is served by the in-process
@@ -1238,10 +1293,14 @@ controlled by `otel.enabled`/`otel.endpoint` (`HARNESS_OTEL_*` /
 `OTEL_EXPORTER_*` fallbacks), `otel.hostname` → the process-stable `host.name`
 resource (`HARNESS_OTEL_HOSTNAME`/`OTEL_HOSTNAME` override, defaults to short
 `os.Hostname()`; explicit empty disables it), and
-`otel.headers`/`otel.resource_attributes`. Session, provider, model, agent, and
-delegate identity are metric-point attributes so REPL switches and `/clear`
-cannot relabel cumulative resource series. See `internal/otel/` and the parameter
-matrix in [usage.md](usage.md#harness-configuration-parameters). `HARNESS_LOG_LEVEL` controls
+`otel.headers`/`otel.resource_attributes`. A process-stable `service.instance.id`
+separates cumulative resource streams; session IDs are not exported. Configured
+provider/model/agent and the delegate boolean are captured execution-point
+attributes, while root-inclusive session distributions omit model identity.
+REPL switches and `/clear` cannot relabel old cumulative points. See
+[telemetry.md](telemetry.md) for accounting, lifecycle, privacy, reliability, and
+migration details, and the parameter matrix in
+[usage.md](usage.md#harness-configuration-parameters). `HARNESS_LOG_LEVEL` controls
 harness diagnostics; `HARNESS_TIMESTAMPS` accepts only `short`, `full`, or `none`.
 `HARNESS_NO_COLOR` is a strict boolean, while non-empty standard `NO_COLOR` is a
 presence-based override. Provider API keys and provider base URLs are resolved
