@@ -211,12 +211,29 @@ code from 100–599 or `0` for unknown. Built-in tool labels use an allowlist;
 MCP/LSP names collapse to `mcp`/`lsp`, unknown custom names to `other`.
 
 The exporter admits up to **128 ordinary metric families**, each with at most
-**64 ordinary series**, and **1,024 ordinary series globally**. Per-family
-resident-size estimates are limited to 16 KiB (2 MiB across 128 families), with
-space reserved for one overflow point per family. These estimates are not a
-claim about exact Go heap usage. Large identities may reach the size budget
-before the series-count budget. There is **no eviction or reset** of admitted
-cumulative series during process lifetime.
+**256 ordinary series**, and **8,192 ordinary series globally**. Estimated
+aggregation storage shares a **16 MiB budget**, with a **1 MiB per-family
+guardrail** rather than equal partitions. A busy family can use spare shared
+capacity without consuming the storage reserved for later families.
+
+The shared budget permanently reserves **4 KiB for each of the 128 possible
+families** (512 KiB total), covering maximum family metadata, shared histogram
+bounds, and one overflow point. Ordinary points consume the remaining shared
+pool. Estimates include compact identity keys, retained attributes and string
+bytes, point/map overhead, and histogram buckets. These are admission estimates,
+**not a total Go heap or RSS cap**; snapshots, JSON encoding, and HTTP buffers
+also allocate. Large identities may reach a byte limit before a series limit.
+There is **no eviction, reset, or release of admission reservations** during
+exporter lifetime, so an overflowing in-flight operation cannot switch series
+between its start and finish.
+
+Internal series keys use collision-free length-prefixed strings, not OTLP JSON;
+this does not change exported attribute values. Tool-specific families
+`harness.tool.calls`, `harness.tool.errors`, `harness.tool.truncations`, and
+`harness.tool.results.bytes` omit the redundant `kind`, `mode`, and `trigger`
+labels. They retain I, `tool`, `outcome`, `activity_class`, and their applicable
+measurement/error labels. Generic work and process diagnostics retain their
+full dimensions, including foreground/background distinctions.
 
 New identities beyond a budget are merged into the family's reserved series
 with the sole attribute **`otel.metric.overflow=true` (OTLP boolean)**. Sums and
@@ -226,6 +243,8 @@ keep the latest overflow sample; in-flight gauges remain additive, and
 shape/numbers, or unsupported values are dropped and counted separately.
 Self-health families bypass these ordinary budgets. Limits also include 16
 attributes per point, 64-byte attribute keys, and 128 histogram boundaries.
+Attribute keys that collide after whitespace/UTF-8 normalization are routed to
+overflow rather than choosing a value nondeterministically.
 
 Automatic metric labels contain no prompt/response/tool content, command
 arguments, file paths, URLs, request IDs, session IDs, child/job IDs, or trace
@@ -289,10 +308,10 @@ start times belong to the exporter, not the current session.
 | `harness.work.queue.duration` | H / `s` | W; known scheduler admission-to-start wait. |
 | `harness.work.duration` | H / `s` | W + `outcome`; known actual execution duration. |
 | `harness.work.delivery.duration` | H / `s` | W + `outcome`; known delivery delay; compaction result points also have `fallback_reason`. |
-| `harness.tool.calls` | S / `{call}` | W + `outcome`, `activity_class`; logical dispatch results. |
-| `harness.tool.errors` | S / `{error}` | W + `outcome`, `activity_class`, `error_kind`; failed, cancelled, or timed-out results. |
-| `harness.tool.truncations` | S / `{truncation}` | W + `outcome`, `activity_class`; truncated logical results. |
-| `harness.tool.results.bytes` | H / `By` | W + `outcome`, `activity_class`, `measurement=shown\|original`; select one measurement before aggregating. |
+| `harness.tool.calls` | S / `{call}` | `tool`, `outcome`, `activity_class`; logical dispatch results. |
+| `harness.tool.errors` | S / `{error}` | `tool`, `outcome`, `activity_class`, `error_kind`; failed, cancelled, or timed-out results. |
+| `harness.tool.truncations` | S / `{truncation}` | `tool`, `outcome`, `activity_class`; truncated logical results. |
+| `harness.tool.results.bytes` | H / `By` | `tool`, `outcome`, `activity_class`, `measurement=shown\|original`; select one measurement before aggregating. |
 | `harness.commands.total` | S / `{command}` | W + `outcome`; `kind=command`, `tool=argv\|shell`, `trigger=single\|step`; executed commands. |
 | `harness.process.diagnostics` | H / `1` | Result/job dimensions + `measurement`; numeric process diagnostics (not labels derived from output). |
 | `harness.background.jobs` | S / `{job}` | W + `outcome`; `started` and terminal outcomes are separate increments. |
@@ -452,8 +471,20 @@ family/series limits and use the same process resource:
 | `harness.otel.export.last_success` | G / `s` | `LastSuccess`: Unix seconds of the last fully successful export, 0 before any success. API field is `time.Time`. |
 
 Health is included in the snapshot **before** that export's HTTP attempts finish;
-the same payload cannot report its own final outcome. Periodic diagnostics warn
-on errors and increased dropped/overflow counts.
+the same payload cannot report its own final outcome. Export errors are warned
+independently of local metric loss. The first local-loss warning appears after
+the next successful periodic export; repeated overflow-only warnings are
+coalesced to at most once per **five minutes**. Newly dropped measurements still
+trigger a warning at the next successful export. Suppression and failed exports
+do not consume pending loss counts: `dropped` and `overflow` in a warning cover
+all increases since the previous loss warning, not necessarily one 30-second
+interval. Cumulative self-health counters remain exact at every export.
+
+Local-loss warnings include the number of overflowing families, active series,
+estimated admitted bytes (including fixed reserves), and bounded limit reasons:
+`attributes`, `family_series`, `global_series`, `family_bytes`, `global_bytes`.
+They never include arbitrary metric names or attribute contents. Final shutdown
+loss diagnostics remain cumulative and are not suppressed.
 
 ### Orderly bounded shutdown
 
@@ -607,6 +638,7 @@ boundaries with the new instruments under one query.
 | Retry/maintenance usage guessed to be waste | Stored physical lineage supplies exact disjoint source/logical discard snapshots, including source-only usage; retained native prefixes are excluded and failure alone is insufficient. |
 | `harness.commands.total` from launch JSON; `harness.commands.steps_per_batch` | Count executed commands with `tool=argv\|shell`, `trigger=single\|step`. Steps-per-batch family removed; allowlisted `harness.process.diagnostics` exposes executed/skipped step diagnostics. |
 | Tool-result byte histogram with one implicit value | Select `measurement=shown` or `original`; two samples describe the same result, not two results. |
+| `kind=tool`, `mode=foreground`, `trigger=none` on `harness.tool.*` | Removed from calls, errors, truncations, and result-byte metrics. Remove these filters/groupings from queries for those families. Identity, tool, outcome, activity, measurement, and error breakdowns remain; `harness.work.*` and `harness.process.diagnostics` keep their work dimensions. |
 | Compactions inferred from prompt/child totals | Separate runs, idle dispositions, and actual applications. Idle prepared work has not reclaimed live context. |
 | Background launch/abandonment treated as actual child finish | Manager job lifecycle and actual delegate/command execution are separate. The process group tracks actual workers and complete owners; bounded settlement can skip a mutable root aggregate and lose late facts, never invent completion. |
 | Retention/turn/skill observations depended on UI callbacks | Core typed observers cover these execution paths across frontends/children; catalog pressure is not a skill activation. Composition gauges now come from core request snapshots with captured identity, including system/tool-schema/provider-state lengths; they are not wire-byte or token-occupancy measurements. |
@@ -622,7 +654,8 @@ boundaries with the new instruments under one query.
 - `internal/execution/context.go`: `ComposeRequest`; numeric pre-dialect request
   composition, supplied by `internal/agent/execution.go`: `observeRequestContext`.
 - `internal/otel/exporter.go`, `metrics.go`, `config.go`: budgets, encoded payloads,
-  retry/partial-response semantics, `Exporter.Health`, `Exporter.Shutdown`.
+  retry/partial-response semantics, `Exporter.Health`, `Exporter.Shutdown`;
+  `exporter_diagnostics.go`: coalesced local-loss warnings.
 - `internal/execution/model.go`: `ModelCall`; `internal/execution/discard.go`:
   `ModelCall.Retain` and `ModelCall.Discard`; `internal/llm/attempt.go` and
   `attempt_tracker.go`: source facts and disposition ownership;
@@ -639,3 +672,23 @@ execution attempt/retry/discard tests, source/proxy attempt tests, actual tool
 and child lifecycle tests, and terminal/ACP root lifecycle tests. For local
 checks run `go test ./internal/otel ./internal/execution`, then the repository's
 required `make` and `go build ./... && go vet ./... && go test ./...`.
+
+The recording-only parent/eight-delegate fixture in
+`internal/otel/exporter_workload_test.go` checks realistic cardinality, cumulative
+totals, gauge balance, and chunk sizes without model, tool, or network execution.
+Microbenchmarks distinguish equal-detail key/snapshot overhead from full workload
+and upper-budget export costs:
+
+```sh
+go test ./internal/otel -run '^$' -bench '^BenchmarkExporterKeys' -benchmem
+go test ./internal/otel -run '^$' -bench '^BenchmarkExporterWorkload' -benchmem
+go test ./internal/otel -run '^$' -bench '^BenchmarkExporterBudgetSnapshotChunks$' -benchmem -benchtime=1x
+```
+
+The key benchmarks retain the same 20 series even under the earlier budgets.
+The workload benchmark reports retained series and overflow explicitly: an older
+exporter can appear cheaper by collapsing detail. The budget benchmark exercises
+all 8,192 ordinary series with work-style labels. Snapshot/chunk benchmarks omit
+HTTP latency; larger cumulative snapshots need more sequential requests within
+the same export timeout. Allocation counts include temporary encoding work and
+must not be mistaken for the resident admission estimate.

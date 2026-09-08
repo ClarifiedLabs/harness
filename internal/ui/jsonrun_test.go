@@ -245,11 +245,19 @@ func TestRunJSONSteerInjectsBeforeNextModelRound(t *testing.T) {
 func TestRunJSONSteersRecoveredSeparatelyWithCorrelationIDs(t *testing.T) {
 	inPrompt := make(chan struct{})
 	releaseTurn := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseTurn) }) }
 	fp := llmtest.New("fake",
 		llmtest.Step{
 			Stop:  llm.StopEndTurn,
 			Usage: llm.Usage{InputTokens: 5, OutputTokens: 2},
-			Block: func(context.Context) { close(inPrompt); <-releaseTurn },
+			Block: func(ctx context.Context) {
+				close(inPrompt)
+				select {
+				case <-releaseTurn:
+				case <-ctx.Done():
+				}
+			},
 		},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("first recovered answer")}, Stop: llm.StopEndTurn},
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("second recovered answer")}, Stop: llm.StopEndTurn},
@@ -266,7 +274,33 @@ func TestRunJSONSteersRecoveredSeparatelyWithCorrelationIDs(t *testing.T) {
 		return ok
 	}
 
-	pw, codeCh := runJSONPipe(t, app)
+	pr, pw := io.Pipe()
+	forceExit := make(chan struct{})
+	app.ForceExit = forceExit
+	codeCh := make(chan int, 1)
+	runDone := make(chan struct{})
+	t.Cleanup(func() {
+		// A failed admission assertion must still release the provider and the
+		// input reader. Join the driver even if the test already read its code.
+		release()
+		pw.Close()
+		pr.Close()
+		select {
+		case <-runDone:
+		case <-time.After(2 * time.Second):
+			t.Error("RunJSON did not drain during cleanup")
+			close(forceExit)
+			select {
+			case <-runDone:
+			case <-time.After(2 * time.Second):
+				t.Error("RunJSON did not stop during cleanup")
+			}
+		}
+	})
+	go func() {
+		defer close(runDone)
+		codeCh <- RunJSON(pr, app)
+	}()
 	writePipe(t, pw, "{\"type\":\"prompt\",\"id\":\"first\",\"text\":\"first\"}\n")
 	select {
 	case <-inPrompt:
@@ -287,10 +321,14 @@ func TestRunJSONSteersRecoveredSeparatelyWithCorrelationIDs(t *testing.T) {
 			t.Fatalf("steer %q was not accepted", want)
 		}
 	}
-	close(releaseTurn)
-	waitFor(t, func() bool { return strings.Count(stream.String(), "\"type\":\"prompt_end\"") >= 3 }, "recovered prompt_end events")
-	writePipe(t, pw, "{\"type\":\"shutdown\"}\n")
-	code := <-codeCh
+	// EOF drains the active prompt and recovered queue, unlike shutdown which
+	// cancels. Driver completion is the barrier for inspecting all events; no
+	// polling deadline needs to accommodate three prompts and session saves.
+	if err := pw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	code := waitRun(t, codeCh)
 	if code != ExitOK {
 		t.Fatalf("exit code = %d, want 0", code)
 	}
@@ -307,6 +345,13 @@ func TestRunJSONSteersRecoveredSeparatelyWithCorrelationIDs(t *testing.T) {
 	starts := linesOfType(lines, "prompt_start")
 	if len(starts) != 3 || starts[1]["id"] != "s1" || starts[2]["id"] != "s2" {
 		t.Fatalf("prompt_start IDs = %v, want recovered IDs s1 then s2", starts)
+	}
+	ends := linesOfType(lines, "prompt_end")
+	if ends[1]["id"] != "s1" || ends[2]["id"] != "s2" {
+		t.Fatalf("prompt_end IDs = %v, want recovered IDs s1 then s2", ends)
+	}
+	if ends[1]["final_text"] != "first recovered answer" || ends[2]["final_text"] != "second recovered answer" {
+		t.Fatalf("recovered prompt_end final texts = %v / %v", ends[1]["final_text"], ends[2]["final_text"])
 	}
 }
 

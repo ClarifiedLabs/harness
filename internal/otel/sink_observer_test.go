@@ -267,20 +267,22 @@ func TestObserverContextRetentionAndSessionDistributions(t *testing.T) {
 func TestObserverConcurrentIdentityAndOverflowBalances(t *testing.T) {
 	s, e := observerSink(t)
 	var wg sync.WaitGroup
-	for i := 0; i < 200; i++ {
+	const identities = maxSeriesPerMetric + 32
+	for i := 0; i < identities; i++ {
+		// Capture distinct identities before concurrent mutation of the live sink.
+		s.SetIdentity(fmt.Sprint(i), "p", fmt.Sprint(i), "a")
+		scope := s.Scope()
 		wg.Add(1)
-		go func(i int) {
+		go func() {
 			defer wg.Done()
-			s.SetIdentity(fmt.Sprint(i), "p", fmt.Sprint(i), "a")
-			scope := s.Scope()
 			a := llm.AttemptEvent{AttemptMetadata: llm.AttemptMetadata{Scope: llm.AttemptScopeUpstream}}
 			s.ObserveModel(execution.ModelEvent{Identity: scope.Identity, Phase: execution.ModelStart, Attempt: a})
 			s.ObserveModel(execution.ModelEvent{Identity: scope.Identity, Phase: execution.ModelFinish, Attempt: a})
-		}(i)
+		}()
 	}
 	wg.Wait()
 	requireNumber(t, e, "harness.model.inflight", 0, nil)
-	requireNumber(t, e, "harness.model.requests", 200, nil)
+	requireNumber(t, e, "harness.model.requests", identities, nil)
 	if e.Health().Overflow == 0 {
 		t.Fatal("expected bounded series overflow")
 	}

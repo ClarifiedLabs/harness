@@ -1,6 +1,8 @@
 package otel
 
 import (
+	"maps"
+
 	"harness/internal/execution"
 	"harness/internal/tools"
 )
@@ -94,7 +96,13 @@ func (s *Sink) ObserveWork(e execution.WorkEvent) {
 		if e.Phase != execution.WorkResult {
 			return
 		}
-		result := labels(done, "activity_class", bounded(e.Activity, "other", "inspect", "mutate", "verify", "wait", "coordinate", "other"))
+		fullResult := labels(done, "activity_class", bounded(e.Activity, "other", "inspect", "mutate", "verify", "wait", "coordinate", "other"))
+		// Tool-specific families do not need generic work's constant dimensions.
+		// Keep the full shape for process diagnostics, which also describe jobs.
+		result := maps.Clone(fullResult)
+		delete(result, "kind")
+		delete(result, "mode")
+		delete(result, "trigger")
 		s.exp.RecordSum("harness.tool.calls", "{call}", n, result)
 		if workOutcome(e.Outcome) == "failed" || workOutcome(e.Outcome) == "cancelled" || workOutcome(e.Outcome) == "timeout" {
 			errKind := bounded(e.ErrorKind, "other", "unknown_tool", "invalid_args", "timeout", "cancelled", "panic", "path_not_found", "edit_oldtext_not_found", "edit_oldtext_ambiguous", "stale_file", "hook_blocked", "blocked", "unsupported_modality", "invalid_result", "regex_invalid", "batch_failed", "provider_internal_error", "provider_auth", "provider_request", "provider_5xx", "rate_limited", "provider_overloaded", "provider_error", "other")
@@ -105,7 +113,7 @@ func (s *Sink) ObserveWork(e execution.WorkEvent) {
 		}
 		s.exp.RecordHistogram("harness.tool.results.bytes", "By", float64(max(0, e.ResultBytes)), labels(result, "measurement", "shown"), byteBounds)
 		s.exp.RecordHistogram("harness.tool.results.bytes", "By", float64(max(0, e.OriginalBytes)), labels(result, "measurement", "original"), byteBounds)
-		s.processDiagnostics(e.Metrics, result)
+		s.processDiagnostics(e.Metrics, fullResult)
 	case execution.WorkCommand:
 		if e.Phase == execution.WorkFinish {
 			s.exp.RecordSum("harness.commands.total", "{command}", n, done)

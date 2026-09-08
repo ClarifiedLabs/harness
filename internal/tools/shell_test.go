@@ -7,10 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -964,54 +962,76 @@ func TestShellStepsReceiptPreservesOriginalWhenWaitIncomplete(t *testing.T) {
 }
 
 func TestRunProcessTimeoutReturnsPartialOutputWhenWaitDoesNotFinish(t *testing.T) {
-	oldUnit := processTimeoutUnit
-	oldGrace := processReapGrace
+	oldUnit, oldGrace, oldKill := processTimeoutUnit, processReapGrace, killProcessGroup
+	t.Cleanup(func() {
+		processTimeoutUnit, processReapGrace, killProcessGroup = oldUnit, oldGrace, oldKill
+	})
 	processTimeoutUnit = 25 * time.Millisecond
 	processReapGrace = 25 * time.Millisecond
+
+	// This deadline is only a failure watchdog. Readiness, not shell startup
+	// within the simulated timeout, coordinates the successful path.
+	guard, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	t.Cleanup(cancel)
+	newPipe := func() (*os.File, *os.File) {
+		t.Helper()
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			r.Close()
+			w.Close()
+		})
+		return r, w
+	}
+	readyR, readyW := newPipe()
+	stdinR, stdinW := newPipe()
+	// Deliberately defer stdout until the timeout's simulated kill attempt.
+	// The second read holds the child alive until cleanup, without a sleep.
+	cmd := exec.CommandContext(guard, "sh", "-c", `IFS= read -r start; printf 'started\n'; printf x >&3; IFS= read -r line`)
+	cmd.Stdin = stdinR
+	cmd.ExtraFiles = []*os.File{readyW}
 	t.Cleanup(func() {
-		processTimeoutUnit = oldUnit
-		processReapGrace = oldGrace
+		// Kill before closing pipes/restoring globals. runProcess already owns
+		// cmd.Wait; this releases its waiter without attempting a second Wait.
+		if cmd.Process != nil {
+			oldKill(cmd.Process.Pid)
+		}
 	})
 
-	pidFile := filepath.Join(t.TempDir(), "pid")
-	oldKill := killProcessGroup
-	killProcessGroup = func(int) {}
-	var cmd *exec.Cmd
-	t.Cleanup(func() {
-		killProcessGroup = oldKill
-		data, err := os.ReadFile(pidFile)
-		if err == nil {
-			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-			if err == nil && pid > 0 {
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
+	var once sync.Once
+	var ready [1]byte
+	var n int
+	var readyErr error
+	killProcessGroup = func(int) {
+		once.Do(func() {
+			// Start has returned. Closing the parent's duplicate ensures EOF if
+			// the child exits (including watchdog kill) without reporting ready.
+			readyW.Close()
+			if _, readyErr = stdinW.WriteString("start\n"); readyErr != nil {
 				return
 			}
-		}
-		if cmd != nil && cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-	})
+			n, readyErr = readyR.Read(ready[:])
+		})
+		// Simulate a child that cannot be killed. It has written partial stdout
+		// and is blocked on stdin before the reap-grace timer can begin, even
+		// if the deadline fired before the child was scheduled.
+	}
 
-	cmd = exec.Command("sh", "-c", `echo $$ > "$PIDFILE"; echo started; sleep 30`)
-	cmd.Env = append(os.Environ(), "PIDFILE="+pidFile)
-
-	start := time.Now()
 	out, err := runProcess(context.Background(), cmd, 1)
-	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("timeout must report a result, not a tool error: %v", err)
 	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("timeout waited for process exit instead of returning captured output: took %v", elapsed)
+	if readyErr != nil || n != 1 || ready[0] != 'x' {
+		t.Fatalf("child readiness: n=%d marker=%q err=%v", n, ready, readyErr)
 	}
-	if !strings.Contains(out, "started") {
-		t.Fatalf("partial output before timeout not reported: %q", out)
+	if err := guard.Err(); err != nil {
+		t.Fatalf("failure watchdog fired: %v", err)
 	}
-	if !strings.Contains(out, "timed out after 1s") {
-		t.Fatalf("timeout should be noted in output: %q", out)
-	}
-	if !strings.Contains(out, "wait did not finish") {
-		t.Fatalf("unfinished wait should be noted in output: %q", out)
+	want := "started\n[timed out after 1s; process group kill signaled; wait did not finish]\n[exit code: -1]"
+	if out != want {
+		t.Fatalf("output = %q, want %q", out, want)
 	}
 }
 

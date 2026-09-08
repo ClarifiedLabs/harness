@@ -4,20 +4,23 @@ import (
 	"bytes"
 	"context"
 	cryptorand "crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"math"
 	"math/rand"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"harness/internal/buildinfo"
 	"harness/internal/logging"
@@ -43,6 +46,8 @@ type Exporter struct {
 	exportGate       chan struct{}
 	health           Health
 	regularPoints    int
+	overflowReasons  [overflowReasonCount]uint64
+	overflowFamilies int
 	lifecycleMu      sync.Mutex
 	periodicCancel   context.CancelFunc
 	periodicDone     chan struct{}
@@ -82,16 +87,22 @@ type histPoint struct {
 
 const (
 	aggTemporalityCumulative = 2
-	// Policy: 128 families, each with up to 64 ordinary series and one reserved
-	// overflow series; ordinary series also share a 1024-series global cap.
-	// Each family's 16KiB resident-size estimate includes metadata and reserves
-	// overflow storage (2MiB total). Self metrics bypass these ordinary budgets.
-	// No cumulative series is evicted/reset.
-	maxQueuePoints         = 1024
+	// Ordinary series share a 16MiB estimated aggregation budget, not equal
+	// family partitions. Reserve maximum metadata/overflow storage for ALL
+	// possible families up front; never release unused reservations. Otherwise
+	// a rejected in-flight identity could become ordinary before its finish.
+	// Self metrics bypass admission. No cumulative series is evicted/reset.
+	maxQueuePoints         = 8192
 	maxMetricFamilies      = 128
-	maxSeriesPerMetric     = 64
-	maxResidentBytes       = 2 * 1024 * 1024
-	maxMetricResidentBytes = maxResidentBytes / maxMetricFamilies
+	maxSeriesPerMetric     = 256
+	maxResidentBytes       = 16 * 1024 * 1024
+	maxMetricResidentBytes = 1024 * 1024
+	maxFamilyReserveBytes  = 4 * 1024
+	// Portable admission estimates, not exact Go heap sizes. Include retained
+	// strings/slices separately; changing key encoding must not hide their cost.
+	metricOverheadBytes    = 256
+	pointOverheadBytes     = 128
+	attributeOverheadBytes = 64
 	maxHistogramBounds     = 128
 	maxMetricAttributes    = 16
 	maxResponseBytes       = 8 * 1024
@@ -156,6 +167,7 @@ func NewExporter(cfg Config, build buildinfo.Metadata, sessionID, provider, mode
 		resourceAttrs: ra,
 		startNano:     strconv.FormatInt(time.Now().UnixNano(), 10),
 		metrics:       make(map[string]*aggregatedMetric),
+		approxBytes:   maxMetricFamilies * maxFamilyReserveBytes,
 		exportGate:    make(chan struct{}, 1),
 		shutdownDone:  make(chan struct{}),
 		waitRetry:     waitForRetry,
@@ -192,22 +204,20 @@ func (e *Exporter) SetPeriodic(ctx context.Context, logger *slog.Logger) {
 		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
-		var dropped, overflow uint64
+		var loss periodicLossReporter
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
 				err := e.Export(ctx)
-				h := e.Health()
 				if logger != nil && ctx.Err() == nil {
 					if err != nil {
 						logger.Warn("periodic OTEL export failed", logging.Category("otel"), "err", err)
-					} else if h.Dropped > dropped || h.Overflow > overflow {
-						logger.Warn("periodic OTEL export lost metric detail", logging.Category("otel"), "dropped", h.Dropped-dropped, "overflow", h.Overflow-overflow)
+					} else {
+						loss.report(logger, time.Now(), e.lossSnapshot())
 					}
 				}
-				dropped, overflow = h.Dropped, h.Overflow
 			}
 		}
 	}()
@@ -372,8 +382,20 @@ func (e *Exporter) updateNumberPoint(pt *numberPoint, kind string, intVal int64,
 	}
 }
 
-func metricApproxBytes(name, unit string) int { return len(name) + len(unit) + 32 }
-func pointApproxBytes(fp string) int          { return len(fp) + 16 }
+func metricApproxBytes(name, unit string) int {
+	return len(name) + len(unit) + metricOverheadBytes
+}
+
+func (m *aggregatedMetric) pointApproxBytes(fp string, attrs []keyValue) int {
+	charge := pointOverheadBytes + len(fp) + attributeOverheadBytes*len(attrs)
+	for _, a := range attrs {
+		charge += len(a.Key) + len(a.Value.StringValue)
+	}
+	if m.kind == "histogram" {
+		charge += 8 * (len(m.histBounds) + 1)
+	}
+	return charge
+}
 
 func (e *Exporter) recordHistogram(name, unit string, value float64, attrs map[string]string, bounds []float64) {
 	e.mu.Lock()
@@ -434,12 +456,15 @@ func (e *Exporter) metricLocked(name, unit, kind string, monotonic bool, bounds 
 		e.dropped++
 		return nil
 	}
+	// Own exactly the admitted strings, not a short substring of caller storage.
+	name, unit = strings.Clone(name), strings.Clone(unit)
 	m := &aggregatedMetric{name: name, unit: unit, kind: kind, monotonic: monotonic,
 		temporality: aggTemporalityCumulative, points: make(map[string]*numberPoint),
 		histPoints: make(map[string]*histPoint), histBounds: append([]float64(nil), bounds...)}
 	e.metrics[name] = m
-	m.residentBytes = metricApproxBytes(name, unit) + 8*len(bounds)
-	e.approxBytes += m.residentBytes
+	// Metadata/bounds and overflow are already covered by the fixed global
+	// reservations; include them in this family's guardrail without recharging.
+	m.residentBytes = metricApproxBytes(name, unit) + 8*len(bounds) + m.pointApproxBytes(overflowFingerprint, overflowAttrs())
 	return m
 }
 
@@ -447,41 +472,64 @@ func (e *Exporter) metricLocked(name, unit, kind string, monotonic bool, bounds 
 // gauges retain the last overflow sample. Its reserved storage is independent
 // of ordinary budgets so a hot family cannot starve all later families.
 func (e *Exporter) pointIdentityLocked(m *aggregatedMetric, attrs map[string]string) ([]keyValue, string) {
-	valid := len(attrs) <= maxMetricAttributes
-	for key := range attrs {
-		if len(key) > 64 || strings.TrimSpace(key) == overflowKey {
-			valid = false
-		}
-	}
-	var kv []keyValue
-	var fp string
+	kv, valid := sanitizeAttrs(attrs)
+	reason := overflowAttributes
 	if valid {
-		kv = attrsFromMap(sanitizeAttrs(attrs))
-		fp = fingerprint(kv)
+		fp := fingerprint(kv)
 		if m.points[fp] != nil || m.histPoints[fp] != nil {
 			return kv, fp
 		}
-		charge := pointApproxBytes(fp) + 8*(len(m.histBounds)+1)
-		overflowReserve := pointApproxBytes(overflowFingerprint) + 8*(len(m.histBounds)+1)
-		valid = m.regularPoints < maxSeriesPerMetric && e.regularPoints < maxQueuePoints && m.residentBytes+charge+overflowReserve <= maxMetricResidentBytes
-	}
-	if valid {
-		return kv, fp
+		charge := m.pointApproxBytes(fp, kv)
+		switch {
+		case m.regularPoints >= maxSeriesPerMetric:
+			reason = overflowFamilySeries
+		case e.regularPoints >= maxQueuePoints:
+			reason = overflowGlobalSeries
+		case m.residentBytes+charge > maxMetricResidentBytes:
+			reason = overflowFamilyBytes
+		case e.approxBytes+charge > maxResidentBytes:
+			reason = overflowGlobalBytes
+		default:
+			for i := range kv {
+				kv[i].Key = strings.Clone(kv[i].Key)
+				kv[i].Value.StringValue = strings.Clone(kv[i].Value.StringValue)
+			}
+			return kv, fp
+		}
 	}
 	e.health.Overflow++
+	e.overflowReasons[reason]++
+	if pt := m.points[overflowFingerprint]; pt != nil {
+		return pt.attrs, overflowFingerprint
+	}
+	if pt := m.histPoints[overflowFingerprint]; pt != nil {
+		return pt.attrs, overflowFingerprint
+	}
+	e.overflowFamilies++
+	return overflowAttrs(), overflowFingerprint
+}
+
+func overflowAttrs() []keyValue {
 	yes := true
-	return []keyValue{{Key: overflowKey, Value: anyValue{BoolValue: &yes}}}, overflowFingerprint
+	return []keyValue{{Key: overflowKey, Value: anyValue{BoolValue: &yes}}}
 }
 
 func (e *Exporter) chargePointLocked(m *aggregatedMetric, fp string) {
-	charge := pointApproxBytes(fp) + 8*(len(m.histBounds)+1)
 	e.pointCount++
-	e.approxBytes += charge
-	if fp != overflowFingerprint {
-		e.regularPoints++
-		m.regularPoints++
-		m.residentBytes += charge
+	if fp == overflowFingerprint {
+		return // Already covered by permanent per-family reservations.
 	}
+	var attrs []keyValue
+	if m.kind == "histogram" {
+		attrs = m.histPoints[fp].attrs
+	} else {
+		attrs = m.points[fp].attrs
+	}
+	charge := m.pointApproxBytes(fp, attrs)
+	e.approxBytes += charge
+	e.regularPoints++
+	m.regularPoints++
+	m.residentBytes += charge
 }
 
 func updateHistogramPoint(pt *histPoint, value float64) {
@@ -502,34 +550,64 @@ func bucketIndex(v float64, bounds []float64) int {
 	return len(bounds)
 }
 
+// fingerprint encodes canonical ordinary STRING attributes in key order. Length
+// framing handles arbitrary delimiters/NULs; the prefix separates nonempty
+// ordinary identities from the overflow sentinel. Empty attributes remain "".
 func fingerprint(attrs []keyValue) string {
 	if len(attrs) == 0 {
 		return ""
 	}
-	// JSON framing avoids collisions from delimiters inside keys and values.
-	data, _ := json.Marshal(attrs)
-	return string(data)
+	size := 1
+	for _, a := range attrs {
+		size += 8 + len(a.Key) + len(a.Value.StringValue)
+	}
+	var out strings.Builder
+	out.Grow(size)
+	out.WriteByte(0)
+	var length [4]byte
+	for _, a := range attrs {
+		binary.BigEndian.PutUint32(length[:], uint32(len(a.Key)))
+		out.Write(length[:])
+		out.WriteString(a.Key)
+		binary.BigEndian.PutUint32(length[:], uint32(len(a.Value.StringValue)))
+		out.Write(length[:])
+		out.WriteString(a.Value.StringValue)
+	}
+	return out.String()
 }
 
-func sanitizeAttrs(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
+func sanitizeAttrs(in map[string]string) ([]keyValue, bool) {
+	if len(in) > maxMetricAttributes {
+		return nil, false
 	}
-	out := make(map[string]string, len(in))
+	out := make([]keyValue, 0, len(in))
 	for k, v := range in {
+		if len(k) > 64 {
+			return nil, false
+		}
 		k = strings.TrimSpace(k)
-		v = strings.TrimSpace(v)
+		if !utf8.ValidString(k) {
+			k = string([]rune(k)) // Match JSON's repair of invalid UTF-8.
+		}
+		if len(k) > 64 || k == overflowKey {
+			return nil, false
+		}
 		if k == "" {
 			continue
 		}
-		// Truncate bounded labels: keys as-is, values capped 128
-		if len([]rune(v)) > 128 {
-			v = truncate(v, 128)
+		v = truncate(strings.TrimSpace(v), 128)
+		if !utf8.ValidString(v) {
+			v = string([]rune(v))
 		}
-		// Lowercase some known enum keys? Keep original case for values but normalize known labels
-		out[k] = v
+		out = append(out, stringAttr(k, v))
 	}
-	return out
+	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
+	for i := 1; i < len(out); i++ {
+		if out[i-1].Key == out[i].Key {
+			return nil, false // Never choose a normalized duplicate by map order.
+		}
+	}
+	return out, true
 }
 
 // Export serializes the entire cumulative snapshot/retry sequence. Waiting for
@@ -628,6 +706,8 @@ func (e *Exporter) MetricsForTest() map[string]*aggregatedMetric {
 	return out
 }
 
+// Copy mutable values, but share admitted immutable attributes and bounds.
+// Sorting retained keys avoids rebuilding serialized identities in comparisons.
 func (e *Exporter) snapshotMetricsLocked() []metric {
 	nowNano := strconv.FormatInt(time.Now().UnixNano(), 10)
 	var metrics []metric
@@ -635,9 +715,10 @@ func (e *Exporter) snapshotMetricsLocked() []metric {
 		switch m.kind {
 		case "sum":
 			var dps []numberDataPoint
-			for _, pt := range m.points {
+			for _, fp := range slices.Sorted(maps.Keys(m.points)) {
+				pt := m.points[fp]
 				dp := numberDataPoint{
-					Attributes:        sortedAttrs(pt.attrs),
+					Attributes:        pt.attrs,
 					StartTimeUnixNano: e.startNano,
 					TimeUnixNano:      nowNano,
 				}
@@ -649,7 +730,6 @@ func (e *Exporter) snapshotMetricsLocked() []metric {
 				}
 				dps = append(dps, dp)
 			}
-			sort.Slice(dps, func(i, j int) bool { return fingerprint(dps[i].Attributes) < fingerprint(dps[j].Attributes) })
 			metrics = append(metrics, metric{
 				Name: m.name, Unit: m.unit,
 				Sum: &sum{
@@ -660,9 +740,10 @@ func (e *Exporter) snapshotMetricsLocked() []metric {
 			})
 		case "gauge":
 			var dps []numberDataPoint
-			for _, pt := range m.points {
+			for _, fp := range slices.Sorted(maps.Keys(m.points)) {
+				pt := m.points[fp]
 				dp := numberDataPoint{
-					Attributes:   sortedAttrs(pt.attrs),
+					Attributes:   pt.attrs,
 					TimeUnixNano: nowNano,
 				}
 				if pt.hasFloat {
@@ -673,30 +754,29 @@ func (e *Exporter) snapshotMetricsLocked() []metric {
 				}
 				dps = append(dps, dp)
 			}
-			sort.Slice(dps, func(i, j int) bool { return fingerprint(dps[i].Attributes) < fingerprint(dps[j].Attributes) })
 			metrics = append(metrics, metric{
 				Name: m.name, Unit: m.unit,
 				Gauge: &gauge{DataPoints: dps},
 			})
 		case "histogram":
 			var dps []histogramDataPoint
-			for _, pt := range m.histPoints {
+			for _, fp := range slices.Sorted(maps.Keys(m.histPoints)) {
+				pt := m.histPoints[fp]
 				bucketCounts := make([]string, len(pt.buckets))
 				for i, c := range pt.buckets {
 					bucketCounts[i] = strconv.FormatUint(c, 10)
 				}
 				sum := pt.sum
 				dps = append(dps, histogramDataPoint{
-					Attributes:        sortedAttrs(pt.attrs),
+					Attributes:        pt.attrs,
 					StartTimeUnixNano: e.startNano,
 					TimeUnixNano:      nowNano,
 					Count:             strconv.FormatUint(pt.count, 10),
 					Sum:               &sum,
 					BucketCounts:      bucketCounts,
-					ExplicitBounds:    append([]float64(nil), pt.bounds...),
+					ExplicitBounds:    pt.bounds,
 				})
 			}
-			sort.Slice(dps, func(i, j int) bool { return fingerprint(dps[i].Attributes) < fingerprint(dps[j].Attributes) })
 			metrics = append(metrics, metric{
 				Name: m.name, Unit: m.unit,
 				Histogram: &histogram{
