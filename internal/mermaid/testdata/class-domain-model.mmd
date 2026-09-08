@@ -1,0 +1,74 @@
+%% Domain model: namespaces, generics, annotations, visibility markers,
+%% every relation type and cardinality labels.
+%% want: Repository<T>
+%% want: <<interface>>
+%% want: places
+classDiagram
+    direction TB
+
+    namespace commerce {
+        class Customer {
+            +String id
+            +String email
+            -Address billing
+            +placeOrder(Cart) Order
+            +history() List~Order~
+        }
+        class Order {
+            +String id
+            +OrderState state
+            +List~LineItem~ items
+            +total() Money
+            +cancel() void
+        }
+    }
+
+    class LineItem {
+        +String sku
+        +int quantity
+        +Money unitPrice
+        +subtotal() Money
+    }
+
+    class Money {
+        <<value object>>
+        +long amount
+        +String currency
+        +plus(Money) Money
+    }
+
+    class Repository~T~ {
+        <<interface>>
+        +find(String id) T
+        +save(T entity) void
+        +delete(String id) void
+    }
+
+    class OrderRepository {
+        -Connection conn
+        +find(String id) Order
+        +save(Order entity) void
+        +delete(String id) void
+    }
+
+    class PaymentMethod {
+        <<abstract>>
+        #String token
+        +charge(Money) Receipt
+    }
+
+    class CreditCard
+    class BankTransfer
+    class Receipt
+
+    Customer "1" --> "0..*" Order : places
+    Order "1" *-- "1..*" LineItem : contains
+    LineItem "*" --> "1" Money : priced in
+    Order ..> Money : totals
+    Repository~T~ <|.. OrderRepository : implements
+    OrderRepository ..> Order : manages
+    PaymentMethod <|-- CreditCard
+    PaymentMethod <|-- BankTransfer
+    Order o-- PaymentMethod : paid with
+    PaymentMethod ..> Receipt : issues
+    Customer --o Receipt : receives

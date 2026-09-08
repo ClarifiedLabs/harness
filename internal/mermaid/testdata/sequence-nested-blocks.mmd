@@ -1,0 +1,46 @@
+%% Every block construct, nested three deep: par/and, critical/option,
+%% break, rect and loop, mixed with alt/else.
+%% want: Coordinator
+%% want: compensate
+sequenceDiagram
+    participant C as Coordinator
+    participant I as Inventory
+    participant P as Payments
+    participant S as Shipping
+
+    C->>I: reserve items
+
+    critical reserve stock
+        I-->>C: reserved
+    option out of stock
+        I-->>C: unavailable
+    option timeout
+        I--xC: no response
+    end
+
+    par charge card
+        C->>P: authorize
+        P-->>C: approved
+    and reserve courier
+        C->>S: book slot
+        S-->>C: slot 14:00
+    and warm cache
+        C->>C: prefetch catalogue
+    end
+
+    rect rgb(200, 220, 240)
+        loop up to 3 attempts
+            C->>P: capture funds
+            alt captured
+                P-->>C: receipt
+            else declined
+                C->>I: release stock
+                I-->>C: compensate done
+                break payment abandoned
+                    C->>S: cancel slot
+                end
+            end
+        end
+    end
+
+    Note over C,S: saga complete

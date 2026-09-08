@@ -83,7 +83,8 @@ type Options struct {
 	// ColorTheme selects syntax colors when ANSI is enabled. Its zero value is dark.
 	ColorTheme highlight.Theme
 	// Width enables visible-width wrapping for paragraphs, list item bodies, and
-	// tables when positive.
+	// tables when positive. Flowcharts adapt to this width (less Prefix), using
+	// DefaultWidth when nonpositive; other diagram kinds keep their natural width.
 	Width int
 	// Prefix is prepended to each non-empty rendered line.
 	Prefix string
@@ -99,14 +100,18 @@ func Render(text string, opts Options) string {
 }
 
 // Stream renders Markdown from incremental text deltas. Complete lines are
-// emitted as soon as possible; tables are buffered until the table block ends so
-// column widths can be calculated.
+// emitted as soon as possible; tables and Mermaid fences are buffered until the
+// block ends so their layout can be calculated.
 type Stream struct {
-	opts        Options
-	pending     string
-	table       []tableLine
-	inFence     bool
-	fenceMarker string
+	opts            Options
+	pending         string
+	table           []tableLine
+	inFence         bool
+	fenceMarker     string
+	diagram         []fenceLine // opening delimiter and body of a buffered Mermaid fence
+	diagramFallback bool        // remaining source after an unclosed Mermaid flush
+	diagramBytes    int
+	diagramPartial  bool // a fallback source line has already emitted a fragment
 	// code highlights the body of the open fence. It is nil for an unlabeled
 	// fence, an unrecognized language, or when ANSI is off, and a nil
 	// highlighter leaves lines untouched.
@@ -140,10 +145,12 @@ func (s *Stream) Write(text string) string {
 		s.pending = s.pending[i+1:]
 		s.renderLine(&out, line, true)
 	}
+	s.flushMermaidPending(&out)
 	return out.String()
 }
 
-// Flush renders any buffered incomplete line or pending table block.
+// Flush renders any buffered incomplete line, table, or unclosed Mermaid fence.
+// It finalizes buffered blocks at a display boundary, not just at EOF.
 func (s *Stream) Flush() string {
 	if !s.opts.Enabled {
 		return ""
@@ -155,6 +162,7 @@ func (s *Stream) Flush() string {
 		s.renderLine(&out, line, false)
 	}
 	s.flushTable(&out)
+	s.flushMermaid(&out, false)
 	return out.String()
 }
 
@@ -166,17 +174,15 @@ func (s *Stream) LineOpen() bool {
 
 // AtLineBoundary reports whether external scrolling output can be inserted
 // without flushing buffered source or splitting a physical output line. A
-// complete buffered table/fence line remains a safe boundary.
+// complete buffered table or Mermaid source line remains a safe boundary.
 func (s *Stream) AtLineBoundary() bool {
 	return s.pending == "" && !s.lineOpen
 }
 
-// HasBufferedTable reports whether a markdown table is currently buffered and
-// not yet flushed. A caller that would flush the stream (e.g. to insert a
-// status line) can use it to avoid splitting a table across two flushes,
-// which would render the halves with different column widths.
-func (s *Stream) HasBufferedTable() bool {
-	return len(s.table) > 0
+// HasBufferedBlock reports whether a table or Mermaid fence is buffered. Callers
+// repainting transient status lines must not Flush and split these layouts.
+func (s *Stream) HasBufferedBlock() bool {
+	return len(s.table) > 0 || s.diagram != nil
 }
 
 // CloseLine tells the stream that the caller wrote an external newline after an
@@ -189,16 +195,32 @@ func (s *Stream) renderLine(out *strings.Builder, line string, newline bool) {
 	line = strings.TrimRight(strings.ReplaceAll(line, "\t", "    "), " \r")
 
 	if s.inFence {
+		if s.diagram != nil {
+			s.bufferMermaidLine(out, line, newline)
+			return
+		}
 		s.flushTable(out)
+		if s.diagramFallback {
+			if s.diagramPartial {
+				s.writeMermaidPartial(out, line, newline)
+				return
+			}
+			line = diagramText(line)
+		}
 		// The closing delimiter is not code, so it is written unstyled.
 		if strings.HasPrefix(strings.TrimSpace(line), s.fenceMarker) {
 			s.inFence = false
 			s.fenceMarker = ""
 			s.code = nil
+			s.diagramFallback = false
+			s.diagramPartial = false
 			s.writeLine(out, s.opts.Prefix+"  "+line, newline)
 			return
 		}
 		s.writeLine(out, s.opts.Prefix+"  "+s.code.Line(line), newline)
+		if s.diagramFallback {
+			s.diagramPartial = !newline
+		}
 		return
 	}
 
@@ -206,6 +228,10 @@ func (s *Stream) renderLine(out *strings.Builder, line string, newline bool) {
 		s.flushTable(out)
 		s.inFence = true
 		s.fenceMarker = marker
+		if strings.EqualFold(info, "mermaid") {
+			s.diagram = []fenceLine{{text: line, newline: newline}}
+			return
+		}
 		if s.opts.ANSI {
 			s.code = highlight.NewWithTheme(info, s.opts.ColorTheme)
 		}

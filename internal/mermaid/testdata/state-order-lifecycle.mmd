@@ -1,0 +1,46 @@
+%% Order lifecycle: composite states, choice/fork/join pseudo-states, quoted
+%% aliases, state descriptions and multi-line notes.
+%% want: Awaiting payment
+%% want: Cancelled
+%% want: fraud check
+stateDiagram-v2
+    [*] --> Draft
+    Draft --> Submitted: submit
+
+    state "Awaiting payment" as Awaiting
+    Submitted --> Awaiting: reserve stock
+
+    state fraud_check <<choice>>
+    Awaiting --> fraud_check: fraud check
+    fraud_check --> Paid: score < 40
+    fraud_check --> Review: score >= 40
+    Review --> Paid: approve
+    Review --> Cancelled: reject
+
+    state fork_ship <<fork>>
+    state join_ship <<join>>
+    Paid --> fork_ship
+    fork_ship --> Picking
+    fork_ship --> Invoicing
+    Picking --> join_ship
+    Invoicing --> join_ship
+    join_ship --> Shipped
+
+    Shipped --> Delivered: courier scan
+    Delivered --> Closed: 30 days
+    Delivered --> Returned: customer return
+    Returned --> Refunded
+    Refunded --> Closed
+
+    Draft --> Cancelled: abandon
+    Awaiting --> Cancelled: timeout
+    Cancelled --> [*]
+    Closed --> [*]
+
+    Picking: pick and pack
+    Invoicing: generate invoice
+
+    note right of Review
+      Manual queue, staffed
+      during business hours.
+    end note

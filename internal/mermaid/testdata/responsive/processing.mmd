@@ -1,0 +1,13 @@
+flowchart TD
+    U["Desktop contributor"]
+    B["Existing report builder"]
+    M["Report metadata, content categories and timestamps"]
+    A["Stored document-processing archive"]
+    W["Future background task service"]
+
+    U -->|"Upload source text + images + notes; retry"| B
+    B -->|"Validate submitted document contents/settings"| M
+    B -->|"Atomically archive input contents + output reports"| A
+    B -->|"5-minute progress update + status check"| U
+    U -.->|"Future preview requests: report + edits"| W
+    A -.->|"Future worker: automated batch processing"| W

@@ -1,0 +1,23 @@
+---
+title: Incident response runbook
+config:
+  theme: forest
+---
+%% Front matter title plus an init directive, both stripped before layout.
+%% want: Incident response runbook
+%% want: Page on-call
+%% want: Post-mortem
+%%{init: {'theme':'dark', 'flowchart':{'curve':'basis'}}}%%
+flowchart TD
+    Alert[/Alert fires/] --> Triage{Severity?}
+    Triage -->|SEV1| Page[Page on-call]
+    Triage -->|SEV2| Ticket[Open ticket]
+    Triage -->|noise| Silence[Silence rule]
+
+    Page --> War[War room]
+    War --> Mitigate[Mitigate]
+    Ticket --> Mitigate
+    Mitigate --> Verify{Recovered?}
+    Verify -->|no| War
+    Verify -->|yes| Postmortem[Post-mortem]
+    Postmortem -.->|action items| Silence

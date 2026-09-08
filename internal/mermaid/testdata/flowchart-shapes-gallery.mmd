@@ -1,0 +1,32 @@
+%% Every supported node shape plus label edge cases: quoting, <br/> line
+%% breaks, HTML entities, unicode (including double-width CJK, which must be
+%% measured in terminal columns, not runes) and multi-statement lines.
+%% want: Ünïcodé
+%% want: 日本語
+%% want: 한글 ＡＢ
+%% want: has [brackets]
+%% want: a & b
+%% want: Parallelogram
+%% want: Trapezoid
+flowchart TD
+    rect[Rectangle] --> round(Rounded)
+    round --> stadium([Stadium shape])
+    stadium --> sub[[Subroutine]]
+    sub --> cyl[(Database)]
+    cyl --> circ((Circle))
+    circ --> diam{Decision?}
+    diam --> hex{{Hexagon}}
+    hex --> asym>Asymmetric]
+    asym --> para[/Parallelogram/]
+    para --> paraAlt[\Alt parallelogram\]
+    paraAlt --> trap[/Trapezoid\]
+    trap --> trapAlt[\Alt trapezoid/]
+
+    trapAlt --> quoted["has [brackets] and (parens)"]
+    quoted --> multi["First line<br/>second line<br>third line"]
+    multi --> entity["a &amp; b &lt;tag&gt;"]
+    entity --> uni[Ünïcodé ✓ 日本語]
+    uni --> wide[한글 ＡＢ ｱｲｳ]
+    wide --> dashed-id-node[Dashed id]
+
+    dashed-id-node --> t1; t1 --> t2; t2 --> t3

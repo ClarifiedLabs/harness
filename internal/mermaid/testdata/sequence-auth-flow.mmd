@@ -1,0 +1,50 @@
+%% OAuth-style handshake: aliased participants, autonumber, activations,
+%% nested alt/opt/loop blocks and notes spanning several lifelines.
+%% want: Browser
+%% want: Authorization server
+%% want: refresh
+sequenceDiagram
+    autonumber
+    participant U as User
+    participant B as Browser
+    participant A as Authorization server
+    participant R as Resource API
+    participant D as Token store
+
+    U->>B: open /dashboard
+    activate B
+    B->>A: GET /authorize?scope=read
+    activate A
+    Note over B,A: PKCE challenge attached
+
+    alt credentials valid
+        A->>U: consent screen
+        U-->>A: approve
+        A-->>B: 302 with auth code
+    else credentials invalid
+        A-->>B: 401 invalid_grant
+        B->>U: show error
+    end
+    deactivate A
+
+    B->>A: POST /token (code)
+    A->>D: persist refresh token
+    D-->>A: ok
+    A-->>B: access + refresh token
+    deactivate B
+
+    loop every request
+        B->>R: GET /data (bearer)
+        R->>A: introspect token
+        A-->>R: active=true
+        R-->>B: 200 payload
+
+        opt token expired
+            B->>A: POST /token (refresh)
+            A->>D: rotate refresh token
+            D-->>A: new pair
+            A-->>B: refreshed tokens
+        end
+    end
+
+    Note right of D: rotation is audited

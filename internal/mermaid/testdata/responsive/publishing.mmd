@@ -1,0 +1,12 @@
+flowchart LR
+    I["Incoming document collection"]
+    D["Prepared draft set"]
+    C["Document contents"]
+    R["Published report"]
+    S["Selected-source package"]
+
+    I -->|"loads source files"| D
+    D -->|"merges"| C
+    C -->|"generates documents"| R
+    I -->|"loads source files"| S
+    S -->|"contains selected examples"| C

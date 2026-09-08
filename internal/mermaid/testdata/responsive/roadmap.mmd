@@ -1,0 +1,15 @@
+flowchart TD
+    P1["P1 · Planning, milestones and examples"]
+    P2["P2 · Data preparation"]
+    P3["P3 · Report generation"]
+    P4["P4 · Background processing — planned"]
+    P5["P5 · Desktop app integration — planned"]
+    P6["P6 · End-to-end verification — planned"]
+
+    P1 --> P2
+    P1 --> P3
+    P1 --> P4
+    P3 --> P4
+    P2 --> P5
+    P4 --> P5
+    P5 --> P6

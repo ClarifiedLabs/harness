@@ -144,7 +144,7 @@ internal/lsptools        harness-side adapter exposing short `lsp_*` tools over 
 ```
 
 The block above lists the core data path plus the optional MCP/LSP surfaces; a few
-small leaf packages (`inputimage`, `markdown`, `replprompt`, `httpserve`, `httpx`,
+small leaf packages (`inputimage`, `markdown`, `mermaid`, `replprompt`, `httpserve`, `httpx`,
 `mcpchild`, `term`) are omitted for brevity.
 
 `internal/llm` is the shared contract between the agent loop and any model provider.
@@ -2961,6 +2961,38 @@ for note-file and lookup operations.
   implementation plan follows the same Markdown, color, and width policy, while the
   implementation-context copy retains the original Markdown
   source. Redirected one-shot stdout remains raw model text.
+- `internal/markdown.Stream` buffers case-insensitive `mermaid` fences and calls
+  the stdlib-only `internal/mermaid` ASCII renderer, ported from mdcli. It supports
+  flowcharts, sequence, state, and class diagrams. Closing the fence or calling
+  `Flush` at a durable display boundary renders the diagram; parser/render errors
+  emit the original normalized indented fence instead. An unfinished fence keeps
+  recognizing its closer after a forced flush, with later body lines displayed
+  as plain code. Buffering falls back once source exceeds 64 KiB; the Mermaid
+  package also limits nodes/participants and node/note lists or state nesting to
+  256, expanded edges/events and virtual layout nodes to 1,024 each, and the
+  canvas (including a front-matter title) to 4,096 columns/rows and 1,000,000
+  bounding-rectangle cells. Checks precede expansion and canvas allocation and
+  return errors wrapping `mermaid.ErrLimitExceeded` for the source fallback.
+  Harness retains a smaller virtual-node budget than mdcli's 8,192 to bound
+  synchronous live-display work across responsive layout attempts. Flowcharts use
+  `mermaid.Options.Width`: the Markdown width (80 when unset) minus the visible
+  prefix, with at least one content column. The renderer tries the natural layout,
+  then node-label wrapping at 32/24/16 columns, and may rotate LR/RL to TD/BT.
+  Overflow, overlapping/clipped edge labels, or unrepresentable self-loops produce
+  a declaration-ordered Nodes/Connections list preserving labels and edge styles,
+  with indented continuation lines where space permits to distinguish label text
+  from list structure.
+  Resource-limit failures still fall back to source, never a list. Adaptive titles
+  and lists obey the canvas bounds; their UTF-8 output is also capped at 4,000,000
+  bytes. Sequence, state, and class diagrams keep their natural width. Output
+  preserves prefixes and final newline state, bypasses prose/Markdown wrapping,
+  and filters terminal and Unicode bidi controls from diagram labels, titles,
+  and fallback text.
+  Transient wait-counter repaints use `HasBufferedBlock` to avoid prematurely
+  flushing either tables or diagrams. Complete buffered source lines remain safe
+  delegate-output boundaries without flushing. This shared stream covers live
+  output, reasoning summaries, displayed plans, replay, and follow; disabled
+  Markdown and stored/model-facing text retain the original source.
 - Recognized language tags on fenced code blocks use the stateful, stdlib-only,
   additive highlighter in `internal/term/highlight` when ANSI is enabled. Each
   code or diff state carries an immutable copied `dark` or `light` palette; there

@@ -1,0 +1,26 @@
+%% Left-to-right service map: parallel edges between the same pair, cylinders,
+%% long labels and every line style.
+%% want: API gateway
+%% want: Postgres
+%% want: publish
+flowchart LR
+    Client([Mobile client]) --> GW[API gateway]
+    GW --> Auth[Auth service]
+    GW --> Orders[Order service]
+    GW --> Search[Search service]
+
+    Auth --> Users[(Users DB)]
+    Orders --> PG[(Postgres)]
+    Orders -->|publish| Bus{{Event bus}}
+    Orders -->|read model| Cache[(Redis cache)]
+    Bus ==> Ship[Shipping worker]
+    Bus ==> Mail[Email worker]
+    Bus ==> Search
+
+    Ship --> PG
+    Ship -.->|retry with backoff| Bus
+    Search --> Index[(Search index)]
+    Cache -.-> PG
+
+    Mail --x Dead[Dead letter queue]
+    Dead --o Ops[On-call rotation]

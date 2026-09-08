@@ -1,0 +1,63 @@
+%% Deep inheritance hierarchy with interfaces, a diamond, empty classes and
+%% members declared both inline and via the `Class : member` shorthand.
+%% want: Shape
+%% want: <<interface>>
+%% want: draw()
+classDiagram
+    class Drawable {
+        <<interface>>
+        +draw() void
+        +bounds() Rect
+    }
+    class Serializable {
+        <<interface>>
+        +toJSON() String
+    }
+
+    class Shape {
+        <<abstract>>
+        #String id
+        #Style style
+        +draw() void
+        +area() double
+        +bounds() Rect
+    }
+
+    Drawable <|.. Shape
+    Serializable <|.. Shape
+
+    class Polygon
+    Polygon : +Point[] vertices
+    Polygon : +int sideCount()
+    Polygon : +area() double
+
+    class Ellipse
+    Ellipse : +double rx
+    Ellipse : +double ry
+    Ellipse : +area() double
+
+    Shape <|-- Polygon
+    Shape <|-- Ellipse
+
+    class Triangle
+    class Quadrilateral
+    class Rectangle
+    class Square
+    class Circle
+    class Rect
+
+    Polygon <|-- Triangle
+    Polygon <|-- Quadrilateral
+    Quadrilateral <|-- Rectangle
+    Rectangle <|-- Square
+    Ellipse <|-- Circle
+
+    class Style {
+        +String stroke
+        +String fill
+        +double width
+    }
+
+    Shape *-- Style : styled by
+    Shape ..> Rect : returns
+    Square ..|> Drawable

@@ -1,0 +1,37 @@
+%% CI/CD pipeline: subgraphs, mixed shapes, fan-out/fan-in, labelled branches.
+%% want: Developer
+%% want: Unit tests
+%% want: Promote
+%% want: rollback
+flowchart TD
+    Dev([Developer]) -->|git push| Hook{{Webhook}}
+    Hook --> Queue[(Build queue)]
+
+    subgraph CI [Continuous integration]
+      direction TB
+      Queue --> Lint[Lint] & Unit[Unit tests] & Build[[Compile]]
+      Lint --> Gate{All green?}
+      Unit --> Gate
+      Build --> Gate
+    end
+
+    Gate -->|no| Notify[Notify author]
+    Notify -.-> Dev
+    Gate -->|yes| Artifact[(Artifact store)]
+
+    subgraph CD [Delivery]
+      Artifact ==> Staging[Deploy staging]
+      Staging --> Smoke{Smoke tests}
+      Smoke -->|fail| Rollback[Roll back]
+      Smoke -->|pass| Promote[Promote to prod]
+    end
+
+    Rollback -.->|rollback| Artifact
+    Promote --> Prod((Production))
+    Prod -.-> Metrics[Metrics]
+    Metrics -.->|regression| Rollback
+
+    classDef green fill:#9f9,stroke:#333
+    class Promote,Prod green
+    style Rollback fill:#f99
+    click Dev href "https://example.com"

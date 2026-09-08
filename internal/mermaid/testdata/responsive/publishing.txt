@@ -1,0 +1,23 @@
+         +------------------------------+
+         | Incoming document collection |
+         +------------------------------+
+                         |
+           +-------------+ loads source files
+           |             +--------------+ loads source files
+           v                            v
++--------------------+     +-------------------------+
+| Prepared draft set |     | Selected-source package |
++--------------------+     +-------------------------+
+           |                            |
+        merges                          |
+           + contains selected examples +
+           v
+ +-------------------+
+ | Document contents |
+ +-------------------+
+           |
+  generates documents
+           v
+ +------------------+
+ | Published report |
+ +------------------+

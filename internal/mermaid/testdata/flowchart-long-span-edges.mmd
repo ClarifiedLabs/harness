@@ -1,0 +1,13 @@
+%% Deep chain crossed by long-span edges, forcing many virtual pass-through
+%% nodes on the intermediate ranks (solid, dotted and thick all skipping ranks).
+%% want: Stage 1
+%% want: Stage 8
+%% want: fast path
+flowchart TD
+    S1[Stage 1] --> S2[Stage 2] --> S3[Stage 3] --> S4[Stage 4]
+    S4 --> S5[Stage 5] --> S6[Stage 6] --> S7[Stage 7] --> S8[Stage 8]
+
+    S1 -->|fast path| S8
+    S2 -.->|skip ahead| S6
+    S3 ==>|bulk copy| S7
+    S8 -->|restart| S1

@@ -1,0 +1,19 @@
+%% Bottom-to-top with interlocking cycles, self-loops and invisible links.
+%% Exercises cycle breaking, self-loop clearance and lineNone layout spacing.
+%% want: Scheduler
+%% want: requeue
+flowchart BT
+    Done[Done] --> Report[Report]
+    Task[Task] --> Done
+    Task --> Task
+    Retry[Retry] --> Task
+    Task -->|failed| Retry
+    Retry -->|give up| Dead[Dead letter]
+
+    Sched[Scheduler] --> Task
+    Report -->|requeue| Sched
+    Sched --> Sched
+
+    Dead ~~~ Report
+    Audit[Audit log] ~~~ Sched
+    Report --> Audit

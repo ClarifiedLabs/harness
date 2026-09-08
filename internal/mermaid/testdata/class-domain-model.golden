@@ -1,0 +1,67 @@
+                                            +-------------------------+
+                                            |      <<interface>>      |
+                                            |      Repository<T>      |
+                                            +-------------------------+
+                                            +-------------------------+
+                                            | +find(String id) T      |
+                                            | +save(T entity) void    |
+                                            | +delete(String id) void |
+                                            +-------------------------+
+                                                         ^
+                                                    implements
+                                                         :
+           +-------------------------+     +--------------------------+
+           |        Customer         |     |     OrderRepository      |
+           +-------------------------+     +--------------------------+
+           | +String id              |     | -Connection conn         |
+           | +String email           |     +--------------------------+
+           | -Address billing        |     | +find(String id) Order   |
+           +-------------------------+     | +save(Order entity) void |
+           | +placeOrder(Cart) Order |     | +delete(String id) void  |
+           | +history() List<Order>  |     +--------------------------+
+           +-------------------------+                   :
+                        |                                :
+                        +-- 1 places 0..* --+            :
+                        |                   +. manages ..+
+     +------------------+                   :
+     |                                      v
+     |                          +-----------------------+
+     |                          |         Order         |
+     |                          +-----------------------+
+     |                          | +String id            |
+     |                          | +OrderState state     |
+     |                          | +List<LineItem> items |
+     |                          +-----------------------+
+     |                          | +total() Money        |
+     |                          | +cancel() void        |
+     |                          +-----------------------+
+     |                                      o
+     |                     +----------------+ 1 contains 1..*
+     |                     |               ++ totals
+     |                     |               :+--- paid with ---+
+ receives                  |               :                  |
+     |                     |               :                  |
+     |           +-------------------+     :     +------------------------+
+     |           |     LineItem      |     :     |      <<abstract>>      |
+     |           +-------------------+     :     |     PaymentMethod      |
+     |           | +String sku       |     :     +------------------------+
+     |           | +int quantity     |     :     | #String token          |
+     |           | +Money unitPrice  |     :     +------------------------+
+     |           +-------------------+     :     | +charge(Money) Receipt |
+     |           | +subtotal() Money |     :     +------------------------+
+     |           +-------------------+     :                  ^
+     |                     |               :                  :
+     |               * priced in 1         :                  :
+     |                     +...............+                  :
+     |                     :                      +-----------+-------+
+     +.....................+. issues .............+...........+       |
+     o                     v                      |                   |
++---------+     +--------------------+     +------------+     +--------------+
+| Receipt |     |  <<value object>>  |     | CreditCard |     | BankTransfer |
++---------+     |       Money        |     +------------+     +--------------+
+                +--------------------+
+                | +long amount       |
+                | +String currency   |
+                +--------------------+
+                | +plus(Money) Money |
+                +--------------------+

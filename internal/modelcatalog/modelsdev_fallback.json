@@ -16700,6 +16700,51 @@
           ]
         }
       },
+      "global.openai.gpt-6-astra": {
+        "id": "global.openai.gpt-6-astra",
+        "name": "GPT-6 Astra (Global)",
+        "release_date": "2026-09-04",
+        "last_updated": "2026-09-04",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 10,
+          "output": 50,
+          "cache_read": 1,
+          "cache_write": 12.5,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 20,
+              "output": 75,
+              "cache_read": 2,
+              "cache_write": 25
+            }
+          ]
+        }
+      },
       "global.xai.grok-4.6": {
         "id": "global.xai.grok-4.6",
         "name": "Grok 4.6 (Global)",
@@ -17717,6 +17762,54 @@
           ]
         }
       },
+      "openai.gpt-6-astra": {
+        "id": "openai.gpt-6-astra",
+        "name": "GPT-6 Astra",
+        "release_date": "2026-09-04",
+        "last_updated": "2026-09-04",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "provider": {
+          "shape": "responses"
+        },
+        "cost": {
+          "input": 11,
+          "output": 55,
+          "cache_read": 1.1,
+          "cache_write": 13.75,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 22,
+              "output": 82.5,
+              "cache_read": 2.2,
+              "cache_write": 27.5
+            }
+          ]
+        }
+      },
       "openai.gpt-oss-120b": {
         "id": "openai.gpt-oss-120b",
         "name": "gpt-oss-120b",
@@ -18500,6 +18593,51 @@
         "cost": {
           "input": 0.17,
           "output": 0.66
+        }
+      },
+      "us.openai.gpt-6-astra": {
+        "id": "us.openai.gpt-6-astra",
+        "name": "GPT-6 Astra (US)",
+        "release_date": "2026-09-04",
+        "last_updated": "2026-09-04",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 11,
+          "output": 55,
+          "cache_read": 1.1,
+          "cache_write": 13.75,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 22,
+              "output": 82.5,
+              "cache_read": 2.2,
+              "cache_write": 27.5
+            }
+          ]
         }
       },
       "us.xai.grok-4.6": {
@@ -31504,6 +31642,41 @@
           "cache_write": 0.038
         }
       },
+      "gemini-3.8-flash": {
+        "id": "gemini-3.8-flash",
+        "name": "Gemini 3.8 Flash",
+        "release_date": "2026-09-02",
+        "last_updated": "2026-09-02",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65535
+        },
+        "cost": {
+          "input": 0.825,
+          "output": 4.125,
+          "cache_read": 0.082,
+          "cache_write": 0.084
+        }
+      },
       "gemma-3-27b-it": {
         "id": "gemma-3-27b-it",
         "name": "gemma-3-27b-it",
@@ -42039,6 +42212,48 @@
               "input": 4,
               "output": 18,
               "cache_read": 0.4
+            }
+          ]
+        }
+      },
+      "openai-gpt-6-astra": {
+        "id": "openai-gpt-6-astra",
+        "name": "OpenAI GPT-6 Astra",
+        "release_date": "2026-09-04",
+        "last_updated": "2026-09-04",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 10,
+          "output": 50,
+          "cache_read": 1,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 20,
+              "output": 75,
+              "cache_read": 2
             }
           ]
         }
@@ -77127,11 +77342,11 @@
           "cache_read": 0.025
         }
       },
-      "inception/mercury-2.5-preview": {
-        "id": "inception/mercury-2.5-preview",
-        "name": "Inception: Mercury 2.5 Preview",
-        "release_date": "2026-08-31",
-        "last_updated": "2026-08-31",
+      "inception/mercury-2.5": {
+        "id": "inception/mercury-2.5",
+        "name": "Inception: Mercury 2.5",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
         "modalities": {
           "input": [
             "text"
@@ -78596,7 +78811,7 @@
         ],
         "limit": {
           "context": 262144,
-          "output": 235929
+          "output": 100352
         },
         "cost": {
           "input": 0.6,
@@ -78765,6 +78980,59 @@
         "cost": {
           "input": 0.9,
           "output": 1.9
+        }
+      },
+      "nex-agi/nex-n2.5-mini:free": {
+        "id": "nex-agi/nex-n2.5-mini:free",
+        "name": "Nex AGI: Nex-N2.5-Mini (free)",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 235929
+        }
+      },
+      "nex-agi/nex-n2.5-pro:free": {
+        "id": "nex-agi/nex-n2.5-pro:free",
+        "name": "Nex AGI: Nex-N2.5-Pro (free)",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 235929
         }
       },
       "nousresearch/hermes-3-llama-3.1-405b": {
@@ -84572,9 +84840,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 2.5,
-          "output": 14,
-          "cache_read": 0.29
+          "input": 2.55,
+          "output": 12.75,
+          "cache_read": 0.256
         }
       },
       "~openai/gpt-latest": {
@@ -84708,12 +84976,12 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 131072
+          "output": 943718
         },
         "cost": {
-          "input": 0.07125,
-          "output": 0.2375,
-          "cache_read": 0.01425
+          "input": 0.075,
+          "output": 0.25,
+          "cache_read": 0.015
         }
       },
       "~z-ai/glm-latest": {
@@ -85277,9 +85545,9 @@
           "output": 32768
         },
         "cost": {
-          "input": 0.41,
-          "output": 2.5,
-          "cache_read": 0.08
+          "input": 0.2,
+          "output": 2,
+          "cache_read": 0.05
         }
       },
       "auto": {
@@ -94908,9 +95176,9 @@
           "output": 32768
         },
         "cost": {
-          "input": 0.41,
-          "output": 2.5,
-          "cache_read": 0.08
+          "input": 0.2,
+          "output": 2,
+          "cache_read": 0.05
         }
       },
       "consensusprotocol/deepseek-v4-flash": {
@@ -126394,9 +126662,9 @@
           "output": 32768
         },
         "cost": {
-          "input": 0.25,
-          "output": 1,
-          "cache_read": 0.125
+          "input": 0.35,
+          "output": 1.4,
+          "cache_read": 0.175
         }
       },
       "z-ai/glm-5.3:thinking": {
@@ -145935,9 +146203,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.08554,
-          "output": 0.17108,
-          "cache_read": 0.017108
+          "input": 0.08092,
+          "output": 0.16184,
+          "cache_read": 0.016184
         }
       },
       "deepseek/deepseek-v4-flash-0731": {
@@ -146037,9 +146305,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.953172,
-          "output": 1.906344,
-          "cache_read": 0.079431
+          "input": 0.9396,
+          "output": 1.8792,
+          "cache_read": 0.0783
         }
       },
       "deepseek/deepseek-v4-pro-0813": {
@@ -147171,11 +147439,11 @@
           "cache_read": 0.025
         }
       },
-      "inception/mercury-2.5-preview": {
-        "id": "inception/mercury-2.5-preview",
-        "name": "Mercury 2.5 Preview",
-        "release_date": "2026-08-31",
-        "last_updated": "2026-08-31",
+      "inception/mercury-2.5": {
+        "id": "inception/mercury-2.5",
+        "name": "Mercury 2.5",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
         "modalities": {
           "input": [
             "text"
@@ -148459,11 +148727,12 @@
         "reasoning": true,
         "limit": {
           "context": 262144,
-          "output": 235929
+          "output": 100352
         },
         "cost": {
           "input": 0.6,
-          "output": 2.5
+          "output": 2.5,
+          "cache_read": 0.15
         }
       },
       "moonshotai/kimi-k2.5": {
@@ -148614,6 +148883,59 @@
         "cost": {
           "input": 0.9,
           "output": 1.9
+        }
+      },
+      "nex-agi/nex-n2.5-mini:free": {
+        "id": "nex-agi/nex-n2.5-mini:free",
+        "name": "Nex-N2.5-Mini (free)",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 235929
+        }
+      },
+      "nex-agi/nex-n2.5-pro:free": {
+        "id": "nex-agi/nex-n2.5-pro:free",
+        "name": "Nex-N2.5-Pro (free)",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 235929
         }
       },
       "nousresearch/hermes-3-llama-3.1-405b": {
@@ -148784,7 +149106,7 @@
           }
         ],
         "limit": {
-          "context": 1000000,
+          "context": 262144,
           "output": 16384
         },
         "cost": {
@@ -154172,9 +154494,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 2.5,
-          "output": 14,
-          "cache_read": 0.29
+          "input": 2.55,
+          "output": 12.75,
+          "cache_read": 0.256
         }
       },
       "~openai/gpt-latest": {
@@ -154325,12 +154647,12 @@
         ],
         "limit": {
           "context": 1310720,
-          "output": 131072
+          "output": 943718
         },
         "cost": {
-          "input": 0.07125,
-          "output": 0.2375,
-          "cache_read": 0.01425
+          "input": 0.075,
+          "output": 0.25,
+          "cache_read": 0.015
         }
       },
       "~z-ai/glm-latest": {
@@ -173076,6 +173398,52 @@
           "input": 1.375,
           "output": 11,
           "cache_read": 0.1375
+        }
+      },
+      "gpt-6-astra": {
+        "id": "gpt-6-astra",
+        "name": "GPT-6 Astra",
+        "release_date": "2026-09-04",
+        "last_updated": "2026-09-04",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "max"
+            ]
+          },
+          {
+            "type": "budget_tokens"
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 10,
+          "output": 50,
+          "cache_read": 1,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 20,
+              "output": 75,
+              "cache_read": 2
+            }
+          ]
         }
       },
       "grok-4.2-beta": {
@@ -193219,6 +193587,40 @@
           "cache_read": 0.066
         }
       },
+      "deepseek/deepseek-v4.1-flash-beta": {
+        "id": "deepseek/deepseek-v4.1-flash-beta",
+        "name": "DeepSeek V4.1 Flash Beta",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "type": "effort",
+            "values": [
+              "high",
+              "xhigh"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "cost": {
+          "input": 0.22,
+          "output": 0.66,
+          "cache_read": 0.007
+        }
+      },
       "fish-audio/s1": {
         "id": "fish-audio/s1",
         "name": "S1",
@@ -194033,6 +194435,38 @@
           "input": 0.25,
           "output": 0.75,
           "cache_read": 0.024999999999999998
+        }
+      },
+      "inception/mercury-2.5": {
+        "id": "inception/mercury-2.5",
+        "name": "Mercury 2.5",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 260000,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.04,
+          "output": 0.15,
+          "cache_read": 0.004
         }
       },
       "inception/mercury-coder-small": {
@@ -197066,6 +197500,38 @@
           "cache_read": 1.25
         }
       },
+      "openai/gpt-image-2.5-flare": {
+        "id": "openai/gpt-image-2.5-flare",
+        "name": "GPT Image 2.5 Flare",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 5,
+          "output": 30,
+          "cache_read": 1.25
+        }
+      },
+      "openai/gpt-image-2.5-sunburst": {
+        "id": "openai/gpt-image-2.5-sunburst",
+        "name": "GPT Image 2.5 Sunburst",
+        "release_date": "2026-09-08",
+        "last_updated": "2026-09-08",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "cost": {
+          "input": 5,
+          "output": 30,
+          "cache_read": 1.25
+        }
+      },
       "openai/gpt-oss-120b": {
         "id": "openai/gpt-oss-120b",
         "name": "GPT OSS 120B",
@@ -198786,32 +199252,6 @@
           "cache_read": 0.0036
         }
       },
-      "xiaomi/mimo-v2.5-pro-ultraspeed": {
-        "id": "xiaomi/mimo-v2.5-pro-ultraspeed",
-        "name": "MiMo V2.5 Pro UltraSpeed",
-        "release_date": "2026-06-08",
-        "last_updated": "2026-06-09",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 1048576,
-          "output": 131072
-        },
-        "cost": {
-          "input": 1.305,
-          "output": 2.61,
-          "cache_read": 0.0108
-        }
-      },
       "zai/glm-4.5": {
         "id": "zai/glm-4.5",
         "name": "GLM 4.5",
@@ -199163,9 +199603,9 @@
           "output": 1000000
         },
         "cost": {
-          "input": 0.7,
-          "output": 2.2,
-          "cache_read": 0.13
+          "input": 1.4,
+          "output": 4.4,
+          "cache_read": 0.14
         }
       },
       "zai/glm-5.3-fast": {
@@ -199229,27 +199669,6 @@
           "input": 0.15,
           "output": 0.5,
           "cache_read": 0.03
-        }
-      },
-      "zai/glm-5.3-promo-50": {
-        "id": "zai/glm-5.3-promo-50",
-        "name": "GLM 5.3 (50% off)",
-        "release_date": "2026-08-18",
-        "last_updated": "2026-08-18",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "limit": {
-          "context": 1048576,
-          "output": 1048576
-        },
-        "cost": {
-          "input": 0.7,
-          "output": 2.2,
-          "cache_read": 0.13
         }
       },
       "zai/glm-5v-turbo": {

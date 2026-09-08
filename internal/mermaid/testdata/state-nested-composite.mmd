@@ -1,0 +1,40 @@
+%% Deeply nested composite states (flattened by the renderer), concurrent
+%% regions separated by `--`, and transitions that cross composite boundaries.
+%% want: Connecting
+%% want: Streaming
+%% want: heartbeat
+stateDiagram-v2
+    direction TB
+    [*] --> Offline
+
+    state Offline {
+        [*] --> Idle
+        Idle --> Dialing: connect
+        Dialing --> Idle: abort
+    }
+
+    Offline --> Online: link up
+
+    state Online {
+        [*] --> Connecting
+        Connecting --> Ready: handshake ok
+        Connecting --> Failed: handshake error
+
+        state Ready {
+            [*] --> Buffering
+            Buffering --> Streaming: buffer full
+            Streaming --> Buffering: underrun
+            Streaming --> Streaming: heartbeat
+            --
+            [*] --> Monitoring
+            Monitoring --> Degraded: loss > 2%
+            Degraded --> Monitoring: recovered
+        }
+
+        Failed --> Connecting: retry
+        Ready --> Draining: shutdown
+    }
+
+    Draining --> Offline: link down
+    Online --> [*]: fatal
+    Degraded --> Failed: give up

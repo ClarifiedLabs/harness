@@ -784,33 +784,33 @@ func TestStreamBoundaryQueryDoesNotFlushPendingTextOrTable(t *testing.T) {
 	}
 }
 
-func TestHasBufferedTable(t *testing.T) {
+func TestHasBufferedBlock(t *testing.T) {
 	stream := NewStream(Options{Enabled: true})
-	if stream.HasBufferedTable() {
+	if stream.HasBufferedBlock() {
 		t.Fatal("new stream should not have buffered table")
 	}
 	stream.Write("| A | B |\n| --- | --- |\n")
-	if !stream.HasBufferedTable() {
+	if !stream.HasBufferedBlock() {
 		t.Fatal("buffered table header+separator should be reported")
 	}
 	stream.Write("| 1 | 2 |\n")
-	if !stream.HasBufferedTable() {
+	if !stream.HasBufferedBlock() {
 		t.Fatal("table with one data row should still be buffered")
 	}
 	if got := stream.Write("\n"); !strings.Contains(got, "| A") {
 		t.Fatalf("non-table blank line should flush table, got %q", got)
 	}
-	if stream.HasBufferedTable() {
+	if stream.HasBufferedBlock() {
 		t.Fatal("table should not remain buffered after flush")
 	}
 	stream.Write("| X | Y |\n| --- | --- |\n")
-	if !stream.HasBufferedTable() {
+	if !stream.HasBufferedBlock() {
 		t.Fatal("second table should be buffered")
 	}
 	if got := stream.Flush(); !strings.Contains(got, "| X") {
 		t.Fatalf("Flush should emit buffered table, got %q", got)
 	}
-	if stream.HasBufferedTable() {
+	if stream.HasBufferedBlock() {
 		t.Fatal("Flush should clear buffered table state")
 	}
 }

@@ -1,0 +1,15 @@
+%% Wide scatter/gather: one node fans out to twelve and back in again.
+%% Stresses cross-axis assignment and crossing reduction on a very wide rank.
+%% want: Partition
+%% want: Reduce
+flowchart TD
+    Input[Input file] --> Split{Partition}
+    Split --> w01[Worker 01] & w02[Worker 02] & w03[Worker 03] & w04[Worker 04]
+    Split --> w05[Worker 05] & w06[Worker 06] & w07[Worker 07] & w08[Worker 08]
+    Split --> w09[Worker 09] & w10[Worker 10] & w11[Worker 11] & w12[Worker 12]
+
+    w01 & w02 & w03 & w04 --> Merge[Reduce]
+    w05 & w06 & w07 & w08 --> Merge
+    w09 & w10 & w11 & w12 --> Merge
+
+    Merge --> Output[(Result set)]

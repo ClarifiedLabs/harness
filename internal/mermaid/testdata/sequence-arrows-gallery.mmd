@@ -1,0 +1,39 @@
+%% Every arrow form, self-messages, note placements, participant boxes and
+%% create/destroy, plus a right-to-left message that crosses the whole diagram.
+%% want: Alpha
+%% want: Ephemeral
+%% want: solid open
+sequenceDiagram
+    title Arrow gallery
+    box Core services
+      participant A as Alpha
+      participant B as Beta
+    end
+    box Edge
+      participant C as Gamma
+    end
+
+    A->B: solid open
+    A->>B: solid arrow
+    A-->C: dashed open
+    A-->>C: dashed arrow
+    B-xC: solid cross
+    B--xC: dashed cross
+    B-)C: solid async
+    B--)C: dashed async
+    A<<->>C: bidirectional
+
+    A->>A: self call
+    B->>B: recursive check
+
+    Note left of A: leftmost note
+    Note right of C: rightmost note
+    Note over A,C: spans every lifeline
+
+    create participant E as Ephemeral
+    A->>E: spawn
+    E-->>A: ready
+    destroy E
+    A-xE: terminate
+
+    C-->>A: long return trip

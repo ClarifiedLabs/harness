@@ -1,0 +1,27 @@
+                                       +---------------------+
+                                       | Desktop contributor |
+                                       +---------------------+
+                                                  ^
+                                    +-------------+ Upload source text + images + notes; retry
+                                    +-------------+ 5-minute progress update + status check
+                                    |             +............................+
+                                    v                                          :
+                       +-------------------------+                             :
+                       | Existing report builder |                             :
+                       +-------------------------+                             :
+                                    |                                          :
+              +---------------------+ Validate submitted document contents/settings
+              |                     +----------------------+ Atomically archive input contents + output reports
+              |                                             Future preview requests: report + edits
+              v                                            v                   :
++---------------------------+               +----------------------------+     :
+| Report metadata, content  |               | Stored document-processing |     :
+| categories and timestamps |               |          archive           |     :
++---------------------------+               +----------------------------+     :
+                                                           :                   :
+                                                           +...................+
+                                       Future worker: automated batch processing
+                                                           v
+                                          +--------------------------------+
+                                          | Future background task service |
+                                          +--------------------------------+
