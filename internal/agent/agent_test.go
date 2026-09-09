@@ -2708,7 +2708,7 @@ func TestCancellationWithNoTextDropsMessage(t *testing.T) {
 	assertPromptTermination(t, sink, TerminationCancelled)
 }
 
-func TestUsageAccumulatedAcrossTurns(t *testing.T) {
+func TestUsageReportedPerAttemptAndAccumulatedAcrossTurns(t *testing.T) {
 	tool := &recordTool{name: "echo", run: func(_ context.Context, _ json.RawMessage) (string, error) {
 		return "x", nil
 	}}
@@ -2744,33 +2744,6 @@ func TestUsageAccumulatedAcrossTurns(t *testing.T) {
 		t.Errorf("prompt turns = %d, want 2", pu.Turns)
 	}
 	assertPromptTermination(t, sink, TerminationModelCompleted)
-}
-
-func TestTurnAttemptUsageEmittedForEachProviderReturn(t *testing.T) {
-	tool := &recordTool{name: "echo", run: func(_ context.Context, _ json.RawMessage) (string, error) {
-		return "x", nil
-	}}
-	reg := &tools.Registry{}
-	reg.Register(tool)
-
-	fp := llmtest.New("fake",
-		llmtest.Step{
-			Events: []llm.StreamEvent{toolDone(0, "a", "echo", `{}`)},
-			Stop:   llm.StopToolUse,
-			Usage:  llm.Usage{InputTokens: 100, OutputTokens: 10},
-		},
-		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("done")},
-			Stop:   llm.StopEndTurn,
-			Usage:  llm.Usage{InputTokens: 200, OutputTokens: 20},
-		},
-	)
-	a := newAgent(fp, reg, Options{})
-	sink := &recordSink{}
-
-	if err := a.RunPrompt(context.Background(), "go", sink); err != nil {
-		t.Fatalf("RunPrompt: %v", err)
-	}
 	if len(sink.attemptUsage) != 2 {
 		t.Fatalf("turn attempt usage events = %d, want 2", len(sink.attemptUsage))
 	}

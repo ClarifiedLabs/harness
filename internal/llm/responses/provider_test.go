@@ -66,6 +66,11 @@ func TestStreamTextOnly(t *testing.T) {
 	if done.Usage == nil || *done.Usage != want {
 		t.Errorf("usage = %+v, want %+v", done.Usage, want)
 	}
+	gotKinds := llmtest.WithoutKind(llmtest.KindsOf(events), llm.EventUsage)
+	wantKinds := []llm.EventKind{llm.EventTextDelta, llm.EventTextDelta, llm.EventDone}
+	if !llmtest.EqualKinds(gotKinds, wantKinds) {
+		t.Errorf("event kinds = %v, want %v", gotKinds, wantKinds)
+	}
 }
 
 func TestStreamReportsServedServiceTier(t *testing.T) {
@@ -117,20 +122,6 @@ func TestNormalizeUsageClampsReasoningToOutputTotal(t *testing.T) {
 	want := llm.Usage{ReasoningTokens: 3}
 	if got != want {
 		t.Fatalf("usage = %+v, want %+v", got, want)
-	}
-}
-
-func TestStreamTextOnlyEventOrder(t *testing.T) {
-	srv := llmtest.ServeSSEFixture(t, "text_only.sse")
-	p := testProvider(t, srv, nil)
-	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.4")))
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	gotKinds := llmtest.WithoutKind(llmtest.KindsOf(events), llm.EventUsage)
-	wantKinds := []llm.EventKind{llm.EventTextDelta, llm.EventTextDelta, llm.EventDone}
-	if !llmtest.EqualKinds(gotKinds, wantKinds) {
-		t.Errorf("event kinds = %v, want %v", gotKinds, wantKinds)
 	}
 }
 

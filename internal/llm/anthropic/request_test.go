@@ -183,10 +183,10 @@ func TestBuildRequestOmitsCompactionMetadata(t *testing.T) {
 	}
 }
 
-func TestBuildRequestMaxTokensDefaultSmallWindow(t *testing.T) {
+func TestBuildRequestMaxTokensContextWindowHint(t *testing.T) {
 	req := basicRequest()
-	// A small window makes contextWindow/4 the binding default.
-	w := buildRequest(req, 20_000, 0)
+	req.ContextWindowHint = 20_000
+	w := buildRequest(req, 1_000_000, 0)
 	if w.MaxTokens != 5_000 {
 		t.Errorf("max_tokens = %d, want 5000 (window/4)", w.MaxTokens)
 	}
@@ -210,12 +210,28 @@ func TestBuildRequestSpeed(t *testing.T) {
 	}
 }
 
-func TestBuildRequestMaxTokensDefaultLargeWindow(t *testing.T) {
-	req := basicRequest()
-	// A large window uses a quarter of the context window by default.
-	w := buildRequest(req, 1_000_000, 0)
-	if w.MaxTokens != 250_000 {
-		t.Errorf("max_tokens = %d, want 250000", w.MaxTokens)
+func TestBuildRequestMaxTokensRequiredWhenWindowUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		outputLimit int
+		want        int
+	}{
+		{name: "default", want: 1_000_000},
+		{name: "catalog ceiling", outputLimit: 64_000, want: 64_000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			w := buildRequest(basicRequest(), 0, tc.outputLimit)
+			if w.MaxTokens != tc.want {
+				t.Fatalf("max_tokens = %d, want %d", w.MaxTokens, tc.want)
+			}
+			b, err := json.Marshal(w)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if !bytes.Contains(b, []byte(`"max_tokens":`)) {
+				t.Fatalf("required token cap missing: %s", b)
+			}
+		})
 	}
 }
 
@@ -237,23 +253,6 @@ func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
 	}
 }
 
-func TestBuildRequestMaxTokensSmallCatalogOutputLimit(t *testing.T) {
-	req := basicRequest()
-	w := buildRequest(req, 1_000_000, 8_000)
-	if w.MaxTokens != 8_000 {
-		t.Errorf("max_tokens = %d, want 8000", w.MaxTokens)
-	}
-}
-
-func TestBuildRequestMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
-	req := basicRequest()
-	req.EstimatedInputTokens = 4_436
-	w := buildRequest(req, 262_144, 262_144)
-	if w.MaxTokens != 65_536 {
-		t.Fatalf("max_tokens = %d, want 65536", w.MaxTokens)
-	}
-}
-
 func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 	req := basicRequest()
 	req.MaxTokens = 100_000
@@ -261,15 +260,6 @@ func TestBuildRequestMaxTokensClampsExplicitValue(t *testing.T) {
 	w := buildRequest(req, 100_000, 0)
 	if w.MaxTokens != 7_000 {
 		t.Fatalf("max_tokens = %d, want 7000", w.MaxTokens)
-	}
-}
-
-func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
-	req := basicRequest()
-	req.MaxTokens = 333
-	w := buildRequest(req, 1_000_000, 64_000)
-	if w.MaxTokens != 333 {
-		t.Errorf("max_tokens = %d, want 333 (user-set beats catalog output limit)", w.MaxTokens)
 	}
 }
 

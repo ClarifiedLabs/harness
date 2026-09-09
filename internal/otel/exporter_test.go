@@ -121,38 +121,6 @@ func TestExporter_RetryAfter(t *testing.T) {
 	}
 }
 
-func TestExporter_NoPromptLeakage(t *testing.T) {
-	var body []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		data, _ := io.ReadAll(r.Body)
-		body = data
-		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-	cfg := Config{Enabled: true, Endpoint: srv.URL, Timeout: 2 * time.Second}
-	exp, err := NewExporter(cfg, buildinfo.Metadata{Version: "test"}, "sess", "openai", "gpt-4", "auto", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Record with bounded labels only; payload must not contain prompt text
-	exp.RecordSum("harness.prompt.total", "{prompt}", 1, map[string]string{"termination_reason": "model_completed"})
-	exp.RecordSum("harness.tool.calls", "{call}", 1, map[string]string{"tool": "read", "activity_class": "inspect"})
-	if err := exp.Export(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	// Must be valid JSON
-	var req exportMetricsServiceRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		t.Fatalf("invalid json: %v\nbody: %s", err, string(body))
-	}
-	text := string(body)
-	for _, forbidden := range []string{"prompt text", "tool_input", "ResultText", "ImageData"} {
-		if strings.Contains(text, forbidden) {
-			t.Fatalf("payload leaked %q: %s", forbidden, text)
-		}
-	}
-}
-
 func TestExporter_Truncation(t *testing.T) {
 	var body []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

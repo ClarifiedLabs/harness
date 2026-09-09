@@ -117,17 +117,10 @@ func TestBuildRequestServiceTier(t *testing.T) {
 	}
 }
 
-func TestBuildRequestMaxOutputTokensFloorLargeWindow(t *testing.T) {
-	// A large window uses a quarter of the context window by default.
-	w := buildRequest(basicRequest(), 1_000_000, 0)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 250_000 {
-		t.Fatalf("max_output_tokens = %v, want 250000", w.MaxOutputTokens)
-	}
-}
-
-func TestBuildRequestMaxOutputTokensFloorSmallWindow(t *testing.T) {
-	// A small window makes window/4 the binding default.
-	w := buildRequest(basicRequest(), 20_000, 0)
+func TestBuildRequestMaxOutputTokensContextWindowHint(t *testing.T) {
+	req := basicRequest()
+	req.ContextWindowHint = 20_000
+	w := buildRequest(req, 1_000_000, 0)
 	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 5_000 {
 		t.Fatalf("max_output_tokens = %v, want 5000 (window/4)", w.MaxOutputTokens)
 	}
@@ -145,22 +138,6 @@ func TestBuildRequestMaxOutputTokensCatalogOutputLimit(t *testing.T) {
 	w := buildRequest(basicRequest(), 1_000_000, 100_000)
 	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 100_000 {
 		t.Fatalf("max_output_tokens = %v, want 100000", w.MaxOutputTokens)
-	}
-}
-
-func TestBuildRequestMaxOutputTokensSmallCatalogOutputLimit(t *testing.T) {
-	w := buildRequest(basicRequest(), 1_000_000, 8_000)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 8_000 {
-		t.Fatalf("max_output_tokens = %v, want 8000", w.MaxOutputTokens)
-	}
-}
-
-func TestBuildRequestMaxOutputTokensClampsFullWindowOutputLimit(t *testing.T) {
-	req := basicRequest()
-	req.EstimatedInputTokens = 4_436
-	w := buildRequest(req, 262_144, 262_144)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 65_536 {
-		t.Fatalf("max_output_tokens = %v, want 65536", w.MaxOutputTokens)
 	}
 }
 
@@ -197,15 +174,6 @@ func TestBuildRequestMaxOutputTokensRaisedToConfiguredFloor(t *testing.T) {
 	})
 	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 32 {
 		t.Fatalf("max_output_tokens = %v, want 32 (configured floor)", w.MaxOutputTokens)
-	}
-}
-
-func TestBuildRequestMaxOutputTokensUserSetBeatsOutputLimit(t *testing.T) {
-	req := basicRequest()
-	req.MaxTokens = 333
-	w := buildRequest(req, 1_000_000, 100_000)
-	if w.MaxOutputTokens == nil || *w.MaxOutputTokens != 333 {
-		t.Fatalf("max_output_tokens = %v, want 333 (user-set beats catalog output limit)", w.MaxOutputTokens)
 	}
 }
 

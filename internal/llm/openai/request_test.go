@@ -103,19 +103,10 @@ func TestBuildRequestMaxTokensUserSet(t *testing.T) {
 	}
 }
 
-func TestBuildRequestMaxTokensFloorLargeWindow(t *testing.T) {
-	// A large window uses a quarter of the context window by default.
+func TestBuildRequestMaxTokensContextWindowHint(t *testing.T) {
 	req := basicRequest()
+	req.ContextWindowHint = 20_000
 	w := buildRequest(req, 1_000_000, 0)
-	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 250_000 {
-		t.Fatalf("max_completion_tokens = %v, want 250000", w.MaxCompletionTokens)
-	}
-}
-
-func TestBuildRequestMaxTokensFloorSmallWindow(t *testing.T) {
-	// A small window makes window/4 the binding default.
-	req := basicRequest()
-	w := buildRequest(req, 20_000, 0)
 	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 5_000 {
 		t.Fatalf("max_completion_tokens = %v, want 5000 (window/4)", w.MaxCompletionTokens)
 	}
@@ -127,14 +118,6 @@ func TestBuildRequestMaxTokensCatalogOutputLimit(t *testing.T) {
 	w := buildRequest(req, 1_000_000, 128_000)
 	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 128_000 {
 		t.Fatalf("max_completion_tokens = %v, want 128000", w.MaxCompletionTokens)
-	}
-}
-
-func TestBuildRequestMaxTokensSmallCatalogOutputLimit(t *testing.T) {
-	req := basicRequest()
-	w := buildRequest(req, 1_000_000, 8_000)
-	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 8_000 {
-		t.Fatalf("max_completion_tokens = %v, want 8000", w.MaxCompletionTokens)
 	}
 }
 
@@ -166,15 +149,6 @@ func TestBuildRequestMaxTokensRaisedToConfiguredFloor(t *testing.T) {
 	w := buildRequestWithOptions(req, 1_000_000, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "testai", minOutputTokens: 16})
 	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 16 {
 		t.Fatalf("max_completion_tokens = %v, want 16 (configured floor)", w.MaxCompletionTokens)
-	}
-}
-
-func TestBuildRequestMaxTokensUserSetBeatsOutputLimit(t *testing.T) {
-	req := basicRequest()
-	req.MaxTokens = 333
-	w := buildRequest(req, 1_000_000, 128_000)
-	if w.MaxCompletionTokens == nil || *w.MaxCompletionTokens != 333 {
-		t.Fatalf("max_completion_tokens = %v, want 333 (user-set beats catalog output limit)", w.MaxCompletionTokens)
 	}
 }
 

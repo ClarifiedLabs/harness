@@ -5,19 +5,40 @@ import (
 	"testing"
 )
 
-func TestResolveMaxTokensUnknownOutputLimit(t *testing.T) {
-	req := Request{EstimatedInputTokens: 1000}
-	if got := ResolveMaxTokens(req, 128_000, 0); got != 32_000 {
-		t.Fatalf("ResolveMaxTokens = %d, want 32000", got)
+// Policy arithmetic lives here; dialect tests cover wire fields and policy inputs.
+func TestResolveMaxTokensPolicy(t *testing.T) {
+	tests := []struct {
+		name          string
+		req           Request
+		contextWindow int
+		outputLimit   int
+		want          int
+	}{
+		{name: "unknown limits omit"},
+		{name: "known output unknown context omits", req: Request{EstimatedInputTokens: 1000}, outputLimit: 64_000},
+		{name: "unknown output limit", req: Request{EstimatedInputTokens: 1000}, contextWindow: 128_000, want: 32_000},
+		{name: "small window default", contextWindow: 20_000, want: 5_000},
+		{name: "large window default", contextWindow: 1_000_000, want: 250_000},
+		{name: "default cap", contextWindow: 8_000_000, want: 1_000_000},
+		{name: "catalog 128k ceiling", contextWindow: 1_000_000, outputLimit: 128_000, want: 128_000},
+		{name: "catalog 100k ceiling", req: Request{EstimatedInputTokens: 1000}, contextWindow: 1_000_000, outputLimit: 100_000, want: 100_000},
+		{name: "catalog 64k ceiling", contextWindow: 1_000_000, outputLimit: 64_000, want: 64_000},
+		{name: "small catalog ceiling", contextWindow: 1_000_000, outputLimit: 8_000, want: 8_000},
+		{name: "full window output limit keeps quarter default", req: Request{EstimatedInputTokens: 4_436}, contextWindow: 262_144, outputLimit: 262_144, want: 65_536},
+		{name: "explicit value", req: Request{MaxTokens: 333}, contextWindow: 1_000_000, want: 333},
+		{name: "explicit value unknown context", req: Request{MaxTokens: 333}, want: 333},
+		{name: "explicit below catalog ceiling", req: Request{MaxTokens: 333}, contextWindow: 1_000_000, outputLimit: 64_000, want: 333},
+		{name: "catalog caps explicit value", req: Request{MaxTokens: 100_000}, contextWindow: 1_000_000, outputLimit: 64_000, want: 64_000},
+		{name: "explicit clamped to remaining window", req: Request{MaxTokens: 100_000, EstimatedInputTokens: 90_000}, contextWindow: 100_000, want: 7_000}, // 100000 - 90000 - 3000 reserve
+		{name: "tiny remaining window", req: Request{EstimatedInputTokens: 99_999}, contextWindow: 100_000, outputLimit: 64_000, want: 1},
+		{name: "estimate input when unset", req: Request{System: strings.Repeat("x", 360_000)}, contextWindow: 100_000, want: 7_000},
 	}
-}
-
-func TestResolveMaxTokensClampsFullWindowOutputLimit(t *testing.T) {
-	req := Request{EstimatedInputTokens: 4436}
-	got := ResolveMaxTokens(req, 262_144, 262_144)
-	want := 65_536
-	if got != want {
-		t.Fatalf("ResolveMaxTokens = %d, want %d", got, want)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveMaxTokens(tc.req, tc.contextWindow, tc.outputLimit); got != tc.want {
+				t.Fatalf("ResolveMaxTokens = %d, want %d", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -27,36 +48,6 @@ func TestResolveMaxTokensLeavesProviderAccountingHeadroom(t *testing.T) {
 	const actualProviderInput = 52_762
 	if actualProviderInput+got > 262_144 {
 		t.Fatalf("ResolveMaxTokens = %d leaves actual request at %d, want <= 262144", got, actualProviderInput+got)
-	}
-}
-
-func TestResolveMaxTokensOutputLimitCapsDefault(t *testing.T) {
-	req := Request{EstimatedInputTokens: 1000}
-	if got := ResolveMaxTokens(req, 1_000_000, 100_000); got != 100_000 {
-		t.Fatalf("ResolveMaxTokens = %d, want 100000", got)
-	}
-}
-
-func TestResolveMaxTokensClampsExplicitValue(t *testing.T) {
-	req := Request{MaxTokens: 100_000, EstimatedInputTokens: 90_000}
-	got := ResolveMaxTokens(req, 100_000, 0)
-	want := 7_000 // 100000 - 90000 - 3000 reserve
-	if got != want {
-		t.Fatalf("ResolveMaxTokens = %d, want %d", got, want)
-	}
-}
-
-func TestResolveMaxTokensTinyRemainingWindow(t *testing.T) {
-	req := Request{EstimatedInputTokens: 99_999}
-	if got := ResolveMaxTokens(req, 100_000, 64_000); got != 1 {
-		t.Fatalf("ResolveMaxTokens = %d, want 1", got)
-	}
-}
-
-func TestResolveMaxTokensKnownOutputUnknownContext(t *testing.T) {
-	req := Request{EstimatedInputTokens: 1000}
-	if got := ResolveMaxTokens(req, 0, 64_000); got != 0 {
-		t.Fatalf("ResolveMaxTokens = %d, want 0", got)
 	}
 }
 

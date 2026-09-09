@@ -70,6 +70,17 @@ func TestStreamTextOnly(t *testing.T) {
 	if *done.Usage != want {
 		t.Errorf("final usage = %+v, want %+v", *done.Usage, want)
 	}
+	gotKinds := llmtest.KindsOf(events)
+	wantKinds := []llm.EventKind{
+		llm.EventTextDelta, // Hello
+		llm.EventTextDelta, // !
+		llm.EventDone,
+	}
+	// Usage events may also be emitted; filter to the structural kinds we assert.
+	gotKinds = llmtest.WithoutKind(gotKinds, llm.EventUsage)
+	if !llmtest.EqualKinds(gotKinds, wantKinds) {
+		t.Errorf("event kinds = %v, want %v", gotKinds, wantKinds)
+	}
 }
 
 func TestStreamFastModeHeaderAndServedSpeed(t *testing.T) {
@@ -95,26 +106,6 @@ func TestStreamFastModeHeaderAndServedSpeed(t *testing.T) {
 	done := events[len(events)-1]
 	if done.Usage == nil || done.Usage.Speed != "fast" {
 		t.Fatalf("done usage = %+v, want served fast speed", done.Usage)
-	}
-}
-
-func TestStreamTextOnlyEventOrder(t *testing.T) {
-	srv := llmtest.ServeSSEFixture(t, "text_only.sse")
-	p := testProvider(t, srv, nil)
-	events, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("claude-opus-4-8")))
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	gotKinds := llmtest.KindsOf(events)
-	wantKinds := []llm.EventKind{
-		llm.EventTextDelta, // Hello
-		llm.EventTextDelta, // !
-		llm.EventDone,
-	}
-	// Usage events may also be emitted; filter to the structural kinds we assert.
-	gotKinds = llmtest.WithoutKind(gotKinds, llm.EventUsage)
-	if !llmtest.EqualKinds(gotKinds, wantKinds) {
-		t.Errorf("event kinds = %v, want %v", gotKinds, wantKinds)
 	}
 }
 

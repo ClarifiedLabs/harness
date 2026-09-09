@@ -120,30 +120,22 @@ func fixedUsageProvider(usage llm.Usage) func(factory.Options) (llm.Provider, er
 // no per-model price; the served catalog and request cost come from the
 // supplied models.dev catalog.
 func TestManagedProviderResolvesPriceFromModelsDevCatalog(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+	const providerJSON = `{
   "name": "testai",
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "managed": true,
   "model_discovery": {"enabled":false},
   "models": [{"name":"alpha","context_window":123000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	md := modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 2, Output: 4})
 	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000}
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"testai.json"}},
+	handler := newTestHandler(t, "testai.json", providerJSON, Options{
 		ModelsDevCatalog:    md,
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(usage),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -167,16 +159,13 @@ func TestManagedProviderResolvesPriceFromModelsDevCatalog(t *testing.T) {
 }
 
 func TestManagedProviderResolvesServiceTierAndModePriceFromModelsDevCatalog(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "managed": true,
   "models": [{"name":"gpt-fast","context_window":123000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	md, err := modelcatalog.DecodeModelsDev(strings.NewReader(`{
 	  "openai": {"id":"openai","models": {
 	    "gpt-fast": {
@@ -197,17 +186,12 @@ func TestManagedProviderResolvesServiceTierAndModePriceFromModelsDevCatalog(t *t
 		Stop:   llm.StopEndTurn,
 	})
 
-	handler, err := NewHandler(Options{
-		ConfigDir:        dir,
-		Config:           Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		ModelsDevCatalog: md,
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	targets := handler.Catalog().Targets
 	if len(targets) != 2 {
 		t.Fatalf("served targets = %+v, want base and fast", targets)
@@ -242,8 +226,7 @@ func TestManagedProviderResolvesServiceTierAndModePriceFromModelsDevCatalog(t *t
 }
 
 func TestManagedCodexLegacyFastSnapshotExposesFastTarget(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai-codex",
   "api_type": "responses",
   "base_url": "https://chatgpt.com/backend-api/codex",
@@ -253,9 +236,7 @@ func TestManagedCodexLegacyFastSnapshotExposesFastTarget(t *testing.T) {
     "name": "gpt-codex",
     "service_tiers": [{"id": "fast", "name": "Fast", "request": {"service_tier": "fast"}}]
   }]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}}, Stop: llm.StopEndTurn})
 	state := modeldiscovery.State{Authoritative: true, Snapshot: modeldiscovery.Snapshot{
@@ -264,14 +245,10 @@ func TestManagedCodexLegacyFastSnapshotExposesFastTarget(t *testing.T) {
 			"gpt-codex": {ID: "gpt-codex", Eligible: true, ServiceTiers: []llm.ServiceTier{{ID: "priority", Name: "Fast", Request: llm.ServiceTierRequest{ServiceTier: "priority"}}}},
 		},
 	}}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir, Config: Config{ProviderConfigs: []string{"openai-codex.json"}},
+	handler := newTestHandler(t, "openai-codex.json", providerJSON, Options{
 		ProviderCatalogs: map[string]modeldiscovery.State{"openai-codex": state},
 		New:              func(factory.Options) (llm.Provider, error) { return fp, nil },
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	fast := catalogTarget(t, handler.Catalog(), "openai-codex", "gpt-codex:fast")
 	if fast.BaseTargetID != "openai-codex:gpt-codex" || fast.Variant != "fast" {
 		t.Fatalf("Codex Fast target = %+v", fast)
@@ -298,30 +275,22 @@ func TestManagedCodexLegacyFastSnapshotExposesFastTarget(t *testing.T) {
 // price_source names a different models.dev provider resolves its prices from
 // that provider rather than its own name.
 func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "proxyai.json"), []byte(`{
+	const providerJSON = `{
   "name": "proxyai",
   "api_type": "responses",
   "base_url": "https://api.proxy.test/v1",
   "managed": true,
   "price_source": "openai",
   "models": [{"name":"gpt-5-codex","context_window":400000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	// The price lives under the "openai" provider, not "proxyai".
 	md := modelsDevCatalogWith("openai", "gpt-5-codex", llm.Price{Input: 1.25, Output: 10})
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"proxyai.json"}},
+	handler := newTestHandler(t, "proxyai.json", providerJSON, Options{
 		ModelsDevCatalog:    md,
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(llm.Usage{InputTokens: 1000, OutputTokens: 2000}),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	if got := catalogModelPrice(t, handler.Catalog(), "proxyai", "gpt-5-codex"); !got.Equal(llm.Price{Input: 1.25, Output: 10, Reasoning: 10}) {
 		t.Fatalf("proxyai managed price = %+v, want {1.25,10,reasoning:10} resolved from openai via price_source", got)
 	}
@@ -335,29 +304,21 @@ func TestManagedPriceSourceResolvesFromOtherProvider(t *testing.T) {
 }
 
 func TestOpenAICodexIgnoresPriceSource(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai-codex",
   "api_type": "responses",
   "base_url": "https://chatgpt.com/backend-api/codex",
   "managed": true,
   "price_source": "openai",
   "models": [{"name":"gpt-5.5","context_window":272000,"price":{"input":99,"output":99}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	md := modelsDevCatalogWith("openai", "gpt-5.5", llm.Price{Input: 5, Output: 30})
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"openai-codex.json"}},
+	handler := newTestHandler(t, "openai-codex.json", providerJSON, Options{
 		ModelsDevCatalog:    md,
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(llm.Usage{InputTokens: 1000, OutputTokens: 2000}),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	if got := catalogModelPrice(t, handler.Catalog(), "openai-codex", "gpt-5.5"); !got.IsZero() {
 		t.Fatalf("codex managed price = %+v, want zero subscription price", got)
 	}
@@ -369,16 +330,13 @@ func TestOpenAICodexIgnoresPriceSource(t *testing.T) {
 }
 
 func TestTieredManagedProviderUsesTieredPricing(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "sakana.json"), []byte(`{
+	const providerJSON = `{
   "name": "sakana",
   "api_type": "responses",
   "base_url": "https://api.sakana.ai/v1",
   "managed": true,
   "models": [{"name":"fugu-ultra","context_window":1000000,"price":{"input":99,"output":99}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	md := modelsDevCatalogWith("sakana", "fugu-ultra", llm.Price{
 		Input:     5,
@@ -386,16 +344,11 @@ func TestTieredManagedProviderUsesTieredPricing(t *testing.T) {
 		CacheRead: 0.5,
 		Tiers:     []llm.PriceTier{{Threshold: 272_000, Input: 10, Output: 45, CacheRead: 1.0}},
 	})
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"sakana.json"}},
+	handler := newTestHandler(t, "sakana.json", providerJSON, Options{
 		ModelsDevCatalog:    md,
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(llm.Usage{InputTokens: 1000, OutputTokens: 2000}),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	wantPrice := llm.Price{
 		Input:     5,
 		Output:    30,
@@ -496,29 +449,21 @@ func TestManualProviderKeepsConfigPrice(t *testing.T) {
 // catalog re-prices managed models in the served catalog and in cost accounting
 // without a restart, and restamps the pricing source date.
 func TestUpdateModelsDevCatalogSwapsManagedPrices(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+	const providerJSON = `{
   "name": "testai",
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "managed": true,
   "models": [{"name":"alpha","context_window":123000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000}
 	firstDate := time.Unix(1_700_000_000, 0)
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"testai.json"}},
+	handler := newTestHandler(t, "testai.json", providerJSON, Options{
 		ModelsDevCatalog:    modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 2, Output: 4}),
 		ModelsDevSourceDate: firstDate,
 		New:                 fixedUsageProvider(usage),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -549,8 +494,7 @@ func TestUpdateModelsDevCatalogSwapsManagedPrices(t *testing.T) {
 }
 
 func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+	const providerJSON = `{
   "name": "testai",
   "api_type": "openai",
   "base_url": "https://api.test/v1",
@@ -560,25 +504,18 @@ func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.
     {"name":"alpha","context_window":123000},
     {"name":"retired","context_window":123000}
   ]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	initial := &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
 		"testai": {ID: "testai", Models: map[string]modelcatalog.Model{
 			"alpha":   {ID: "alpha", Cost: llm.Price{Input: 2, Output: 4}},
 			"retired": {ID: "retired", Cost: llm.Price{Input: 9, Output: 9}},
 		}},
 	}}
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"testai.json"}},
+	handler := newTestHandler(t, "testai.json", providerJSON, Options{
 		ModelsDevCatalog:    initial,
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(llm.Usage{}),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	if !catalogHasTarget(handler.Catalog(), "testai", "retired") {
 		t.Fatalf("initial catalog missing retired target: %+v", handler.Catalog().Targets)
 	}
@@ -598,27 +535,19 @@ func TestUpdateModelsDevCatalogPrunesManagedModelsMissingFromRefresh(t *testing.
 }
 
 func TestUpdateModelsDevCatalogPrunesManagedProviderMissingFromRefresh(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "goneai.json"), []byte(`{
+	const providerJSON = `{
   "name": "goneai",
   "api_type": "openai",
   "base_url": "https://api.gone.test/v1",
   "managed": true,
   "model_discovery": {"enabled":false},
   "models": [{"name":"alpha","context_window":123000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"goneai.json"}},
+}`
+	handler := newTestHandler(t, "goneai.json", providerJSON, Options{
 		ModelsDevCatalog:    modelsDevCatalogWith("goneai", "alpha", llm.Price{Input: 2, Output: 4}),
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(llm.Usage{}),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	if !catalogHasTarget(handler.Catalog(), "goneai", "alpha") {
 		t.Fatalf("initial catalog missing goneai target: %+v", handler.Catalog().Targets)
 	}
@@ -636,25 +565,17 @@ func TestUpdateModelsDevCatalogPrunesManagedProviderMissingFromRefresh(t *testin
 }
 
 func TestUpdateModelsDevCatalogKeepsManualProviderMissingFromRefresh(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "manual.json"), []byte(`{
+	const providerJSON = `{
   "name": "manualai",
   "api_type": "openai",
   "base_url": "https://api.manual.test/v1",
   "models": [{"name":"alpha","context_window":123000,"price":{"input":2,"output":4}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"manual.json"}},
+}`
+	handler := newTestHandler(t, "manual.json", providerJSON, Options{
 		ModelsDevCatalog:    modelsDevCatalogWith("manualai", "alpha", llm.Price{Input: 99, Output: 99}),
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(llm.Usage{}),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 
 	handler.UpdateModelsDevCatalog(modelsDevCatalogWith("otherai", "beta", llm.Price{Input: 6, Output: 8}), time.Unix(1_700_086_400, 0))
 
@@ -710,20 +631,13 @@ func TestProviderCatalogControlsManagedAvailabilityAndMetadata(t *testing.T) {
 }
 
 func TestProviderDiscoveryFailureStatePreservesConfiguredAllowlist(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+	const providerJSON = `{
   "name":"testai","api_type":"openai","base_url":"https://api.test/v1","managed":true,
   "models":[{"name":"configured-only","context_window":1000}]
-}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir, Config: Config{ProviderConfigs: []string{"testai.json"}},
+}`
+	handler := newTestHandler(t, "testai.json", providerJSON, Options{
 		ModelsDevCatalog: modelsDevCatalogWith("other", "different", llm.Price{}), New: fixedUsageProvider(llm.Usage{}),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if !catalogHasTarget(handler.Catalog(), "testai", "configured-only") {
 		t.Fatalf("configured model was pruned without a successful provider response: %+v", handler.Catalog().Targets)
 	}
@@ -734,27 +648,20 @@ func TestProviderDiscoveryFailureStatePreservesConfiguredAllowlist(t *testing.T)
 }
 
 func TestStaleProviderSnapshotEnrichesMetadataWithoutOverridingPrice(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openrouter.json"), []byte(`{
+	const providerJSON = `{
   "name":"openrouter","api_type":"openai","base_url":"https://openrouter.ai/api/v1","managed":true,
   "models":[{"name":"vendor/model","context_window":1000}]
-}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
+}`
 	contextWindow := 2000
 	directPrice := llm.Price{Input: 99, Output: 99}
 	state := modeldiscovery.State{Authoritative: false, Snapshot: modeldiscovery.Snapshot{
 		Version: 1, Provider: "openrouter", BaseURL: "https://openrouter.ai/api/v1", Complete: true,
 		Models: map[string]modeldiscovery.Model{"vendor/model": {ID: "vendor/model", ContextWindow: &contextWindow, Price: &directPrice, Eligible: true}},
 	}}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir, Config: Config{ProviderConfigs: []string{"openrouter.json"}},
+	handler := newTestHandler(t, "openrouter.json", providerJSON, Options{
 		ModelsDevCatalog: modelsDevCatalogWith("openrouter", "vendor/model", llm.Price{Input: 2, Output: 4}),
 		ProviderCatalogs: map[string]modeldiscovery.State{"openrouter": state}, New: fixedUsageProvider(llm.Usage{}),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	target := catalogTarget(t, handler.Catalog(), "openrouter", "vendor/model")
 	if target.ContextWindow != contextWindow || !target.Price.Equal(llm.Price{Input: 2, Output: 4, Reasoning: 4}) {
 		t.Fatalf("target = %+v", target)
@@ -765,26 +672,18 @@ func TestStaleProviderSnapshotEnrichesMetadataWithoutOverridingPrice(t *testing.
 // snapshot swap under -race: a writer keeps swapping catalogs while readers hit
 // /v1/models, /v1/stream, and Catalog().
 func TestUpdateModelsDevCatalogConcurrentWithRequests(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+	const providerJSON = `{
   "name": "testai",
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "managed": true,
   "models": [{"name":"alpha","context_window":123000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir:           dir,
-		Config:              Config{ProviderConfigs: []string{"testai.json"}},
+}`
+	handler := newTestHandler(t, "testai.json", providerJSON, Options{
 		ModelsDevCatalog:    modelsDevCatalogWith("testai", "alpha", llm.Price{Input: 1, Output: 1}),
 		ModelsDevSourceDate: time.Unix(1_700_000_000, 0),
 		New:                 fixedUsageProvider(llm.Usage{InputTokens: 100, OutputTokens: 200}),
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 

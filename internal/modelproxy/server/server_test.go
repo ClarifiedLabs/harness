@@ -225,8 +225,7 @@ func (p *countingFakeProvider) CountInputTokens(context.Context, llm.Request) (l
 }
 
 func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openrouter.json"), []byte(`{
+	const providerJSON = `{
   "name": "openrouter",
   "api_type": "openai",
   "base_url": "https://openrouter.ai/api/v1",
@@ -241,19 +240,15 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
   "models": [
     {"name":"openai/gpt-5.5","context_window":1050000,"output_limit":64000,"input_modalities":["text","image"],"price":{"input":5,"output":30},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}]}
   ]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	var captured factory.Options
 	fp := llmtest.New("fake", llmtest.Step{
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
 		Stop:   llm.StopEndTurn,
 	})
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
+	handler := newTestHandler(t, "openrouter.json", providerJSON, Options{
 		Config: Config{
-			ProviderConfigs:      []string{"openrouter.json"},
 			DefaultContextWindow: 512000,
 		},
 		Getenv: func(k string) string {
@@ -267,9 +262,6 @@ func TestHandlerCatalogAndStreamResolveProviderConfig(t *testing.T) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -376,16 +368,13 @@ func TestApplyServiceTierForTargetUsesResolvedVariant(t *testing.T) {
 }
 
 func TestHandlerStreamRetriesWithoutServerToolsOnRejection(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openrouter.json"), []byte(`{
+	const providerJSON = `{
   "name": "openrouter",
   "api_type": "openai",
   "base_url": "https://openrouter.ai/api/v1",
   "api_key": "sk-file",
   "models": [{"name":"openai/gpt-5.5","context_window":1000000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	// First attempt fails with a provider error about the web_search tool; the
 	// proxy must retry once without server tools and stream the second attempt.
@@ -393,14 +382,10 @@ func TestHandlerStreamRetriesWithoutServerToolsOnRejection(t *testing.T) {
 		llmtest.Step{Err: &llm.APIError{StatusCode: http.StatusBadRequest, Message: "unsupported tool web_search"}},
 		llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}}, Stop: llm.StopEndTurn},
 	)
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openrouter.json"}, DefaultContextWindow: 512000},
-		New:       func(opts factory.Options) (llm.Provider, error) { return fp, nil },
+	handler := newTestHandler(t, "openrouter.json", providerJSON, Options{
+		Config: Config{DefaultContextWindow: 512000},
+		New:    func(opts factory.Options) (llm.Provider, error) { return fp, nil },
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -530,28 +515,20 @@ func TestServerToolRejected(t *testing.T) {
 }
 
 func TestHandlerInputTokens(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-file",
   "models": [{"name":"gpt-5.5","context_window":1000000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	var captured factory.Options
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(opts factory.Options) (llm.Provider, error) {
 			captured = opts
 			return &countingFakeProvider{FakeProvider: llmtest.New("responses"), count: 4321}, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -580,28 +557,20 @@ func TestHandlerInputTokens(t *testing.T) {
 }
 
 func TestHandlerInputTokensUsesLocalEstimateForCodexOAuth(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai-codex",
   "api_type": "responses",
   "base_url": "https://chatgpt.com/backend-api/codex",
   "auth": {"type":"codex_oauth"},
   "models": [{"name":"gpt-5.5","context_window":1000000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	constructions := 0
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai-codex.json"}},
+	handler := newTestHandler(t, "openai-codex.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			constructions++
 			return &countingFakeProvider{FakeProvider: llmtest.New("responses"), count: 4321}, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -640,26 +609,18 @@ func TestHandlerInputTokensUsesLocalEstimateForCodexOAuth(t *testing.T) {
 }
 
 func TestHandlerInputTokensUnsupported(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-file",
   "models": [{"name":"gpt-5.5","context_window":1000000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+}`
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("openai"), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -757,17 +718,14 @@ func TestLoadConfigParsesDurationAndInstanceSettings(t *testing.T) {
 }
 
 func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-test",
   "service_tiers": [{"id":"fast","name":"Fast","request":{"service_tier":"priority"}}],
   "models": [{"name":"gpt-5.5","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	fp := llmtest.New("responses",
 		llmtest.Step{
@@ -786,16 +744,11 @@ func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 			ResponseID: "resp_3",
 		},
 	)
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -900,31 +853,23 @@ func TestHandlerStreamPassesResponseStateFields(t *testing.T) {
 }
 
 func TestHandlerStreamSeparatesProxySessionStateFromCacheAffinity(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-test",
   "models": [{"name":"gpt-5.5","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	fp := llmtest.New("responses",
 		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_1"},
 		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_2"},
 	)
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -997,31 +942,23 @@ func TestHandlerStreamSeparatesProxySessionStateFromCacheAffinity(t *testing.T) 
 }
 
 func TestHandlerStreamDoesNotContinueShorterTranscriptWithSamePromptCacheKey(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-test",
   "models": [{"name":"gpt-5.5","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	fp := llmtest.New("responses",
 		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_1"},
 		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_2"},
 	)
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -1071,16 +1008,13 @@ func TestHandlerStreamDoesNotContinueShorterTranscriptWithSamePromptCacheKey(t *
 }
 
 func TestHandlerStreamDoesNotRetryPreviousResponseRejection(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-test",
   "models": [{"name":"gpt-5.5","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	var logs bytes.Buffer
 	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
@@ -1092,17 +1026,12 @@ func TestHandlerStreamDoesNotRetryPreviousResponseRejection(t *testing.T) {
 		llmtest.Step{Err: &llm.APIError{Code: "previous_response_not_found", Message: "previous_response_id is invalid"}},
 		llmtest.Step{Stop: llm.StopEndTurn, ResponseID: "resp_2"},
 	)
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -1237,8 +1166,7 @@ func TestReasoningProfilesMapToEffortAndBudgetControls(t *testing.T) {
 }
 
 func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "providers.json"), []byte(`[
+	const providerJSON = `[
   {
     "name": "openai",
     "api_type": "responses",
@@ -1277,16 +1205,8 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
     "api_key": "sk-test",
     "models": [{"name":"openai/gpt-5.5","context_window":128000}]
   }
-]`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"providers.json"}},
-	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
+]`
+	handler := newTestHandler(t, "providers.json", providerJSON, Options{})
 
 	targets := map[string]protocol.Target{}
 	for _, target := range handler.Catalog().Targets {
@@ -1353,8 +1273,7 @@ func TestProviderResponsesCompactionCapabilityResolution(t *testing.T) {
 }
 
 func TestHandlerCompactUsesExplicitResponsesCapability(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
@@ -1362,9 +1281,7 @@ func TestHandlerCompactUsesExplicitResponsesCapability(t *testing.T) {
   "responses_compaction": true,
   "server_tools": ["web_search"],
   "models": [{"name":"gpt-5.5","context_window":128000,"price":{"input":1,"output":2},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","high"]}]}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	provider := &compactingFakeProvider{
 		FakeProvider: llmtest.New("fake"),
 		result: llm.CompactedContext{
@@ -1372,16 +1289,11 @@ func TestHandlerCompactUsesExplicitResponsesCapability(t *testing.T) {
 			Usage: llm.Usage{InputTokens: 20, OutputTokens: 3},
 		},
 	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return provider, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -1430,28 +1342,20 @@ func TestHandlerCompactUsesExplicitResponsesCapability(t *testing.T) {
 }
 
 func TestHandlerCompactRejectsUnadvertisedCapability(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "responses",
   "base_url": "https://api.openai.com/v1",
   "api_key": "sk-test",
   "models": [{"name":"gpt-5.5","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	constructed := false
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			constructed = true
 			return llmtest.New("fake"), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 	body, _ := json.Marshal(protocol.CompactRequest{TargetID: "openai:gpt-5.5", Request: llm.Request{Messages: []llm.Message{{
@@ -1639,22 +1543,13 @@ func TestHandlerStreamResolvesProviderAuth(t *testing.T) {
 }
 
 func TestHandlerRejectsUnknownModel(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"known","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
+}`
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{})
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -1680,22 +1575,13 @@ func TestHandlerRejectsUnknownModel(t *testing.T) {
 }
 
 func TestHandlerRequiresExplicitProviderAndModel(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"known","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
+}`
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{})
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -1721,25 +1607,20 @@ func TestHandlerRequiresExplicitProviderAndModel(t *testing.T) {
 }
 
 func TestHandlerLogsStreamStats(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4,"cache_read":0.5,"cache_write":1}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	var logs bytes.Buffer
 	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
 	if err != nil {
 		t.Fatalf("NewProxyLogger: %v", err)
 	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{
 				Events: []llm.StreamEvent{
@@ -1751,9 +1632,6 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 			}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -1804,15 +1682,12 @@ func TestHandlerLogsStreamStats(t *testing.T) {
 }
 
 func TestHandlerLogsAndForwardsEveryRetriedUpstreamFailure(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"retrying","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	issue := func(attempt int, status int, message string) llm.StreamEvent {
 		return llm.StreamEvent{Kind: llm.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
 			State:        llm.ModelRequestUpstreamAttemptFailed,
@@ -1830,10 +1705,8 @@ func TestHandlerLogsAndForwardsEveryRetriedUpstreamFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProxyLogger: %v", err)
 	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{
 				issue(1, http.StatusTooManyRequests, "quota window one"),
@@ -1843,9 +1716,6 @@ func TestHandlerLogsAndForwardsEveryRetriedUpstreamFailure(t *testing.T) {
 			}}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -1897,15 +1767,12 @@ func TestHandlerLogsAndForwardsEveryRetriedUpstreamFailure(t *testing.T) {
 }
 
 func TestHandlerClientCancellationStaysCancellationEndToEnd(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"blocked","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	started := make(chan struct{})
 	logged := make(chan struct{})
 	logs := lockedLogBuffer{notify: `"msg":"model request completed"`, notified: logged}
@@ -1913,10 +1780,8 @@ func TestHandlerClientCancellationStaysCancellationEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewProxyLogger: %v", err)
 	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{Block: func(ctx context.Context) {
 				close(started)
@@ -1924,9 +1789,6 @@ func TestHandlerClientCancellationStaysCancellationEndToEnd(t *testing.T) {
 			}}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 	client, err := proxyclient.New(srv.URL, srv.Client())
@@ -1983,8 +1845,7 @@ func TestHandlerClientCancellationStaysCancellationEndToEnd(t *testing.T) {
 }
 
 func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
@@ -1992,14 +1853,10 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
     {"name":"priced","context_window":128000,"price":{"input":2,"output":4,"cache_read":0.5,"cache_write":1}},
     {"name":"free","context_window":128000}
   ]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, CacheWrite1hTokens: 6000, ReasoningTokens: 500}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{
 				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
@@ -2008,9 +1865,6 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 			}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2075,20 +1929,15 @@ func TestHandlerUsageAggregatesKnownCostRequests(t *testing.T) {
 }
 
 func TestHandlerPricesUsageSnapshotsBeforeStreamError(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{
 				Events: []llm.StreamEvent{{Kind: llm.EventUsage, Usage: &usage}},
@@ -2096,9 +1945,6 @@ func TestHandlerPricesUsageSnapshotsBeforeStreamError(t *testing.T) {
 			}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2145,22 +1991,13 @@ func TestHandlerPricesUsageSnapshotsBeforeStreamError(t *testing.T) {
 }
 
 func TestHandlerUsageEmptyBeforeAnyRequest(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
+}`
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{})
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2237,25 +2074,17 @@ func TestHandlerCatalogStampsPricingStaleness(t *testing.T) {
 }
 
 func TestNewHandlerPricingMaxAgeFallsBackToConfigTTL(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
+}`
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		Config: Config{
-			ProviderConfigs:   []string{"openai.json"},
 			ModelsDevCacheTTL: Duration{Duration: 12 * time.Hour, Set: true},
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	pricing := handler.Catalog().Pricing
 	if pricing == nil {
 		t.Fatalf("catalog.Pricing = nil, want config TTL fallback")
@@ -2266,15 +2095,12 @@ func TestNewHandlerPricingMaxAgeFallsBackToConfigTTL(t *testing.T) {
 }
 
 func TestHandlerLogsStreamErrorDetails(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"known","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	var logs bytes.Buffer
 	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
@@ -2287,17 +2113,12 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 		Retryable:  true,
 		RetryAfter: 250 * time.Millisecond,
 	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{Err: providerErr}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2349,15 +2170,12 @@ func TestHandlerLogsStreamErrorDetails(t *testing.T) {
 }
 
 func TestHandlerRetriesInferredOutputTokenFloor(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "testai.json"), []byte(`{
+	const providerJSON = `{
   "name": "testai",
   "api_type": "openai",
   "base_url": "https://api.test/v1",
   "models": [{"name":"model","context_window":1000000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	var logs bytes.Buffer
 	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
@@ -2372,17 +2190,12 @@ func TestHandlerRetriesInferredOutputTokenFloor(t *testing.T) {
 		}},
 		llmtest.Step{Stop: llm.StopEndTurn},
 	)
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"testai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "testai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2455,27 +2268,20 @@ func TestHandlerRetriesInferredOutputTokenFloor(t *testing.T) {
 }
 
 func TestHandlerAPIKeyAuthRejectsAndAccepts(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"known","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	cfg := Config{ProviderConfigs: []string{"openai.json"}}
 	store := apikey.Store{Entries: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}}}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    cfg,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Config: cfg,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake"), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(store.Middleware(handler))
 	defer srv.Close()
 
@@ -2504,25 +2310,17 @@ func TestHandlerAPIKeyAuthRejectsAndAccepts(t *testing.T) {
 }
 
 func TestHandlerNoAPIKeyAllowsWhenUnconfigured(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"known","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+}`
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake"), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2537,8 +2335,7 @@ func TestHandlerNoAPIKeyAllowsWhenUnconfigured(t *testing.T) {
 }
 
 func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
@@ -2546,16 +2343,12 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
     {"name":"priced","context_window":128000,"price":{"input":2,"output":4}},
     {"name":"free","context_window":128000}
   ]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	reg := metrics.New()
 	usage := llm.Usage{InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000, CacheWriteTokens: 4000, CacheWrite1hTokens: 6000, ReasoningTokens: 500}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Metrics:   reg,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Metrics: reg,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{
 				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
@@ -2564,9 +2357,6 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 			}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2636,23 +2426,19 @@ func TestHandlerMetricsRecordsPricedAndFreeModels(t *testing.T) {
 }
 
 func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	reg := metrics.New()
 	usage := llm.Usage{InputTokens: 100, OutputTokens: 50}
 	cfg := Config{ProviderConfigs: []string{"openai.json"}}
 	store := apikey.Store{Entries: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}}}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    cfg,
-		Metrics:   reg,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Config:  cfg,
+		Metrics: reg,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{
 				Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
@@ -2661,9 +2447,6 @@ func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
 			}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(store.Middleware(handler))
 	defer srv.Close()
 
@@ -2694,27 +2477,19 @@ func TestHandlerMetricsKeyLabelReflectsAuth(t *testing.T) {
 }
 
 func TestHandlerMetricsRecordsErrors(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"known","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	reg := metrics.New()
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Metrics:   reg,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Metrics: reg,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{Err: &llm.APIError{Code: "server_error", Message: "boom"}}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2742,29 +2517,22 @@ func TestHandlerMetricsRecordsErrors(t *testing.T) {
 }
 
 func TestHandlerMetricsRecordsRejectedAuth(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	reg := metrics.New()
 	cfg := Config{ProviderConfigs: []string{"openai.json"}}
 	store := apikey.Store{Entries: []apikey.Entry{{Name: "laptop", Hash: apikey.Hash("hmp_secret")}}}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    cfg,
-		Metrics:   reg,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Config:  cfg,
+		Metrics: reg,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(ObserveAuth(handler, store, store.Middleware(handler)))
 	defer srv.Close()
 
@@ -2828,27 +2596,19 @@ func TestStreamFailedExcludesClientCancel(t *testing.T) {
 }
 
 func TestHandlerMetricsRecordsUnresolvedRequest(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name": "openai",
   "api_type": "openai",
   "base_url": "http://localhost:11434/v1",
   "models": [{"name":"priced","context_window":128000,"price":{"input":2,"output":4}}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	reg := metrics.New()
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Metrics:   reg,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Metrics: reg,
 		New: func(factory.Options) (llm.Provider, error) {
 			return llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -2910,29 +2670,21 @@ func seriesLine(name string, labels map[string]string) string {
 }
 
 func TestHandlerCatalogLogsTraceAttrsOnlyForValidTraceparent(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "provider.json"), []byte(`{
+	const providerJSON = `{
   "name":"test",
   "api_type":"openai",
   "base_url":"https://example.invalid",
   "api_key":"sk-test",
   "models":[{"name":"model","context_window":1000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	var logs bytes.Buffer
 	logger, err := logging.NewProxyLogger(&logs, logging.LevelInfo, logging.FormatJSON)
 	if err != nil {
 		t.Fatalf("NewProxyLogger: %v", err)
 	}
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"provider.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "provider.json", providerJSON, Options{
+		Logger: logger,
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -3132,27 +2884,19 @@ func TestAPIKeyCostBudgetRejectsAfterWindowSpendPersists(t *testing.T) {
 }
 
 func TestAPIKeyCostBudgetAllowsUnpricedTargetByDefault(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name":"openai",
   "api_type":"openai",
   "base_url":"http://localhost:11434/v1",
   "models":[{"name":"free","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	providerCalls := 0
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			providerCalls++
 			return llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}}, Stop: llm.StopEndTurn}), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	secret := "hmp_budgeted"
 	entry := budgetedKeyEntry("laptop", secret, 1, time.Hour, false)
 	srv := httptest.NewServer(apikey.Store{Entries: []apikey.Entry{entry}}.Middleware(handler))
@@ -3168,27 +2912,19 @@ func TestAPIKeyCostBudgetAllowsUnpricedTargetByDefault(t *testing.T) {
 }
 
 func TestAPIKeyCostBudgetRejectsUnpricedTargetWhenConfigured(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name":"openai",
   "api_type":"openai",
   "base_url":"http://localhost:11434/v1",
   "models":[{"name":"free","context_window":128000}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 	providerCalls := 0
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
 		New: func(factory.Options) (llm.Provider, error) {
 			providerCalls++
 			return llmtest.New("fake"), nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	secret := "hmp_budgeted"
 	entry := budgetedKeyEntry("laptop", secret, 1, time.Hour, true)
 	srv := httptest.NewServer(apikey.Store{Entries: []apikey.Entry{entry}}.Middleware(handler))
@@ -3249,15 +2985,12 @@ func TestCostBudgetWindowResetAndUsageOmitWhenDisabled(t *testing.T) {
 }
 
 func TestHandlerRichImageRejectionReturnsSafeCorrelatedDiagnostic(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name":"openai",
   "api_type":"openai",
   "base_url":"https://api.test/v1",
   "models":[{"name":"vision","context_window":128000,"input_modalities":["text","image"]}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	payload := serverOnePixelPNG
 	providerErr := &llm.APIError{
@@ -3272,17 +3005,12 @@ func TestHandlerRichImageRejectionReturnsSafeCorrelatedDiagnostic(t *testing.T) 
 		t.Fatalf("NewProxyLogger: %v", err)
 	}
 	fp := llmtest.New("fake", llmtest.Step{Err: providerErr})
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
@@ -3347,15 +3075,12 @@ func TestHandlerRichImageRejectionReturnsSafeCorrelatedDiagnostic(t *testing.T) 
 }
 
 func TestHandlerSuccessfulRichImageLogsSafeShapeAndCorrelationOnly(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "openai.json"), []byte(`{
+	const providerJSON = `{
   "name":"openai",
   "api_type":"openai",
   "base_url":"https://api.test/v1",
   "models":[{"name":"vision","context_window":128000,"input_modalities":["text","image"]}]
-}`), 0o600); err != nil {
-		t.Fatalf("write provider config: %v", err)
-	}
+}`
 
 	payload := serverOnePixelPNG
 	var logs bytes.Buffer
@@ -3367,17 +3092,12 @@ func TestHandlerSuccessfulRichImageLogsSafeShapeAndCorrelationOnly(t *testing.T)
 		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: "ok"}},
 		Stop:   llm.StopEndTurn,
 	})
-	handler, err := NewHandler(Options{
-		ConfigDir: dir,
-		Config:    Config{ProviderConfigs: []string{"openai.json"}},
-		Logger:    logger,
+	handler := newTestHandler(t, "openai.json", providerJSON, Options{
+		Logger: logger,
 		New: func(factory.Options) (llm.Provider, error) {
 			return fp, nil
 		},
 	})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 

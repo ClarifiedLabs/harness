@@ -307,107 +307,81 @@ func TestPromptLineEditorIsRuneAware(t *testing.T) {
 	}
 }
 
-func TestPromptLineEditorShiftEnterCSIuInsertsNewline(t *testing.T) {
-	input, ok, err := readEditedInput(t, "first\x1b[13;2usecond\r")
-	if err != nil {
-		t.Fatalf("read = %v", err)
+func TestPromptLineEditorNewlineAndSubmitEncodings(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "ShiftEnterCSIuInsertsNewline",
+			input: "first\x1b[13;2usecond\r",
+			want:  "first\nsecond",
+		},
+		{
+			name:  "KittyAllKeysTextShiftEnterAndEnter",
+			input: "\x1b[102;;102u\x1b[111;;111u\x1b[111;;111u\x1b[13;2u\x1b[98;;98u\x1b[97;;97u\x1b[114;;114u\x1b[13uignored",
+			want:  "foo\nbar",
+		},
+		{
+			name:  "KittyShiftEnterOnEmptyPromptInsertsNewline",
+			input: "\x1b[13;2u\x1b[120;;120u\x1b[13u",
+			want:  "\nx",
+		},
+		{
+			name:  "RawLFInsertsNewlineAndRawCRSubmits",
+			input: "foo\nbar\rignored",
+			want:  "foo\nbar",
+		},
+		{
+			name:  "ITerm2ShiftEnterModifierEventInsertsNewline",
+			input: "foo\x1b[57441;2u\nbar\x1b[13u",
+			want:  "foo\nbar",
+		},
+		{
+			name:  "ITerm2ShiftEnterOnEmptyPromptInsertsNewline",
+			input: "\x1b[57441;2u\nx\x1b[13u",
+			want:  "\nx",
+		},
+		{
+			name:  "ITerm2ConsecutiveShiftEntersInsertNewlines",
+			input: "\x1b[57441;2u\n\x1b[57441;2u\nx\x1b[13u",
+			want:  "\n\nx",
+		},
+		{
+			name:  "ShiftModifierDoesNotAffectLaterEnterAfterText",
+			input: "\x1b[57441;2u\x1b[120;;120u\x1b[13u",
+			want:  "x",
+		},
+		{
+			name:  "ShiftEnterXTermModifiedKeyInsertsNewline",
+			input: "first\x1b[27;2;13~second\r",
+			want:  "first\nsecond",
+		},
+		{
+			name:  "ShiftEnterTildeKeyInsertsNewline",
+			input: "first\x1b[13;2~second\r",
+			want:  "first\nsecond",
+		},
+		{
+			name:  "CSIuEnterSubmits",
+			input: "submit me\x1b[13uignored",
+			want:  "submit me",
+		},
 	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "first\nsecond" {
-		t.Fatalf("input text = %q, want first\\nsecond", input.text)
-	}
-}
-
-func TestPromptLineEditorKittyAllKeysTextShiftEnterAndEnter(t *testing.T) {
-	input, ok, err := readEditedInput(t, "\x1b[102;;102u\x1b[111;;111u\x1b[111;;111u\x1b[13;2u\x1b[98;;98u\x1b[97;;97u\x1b[114;;114u\x1b[13uignored")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "foo\nbar" {
-		t.Fatalf("input text = %q, want foo\\nbar", input.text)
-	}
-}
-
-func TestPromptLineEditorKittyShiftEnterOnEmptyPromptInsertsNewline(t *testing.T) {
-	input, ok, err := readEditedInput(t, "\x1b[13;2u\x1b[120;;120u\x1b[13u")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "\nx" {
-		t.Fatalf("input text = %q, want \\nx", input.text)
-	}
-}
-
-func TestPromptLineEditorRawLFInsertsNewlineAndRawCRSubmits(t *testing.T) {
-	input, ok, err := readEditedInput(t, "foo\nbar\rignored")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "foo\nbar" {
-		t.Fatalf("input text = %q, want foo\\nbar", input.text)
-	}
-}
-
-func TestPromptLineEditorITerm2ShiftEnterModifierEventInsertsNewline(t *testing.T) {
-	input, ok, err := readEditedInput(t, "foo\x1b[57441;2u\nbar\x1b[13u")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "foo\nbar" {
-		t.Fatalf("input text = %q, want foo\\nbar", input.text)
-	}
-}
-
-func TestPromptLineEditorITerm2ShiftEnterOnEmptyPromptInsertsNewline(t *testing.T) {
-	input, ok, err := readEditedInput(t, "\x1b[57441;2u\nx\x1b[13u")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "\nx" {
-		t.Fatalf("input text = %q, want \\nx", input.text)
-	}
-}
-
-func TestPromptLineEditorITerm2ConsecutiveShiftEntersInsertNewlines(t *testing.T) {
-	input, ok, err := readEditedInput(t, "\x1b[57441;2u\n\x1b[57441;2u\nx\x1b[13u")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "\n\nx" {
-		t.Fatalf("input text = %q, want \\n\\nx", input.text)
-	}
-}
-
-func TestPromptLineEditorShiftModifierDoesNotAffectLaterEnterAfterText(t *testing.T) {
-	input, ok, err := readEditedInput(t, "\x1b[57441;2u\x1b[120;;120u\x1b[13u")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "x" {
-		t.Fatalf("input text = %q, want x", input.text)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input, ok, err := readEditedInput(t, tt.input)
+			if err != nil {
+				t.Fatalf("read = %v", err)
+			}
+			if !ok {
+				t.Fatal("read returned ok=false")
+			}
+			if input.text != tt.want {
+				t.Fatalf("input text = %q, want %q", input.text, tt.want)
+			}
+		})
 	}
 }
 
@@ -456,45 +430,6 @@ func TestPromptLineEditorRedrawNoWidthClearsMultilinePromptRowsFromPrompt(t *tes
 	lines := screen.visibleLines()
 	if lines[0] != "ctx" || lines[1] != "> f" {
 		t.Fatalf("final screen = %#v, want multiline prompt with f", lines)
-	}
-}
-
-func TestPromptLineEditorShiftEnterXTermModifiedKeyInsertsNewline(t *testing.T) {
-	input, ok, err := readEditedInput(t, "first\x1b[27;2;13~second\r")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "first\nsecond" {
-		t.Fatalf("input text = %q, want first\\nsecond", input.text)
-	}
-}
-
-func TestPromptLineEditorShiftEnterTildeKeyInsertsNewline(t *testing.T) {
-	input, ok, err := readEditedInput(t, "first\x1b[13;2~second\r")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "first\nsecond" {
-		t.Fatalf("input text = %q, want first\\nsecond", input.text)
-	}
-}
-
-func TestPromptLineEditorCSIuEnterSubmits(t *testing.T) {
-	input, ok, err := readEditedInput(t, "submit me\x1b[13uignored")
-	if err != nil {
-		t.Fatalf("read = %v", err)
-	}
-	if !ok {
-		t.Fatal("read returned ok=false")
-	}
-	if input.text != "submit me" {
-		t.Fatalf("input text = %q, want submit me", input.text)
 	}
 }
 
