@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,6 +24,7 @@ import (
 	"harness/internal/delegate"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/logging"
 	"harness/internal/mcp/jsonrpc"
 	"harness/internal/plan"
 	"harness/internal/session"
@@ -29,6 +32,35 @@ import (
 	"harness/internal/tools"
 	"harness/internal/ui"
 )
+
+func TestACPTelemetryUsesConfiguredLogLevel(t *testing.T) {
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+	for _, level := range []string{"info", "debug"} {
+		t.Run(level, func(t *testing.T) {
+			var stderr bytes.Buffer
+			logLevel := new(slog.LevelVar)
+			logger := slog.New(logging.NewPlainHandler(&stderr, logging.HandlerOptions{Level: logLevel}))
+			factory := &acpRootFactory{logger: logger, logLevel: logLevel}
+			telemetry, err := factory.telemetryFor(config.Config{
+				LogLevel: level,
+				OTel:     config.OTelConfig{Enabled: true, Endpoint: collector.URL},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer telemetry.discard()
+			// The periodic exporter receives this same logger. Coalescing is tested
+			// in internal/otel; here ensure ACP does not permanently filter DEBUG.
+			telemetry.logger.Debug("periodic OTEL export failed", logging.Category("otel"))
+			if got := strings.Contains(stderr.String(), "[debug] [otel] periodic OTEL export failed"); got != (level == "debug") {
+				t.Fatalf("level=%s stderr=%q", level, stderr.String())
+			}
+		})
+	}
+}
 
 func TestACPCommandCatalogExposesOnlyServe(t *testing.T) {
 	catalog := commandCatalog(environment{})

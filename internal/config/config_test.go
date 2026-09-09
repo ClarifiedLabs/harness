@@ -101,6 +101,31 @@ func TestGeneratedUsageIncludesConfigDefaultsAndEnvironment(t *testing.T) {
 	}
 }
 
+func TestOTelTimeoutDefaultAndOverrides(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		env  map[string]string
+		args []string
+		want int
+	}{
+		{name: "default", body: `{}`, want: 15},
+		{name: "config zero", body: `{"otel":{"timeout_seconds":0}}`, want: 15},
+		{name: "environment zero", body: `{}`, env: map[string]string{"HARNESS_OTEL_TIMEOUT": "0"}, want: 15},
+		{name: "flag zero", body: `{}`, args: []string{"-otel-timeout", "0"}, want: 15},
+		{name: "config", body: `{"otel":{"timeout_seconds":5}}`, want: 5},
+		{name: "environment", body: `{"otel":{"timeout_seconds":5}}`, env: map[string]string{"HARNESS_OTEL_TIMEOUT": "20"}, want: 20},
+		{name: "flag", body: `{"otel":{"timeout_seconds":5}}`, env: map[string]string{"HARNESS_OTEL_TIMEOUT": "20"}, args: []string{"-otel-timeout", "25"}, want: 25},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := load(t, tc.args, tc.env, writeConfig(t, tc.body))
+			if got := result.Config.OTel.TimeoutSeconds; got != tc.want {
+				t.Fatalf("OTel.TimeoutSeconds=%d want=%d", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDefaultToolTimeout(t *testing.T) {
 	result := load(t, nil, nil, filepath.Join(t.TempDir(), "missing.json"))
 	if got := result.Config.ToolTimeoutSeconds; got != 1800 {

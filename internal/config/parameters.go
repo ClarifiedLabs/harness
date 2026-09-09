@@ -319,7 +319,7 @@ var definitions = []parameterDefinition{
 		}
 		return optional[string]{}
 	}, func(c *Config, v string) { c.OTel.Protocol = v }, func(c Config) string { return c.OTel.Protocol }, canonicalOTelProtocol, []string{"http/json"}, false),
-	intDef("otel.timeout_seconds", "otel.timeout_seconds", []string{"otel-timeout"}, []string{"HARNESS_OTEL_TIMEOUT"}, literal(5, "", "seconds"), func(f fileConfig) optional[int] {
+	intDef("otel.timeout_seconds", "otel.timeout_seconds", []string{"otel-timeout"}, []string{"HARNESS_OTEL_TIMEOUT"}, literal(15, "", "seconds"), func(f fileConfig) optional[int] {
 		if f.OTel.Set {
 			return f.OTel.Value.TimeoutSeconds
 		}

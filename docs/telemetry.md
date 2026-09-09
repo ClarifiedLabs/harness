@@ -25,7 +25,7 @@ Harness config:
     "enabled": true,
     "endpoint": "http://127.0.0.1:4318",
     "protocol": "http/json",
-    "timeout_seconds": 5,
+    "timeout_seconds": 15,
     "service_name": "harness",
     "hostname": "",
     "resource_attributes": {"deployment.environment": "development"}
@@ -36,7 +36,7 @@ Harness config:
 The exporter appends `/v1/metrics` unless the endpoint already ends with it.
 Only absolute HTTP(S) URLs are accepted; URL user info and fragments are rejected.
 Use headers for authentication, not URL credentials. The timeout is **1–30
-seconds**, default 5, for an entire export, including waiting for serialization,
+seconds**, default 15, for an entire export, including waiting for serialization,
 chunking, HTTP attempts, and retry delays—not a fresh budget per request.
 Exports run every **30 seconds** and once more during orderly shutdown.
 Collector errors are diagnostics, not prompt failures; invalid enabled exporter
@@ -424,8 +424,9 @@ per-process percentiles; merge compatible bucket increments first.
 
 ## Export reliability and self-health
 
-Exports are serialized with one overall context budget. Each wire request is
-measured on its **actual encoded JSON**, limited to **64 KiB**, including the
+Exports are serialized with one overall context budget: **15 seconds** by
+default, configurable from 1–30 seconds via `otel.timeout_seconds` / `-otel-timeout`.
+Each wire request is measured on its **actual encoded JSON**, limited to **64 KiB**, including the
 resource and scope. Larger cumulative snapshots are split into sequential
 batches at complete data-point boundaries, preserving start times and all
 families. A single point that cannot fit is omitted and counted; resident
@@ -471,8 +472,13 @@ family/series limits and use the same process resource:
 | `harness.otel.export.last_success` | G / `s` | `LastSuccess`: Unix seconds of the last fully successful export, 0 before any success. API field is `time.Time`. |
 
 Health is included in the snapshot **before** that export's HTTP attempts finish;
-the same payload cannot report its own final outcome. Export errors are warned
-independently of local metric loss. The first local-loss warning appears after
+the same payload cannot report its own final outcome. Periodic export failures
+are debug diagnostics (`-log-level debug`), emitted immediately after the first
+failure in a consecutive outage, not queued until prompt completion. Further
+failures are suppressed until a successful export resets the episode; counters
+still include every attempt/failure. Terminal sessions retain the diagnostic in
+`diagnostics.ndjson` even when the display level hides it. Final shutdown export
+failures remain warnings. The first local-loss warning appears after
 the next successful periodic export; repeated overflow-only warnings are
 coalesced to at most once per **five minutes**. Newly dropped measurements still
 trigger a warning at the next successful export. Suppression and failed exports
@@ -610,6 +616,11 @@ must also be converted to cumulative `le` buckets for Prometheus quantiles.
    reserved overflow series. Scraped stale gauges from exited CLIs are not
    active outages. Loss counters do not measure all data missing after a crash;
    use Collector health, process liveness, and final local diagnostics too.
+   Group by resource `host.name` to find problem hosts, then `service.instance.id`
+   to isolate a Harness process. These self metrics have no session-ID label;
+   use session diagnostics for per-session investigation. Failure counts survive
+   an outage in memory and are sent on recovery, but an unreachable Collector
+   cannot receive health updates during the outage.
 
 Overflow points intentionally lack I/M/W/C dimensions. Include them in total
 panels, and display their contribution separately; filtered breakdowns cannot
@@ -655,7 +666,7 @@ boundaries with the new instruments under one query.
   composition, supplied by `internal/agent/execution.go`: `observeRequestContext`.
 - `internal/otel/exporter.go`, `metrics.go`, `config.go`: budgets, encoded payloads,
   retry/partial-response semantics, `Exporter.Health`, `Exporter.Shutdown`;
-  `exporter_diagnostics.go`: coalesced local-loss warnings.
+  `exporter_diagnostics.go`: deduplicated debug failures and coalesced local-loss warnings.
 - `internal/execution/model.go`: `ModelCall`; `internal/execution/discard.go`:
   `ModelCall.Retain` and `ModelCall.Discard`; `internal/llm/attempt.go` and
   `attempt_tracker.go`: source facts and disposition ownership;

@@ -18,6 +18,22 @@ import (
 	"harness/internal/tools"
 )
 
+func TestExporterDefaultTimeout(t *testing.T) {
+	for _, timeout := range []time.Duration{0, 5 * time.Second} {
+		e, err := NewExporter(Config{Enabled: true, Endpoint: "http://collector.invalid", Timeout: timeout}, buildinfo.Metadata{}, "", "", "", "", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := timeout
+		if want == 0 {
+			want = 15 * time.Second
+		}
+		if e.cfg.Timeout != want {
+			t.Fatalf("configured timeout=%v: got=%v want=%v", timeout, e.cfg.Timeout, want)
+		}
+	}
+}
+
 func TestExporter_NormalizesEndpoint(t *testing.T) {
 	tests := []struct {
 		in   string

@@ -605,11 +605,17 @@ Metrics export is opt-in through `otel.enabled`; enabling it requires an absolut
 HTTP(S) `otel.endpoint` without URL user info or a fragment. A base endpoint has
 `/v1/metrics` appended; an endpoint already ending there is used as-is.
 `otel.protocol` supports only `http/json` (the default), not gRPC/protobuf.
-`otel.timeout_seconds` is 1–30 seconds, default 5, for the whole export including
+`otel.timeout_seconds` is 1–30 seconds, default 15, for the whole export including
 serialization waits, batches, and retries. Cumulative metrics export every 30
 seconds across one-shot, REPL, and ACP execution, with a final bounded shutdown
 export. Transient Collector failures receive bounded retries and never change
 a prompt result; invalid enabled exporter configuration fails startup.
+Periodic export failures appear only at `-log-level debug`, once per consecutive
+failure episode (a successful export resets suppression). The diagnostic is
+written when the export fails, not held until prompt completion, and is retained
+in session `diagnostics.ndjson` even when hidden from the terminal. Final shutdown
+export failures and metric-loss diagnostics remain warnings. ACP serving applies
+the resolved `log_level` when the first root session loads its configuration.
 
 `otel.headers` may come from JSON, `OTEL_EXPORTER_OTLP_HEADERS`, or
 `HARNESS_OTEL_HEADERS` (in increasing precedence), and `${NAME}` references are
@@ -739,7 +745,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `otel.enabled` | `boolean` | `true`, `false` | `-otel-enabled` | `HARNESS_OTEL_ENABLED` | `otel.enabled` | false | no | Harness otel.enabled setting. |
 | `otel.endpoint` | `string` | - | `-otel-endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `HARNESS_OTEL_ENDPOINT` | `otel.endpoint` | unset | no | Harness otel.endpoint setting. |
 | `otel.protocol` | `string` | `http/json` | `-otel-protocol` | `HARNESS_OTEL_PROTOCOL` | `otel.protocol` | "http/json" | no | Harness otel.protocol setting. |
-| `otel.timeout_seconds` | `integer` | - | `-otel-timeout` | `HARNESS_OTEL_TIMEOUT` | `otel.timeout_seconds` | 5 (seconds) | no | Harness otel.timeout seconds setting. |
+| `otel.timeout_seconds` | `integer` | - | `-otel-timeout` | `HARNESS_OTEL_TIMEOUT` | `otel.timeout_seconds` | 15 (seconds) | no | Harness otel.timeout seconds setting. |
 | `otel.service_name` | `string` | - | `-otel-service-name` | `OTEL_SERVICE_NAME`, `HARNESS_OTEL_SERVICE_NAME` | `otel.service_name` | "harness" | no | Harness otel.service name setting. |
 | `otel.hostname` | `string` | - | `-otel-hostname` | `HARNESS_OTEL_HOSTNAME`, `OTEL_HOSTNAME` | `otel.hostname` | short hostname (empty disables host.name) | no | Harness otel.hostname setting. |
 | `agents` | `object` | - | - | - | `agents` | unset | no | Structured agents settings. |

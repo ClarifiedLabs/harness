@@ -62,6 +62,7 @@ type acpRootFactory struct {
 	env       environment
 	flags     cli.Values
 	logger    *slog.Logger
+	logLevel  *slog.LevelVar
 	launchCWD string
 	build     acpRootBuilder
 
@@ -77,10 +78,10 @@ type acpRootFactory struct {
 }
 
 func runACPServe(env environment, invocation cli.Invocation) int {
-	logger, _, _, err := newHarnessLogger(env.stderr, "info", "", false)
-	if err != nil {
-		return fail(env.stderr, ui.ExitRuntime, "acp serve: %v", err)
-	}
+	// The first root resolves process configuration, including diagnostic level.
+	// Keep server/telemetry loggers on the same atomically adjustable stderr sink.
+	logLevel := new(slog.LevelVar)
+	logger := slog.New(logging.NewPlainHandler(env.stderr, logging.HandlerOptions{Level: logLevel}))
 	launchCWD, err := os.Getwd()
 	if err != nil {
 		return fail(env.stderr, ui.ExitRuntime, "acp serve: resolve launch cwd: %v", err)
@@ -89,7 +90,7 @@ func runACPServe(env environment, invocation cli.Invocation) int {
 	if err != nil {
 		return fail(env.stderr, ui.ExitRuntime, "acp serve: resolve launch cwd: %v", err)
 	}
-	factory := acpagent.Factory(&acpRootFactory{env: env, flags: invocation.Flags, logger: logger, launchCWD: launchCWD})
+	factory := acpagent.Factory(&acpRootFactory{env: env, flags: invocation.Flags, logger: logger, logLevel: logLevel, launchCWD: launchCWD})
 	if env.acpRootFactory != nil {
 		factory = env.acpRootFactory(invocation)
 	}

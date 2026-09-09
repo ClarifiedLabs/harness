@@ -6,7 +6,45 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"harness/internal/logging"
+	"harness/internal/ui"
 )
+
+func TestHarnessLoggerDebugDuringActiveStatus(t *testing.T) {
+	for _, level := range []string{"info", "debug"} {
+		t.Run(level, func(t *testing.T) {
+			dir := t.TempDir()
+			var stdout, stderr bytes.Buffer
+			output := ui.NewOutputCoordinator(&stdout, &stderr)
+			logger, _, _, err := newHarnessLogger(output.Stderr(), level, dir, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := "\r\x1b[2K[turn: 1 · prompt running]"
+			output.SetStatus([]byte(status))
+			logger.Debug("periodic OTEL export failed", logging.Category("otel"))
+			// Inspect before clearing status or ending the prompt: no deferred flush.
+			want := status
+			if level == "debug" {
+				want += "\r\x1b[2K[debug] [otel] periodic OTEL export failed\n" + status
+			}
+			if got := stderr.String(); got != want {
+				t.Fatalf("live diagnostic=%q want=%q", got, want)
+			}
+			if stdout.Len() != 0 {
+				t.Fatalf("diagnostic wrote stdout: %q", stdout.String())
+			}
+			data, err := os.ReadFile(filepath.Join(dir, sessionDiagnosticsLog))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(data), `"level":"DEBUG"`) || !strings.Contains(string(data), `"msg":"periodic OTEL export failed"`) || bytes.ContainsRune(data, '\x1b') {
+				t.Fatalf("missing debug diagnostic or leaked ANSI: %s", data)
+			}
+		})
+	}
+}
 
 func TestHarnessLoggerPersistsWarningWhenDisplayLevelSuppressesIt(t *testing.T) {
 	dir := t.TempDir()

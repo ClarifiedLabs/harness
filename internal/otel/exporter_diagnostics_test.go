@@ -2,6 +2,7 @@ package otel
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -12,6 +13,74 @@ import (
 	"testing"
 	"time"
 )
+
+func TestPeriodicFailureReporterCoalescesWithoutLosingHealth(t *testing.T) {
+	for _, level := range []slog.Level{slog.LevelInfo, slog.LevelDebug} {
+		t.Run(level.String(), func(t *testing.T) {
+			e := newTestExporter(t, "http://collector.invalid")
+			var buf bytes.Buffer
+			logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: level}))
+			var reporter periodicFailureReporter
+			failing := true
+			var payload []byte
+			e.client.Transport = reliabilityTransport(func(r *http.Request) (*http.Response, error) {
+				if failing {
+					return nil, context.DeadlineExceeded
+				}
+				var err error
+				payload, err = io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Body: http.NoBody, Header: make(http.Header), Request: r}, nil
+			})
+			for i := 0; i < 90; i++ {
+				err := e.Export(t.Context())
+				if err == nil {
+					t.Fatal("expected failed export")
+				}
+				reporter.report(logger, err)
+				want := 0
+				if level == slog.LevelDebug {
+					want = 1
+				}
+				if got := strings.Count(buf.String(), "periodic OTEL export failed"); got != want {
+					t.Fatalf("failure %d: diagnostics=%d want=%d: %s", i, got, want, buf.String())
+				}
+			}
+			if h := e.Health(); h.Attempts != 90 || h.Failures != 90 || h.Retries != 0 {
+				t.Fatalf("suppression changed health: %+v", h)
+			}
+			failing = false
+			if err := e.Export(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			reporter.report(logger, nil)
+			// Recovery exports all failures, not just the single logged failure.
+			found := false
+			for _, m := range decodeReliabilityMetrics(t, payload) {
+				if m.Name == selfMetricPrefix+"failures" {
+					found = true
+					if m.Sum.DataPoints[0].AsInt != "90" {
+						t.Fatalf("exported failure count=%s", m.Sum.DataPoints[0].AsInt)
+					}
+				}
+			}
+			if !found {
+				t.Fatal("recovery payload missing exporter failures")
+			}
+			failing = true
+			reporter.report(logger, e.Export(t.Context()))
+			want := 0
+			if level == slog.LevelDebug {
+				want = 2
+			}
+			if got := strings.Count(buf.String(), "periodic OTEL export failed"); got != want {
+				t.Fatalf("new outage diagnostics=%d want=%d: %s", got, want, buf.String())
+			}
+		})
+	}
+}
 
 func TestPeriodicLossReporterCoalescesWithoutLosingCounts(t *testing.T) {
 	var buf bytes.Buffer
@@ -85,7 +154,7 @@ func TestExporterPeriodicFailureDoesNotConsumePendingOverflow(t *testing.T) {
 		e.RecordSum("counter", "1", 1, map[string]string{"id": strconv.Itoa(i)})
 	}
 	logs := make(reliabilityLogChannel, 4)
-	e.SetPeriodic(t.Context(), slog.New(slog.NewTextHandler(logs, nil)))
+	e.SetPeriodic(t.Context(), slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	for _, want := range []string{"periodic OTEL export failed", "overflow=1"} {
 		select {
 		case log := <-logs:

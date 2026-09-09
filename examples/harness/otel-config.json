@@ -3,7 +3,7 @@
     "enabled": true,
     "endpoint": "https://otel.example.test:4318",
     "protocol": "http/json",
-    "timeout_seconds": 5,
+    "timeout_seconds": 15,
     "service_name": "harness",
     "hostname": "myhost",
     "headers": {

@@ -9,6 +9,7 @@ import (
 	"harness/internal/acp"
 	"harness/internal/acpagent"
 	"harness/internal/config"
+	"harness/internal/logging"
 )
 
 // A protocol close timeout does not mean the root stopped executing. Retain
@@ -168,6 +169,13 @@ func (f *acpRootFactory) telemetryFor(cfg config.Config) (*rootTelemetry, error)
 	f.mu.Unlock()
 	if initialized {
 		return telemetry, nil
+	}
+	if f.logLevel != nil {
+		level, err := logging.ParseLevel(cfg.LogLevel)
+		if err != nil {
+			return nil, err
+		}
+		f.logLevel.Set(level)
 	}
 	telemetry, err := newRootTelemetry(cfg, f.logger)
 	if err != nil {

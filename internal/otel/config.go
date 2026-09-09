@@ -10,7 +10,7 @@ import (
 const (
 	minExportTimeout       = time.Second
 	maxExportTimeout       = 30 * time.Second
-	DefaultExportTimeout   = 5 * time.Second
+	DefaultExportTimeout   = 15 * time.Second
 	PeriodicExportInterval = 30 * time.Second
 	ShutdownExportTimeout  = 2 * time.Second
 )

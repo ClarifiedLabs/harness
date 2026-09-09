@@ -217,7 +217,7 @@ func canonicalOTelHostname(value string) (string, error) {
 
 func oTelTimeoutSeconds(value int) (int, error) {
 	if value == 0 {
-		return 5, nil
+		return 15, nil
 	}
 	if value < 1 || value > 30 {
 		return 0, fmt.Errorf("otel.timeout_seconds must be between 1 and 30")

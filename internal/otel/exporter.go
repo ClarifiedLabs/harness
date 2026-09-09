@@ -23,7 +23,6 @@ import (
 	"unicode/utf8"
 
 	"harness/internal/buildinfo"
-	"harness/internal/logging"
 )
 
 // Exporter collects OTLP metrics and pushes them to the collector. It is safe for
@@ -204,6 +203,7 @@ func (e *Exporter) SetPeriodic(ctx context.Context, logger *slog.Logger) {
 		}
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
+		var failure periodicFailureReporter
 		var loss periodicLossReporter
 		for {
 			select {
@@ -212,9 +212,8 @@ func (e *Exporter) SetPeriodic(ctx context.Context, logger *slog.Logger) {
 			case <-ticker.C:
 				err := e.Export(ctx)
 				if logger != nil && ctx.Err() == nil {
-					if err != nil {
-						logger.Warn("periodic OTEL export failed", logging.Category("otel"), "err", err)
-					} else {
+					failure.report(logger, err)
+					if err == nil {
 						loss.report(logger, time.Now(), e.lossSnapshot())
 					}
 				}

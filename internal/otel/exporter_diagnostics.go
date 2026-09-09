@@ -36,6 +36,25 @@ func (e *Exporter) lossSnapshot() metricLossSnapshot {
 	return metricLossSnapshot{Health: e.healthLocked(), reasons: e.overflowReasons, families: e.overflowFamilies, bytes: e.approxBytes}
 }
 
+// Owned by the periodic worker. Report the first failure as soon as it occurs,
+// not at a prompt boundary. A successful export starts a new failure episode;
+// suppressing diagnostics never changes cumulative exporter-health counters.
+type periodicFailureReporter struct {
+	reported bool
+}
+
+func (p *periodicFailureReporter) report(logger *slog.Logger, err error) {
+	if err == nil {
+		p.reported = false
+		return
+	}
+	if logger == nil || p.reported {
+		return
+	}
+	logger.Debug("periodic OTEL export failed", logging.Category("otel"), "err", err)
+	p.reported = true
+}
+
 // Owned by the periodic worker. Only emitted warnings advance the baseline, so
 // suppressed ticks and export failures cannot consume unreported loss counts.
 type periodicLossReporter struct {

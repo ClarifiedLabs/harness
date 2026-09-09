@@ -203,7 +203,7 @@ func TestExporterPeriodicLoopLogsExportErrors(t *testing.T) {
 	exp.periodicInterval = time.Millisecond
 	exp.RecordSum("harness.periodic", "{call}", 1, nil)
 	logs := make(logChannel, 1)
-	logger, err := logging.NewLogger(logs, logging.LevelInfo)
+	logger, err := logging.NewLogger(logs, logging.LevelDebug)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestExporterPeriodicLoopLogsExportErrors(t *testing.T) {
 	exp.SetPeriodic(ctx, logger)
 	select {
 	case line := <-logs:
-		if !strings.Contains(line, "[otel]") || !strings.Contains(line, "periodic OTEL export failed") {
+		if !strings.Contains(line, "[debug] [otel]") || !strings.Contains(line, "periodic OTEL export failed") {
 			t.Fatalf("log line = %q", line)
 		}
 	case <-time.After(time.Second):
