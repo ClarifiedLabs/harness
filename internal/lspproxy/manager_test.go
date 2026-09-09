@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -583,7 +584,11 @@ func TestPrewarmLogsStartFailureOnce(t *testing.T) {
 	m := NewManager(goConfig(), "lsp", logger)
 	m.lookPath = func(string) (string, error) { return "/usr/bin/gopls", nil }
 	m.computeAvailable()
-	m.spawn = helperSpawn("crash", nil)
+	// Fail before starting a child so asynchronous stderr-drain warnings cannot
+	// affect the warning count or race with reads of the log buffer.
+	m.spawn = func() *exec.Cmd {
+		return exec.Command(filepath.Join(root, "missing-language-server"))
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -592,6 +597,9 @@ func TestPrewarmLogsStartFailureOnce(t *testing.T) {
 	}
 	if got := strings.Count(logs.String(), "level=WARN"); got != 1 {
 		t.Fatalf("warning count = %d, want 1; logs:\n%s", got, logs.String())
+	}
+	if !strings.Contains(logs.String(), "language server start failed; backing off") {
+		t.Fatalf("missing server launch warning:\n%s", logs.String())
 	}
 	if strings.Contains(logs.String(), "failed to warm server") {
 		t.Fatalf("prewarm duplicated the server launch warning:\n%s", logs.String())
