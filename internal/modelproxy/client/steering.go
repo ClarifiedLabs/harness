@@ -15,12 +15,10 @@ func (p *Provider) Steer(ctx context.Context, submission llm.SteerSubmission) er
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+"/v1/steer", bytes.NewReader(body))
+	req, err := p.client.newRequest(ctx, http.MethodPost, "/v1/steer", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
-	req.Header.Set("content-type", "application/json")
-	p.client.setAuth(req)
 	resp, err := p.client.http.Do(req)
 	if err != nil {
 		return err

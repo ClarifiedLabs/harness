@@ -75,17 +75,11 @@ func (c *ModelCall) Discard(reason string) {
 }
 
 // addReportedUsage combines disjoint, complete fallback response snapshots.
-// Callers avoid treating a missing snapshot as an unpriced zero response.
+// Unlike general usage totals, an explicitly reported unpriced zero response
+// makes the cost incomplete. Callers keep missing snapshots out of this sum.
 func addReportedUsage(a, b llm.Usage) llm.Usage {
-	return llm.Usage{
-		InputTokens:        a.InputTokens + b.InputTokens,
-		OutputTokens:       a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
-		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
-		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:            a.CostUSD + b.CostUSD,
-		CostKnown:          a.CostKnown && b.CostKnown,
-		CacheWriteTTLKnown: a.CacheWriteTTLKnown || b.CacheWriteTTLKnown,
-	}
+	out := llm.AddUsage(a, b)
+	out.CostKnown = a.CostKnown && b.CostKnown
+	out.CacheWriteTTLKnown = a.CacheWriteTTLKnown || b.CacheWriteTTLKnown
+	return out
 }

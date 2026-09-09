@@ -1,71 +1,17 @@
 package config
 
 import (
-	"flag"
 	"fmt"
-	"io"
 	"strings"
 
 	"harness/internal/cli"
-	"harness/internal/configmeta"
 )
 
 type flagOccurrence struct{ name, value string }
 
 type flagState struct {
-	set        *flag.FlagSet
 	settings   map[string][]flagOccurrence
 	invocation map[string][]flagOccurrence
-}
-
-type trackedFlag struct {
-	state   *flagState
-	key     string
-	name    string
-	boolean bool
-	setting bool
-}
-
-func (value *trackedFlag) String() string   { return "" }
-func (value *trackedFlag) IsBoolFlag() bool { return value.boolean }
-func (value *trackedFlag) Set(raw string) error {
-	occurrence := flagOccurrence{name: value.name, value: raw}
-	if value.setting {
-		value.state.settings[value.key] = append(value.state.settings[value.key], occurrence)
-	} else {
-		value.state.invocation[value.key] = append(value.state.invocation[value.key], occurrence)
-	}
-	return nil
-}
-
-func newFlagState() *flagState {
-	state := newParsedFlagState(cli.Values{})
-	state.set = flag.NewFlagSet("harness", flag.ContinueOnError)
-	state.set.SetOutput(io.Discard)
-	for _, definition := range allDefinitions {
-		definition.register(state)
-	}
-
-	state.addInvocationFlag("h", "help", "show help and exit", true)
-	state.addInvocationFlag("help", "help", "show help and exit", true)
-	state.addInvocationFlag("version", "version", "print release version and exit", true)
-	state.addInvocationFlag("config", "config", "alternate config path", false)
-	state.addInvocationFlag("p", "prompt", "one-shot prompt", false)
-	state.addInvocationFlag("i", "initial_prompt", "initial interactive prompt", false)
-	state.addInvocationFlag("initial-prompt", "initial_prompt", "initial interactive prompt", false)
-	state.addInvocationFlag("image", "image", "attach an image; repeatable; optionally detail:path", false)
-	state.addInvocationFlag("resume", "resume", "load a session transcript and continue", false)
-	state.addInvocationFlag("session", "session", "explicit session save path", false)
-	state.addInvocationFlag("q", "quiet", "suppress status messages and reasoning output", true)
-	state.addInvocationFlag("quiet", "quiet", "suppress status messages and reasoning output", true)
-	state.addInvocationFlag("format", "format", "output format: text or json", false)
-	state.addInvocationFlag("debug-request", "debug_request", "dump the first model request and exit", true)
-	state.addInvocationFlag("agents", "show_agents", "list configured agents and exit", true)
-	state.addInvocationFlag("models", "show_models", "list configured models and exit", true)
-	state.addInvocationFlag("check-model-proxy", "check_model_proxy", "check model proxy reachability and exit", true)
-	state.addInvocationFlag("hooks", "hooks_override", "override hook config file for this run", false)
-	annotateSettingFlags(state.set, parameterCatalog)
-	return state
 }
 
 func newParsedFlagState(values cli.Values) *flagState {
@@ -87,27 +33,6 @@ func newParsedFlagState(values cli.Values) *flagState {
 	return state
 }
 
-func (state *flagState) addSettingFlag(name, key, description string, boolean bool) {
-	state.set.Var(&trackedFlag{state: state, key: key, name: name, boolean: boolean, setting: true}, name, description)
-}
-
-func annotateSettingFlags(set *flag.FlagSet, catalog configmeta.Catalog) {
-	for _, parameter := range catalog.Parameters() {
-		for _, name := range parameter.Flags {
-			settingFlag := set.Lookup(name)
-			if settingFlag == nil {
-				continue
-			}
-			if len(parameter.Environment) > 0 {
-				settingFlag.Usage += " (env: " + strings.Join(parameter.Environment, ", ") + ")"
-			}
-			settingFlag.DefValue = configmeta.FormatDefault(parameter.Default)
-		}
-	}
-}
-func (state *flagState) addInvocationFlag(name, key, description string, boolean bool) {
-	state.set.Var(&trackedFlag{state: state, key: key, name: name, boolean: boolean}, name, description)
-}
 func (state *flagState) lastInvocation(key string) (flagOccurrence, bool) {
 	values := state.invocation[key]
 	if len(values) == 0 {
@@ -203,13 +128,4 @@ func resolveRunOptions(context *resolveContext) error {
 		return err
 	}
 	return nil
-}
-
-// Usage renders root help from the same generated flag set used by Load.
-func Usage(w io.Writer) {
-	fmt.Fprintln(w, "harness — a minimal agentic coding harness.")
-	fmt.Fprintln(w, "\nUsage:\n  harness [flags]\n  harness config <list|show|check> [flags]\n\nFlags:")
-	state := newFlagState()
-	state.set.SetOutput(w)
-	state.set.PrintDefaults()
 }

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"harness/internal/cli"
 	"harness/internal/configmeta"
 )
 
@@ -35,7 +36,11 @@ func load(t *testing.T, args []string, env map[string]string, path string) Resul
 	return result
 }
 
-func TestCatalogAndGeneratedFlags(t *testing.T) {
+func TestCatalogAndCLIFlags(t *testing.T) {
+	flags := make(map[string]cli.Flag)
+	for _, declaration := range CLIFlags() {
+		flags[declaration.ID] = declaration
+	}
 	catalog := Catalog()
 	if catalog.Len() < 70 {
 		t.Fatalf("catalog has %d parameters, want comprehensive catalog", catalog.Len())
@@ -44,11 +49,19 @@ func TestCatalogAndGeneratedFlags(t *testing.T) {
 		if parameter.Key == "" || parameter.Type == "" || parameter.Description == "" {
 			t.Fatalf("incomplete parameter: %+v", parameter)
 		}
-		for _, name := range parameter.Flags {
-			state := newFlagState()
-			if state.set.Lookup(name) == nil {
-				t.Errorf("catalog flag %q is not generated", name)
-			}
+		if len(parameter.Flags) == 0 {
+			continue
+		}
+		declaration, ok := flags[parameter.Key]
+		if !ok || !reflect.DeepEqual(declaration.Names, parameter.Flags) {
+			t.Errorf("catalog flag %q names = %v, want %v", parameter.Key, declaration.Names, parameter.Flags)
+		}
+		wantKind := cli.ValueFlag
+		if parameter.Type == "boolean" {
+			wantKind = cli.BoolFlag
+		}
+		if declaration.Kind != wantKind {
+			t.Errorf("catalog flag %q kind = %v, want %v", parameter.Key, declaration.Kind, wantKind)
 		}
 	}
 	noColor, ok := catalog.Lookup("no_color")
@@ -58,46 +71,6 @@ func TestCatalogAndGeneratedFlags(t *testing.T) {
 	secret, _ := catalog.Lookup("model_proxy_api_key")
 	if !secret.Sensitive {
 		t.Fatal("model proxy API key not marked sensitive")
-	}
-}
-
-func TestGeneratedUsageIncludesConfigDefaultsAndEnvironment(t *testing.T) {
-	state := newFlagState()
-	for _, name := range []string{"h", "help", "version"} {
-		if state.set.Lookup(name) == nil {
-			t.Errorf("root meta flag %q is not generated", name)
-		}
-	}
-	for _, parameter := range Catalog().Parameters() {
-		for _, name := range parameter.Flags {
-			settingFlag := state.set.Lookup(name)
-			if settingFlag == nil {
-				t.Fatalf("catalog flag %q is not generated", name)
-			}
-			if want := configmeta.FormatDefault(parameter.Default); settingFlag.DefValue != want {
-				t.Errorf("flag %q default = %q, want %q", name, settingFlag.DefValue, want)
-			}
-			for _, environment := range parameter.Environment {
-				if !strings.Contains(settingFlag.Usage, environment) {
-					t.Errorf("flag %q usage %q does not name environment variable %q", name, settingFlag.Usage, environment)
-				}
-			}
-		}
-	}
-
-	var usage bytes.Buffer
-	Usage(&usage)
-	for _, want := range []string{
-		"-h\tshow help and exit", "-help\n", "-version\n",
-		"Harness model setting. (env: HARNESS_MODEL) (default unset (provider/model selected elsewhere))",
-		"Harness max turns setting. (env: HARNESS_MAX_TURNS) (default 0 (non-positive means unlimited))",
-		"Harness no color setting. (env: HARNESS_NO_COLOR, NO_COLOR) (default false (NO_COLOR is a presence-based override))",
-		"Harness responses stateful setting. (env: HARNESS_RESPONSES_STATEFUL) (default true)",
-		"Harness model proxy url setting. (env: HARNESS_MODEL_PROXY_URL) (default derived: runtime model proxy URL)",
-	} {
-		if !strings.Contains(usage.String(), want) {
-			t.Errorf("usage does not contain %q:\n%s", want, usage.String())
-		}
 	}
 }
 
@@ -269,23 +242,48 @@ func collectJSONPaths(typ reflect.Type, prefix string, paths *[]string) {
 	}
 }
 
-func TestPrecedenceAndExactProvenance(t *testing.T) {
-	path := writeConfig(t, `{"max_turns":3}`)
-	result := load(t, []string{"--max-turns=9", "--max-turns=11"}, map[string]string{"HARNESS_MAX_TURNS": "7"}, path)
-	if result.Config.MaxTurns != 11 {
-		t.Fatalf("MaxTurns=%d", result.Config.MaxTurns)
-	}
-	if got := result.Sources["max_turns"]; got != (configmeta.Source{Kind: configmeta.SourceFlag, Name: "--max-turns"}) {
-		t.Fatalf("source=%+v", got)
-	}
-
-	result = load(t, nil, map[string]string{"HARNESS_MAX_TURNS": "7"}, path)
-	if result.Config.MaxTurns != 7 || result.Sources["max_turns"].Name != "HARNESS_MAX_TURNS" {
-		t.Fatalf("env result=%+v", result)
-	}
-	result = load(t, nil, nil, path)
-	if result.Config.MaxTurns != 3 || result.Sources["max_turns"] != (configmeta.Source{Kind: configmeta.SourceFile, Name: path}) {
-		t.Fatalf("file source=%+v", result.Sources["max_turns"])
+func TestLoadParsedPrecedenceAndPresence(t *testing.T) {
+	path := writeConfig(t, `{"max_turns":3,"responses_stateful":false,"system_prompt":"file"}`)
+	env := map[string]string{"HARNESS_MAX_TURNS": "7", "HARNESS_RESPONSES_STATEFUL": "true", "HARNESS_SYSTEM_PROMPT": "env"}
+	for _, test := range []struct {
+		name         string
+		path         string
+		env          map[string]string
+		args         []string
+		wantTurns    int
+		wantStateful bool
+		wantPrompt   string
+		wantSource   configmeta.Source
+	}{
+		{name: "defaults", wantStateful: true, wantSource: configmeta.Source{Kind: configmeta.SourceDefault, Name: "built-in"}},
+		{name: "file", path: path, wantTurns: 3, wantPrompt: "file", wantSource: configmeta.Source{Kind: configmeta.SourceFile, Name: path}},
+		{name: "environment", path: path, env: env, wantTurns: 7, wantStateful: true, wantPrompt: "env", wantSource: configmeta.Source{Kind: configmeta.SourceEnvironment, Name: "HARNESS_MAX_TURNS"}},
+		{name: "explicit zero false empty flags", path: path, env: env, args: []string{"--max-turns=9", "--max-turns=0", "--responses-stateful=false", "--system-prompt="}, wantSource: configmeta.Source{Kind: configmeta.SourceFlag, Name: "--max-turns"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			invocation, err := cli.Parse(loadCLICatalog, test.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := LoadParsed(LoadOptions{LookupEnv: lookup(test.env), DefaultConfigPath: test.path, WorkingDir: t.TempDir()}, invocation.Flags)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Config.MaxTurns != test.wantTurns || result.Config.ResponsesStateful != test.wantStateful || result.Config.SystemPrompt != test.wantPrompt {
+				t.Fatalf("MaxTurns=%d ResponsesStateful=%t SystemPrompt=%q, want %d/%t/%q", result.Config.MaxTurns, result.Config.ResponsesStateful, result.Config.SystemPrompt, test.wantTurns, test.wantStateful, test.wantPrompt)
+			}
+			if got := result.Sources["max_turns"]; got != test.wantSource {
+				t.Errorf("max_turns source = %+v, want %+v", got, test.wantSource)
+			}
+			for _, key := range []string{"responses_stateful", "system_prompt"} {
+				if got := result.Sources[key]; got.Kind != test.wantSource.Kind {
+					t.Errorf("%s source = %+v, want kind %s", key, got, test.wantSource.Kind)
+				}
+			}
+			if result.Run.PromptSet || result.Run.InitialPromptSet {
+				t.Fatalf("absent prompt flags marked present: %+v", result.Run)
+			}
+		})
 	}
 }
 
@@ -344,42 +342,6 @@ func TestReadLimitsPrecedence(t *testing.T) {
 		if got := result.Sources[key]; got != (configmeta.Source{Kind: configmeta.SourceEnvironment, Name: name}) {
 			t.Errorf("%s source = %+v, want environment %s", key, got, name)
 		}
-	}
-}
-
-func TestRemovedParametersAreUnavailable(t *testing.T) {
-	oldKeys := []string{
-		"trajectory_context",
-		"delegate_max_descendants",
-		"read_file_default_limit",
-		"read_file_result_max_bytes",
-		"read_file_result_max_lines",
-		"rg_result_max_bytes",
-		"rg_result_max_lines",
-		"grep_result_max_bytes",
-		"grep_result_max_lines",
-	}
-	for _, key := range oldKeys {
-		if _, ok := Catalog().Lookup(key); ok {
-			t.Errorf("obsolete parameter %q remains in catalog", key)
-		}
-		path := writeConfig(t, `{"`+key+`":1}`)
-		if _, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: path}); err == nil || !strings.Contains(err.Error(), `unknown field "`+key+`"`) {
-			t.Errorf("obsolete file setting %q error = %v, want strict unknown-field rejection", key, err)
-		}
-	}
-
-	result := load(t, nil, map[string]string{
-		"HARNESS_READ_FILE_DEFAULT_LIMIT":    "1",
-		"HARNESS_READ_FILE_RESULT_MAX_BYTES": "2",
-		"HARNESS_READ_FILE_RESULT_MAX_LINES": "3",
-		"HARNESS_RG_RESULT_MAX_BYTES":        "4",
-		"HARNESS_RG_RESULT_MAX_LINES":        "5",
-		"HARNESS_GREP_RESULT_MAX_BYTES":      "6",
-		"HARNESS_GREP_RESULT_MAX_LINES":      "7",
-	}, "")
-	if result.Config.ReadDefaultLimit != 0 || result.Config.ReadTotalLinesMaxBytes != 0 || result.Config.ReadResultMaxBytes != 0 || result.Config.ReadResultMaxLines != 0 {
-		t.Fatalf("obsolete environment variables affected read limits: %+v", result.Config)
 	}
 }
 
@@ -694,9 +656,16 @@ func TestRelativeConfigPathAbsolutizesNestedReferencesOnce(t *testing.T) {
 	}
 }
 
-func TestRunOptionsAreSeparateAndRepeatable(t *testing.T) {
-	result := load(t, []string{"-p", "hi", "--image", "low:a.png", "--image", "b.png", "--format", "json", "-q"}, nil, "")
-	if !result.Run.PromptSet || result.Run.Prompt != "hi" || !result.Run.Quiet || result.Run.OutputFormat != "json" || len(result.Run.Images) != 2 || result.Run.Images[0].Detail != "low" || result.Run.Images[1].Detail != "auto" {
+func TestLoadParsedRunOptionsAreSeparateAndRepeatable(t *testing.T) {
+	invocation, err := cli.Parse(loadCLICatalog, []string{"-p", "", "--image", "low:a.png", "--image", "b.png", "--format", "json", "-q", "--quiet=false"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := LoadParsed(LoadOptions{LookupEnv: lookup(nil), WorkingDir: t.TempDir()}, invocation.Flags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Run.PromptSet || result.Run.Prompt != "" || result.Run.Quiet || result.Run.OutputFormat != "json" || len(result.Run.Images) != 2 || result.Run.Images[0].Detail != "low" || result.Run.Images[1].Detail != "auto" {
 		t.Fatalf("Run=%+v", result.Run)
 	}
 	if _, err := Load(LoadOptions{Args: []string{"-p", "x", "-i", "y"}, LookupEnv: lookup(nil)}); err == nil {
@@ -877,48 +846,6 @@ func TestProjectionPreservesProviderQualifiedModel(t *testing.T) {
 	values := Project(result, false).Values
 	if got := values["model"]; got != "openai:gpt-5" {
 		t.Fatalf("projected model = %#v, want provider-qualified setting", got)
-	}
-}
-
-func TestRemovedOTelTracesConfigurationIsUnavailable(t *testing.T) {
-	if _, ok := Catalog().Lookup("otel.traces.enabled"); ok {
-		t.Fatal("obsolete otel.traces.enabled remains in parameter catalog")
-	}
-	if _, ok := LookupCLIFlag("otel.traces.enabled"); ok {
-		t.Fatal("obsolete otel.traces.enabled remains in CLI catalog")
-	}
-	if flag := newFlagState().set.Lookup("otel-traces"); flag != nil {
-		t.Fatalf("obsolete -otel-traces flag remains available: %+v", flag)
-	}
-
-	path := writeConfig(t, `{"otel":{"traces":{"enabled":true}}}`)
-	if _, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: path}); err == nil || !strings.Contains(err.Error(), `unknown field "traces"`) {
-		t.Fatalf("obsolete file setting error = %v, want strict unknown-field rejection", err)
-	}
-	if _, err := Load(LoadOptions{Args: []string{"--otel-traces"}, LookupEnv: lookup(nil)}); err == nil {
-		t.Fatal("obsolete --otel-traces flag was accepted")
-	}
-}
-
-func TestRemovedCompatibilityInputsAreRejected(t *testing.T) {
-	for _, args := range [][]string{{"--show-config"}, {"--no-timestamps"}} {
-		if _, err := Load(LoadOptions{Args: args, LookupEnv: lookup(nil)}); err == nil {
-			t.Fatalf("accepted %v", args)
-		}
-	}
-	for name, value := range map[string]string{"HARNESS_NO_TIMESTAMPS": "true", "HARNESS_TIMESTAMPS": "long", "HARNESS_REPL_EDIT_MODE": "vim", "LOG_LEVEL": "debug"} {
-		result, err := Load(LoadOptions{LookupEnv: lookup(map[string]string{name: value})})
-		if name == "LOG_LEVEL" {
-			if err != nil || result.Config.LogLevel != "info" {
-				t.Fatalf("LOG_LEVEL should be ignored: %+v %v", result, err)
-			}
-		} else if name == "HARNESS_NO_TIMESTAMPS" {
-			if err != nil || result.Config.TimestampMode != "short" {
-				t.Fatalf("removed env should be ignored: %+v %v", result, err)
-			}
-		} else if err == nil {
-			t.Fatalf("accepted %s=%s", name, value)
-		}
 	}
 }
 

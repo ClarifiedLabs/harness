@@ -57,7 +57,7 @@ func (r *executionRecorder) usage() llm.Usage {
 	var total llm.Usage
 	for _, e := range r.models {
 		if e.Phase == execution.ModelUsageDelta {
-			total = add(total, e.Usage)
+			total = llm.AddUsage(total, e.Usage)
 		}
 	}
 	return total

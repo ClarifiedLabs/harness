@@ -98,7 +98,7 @@ internal/cli             immutable nested command/flag catalogs, presence-aware 
 internal/modelproxy      proxy protocol, client Provider, server handler
 internal/modelproxy/config model-proxy top-level setting catalog, source resolution, and safe projections
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
-internal/llm             provider-agnostic types, Provider interface, model/price registry, and content-free physical attempt/retry/discard source facts
+internal/llm             provider-agnostic types, canonical message cloning and additive usage accounting, Provider interface, model/price registry, and content-free physical attempt/retry/discard source facts
 internal/execution       neutral typed Observer/Scope for model, work, prompt, context, turn, and skill observations; ModelCall owns exact physical usage/discard lineage and legacy response segments; Group tracks actual workers and complete owners without wrapping Provider capabilities
 internal/llm/openai      Chat Completions dialect: wire structs, request builder, stream decode, tool-call assembly
 internal/llm/responses   OpenAI Responses dialect: same responsibilities
@@ -238,6 +238,12 @@ support for another protocol version.
 The internal model is Anthropic-shaped — a content-block list — because it is a lossless
 superset of OpenAI's flat fields: collapsing blocks into OpenAI's shape is mechanical,
 while the reverse direction would lose structure.
+
+`internal/llm/clone.go` owns deep copies of messages, content blocks, and
+compaction metadata, including opaque JSON and reasoning-option pointers. Agent
+rewrites and session-tree snapshots share these helpers; public tree entry/path/
+node views are independent copies. Nil and empty slices remain distinct in the
+canonical helpers, with local adapters retaining legacy empty-transcript shapes.
 
 The full types live in `internal/llm/message.go` (`Role`, `Message`,
 `MessageOrigin`, `ParallelToolBatch`, `CompactionMetadata`, `BlockKind`,
@@ -985,6 +991,14 @@ type Usage struct {
     Speed            string // actually served speed, when reported
 }
 ```
+
+`llm.AddUsage` combines disjoint usage across calls and workers. A token-bearing
+operand with unknown cost keeps the aggregate `CostKnown` false; empty usage does
+not invalidate a known cost, and partial `CostUSD` is retained. Per-response
+pricing metadata is not carried into totals: price each response before adding.
+This is separate from cumulative-snapshot merging and execution's stricter
+reported-response accounting (where an explicitly unpriced empty response also
+makes cost incomplete).
 
 Normalization: OpenAI-compatible `prompt_tokens` **includes** cached tokens, so
 cache read/write fields (`prompt_tokens_details.cached_tokens`,
@@ -2936,6 +2950,13 @@ and the Codex comparison, and [tools.md](tools.md#experimental-context-managemen
 for note-file and lookup operations.
 
 ## 10. CLI / REPL (`internal/ui`)
+
+`App.preparePromptExecution` owns the shared interactive execution/finalization
+lifecycle: interrupt setup, event flushing, error display, saving, and completion
+notification. Entry points retain admission and goal policy; host-created API and
+detached-wait continuations never advance or pause goals. `AgentSelection` embeds
+`ModelSelection`, and `App.applyModelSelection` installs their shared target fields.
+Callers retain partial-override, response-state reset/retention, and prewarm policy.
 
 ### Rendering
 

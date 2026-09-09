@@ -1398,39 +1398,6 @@ func estimateContinuationContext(child *agent.Agent, messages []llm.Message, pro
 	return estimate
 }
 
-func addDelegateUsage(a, b llm.Usage) llm.Usage {
-	return llm.Usage{
-		InputTokens:        a.InputTokens + b.InputTokens,
-		OutputTokens:       a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
-		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
-		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:            a.CostUSD + b.CostUSD,
-		CostKnown:          aggregateDelegateCostKnown(a, b),
-	}
-}
-
-func aggregateDelegateCostKnown(a, b llm.Usage) bool {
-	switch {
-	case delegateUsageHasTokens(a) && !a.CostKnown:
-		return false
-	case delegateUsageHasTokens(b) && !b.CostKnown:
-		return false
-	default:
-		return a.CostKnown || b.CostKnown
-	}
-}
-
-func delegateUsageHasTokens(usage llm.Usage) bool {
-	return usage.InputTokens != 0 ||
-		usage.OutputTokens != 0 ||
-		usage.CacheReadTokens != 0 ||
-		usage.CacheWriteTokens != 0 ||
-		usage.CacheWrite1hTokens != 0 ||
-		usage.ReasoningTokens != 0
-}
-
 func continuationContextError(childID string, estimate agent.ContextEstimate) error {
 	if estimate.Window <= 0 {
 		return continuationIncompatibleError(childID, "current context window is unavailable")
@@ -2423,9 +2390,9 @@ func (s *childSink) addPreflightMaintenance(purpose string, usage llm.Usage, com
 	if usage == (llm.Usage{}) {
 		return
 	}
-	s.preflightMaintenance = addDelegateUsage(s.preflightMaintenance, usage)
-	s.usage.Usage = addDelegateUsage(s.usage.Usage, usage)
-	s.usage.Maintenance = addDelegateUsage(s.usage.Maintenance, usage)
+	s.preflightMaintenance = llm.AddUsage(s.preflightMaintenance, usage)
+	s.usage.Usage = llm.AddUsage(s.usage.Usage, usage)
+	s.usage.Maintenance = llm.AddUsage(s.usage.Maintenance, usage)
 	s.MaintenanceComplete(agent.MaintenanceUsage{Purpose: purpose, Usage: usage})
 }
 
@@ -2433,8 +2400,8 @@ func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	if s == nil || s.checkpoint == nil {
 		return
 	}
-	checkpoint.Usage.Usage = addDelegateUsage(checkpoint.Usage.Usage, s.preflightMaintenance)
-	checkpoint.Usage.Maintenance = addDelegateUsage(checkpoint.Usage.Maintenance, s.preflightMaintenance)
+	checkpoint.Usage.Usage = llm.AddUsage(checkpoint.Usage.Usage, s.preflightMaintenance)
+	checkpoint.Usage.Maintenance = llm.AddUsage(checkpoint.Usage.Maintenance, s.preflightMaintenance)
 	checkpoint.Usage.Compactions += s.preflightCompactions
 	started := time.Now()
 	if err := s.checkpoint(checkpoint); err != nil {
@@ -2515,8 +2482,8 @@ func (s *childSink) PeekRequestContext() []string {
 
 func (s *childSink) PromptComplete(usage agent.PromptUsage) {
 	s.flushDisplay()
-	usage.Usage = addDelegateUsage(usage.Usage, s.preflightMaintenance)
-	usage.Maintenance = addDelegateUsage(usage.Maintenance, s.preflightMaintenance)
+	usage.Usage = llm.AddUsage(usage.Usage, s.preflightMaintenance)
+	usage.Maintenance = llm.AddUsage(usage.Maintenance, s.preflightMaintenance)
 	usage.Compactions += s.preflightCompactions
 	s.usage = usage
 	s.activity.MarkUsage(usage.Usage)

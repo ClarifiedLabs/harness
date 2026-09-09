@@ -299,8 +299,8 @@ func collectStats(dir string) (statsReport, error) {
 		if child.meta.TerminationReason != "" {
 			report.terminationCounts[child.meta.TerminationReason]++
 		}
-		report.directUsage = addUsage(report.directUsage, child.stats.directUsage)
-		report.delegateDirectUsage = addUsage(report.delegateDirectUsage, child.stats.directUsage)
+		report.directUsage = llm.AddUsage(report.directUsage, child.stats.directUsage)
+		report.delegateDirectUsage = llm.AddUsage(report.delegateDirectUsage, child.stats.directUsage)
 		report.directModelCalls += child.stats.modelCalls
 		report.delegateModelCalls += child.stats.modelCalls
 		report.directMaintCalls += child.stats.maintenanceCalls
@@ -379,7 +379,7 @@ func collectSessionStatsWithFallback(dir string, child *ChildMeta) (collectedSes
 		case EventTurnAttemptUsage:
 			modelCalls++
 			if ev.Usage != nil {
-				directUsage = addUsage(directUsage, *ev.Usage)
+				directUsage = llm.AddUsage(directUsage, *ev.Usage)
 			}
 			if ev.Prompt > 0 && ev.Turn > 0 {
 				attemptedTurns[[2]int{ev.Prompt, ev.Turn}] = struct{}{}
@@ -391,8 +391,8 @@ func collectSessionStatsWithFallback(dir string, child *ChildMeta) (collectedSes
 		case EventMaintenanceUsage:
 			maintenanceCalls++
 			if ev.Usage != nil {
-				maintenanceUsage = addUsage(maintenanceUsage, *ev.Usage)
-				directUsage = addUsage(directUsage, *ev.Usage)
+				maintenanceUsage = llm.AddUsage(maintenanceUsage, *ev.Usage)
+				directUsage = llm.AddUsage(directUsage, *ev.Usage)
 			}
 		case EventBranch:
 			navigations++
@@ -841,7 +841,7 @@ func collectCompactionStats(dir string, tree *Tree) (compactionStats, parallelSt
 			}
 			compactions.fallbackReasons[meta.FallbackReason]++
 		}
-		compactions.usage = addUsage(compactions.usage, meta.Usage)
+		compactions.usage = llm.AddUsage(compactions.usage, meta.Usage)
 		collectParallelBatches(messages, seenBatches, &parallel)
 	}
 	return compactions, parallel, nil
@@ -1106,20 +1106,7 @@ func (stats *compactionStats) add(other compactionStats) {
 	for reason, count := range other.fallbackReasons {
 		stats.fallbackReasons[reason] += count
 	}
-	stats.usage = addUsage(stats.usage, other.usage)
-}
-
-func addUsage(a, b llm.Usage) llm.Usage {
-	return llm.Usage{
-		InputTokens:        a.InputTokens + b.InputTokens,
-		OutputTokens:       a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
-		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
-		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:            a.CostUSD + b.CostUSD,
-		CostKnown:          a.CostKnown || b.CostKnown,
-	}
+	stats.usage = llm.AddUsage(stats.usage, other.usage)
 }
 
 func totalTokens(usage llm.Usage) int {

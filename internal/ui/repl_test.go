@@ -1428,8 +1428,8 @@ func TestAgentSwitchRefreshesCompleteOTelIdentity(t *testing.T) {
 	exp := testUIExporter(t, app)
 	app.SwitchAgent = func(string) (AgentSelection, error) {
 		return AgentSelection{
-			Name: "plan", System: "plan prompt", Provider: "new-provider",
-			Model: "new-model", RegistryModel: "new-provider:new-model", Runtime: fp,
+			Name: "plan", System: "plan prompt",
+			ModelSelection: ModelSelection{Provider: "new-provider", Model: "new-model", RegistryModel: "new-provider:new-model", Runtime: fp},
 		}, nil
 	}
 	if err := app.applyAgentSwitch("plan"); err != nil {
@@ -3433,14 +3433,11 @@ func TestREPLAgentCommandSwitchesNextTurn(t *testing.T) {
 			t.Fatalf("switch agent = %q, want plan", name)
 		}
 		return AgentSelection{
-			Name:          "plan",
-			Tools:         planTools,
-			System:        "PLAN AGENT PROMPT",
-			Provider:      "anthropic",
-			Model:         "claude-opus-4-8",
-			RegistryModel: "anthropic:claude-opus-4-8",
-			Runtime:       fp,
-			BaseURL:       "proxy",
+			Name: "plan", Tools: planTools, System: "PLAN AGENT PROMPT",
+			ModelSelection: ModelSelection{
+				Provider: "anthropic", Model: "claude-opus-4-8", RegistryModel: "anthropic:claude-opus-4-8",
+				Runtime: fp, BaseURL: "proxy",
+			},
 		}, nil
 	}
 
@@ -3484,14 +3481,11 @@ func TestREPLAgentSwitchRotatesProxySessionID(t *testing.T) {
 			t.Fatalf("switch agent = %q, want plan", name)
 		}
 		return AgentSelection{
-			Name:              "plan",
-			Tools:             tools.Default(),
-			System:            "PLAN AGENT PROMPT",
-			Provider:          app.Provider,
-			Model:             app.Model,
-			RegistryModel:     app.RegistryModel,
-			Runtime:           fp,
-			ResponsesStateful: true,
+			Name: "plan", Tools: tools.Default(), System: "PLAN AGENT PROMPT",
+			ModelSelection: ModelSelection{
+				Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel,
+				Runtime: fp, ResponsesStateful: true,
+			},
 		}, nil
 	}
 
@@ -3519,7 +3513,7 @@ func TestREPLModeAliasSwitchesAgent(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", Provider: "anthropic", Model: "claude-opus-4-8", Runtime: fp}, nil
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", ModelSelection: ModelSelection{Provider: "anthropic", Model: "claude-opus-4-8", Runtime: fp}}, nil
 	}
 
 	if code := Run(strings.NewReader("/mode plan\n/exit\n"), app, nil); code != 0 {
@@ -3535,7 +3529,7 @@ func TestREPLPlanAliasDirectlySwitchesAgent(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", Provider: "anthropic", Model: "claude-opus-4-8", Runtime: fp}, nil
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", ModelSelection: ModelSelection{Provider: "anthropic", Model: "claude-opus-4-8", Runtime: fp}}, nil
 	}
 
 	if code := Run(strings.NewReader("/plan\n/exit\n"), app, nil); code != 0 {
@@ -3551,7 +3545,7 @@ func TestREPLAutoAliasDirectlySwitchesAgent(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", Provider: "anthropic", Model: "claude-opus-4-8", Runtime: fp}, nil
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", ModelSelection: ModelSelection{Provider: "anthropic", Model: "claude-opus-4-8", Runtime: fp}}, nil
 	}
 
 	if code := Run(strings.NewReader("/auto\n/exit\n"), app, nil); code != 0 {
@@ -3567,7 +3561,7 @@ func TestREPLAgentCommandWarnsWhenProviderOrModelChanges(t *testing.T) {
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", Provider: "openai", Model: "gpt-5.5", Runtime: fp}, nil
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "sys", ModelSelection: ModelSelection{Provider: "openai", Model: "gpt-5.5", Runtime: fp}}, nil
 	}
 
 	if code := Run(strings.NewReader("/agent review\n/exit\n"), app, nil); code != 0 {
@@ -3686,14 +3680,14 @@ func TestREPLShiftTabCyclesAgentsAndDebouncesFinalPrewarm(t *testing.T) {
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
 		switched = append(switched, name)
 		return AgentSelection{
-			Name:          name,
-			Tools:         toolSets[name],
-			System:        strings.ToUpper(name) + " SYSTEM",
-			Provider:      "anthropic",
-			Model:         "claude-opus-4-8", // deliberately identical for every agent
-			RegistryModel: "anthropic:claude-opus-4-8",
-			BaseURL:       app.BaseURL,
-			Runtime:       fp,
+			Name: name, Tools: toolSets[name], System: strings.ToUpper(name) + " SYSTEM",
+			ModelSelection: ModelSelection{
+				Provider:      "anthropic",
+				Model:         "claude-opus-4-8", // deliberately identical for every agent
+				RegistryModel: "anthropic:claude-opus-4-8",
+				BaseURL:       app.BaseURL,
+				Runtime:       fp,
+			},
 		}, nil
 	}
 
@@ -3817,7 +3811,7 @@ func TestREPLShiftTabPendingPrewarmCancelledByExplicitAgentSwitch(t *testing.T) 
 	app := newTestApp(t, &out, &errw, fp)
 	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "explore", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
+		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), ModelSelection: ModelSelection{Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}}, nil
 	}
 	delayRequests := make(chan shiftTabDelayRequest, 2)
 	app.shiftTabPrewarmAfter = func(delay time.Duration) <-chan time.Time {
@@ -3913,7 +3907,7 @@ func TestREPLRapidAgentSwitchesPrewarmOnlySettledSelection(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "explore", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
+		return AgentSelection{Name: name, Tools: tools.Default(), System: strings.ToUpper(name), ModelSelection: ModelSelection{Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}}, nil
 	}
 	delayRequests := make(chan shiftTabDelayRequest, 4)
 	app.shiftTabPrewarmAfter = func(delay time.Duration) <-chan time.Time {
@@ -4010,7 +4004,7 @@ func TestREPLShiftTabPendingPrewarmCancelledByRealPrompt(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp)
 	app.AvailableAgents = []AgentSummary{{Name: "auto", InteractiveSelectable: true}, {Name: "plan", InteractiveSelectable: true}}
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default(), System: "PLAN", Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}, nil
+		return AgentSelection{Name: name, Tools: tools.Default(), System: "PLAN", ModelSelection: ModelSelection{Provider: app.Provider, Model: app.Model, RegistryModel: app.RegistryModel, Runtime: fp}}, nil
 	}
 	delayRequests := make(chan shiftTabDelayRequest, 1)
 	app.shiftTabPrewarmAfter = func(delay time.Duration) <-chan time.Time {

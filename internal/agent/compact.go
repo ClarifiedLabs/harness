@@ -600,7 +600,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 		readFiles, modifiedFiles, readFilesOmitted = a.compactionFileActivity(older, prior)
 		if !fallbackUsed {
 			generated, attemptUsage, err := a.summarizeCompaction(summaryCtx, older, prior, readFiles, readFilesOmitted, modifiedFiles, focus)
-			usage = add(usage, attemptUsage)
+			usage = llm.AddUsage(usage, attemptUsage)
 			if err != nil {
 				if ctx.Err() != nil {
 					return usage, false, err
@@ -797,7 +797,7 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		Content: []llm.ContentBlock{{
 			Kind:                  llm.BlockProviderCompaction,
 			ReasoningReplayDomain: a.reasoningReplayDomain,
-			ProviderCompaction:    cloneRawMessages(result.Items),
+			ProviderCompaction:    llm.CloneRawMessages(result.Items),
 		}},
 	}
 	if err := llm.ValidateMessageContent([]llm.Message{checkpoint}); err != nil {
@@ -832,17 +832,6 @@ func nativeCompactionTransient(err error) bool {
 		return apiErr.Retryable || retry.RetryableStatus(apiErr.StatusCode)
 	}
 	return true
-}
-
-func cloneRawMessages(items []json.RawMessage) []json.RawMessage {
-	if items == nil {
-		return nil
-	}
-	out := make([]json.RawMessage, len(items))
-	for i := range items {
-		out[i] = append(json.RawMessage(nil), items[i]...)
-	}
-	return out
 }
 
 func (a *Agent) runPostCompactHook(ctx context.Context, sink EventSink, trigger, focus string) {
@@ -935,25 +924,13 @@ func (a *Agent) noticeCurrentShrink(sink EventSink, trigger string, before, afte
 	sink.Notice(fmt.Sprintf("[compacted: archived oversized turn payload · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
 }
 
-// cloneMessages returns a deep-enough copy of msgs for transcript rewrites.
-// Content and nested rich tool-result content get independent backing slices, as
-// do the other message-owned slices that compaction may retain or mutate.
+// cloneMessages preserves the agent's historical non-nil empty transcript while
+// sharing the canonical deep clone with other transcript owners.
 func cloneMessages(msgs []llm.Message) []llm.Message {
-	out := make([]llm.Message, len(msgs))
-	for i, m := range msgs {
-		out[i] = m
-		out[i].Content = cloneContentBlocks(m.Content)
-		out[i].ParallelToolBatches = append([]llm.ParallelToolBatch(nil), m.ParallelToolBatches...)
-		for j := range out[i].ParallelToolBatches {
-			out[i].ParallelToolBatches[j].ToolUseIDs = append([]string(nil), m.ParallelToolBatches[j].ToolUseIDs...)
-		}
-		out[i].Compaction = cloneCompactionMetadata(m.Compaction)
-		if m.ReasoningState != nil {
-			state := *m.ReasoningState
-			out[i].ReasoningState = &state
-		}
+	if msgs == nil {
+		return []llm.Message{}
 	}
-	return out
+	return llm.CloneMessages(msgs)
 }
 
 func withoutProviderCompactionMessages(messages []llm.Message) []llm.Message {
@@ -978,38 +955,6 @@ func withoutProviderCompactionDomain(messages []llm.Message, domain string) []ll
 		out = append(out, message)
 	}
 	return out
-}
-
-func cloneContentBlocks(blocks []llm.ContentBlock) []llm.ContentBlock {
-	if blocks == nil {
-		return nil
-	}
-	out := append([]llm.ContentBlock(nil), blocks...)
-	for i := range out {
-		out[i].ResultContent = cloneContentBlocks(blocks[i].ResultContent)
-		out[i].ToolInput = append(json.RawMessage(nil), blocks[i].ToolInput...)
-		out[i].InteractionStep = append(json.RawMessage(nil), blocks[i].InteractionStep...)
-		out[i].ResponsesToolSearch = append(json.RawMessage(nil), blocks[i].ResponsesToolSearch...)
-		out[i].AnthropicToolSearch = append(json.RawMessage(nil), blocks[i].AnthropicToolSearch...)
-		if blocks[i].ProviderCompaction != nil {
-			out[i].ProviderCompaction = make([]json.RawMessage, len(blocks[i].ProviderCompaction))
-			for j := range blocks[i].ProviderCompaction {
-				out[i].ProviderCompaction[j] = append(json.RawMessage(nil), blocks[i].ProviderCompaction[j]...)
-			}
-		}
-	}
-	return out
-}
-
-func cloneCompactionMetadata(meta *llm.CompactionMetadata) *llm.CompactionMetadata {
-	if meta == nil {
-		return nil
-	}
-	out := *meta
-	out.UserInstructions = append([]llm.ContentBlock(nil), meta.UserInstructions...)
-	out.ReadFiles = append([]string(nil), meta.ReadFiles...)
-	out.ModifiedFiles = append([]string(nil), meta.ModifiedFiles...)
-	return &out
 }
 
 // GenerateBranchSummary summarizes only the conversation fragment that will
@@ -1044,14 +989,14 @@ func (a *Agent) summarize(ctx context.Context, system string, older []llm.Messag
 	summaries := make([]llm.Message, 0, len(chunks))
 	for i, chunk := range chunks {
 		summary, usage, err := a.summarizeOne(ctx, system, chunk, purpose)
-		total = add(total, usage)
+		total = llm.AddUsage(total, usage)
 		if err != nil {
 			return "", total, err
 		}
 		summaries = append(summaries, textMessageAt(a.now(), llm.RoleUser, fmt.Sprintf("Chunk %d summary:\n%s", i+1, summary)))
 	}
 	final, usage, err := a.summarizeOne(ctx, system, summaries, purpose)
-	total = add(total, usage)
+	total = llm.AddUsage(total, usage)
 	if err != nil {
 		return "", total, err
 	}
@@ -1089,7 +1034,7 @@ func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, pr
 		finalMessages = make([]llm.Message, 0, len(chunks))
 		for i, chunk := range chunks {
 			summary, usage, err := a.summarizeOne(ctx, mapSystem, chunk, llm.RequestPurposeCompaction)
-			total = add(total, usage)
+			total = llm.AddUsage(total, usage)
 			if err != nil {
 				return "", total, err
 			}
@@ -1108,7 +1053,7 @@ func (a *Agent) summarizeCompaction(ctx context.Context, older []llm.Message, pr
 		finalSystem = prompts.CompactionUpdate()
 	}
 	final, usage, err := a.summarizeOne(ctx, compactionSystem(finalSystem, focus), finalMessages, llm.RequestPurposeCompaction)
-	total = add(total, usage)
+	total = llm.AddUsage(total, usage)
 	if err != nil {
 		return "", total, err
 	}
@@ -1158,7 +1103,7 @@ func (a *Agent) summarizeOne(ctx context.Context, system string, older []llm.Mes
 	for bumped := false; ; {
 		mark := ledger.mark()
 		text, usage, stop, err := a.streamSummary(ctx, system, older, budget, purpose)
-		total = add(total, usage)
+		total = llm.AddUsage(total, usage)
 		if err != nil {
 			return "", total, err
 		}
@@ -1218,7 +1163,7 @@ func (a *Agent) streamSummary(ctx context.Context, system string, older []llm.Me
 			}
 			mark := ledger.mark()
 			text, usage, stop, err := a.collectSummary(attemptCtx, req)
-			total = add(total, usage)
+			total = llm.AddUsage(total, usage)
 			if err == nil {
 				return text, total, stop, nil
 			}
@@ -1365,7 +1310,7 @@ func prepareSummaryMessages(msgs []llm.Message, maxToolResultBytes int) []llm.Me
 		}
 	}
 	for i, m := range msgs {
-		out[i] = llm.Message{Role: m.Role, Time: m.Time, Phase: m.Phase, Content: cloneContentBlocks(m.Content)}
+		out[i] = llm.Message{Role: m.Role, Time: m.Time, Phase: m.Phase, Content: llm.CloneContentBlocks(m.Content)}
 		out[i].Content = slices.DeleteFunc(out[i].Content, func(block llm.ContentBlock) bool {
 			return block.Kind == llm.BlockResponsesToolSearch || block.Kind == llm.BlockAnthropicToolSearch
 		})
@@ -1716,7 +1661,7 @@ func (a *Agent) deterministicCompactionNotice(reason string) string {
 func priorCompactionMetadata(messages []llm.Message) *llm.CompactionMetadata {
 	for i := len(messages) - 1; i >= 0; i-- {
 		if messages[i].Origin == llm.MessageOriginCompactionCheckpoint && messages[i].Compaction != nil {
-			return cloneCompactionMetadata(messages[i].Compaction)
+			return llm.CloneCompactionMetadata(messages[i].Compaction)
 		}
 	}
 	return nil

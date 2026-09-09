@@ -72,10 +72,21 @@ func New(baseURL string, httpClient *http.Client, opts ...Option) (*Client, erro
 	return c, nil
 }
 
-func (c *Client) setAuth(req *http.Request) {
+// newRequest builds a proxy request; non-nil bodies contain JSON.
+func (c *Client) newRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	if err != nil {
+		return nil, err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set(requesterHeader, "harness")
 	if c.apiKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
+	c.setTrace(req)
+	return req, nil
 }
 
 func (c *Client) setTrace(req *http.Request) {
@@ -93,13 +104,10 @@ func (c *Client) setTrace(req *http.Request) {
 func (c *Client) URL() string { return c.baseURL }
 
 func (c *Client) Catalog(ctx context.Context) (protocol.Catalog, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/v1/models", nil)
+	req, err := c.newRequest(ctx, http.MethodGet, "/v1/models", nil)
 	if err != nil {
 		return protocol.Catalog{}, err
 	}
-	req.Header.Set(requesterHeader, "harness")
-	c.setAuth(req)
-	c.setTrace(req)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return protocol.Catalog{}, err
@@ -190,19 +198,15 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal proxy request: " + err.Error()})
 			return
 		}
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+"/v1/stream", bytes.NewReader(body))
+		httpReq, err := p.client.newRequest(ctx, http.MethodPost, "/v1/stream", bytes.NewReader(body))
 		if err != nil {
 			yield(llm.StreamEvent{}, &llm.APIError{Message: "build proxy request: " + err.Error()})
 			return
 		}
-		httpReq.Header.Set("content-type", "application/json")
 		httpReq.Header.Set("accept", protocol.ContentTypeNDJSON)
-		httpReq.Header.Set(requesterHeader, "harness")
 		if req.ProxySessionID != "" {
 			httpReq.Header.Set("X-Harness-Session", req.ProxySessionID)
 		}
-		p.client.setAuth(httpReq)
-		p.client.setTrace(httpReq)
 
 		resp, err := p.client.http.Do(httpReq)
 		if err != nil {
@@ -320,14 +324,10 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	if err != nil {
 		return llm.InputTokenCount{}, fmt.Errorf("marshal proxy input token request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+"/v1/input_tokens", bytes.NewReader(body))
+	httpReq, err := p.client.newRequest(ctx, http.MethodPost, "/v1/input_tokens", bytes.NewReader(body))
 	if err != nil {
 		return llm.InputTokenCount{}, err
 	}
-	httpReq.Header.Set("content-type", "application/json")
-	httpReq.Header.Set(requesterHeader, "harness")
-	p.client.setAuth(httpReq)
-	p.client.setTrace(httpReq)
 	resp, err := p.client.http.Do(httpReq)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -367,14 +367,10 @@ func (p *Provider) CompactContext(ctx context.Context, req llm.Request) (llm.Com
 	if err != nil {
 		return llm.CompactedContext{}, fmt.Errorf("marshal proxy compact request: %w", err)
 	}
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.client.baseURL+"/v1/compact", bytes.NewReader(body))
+	httpReq, err := p.client.newRequest(ctx, http.MethodPost, "/v1/compact", bytes.NewReader(body))
 	if err != nil {
 		return llm.CompactedContext{}, err
 	}
-	httpReq.Header.Set("content-type", "application/json")
-	httpReq.Header.Set(requesterHeader, "harness")
-	p.client.setAuth(httpReq)
-	p.client.setTrace(httpReq)
 	resp, err := p.client.http.Do(httpReq)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

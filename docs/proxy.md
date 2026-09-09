@@ -223,10 +223,11 @@ logs:
 harness -trace-proxy -model <provider>:<model>
 ```
 
-Harness sends standard W3C `traceparent` headers. Proxy logs that receive a
-valid trace include `trace_id`, `span_id`, `parent_span_id`, and
-`trace_sampled` fields. Tracing does not log prompts, request bodies, API
-keys, or authentication headers.
+Harness sends standard W3C `traceparent` headers, including on model catalog,
+streaming, token-count, compaction, and native-steering requests. Each request gets
+its own span. Proxy logs that receive a valid trace include `trace_id`, `span_id`,
+`parent_span_id`, and `trace_sampled` fields. Tracing does not log prompts, request
+bodies, API keys, or authentication headers.
 
 ## Multimodal tool-result compatibility diagnostics
 

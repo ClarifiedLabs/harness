@@ -81,24 +81,10 @@ type AgentSummary struct {
 // new tool registry, fully reassembled system prompt, and model target runtime
 // for subsequent turns.
 type AgentSelection struct {
-	Name                  string
-	Tools                 *tools.Registry
-	System                string
-	Provider              string
-	Model                 string
-	RegistryModel         string
-	BaseURL               string
-	Runtime               llm.Provider
-	ContextWindow         int
-	Reasoning             llm.ReasoningConfig
-	BaseTargetID          string
-	ReasoningReplayDomain string
-	Variant               string
-	FastTargetID          string
-	ServerTools           []llm.ServerTool
-	ResponsesStateful     bool
-	NativeCompaction      bool
-	ReasoningSet          bool
+	ModelSelection
+	Name   string
+	Tools  *tools.Registry
+	System string
 }
 
 // LSPServerRootStatus, LSPServerStatus, and LSPStatus are UI-neutral snapshots
@@ -3226,7 +3212,7 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 		fmt.Fprintln(app.Errw, "[model switch unavailable]")
 		return false
 	}
-	oldProvider, oldModel, oldBaseTargetID := app.Provider, app.Model, app.BaseTargetID
+	oldProvider, oldModel := app.Provider, app.Model
 	selection, err := app.SwitchModel(model, reasoning)
 	if err != nil {
 		fmt.Fprintf(app.Errw, "[model switch failed: %v]\n", err)
@@ -3245,21 +3231,11 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 	if !selection.ReasoningSet && selection.Reasoning.Empty() && !reasoning.Empty() {
 		selection.Reasoning = reasoning
 	}
-	if selection.BaseTargetID == "" {
-		selection.BaseTargetID = selection.Model
-	}
-	if selection.ReasoningReplayDomain == "" {
-		selection.ReasoningReplayDomain = selection.BaseTargetID
-	}
-	baseChanged := oldBaseTargetID == "" || selection.BaseTargetID != oldBaseTargetID
+	// A model switch always replaces reasoning after resolving the requested
+	// fallback; an agent selection may deliberately leave it unchanged.
+	selection.ReasoningSet = true
 	responseState := app.Agent.ResponseState()
-	app.Agent.SetProvider(selection.Runtime)
-	app.Agent.SetModel(selection.Model, selection.ContextWindow)
-	app.Agent.SetReasoningReplayDomain(selection.ReasoningReplayDomain)
-	app.Agent.SetReasoning(selection.Reasoning)
-	app.Agent.SetServerTools(selection.ServerTools)
-	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
-	app.Agent.SetNativeCompaction(selection.NativeCompaction)
+	baseChanged := app.applyModelSelection(selection)
 	if baseChanged {
 		app.Agent.ResetProxySessionID()
 	} else if selection.ResponsesStateful &&
@@ -3272,23 +3248,10 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 		) {
 		app.Agent.SetResponseState(responseState)
 	}
-	if selection.RegistryModel == "" {
-		selection.RegistryModel = selection.Model
-	}
-	app.Renderer.SetModel(selection.RegistryModel)
-	app.Provider = selection.Provider
-	app.Model = selection.Model
-	app.RegistryModel = selection.RegistryModel
 	app.refreshOTelIdentity()
 	if app.Hooks != nil {
 		app.Hooks.SetModel(app.Model)
 	}
-	app.BaseURL = selection.BaseURL
-	app.Reasoning = selection.Reasoning
-	app.BaseTargetID = selection.BaseTargetID
-	app.ReasoningReplayDomain = selection.ReasoningReplayDomain
-	app.Variant = selection.Variant
-	app.FastTargetID = selection.FastTargetID
 	fmt.Fprintf(app.Errw, "[model switched: model=%s proxy-url=%s reasoning=%s]\n", modelDisplayName(app.Provider, app.Model), app.BaseURL, app.reasoningLabel())
 	if oldProvider != app.Provider || oldModel != app.Model {
 		app.onModelChanged()
@@ -3297,6 +3260,51 @@ func (app *App) switchModel(model string, reasoning llm.ReasoningConfig) bool {
 		app.schedulePrewarm() // the new underlying model/provider invalidated the warm cache prefix (r43)
 	}
 	return true
+}
+
+// applyModelSelection installs the common target bundle and reports whether its
+// base target changed. Callers own response-state/reset policy, telemetry, and
+// prewarming. Missing runtime/model/provider and unset reasoning are partial
+// overrides; BaseURL is exact (agent switches resolve its fallback first).
+func (app *App) applyModelSelection(selection ModelSelection) bool {
+	if selection.BaseTargetID == "" {
+		selection.BaseTargetID = selection.Model
+	}
+	if selection.ReasoningReplayDomain == "" {
+		selection.ReasoningReplayDomain = selection.BaseTargetID
+	}
+	baseChanged := app.BaseTargetID == "" || selection.BaseTargetID != app.BaseTargetID
+	if selection.Runtime != nil {
+		app.Agent.SetProvider(selection.Runtime)
+	}
+	if selection.Model != "" {
+		app.Agent.SetModel(selection.Model, selection.ContextWindow)
+		app.Model = selection.Model
+	}
+	app.Agent.SetReasoningReplayDomain(selection.ReasoningReplayDomain)
+	if selection.ReasoningSet {
+		app.Agent.SetReasoning(selection.Reasoning)
+		app.Reasoning = selection.Reasoning
+	}
+	app.Agent.SetServerTools(selection.ServerTools)
+	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
+	app.Agent.SetNativeCompaction(selection.NativeCompaction)
+	if selection.Provider != "" {
+		app.Provider = selection.Provider
+	}
+	if selection.RegistryModel == "" {
+		selection.RegistryModel = app.Model
+	}
+	app.RegistryModel = selection.RegistryModel
+	if app.Renderer != nil {
+		app.Renderer.SetModel(selection.RegistryModel)
+	}
+	app.BaseURL = selection.BaseURL
+	app.BaseTargetID = selection.BaseTargetID
+	app.ReasoningReplayDomain = selection.ReasoningReplayDomain
+	app.Variant = selection.Variant
+	app.FastTargetID = selection.FastTargetID
+	return baseChanged
 }
 
 // prewarm triggers a background prompt-cache warm-up after a cache-invalidating
@@ -3868,52 +3876,18 @@ func (app *App) applyAgentSwitchUsing(name string, prewarm bool, switchAgent fun
 	}
 	app.Agent.SetTools(selection.Tools)
 	app.Agent.SetSystem(selection.System)
-	if selection.Runtime != nil {
-		app.Agent.SetProvider(selection.Runtime)
+	if selection.BaseURL == "" {
+		selection.BaseURL = app.BaseURL
 	}
-	if selection.Model != "" {
-		app.Agent.SetModel(selection.Model, selection.ContextWindow)
-	}
-	if selection.ReasoningSet {
-		app.Reasoning = selection.Reasoning
-		app.Agent.SetReasoning(selection.Reasoning)
-	}
-	if selection.BaseTargetID == "" {
-		selection.BaseTargetID = selection.Model
-	}
-	if selection.ReasoningReplayDomain == "" {
-		selection.ReasoningReplayDomain = selection.BaseTargetID
-	}
-	app.BaseTargetID = selection.BaseTargetID
-	app.ReasoningReplayDomain = selection.ReasoningReplayDomain
-	app.Agent.SetReasoningReplayDomain(selection.ReasoningReplayDomain)
-	app.Variant = selection.Variant
-	app.FastTargetID = selection.FastTargetID
-	app.Agent.SetServerTools(selection.ServerTools)
-	app.Agent.SetResponsesStateful(selection.ResponsesStateful)
-	app.Agent.SetNativeCompaction(selection.NativeCompaction)
+	app.applyModelSelection(selection.ModelSelection)
+	// Agent changes also replace tools/system, so they always start fresh even
+	// when the underlying target remains the same.
 	app.Agent.ResetProxySessionID()
 	app.AgentName = selection.Name
 	app.System = selection.System // so saved sessions capture the agent's prompt
-	if selection.Provider != "" {
-		app.Provider = selection.Provider
-	}
-	if selection.Model != "" {
-		app.Model = selection.Model
-	}
 	app.refreshOTelIdentity()
 	if app.Hooks != nil {
 		app.Hooks.SetModel(app.Model)
-	}
-	if selection.RegistryModel == "" {
-		selection.RegistryModel = app.Model
-	}
-	app.RegistryModel = selection.RegistryModel
-	if app.Renderer != nil {
-		app.Renderer.SetModel(selection.RegistryModel)
-	}
-	if selection.BaseURL != "" {
-		app.BaseURL = selection.BaseURL
 	}
 	fmt.Fprintf(app.Errw, "[agent switched: %s]\n", selection.Name)
 	fmt.Fprintln(app.Errw, ProviderLine(app.Provider, app.Model, app.currentRegistryModel(), app.Reasoning, app.Registry))
@@ -4274,6 +4248,47 @@ func (app *App) finishPromptRun(err error, requestContext []string) {
 	app.clearAPIContinuation()
 }
 
+// preparePromptExecution owns the lifecycle shared by admitted prompts and
+// continuations. Admission stays with the caller; onEnd is only supplied for
+// human/goal prompts, since host recovery turns must not change goal state.
+func (app *App) preparePromptExecution(ctx context.Context, promptID int, requestContext []string, run func(context.Context, *accumulatingSink) error, onEnd func(context.Context, error)) func() {
+	var cancel context.CancelFunc
+	if app.Interrupt != nil {
+		ctx, cancel = context.WithCancel(ctx)
+		app.Interrupt.BeginPrompt(func() {
+			if app.Renderer != nil {
+				app.Renderer.CancelRequested()
+			}
+			cancel()
+		})
+	}
+
+	app.Renderer.StartPromptRun()
+	return func() {
+		if app.OnPromptFinished != nil {
+			defer app.OnPromptFinished()
+		}
+		if app.Interrupt != nil {
+			defer func() {
+				app.Interrupt.EndPrompt()
+				cancel()
+			}()
+		}
+
+		sink := newREPLSink(app.Renderer, app, promptID)
+		err := run(ctx, sink)
+		app.finishPromptRun(err, requestContext)
+		sink.FlushEvents()
+		if onEnd != nil {
+			onEnd(ctx, err)
+		}
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
+			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
+		}
+		app.saveOrWarn(app.SessionPath)
+	}
+}
+
 func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), bool) {
 	prepared, err := app.preparePrompt(prompt, opts, true)
 	if err != nil {
@@ -4327,39 +4342,11 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 	if app.Goal != nil {
 		ctx = goal.WithGeneration(ctx, app.Goal, goalGeneration)
 	}
-	var cancel context.CancelFunc
-	if app.Interrupt != nil {
-		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginPrompt(func() {
-			if app.Renderer != nil {
-				app.Renderer.CancelRequested()
-			}
-			cancel()
-		})
-	}
-
-	app.Renderer.StartPromptRun()
-	return func() {
-		if app.OnPromptFinished != nil {
-			defer app.OnPromptFinished()
-		}
-		if app.Interrupt != nil {
-			defer func() {
-				app.Interrupt.EndPrompt()
-				cancel()
-			}()
-		}
-
-		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
-		app.finishPromptRun(err, requestContext)
-		sink.FlushEvents()
+	return app.preparePromptExecution(ctx, promptID, requestContext, func(ctx context.Context, sink *accumulatingSink) error {
+		return app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
+	}, func(ctx context.Context, err error) {
 		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
-			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
-		}
-		app.saveOrWarn(app.SessionPath)
-	}, true
+	}), true
 }
 
 // prepareDetachedWaitContinuation admits the small host-created continuation
@@ -4370,41 +4357,9 @@ func (app *App) preparePromptRun(prompt string, opts promptOptions) (func(), boo
 func (app *App) prepareDetachedWaitContinuation() (func(), bool) {
 	admission, promptID := app.admitInternalPrompt(detachedBackgroundWaitContinuation, detachedBackgroundWaitCause)
 	requestContext := app.promptHookContext(nil)
-	ctx := context.Background()
-	var cancel context.CancelFunc
-	if app.Interrupt != nil {
-		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginPrompt(func() {
-			if app.Renderer != nil {
-				app.Renderer.CancelRequested()
-			}
-			cancel()
-		})
-	}
-
-	app.Renderer.StartPromptRun()
-	return func() {
-		if app.OnPromptFinished != nil {
-			defer app.OnPromptFinished()
-		}
-		if app.Interrupt != nil {
-			defer func() {
-				app.Interrupt.EndPrompt()
-				cancel()
-			}()
-		}
-
-		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
-		app.finishPromptRun(err, requestContext)
-		sink.FlushEvents()
-		// Deliberately do not call goalOnPromptEnd or alter its interruption state:
-		// this host-created turn must not consume, pause, or otherwise mutate a goal.
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
-			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
-		}
-		app.saveOrWarn(app.SessionPath)
-	}, true
+	return app.preparePromptExecution(context.Background(), promptID, requestContext, func(ctx context.Context, sink *accumulatingSink) error {
+		return app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
+	}, nil), true
 }
 
 // prepareAPIContinuation starts a fresh accounting prompt from the existing
@@ -4417,41 +4372,10 @@ func (app *App) prepareAPIContinuation() (func(), bool) {
 	}
 	app.clearAPIContinuation()
 	promptID := app.beginContinuationPrompt()
-	ctx := context.Background()
-	var cancel context.CancelFunc
-	if app.Interrupt != nil {
-		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginPrompt(func() {
-			if app.Renderer != nil {
-				app.Renderer.CancelRequested()
-			}
-			cancel()
-		})
-	}
-
-	app.Renderer.StartPromptRun()
-	return func() {
-		if app.OnPromptFinished != nil {
-			defer app.OnPromptFinished()
-		}
-		if app.Interrupt != nil {
-			defer func() {
-				app.Interrupt.EndPrompt()
-				cancel()
-			}()
-		}
-
-		sink := newREPLSink(app.Renderer, app, promptID)
+	return app.preparePromptExecution(context.Background(), promptID, requestContext, func(ctx context.Context, sink *accumulatingSink) error {
 		sink.Notice("[continuing after API error]")
-		err := app.Agent.ContinuePromptWithContext(ctx, requestContext, promptID, sink)
-		app.finishPromptRun(err, requestContext)
-		sink.FlushEvents()
-		// A host recovery attempt never admits, advances, or pauses a goal.
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
-			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
-		}
-		app.saveOrWarn(app.SessionPath)
-	}, true
+		return app.Agent.ContinuePromptWithContext(ctx, requestContext, promptID, sink)
+	}, nil), true
 }
 
 func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnBlock bool) (preparedPrompt, error) {
@@ -4542,39 +4466,11 @@ func (app *App) prepareSteeredPrompt(input agent.SteerInput) (func(), bool) {
 	if app.Goal != nil {
 		ctx = goal.WithGeneration(ctx, app.Goal, goalGeneration)
 	}
-	var cancel context.CancelFunc
-	if app.Interrupt != nil {
-		ctx, cancel = context.WithCancel(ctx)
-		app.Interrupt.BeginPrompt(func() {
-			if app.Renderer != nil {
-				app.Renderer.CancelRequested()
-			}
-			cancel()
-		})
-	}
-
-	app.Renderer.StartPromptRun()
-	return func() {
-		if app.OnPromptFinished != nil {
-			defer app.OnPromptFinished()
-		}
-		if app.Interrupt != nil {
-			defer func() {
-				app.Interrupt.EndPrompt()
-				cancel()
-			}()
-		}
-
-		sink := newREPLSink(app.Renderer, app, promptID)
-		err := app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
-		app.finishPromptRun(err, requestContext)
-		sink.FlushEvents()
+	return app.preparePromptExecution(ctx, promptID, requestContext, func(ctx context.Context, sink *accumulatingSink) error {
+		return app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
+	}, func(ctx context.Context, err error) {
 		app.goalOnPromptEnd(ctx, err, goalRevision, goalActive)
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) && !sink.terminalModelErrorDisplayed {
-			fmt.Fprintf(app.Errw, "[error: %v]\n", err)
-		}
-		app.saveOrWarn(app.SessionPath)
-	}, true
+	}), true
 }
 
 // compact forces compaction now (/compact, design §12). The summary call's usage

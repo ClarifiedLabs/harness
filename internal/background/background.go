@@ -938,7 +938,7 @@ func (m *Manager) DrainPromptWorkUsage() llm.Usage {
 			continue
 		}
 		job.usageDelivered = true
-		total = addUsage(total, job.Result.Usage)
+		total = llm.AddUsage(total, job.Result.Usage)
 	}
 	return total
 }
@@ -1425,33 +1425,6 @@ func formatGetResult(job Snapshot) tools.RunResult {
 	}
 	job.Result.Text = job.Result.OriginalText
 	return tools.RunResult{Text: text, OriginalText: formatGet(job)}
-}
-
-func addUsage(a, b llm.Usage) llm.Usage {
-	return llm.Usage{
-		InputTokens:        a.InputTokens + b.InputTokens,
-		OutputTokens:       a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
-		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
-		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:            a.CostUSD + b.CostUSD,
-		CostKnown:          aggregateCostKnown(a, b),
-	}
-}
-
-func aggregateCostKnown(a, b llm.Usage) bool {
-	aHasUsage := usageHasTokens(a)
-	bHasUsage := usageHasTokens(b)
-	if (aHasUsage && !a.CostKnown) || (bHasUsage && !b.CostKnown) {
-		return false
-	}
-	return a.CostKnown || b.CostKnown
-}
-
-func usageHasTokens(u llm.Usage) bool {
-	return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheReadTokens != 0 ||
-		u.CacheWriteTokens != 0 || u.CacheWrite1hTokens != 0 || u.ReasoningTokens != 0
 }
 
 func preview(s string, max int) string {

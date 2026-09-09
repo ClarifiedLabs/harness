@@ -23,7 +23,7 @@ func executionDiscardUsage(r *executionRecorder) llm.Usage {
 	var total llm.Usage
 	for _, event := range r.models {
 		if event.Phase == execution.ModelDiscard {
-			total = add(total, event.Usage)
+			total = llm.AddUsage(total, event.Usage)
 		}
 	}
 	return total

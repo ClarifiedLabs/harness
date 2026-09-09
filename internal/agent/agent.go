@@ -1449,7 +1449,7 @@ func newTurnAttemptCoordinator(a *Agent, sink EventSink, turn int) *turnAttemptC
 
 func (c *turnAttemptCoordinator) request(ctx context.Context, req llm.Request, estimate ContextEstimate) (turnResult, error) {
 	res, wasted, err := c.agent.streamWithRetry(ctx, req, c.sink, c.turn, c.next, estimate)
-	c.wasted = add(c.wasted, wasted)
+	c.wasted = llm.AddUsage(c.wasted, wasted)
 	c.retryReason, _ = llm.ClassifyAttemptError(err, 0)
 	if res.attempts >= c.next {
 		c.next = res.attempts + 1
@@ -1470,7 +1470,7 @@ func (c *turnAttemptCoordinator) abandon(res turnResult) {
 		return
 	}
 	c.abandoned[res.attempts] = true
-	c.wasted = add(c.wasted, res.usage)
+	c.wasted = llm.AddUsage(c.wasted, res.usage)
 	res.modelCall.Discard("request_rebuild")
 	if abandon, ok := c.sink.(TurnAttemptAbandonSink); ok {
 		abandon.TurnAttemptAbandoned(c.turn, res.attempts)
@@ -2046,8 +2046,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	}
 	finalizePrompt := func(validationPhase string) error {
 		usage, wasted, estimate, completed := a.finalizeWithSummary(ctx, sink, appendPromptContext(extraContext, steerContext), turns+1)
-		total = add(total, usage)
-		wastedTotal = add(wastedTotal, wasted)
+		total = llm.AddUsage(total, usage)
+		wastedTotal = llm.AddUsage(wastedTotal, wasted)
 		lastContext = estimate
 		if !completed {
 			return nil
@@ -2184,8 +2184,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			// progress (no-op churn).
 			compUsage, changed, err := a.compactTriggered(ctx, sink, "auto")
 			if compUsage != (llm.Usage{}) {
-				total = add(total, compUsage)
-				maintenanceTotal = add(maintenanceTotal, compUsage)
+				total = llm.AddUsage(total, compUsage)
+				maintenanceTotal = llm.AddUsage(maintenanceTotal, compUsage)
 				reportMaintenance(sink, "compaction", compUsage)
 			}
 			if err == nil && changed {
@@ -2213,8 +2213,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if a.autoCompactionEnabled() && a.overThreshold(modelReq.estimate.Total) {
 			compUsage, changed, err := a.compactTriggered(ctx, sink, "input-count")
 			if compUsage != (llm.Usage{}) {
-				total = add(total, compUsage)
-				maintenanceTotal = add(maintenanceTotal, compUsage)
+				total = llm.AddUsage(total, compUsage)
+				maintenanceTotal = llm.AddUsage(maintenanceTotal, compUsage)
 				reportMaintenance(sink, "compaction", compUsage)
 			}
 			if err == nil && changed {
@@ -2239,7 +2239,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// RequestContext above may have drained a just-completed delegate report.
 		// Fold its usage before the provider call and remember whether older
 		// join-required work is still running during this parent model round.
-		total = add(total, drainPromptWorkUsage(sink))
+		total = llm.AddUsage(total, drainPromptWorkUsage(sink))
 		pendingBeforeRequest := pendingPromptWork(sink)
 		forcePromptWorkSynthesis = false
 		if retention.observed {
@@ -2260,8 +2260,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				}
 				compUsage, changed, cerr := a.compactTriggered(ctx, sink, "context-overflow")
 				if compUsage != (llm.Usage{}) {
-					total = add(total, compUsage)
-					maintenanceTotal = add(maintenanceTotal, compUsage)
+					total = llm.AddUsage(total, compUsage)
+					maintenanceTotal = llm.AddUsage(maintenanceTotal, compUsage)
 					reportMaintenance(sink, "compaction", compUsage)
 				}
 				if cerr != nil {
@@ -2335,8 +2335,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 
 		}
 		wasted := attempts.wasted
-		wastedTotal = add(wastedTotal, wasted)
-		total = add(total, add(res.usage, wasted))
+		wastedTotal = llm.AddUsage(wastedTotal, wasted)
+		total = llm.AddUsage(total, llm.AddUsage(res.usage, wasted))
 		// Context-size signal, not billing: cached tokens occupy the window too.
 		lastInput = res.usage.InputTokens + res.usage.CacheReadTokens +
 			res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
@@ -2370,7 +2370,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				deliverNativeSteers(res.deliveredSteers, sink)
 			}
 			if turns > 0 && cancelled && res.text != "" {
-				sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(res.usage, wasted), Wasted: wasted, Context: lastContext})
+				sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(res.usage, wasted), Wasted: wasted, Context: lastContext})
 				checkpoint(PromptCheckpointClosedTurn)
 			}
 			return err
@@ -2396,14 +2396,14 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			if err := a.validateTranscript("after assistant turn"); err != nil {
 				return err
 			}
-			sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(res.usage, wasted), Wasted: wasted, Context: lastContext})
+			sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(res.usage, wasted), Wasted: wasted, Context: lastContext})
 			checkpoint(PromptCheckpointClosedTurn)
 			// A model may try to finalize while background delegates are still
 			// running. Join them, then issue another model request with their reports
 			// injected as request context so the parent actually synthesizes them.
 			if pendingPromptWork(sink) {
 				usage, waitErr := waitForPromptWork(ctx, sink)
-				total = add(total, usage)
+				total = llm.AddUsage(total, usage)
 				if waitErr != nil {
 					return waitErr
 				}
@@ -2498,7 +2498,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		)
 		dispatchCtx = context.WithValue(dispatchCtx, asyncResultsKey{}, res.asyncResults)
 		results, parallelBatches, toolUsage := a.dispatchCalls(dispatchCtx, res.toolCalls, promptID, turns, sink)
-		total = add(total, toolUsage)
+		total = llm.AddUsage(total, toolUsage)
 		a.transcript = append(a.transcript, llm.Message{
 			Role:                llm.RoleUser,
 			Time:                a.now(),
@@ -2509,7 +2509,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if err := a.validateTranscript("after tool results"); err != nil {
 			return err
 		}
-		sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: add(add(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext})
+		sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(llm.AddUsage(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext})
 		checkpoint(PromptCheckpointClosedTurn)
 		progress := guard.aggregateTurnProgress(a.tools, turns, executionCalls, results)
 
@@ -2518,7 +2518,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// this request, join it now and synthesize its injected report next.
 		if (pendingBeforeRequest || (!unlimited && turns >= a.maxTurns)) && pendingPromptWork(sink) {
 			usage, waitErr := waitForPromptWork(ctx, sink)
-			total = add(total, usage)
+			total = llm.AddUsage(total, usage)
 			reportTurnProgress(scope, sink, progress, executionCalls)
 			if waitErr != nil {
 				return waitErr
@@ -2659,12 +2659,12 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	// must not abandon join-required delegates or lose their spend.
 	if pendingPromptWork(sink) {
 		usage, waitErr := waitForPromptWork(ctx, sink)
-		total = add(total, usage)
+		total = llm.AddUsage(total, usage)
 		if waitErr != nil {
 			return waitErr
 		}
 	}
-	total = add(total, drainPromptWorkUsage(sink))
+	total = llm.AddUsage(total, drainPromptWorkUsage(sink))
 
 	// Post-prompt compaction trigger (design §12, §8.1): fires after the final
 	// turn, before returning to the REPL. The summary call's usage folds into the
@@ -2674,8 +2674,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink)
 	if compUsage != (llm.Usage{}) {
-		total = add(total, compUsage)
-		maintenanceTotal = add(maintenanceTotal, compUsage)
+		total = llm.AddUsage(total, compUsage)
+		maintenanceTotal = llm.AddUsage(maintenanceTotal, compUsage)
 		reportMaintenance(sink, "compaction", compUsage)
 	}
 	if err == nil && changed {
@@ -2934,7 +2934,7 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 		res, err = attempts.rerun(ctx, res, modelReq.request, modelReq.estimate)
 	}
 	wasted := attempts.wasted
-	usage := add(res.usage, wasted)
+	usage := llm.AddUsage(res.usage, wasted)
 	if err != nil {
 		res.modelCall.Discard("error")
 		a.resetResponseState()
@@ -3117,7 +3117,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 	for _, stage := range stages {
 		batches, usage := a.dispatchCallStage(ctx, executionCalls, stage, promptID, turnID, sink, blocks, &richEncodedBytes, crossStageDependencies, actualCompletions, suppressed)
 		parallelBatches = append(parallelBatches, batches...)
-		total = add(total, usage)
+		total = llm.AddUsage(total, usage)
 	}
 	return blocks, parallelBatches, total
 }
@@ -3189,7 +3189,7 @@ func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, sta
 			block, usage, completion := a.dispatchSequentialCall(ctx, calls[i], promptID, turnID, sink, a.hasMutationConflictBefore(calls, i, stage.end), richEncodedBytes)
 			blocks[i] = block
 			actualCompletions[i] = completion
-			total = add(total, usage)
+			total = llm.AddUsage(total, usage)
 			i++
 			continue
 		}
@@ -3210,7 +3210,7 @@ func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, sta
 				block, usage, completion := a.dispatchSequentialCall(ctx, call, promptID, turnID, sink, a.hasMutationConflictBefore(calls, globalIndex, stage.end), richEncodedBytes)
 				blocks[globalIndex] = block
 				actualCompletions[globalIndex] = completion
-				total = add(total, usage)
+				total = llm.AddUsage(total, usage)
 			}
 			continue
 		}
@@ -3226,7 +3226,7 @@ func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, sta
 			awaitActual[j] = a.hasMutationConflictBefore(calls, start+j, stage.end)
 		}
 		usage := a.dispatchParallelBatch(ctx, batchCalls, dependencies, awaitActual, blocks[start:i], sink, richEncodedBytes, start, crossStageDependencies[start:i], actualCompletions)
-		total = add(total, usage)
+		total = llm.AddUsage(total, usage)
 	}
 	return parallelBatches, total
 }
@@ -3453,7 +3453,7 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 		clearToolProgress(calls[i], sink)
 		reportToolMutation(a.tools, calls[i], r, sink)
 		emitToolDiff(calls[i], scheduled.diffEvents, sink)
-		total = add(total, usage)
+		total = llm.AddUsage(total, usage)
 	}
 	return total
 }
@@ -4018,7 +4018,7 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		if retryAfter > maxStreamRetryAfter {
 			return res, wasted, err
 		}
-		wasted = add(wasted, res.usage)
+		wasted = llm.AddUsage(wasted, res.usage)
 		res.modelCall.Discard("stream_retry")
 		delay := retry.Next(attempt, retryAfter)
 		retryEvent := modelRequestEventFromError(err, llm.ModelRequestRetryScheduled)
@@ -4218,12 +4218,12 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 		}
 		currentInput := res.usage.InputTokens + res.usage.CacheReadTokens + res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
 		res.contextInput = &currentInput
-		res.usage = add(previousUsage, res.usage)
+		res.usage = llm.AddUsage(previousUsage, res.usage)
 	}()
 	reads := a.newAsyncReads(ctx, req)
 	defer func() { res.asyncResults = reads.finish(retErr != nil) }()
 	// Close the provider invocation before joining speculative tool work.
-	defer func() { call.Finish(add(previousUsage, res.usage), retErr) }()
+	defer func() { call.Finish(llm.AddUsage(previousUsage, res.usage), retErr) }()
 	var text []byte
 	textBlocks := make(map[int][]byte)
 	orderedBlocks := make(map[int]llm.ContentBlock)
@@ -4259,7 +4259,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 					if ev.Usage != nil {
 						res.usage = mergeUsage(res.usage, *ev.Usage)
 					}
-					previousUsage = add(previousUsage, res.usage)
+					previousUsage = llm.AddUsage(previousUsage, res.usage)
 					res.text = string(text)
 					if res.text != "" || len(res.reasoning) > 0 {
 						res.contextPrefix = append(res.contextPrefix, a.assistantMessage(res))
@@ -4535,19 +4535,6 @@ func maxTurnsNotice(maxTurns int) string {
 	return fmt.Sprintf("[stopped: reached max turns (%d)]", maxTurns)
 }
 
-func add(a, b llm.Usage) llm.Usage {
-	return llm.Usage{
-		InputTokens:        a.InputTokens + b.InputTokens,
-		OutputTokens:       a.OutputTokens + b.OutputTokens,
-		CacheReadTokens:    a.CacheReadTokens + b.CacheReadTokens,
-		CacheWriteTokens:   a.CacheWriteTokens + b.CacheWriteTokens,
-		CacheWrite1hTokens: a.CacheWrite1hTokens + b.CacheWrite1hTokens,
-		ReasoningTokens:    a.ReasoningTokens + b.ReasoningTokens,
-		CostUSD:            a.CostUSD + b.CostUSD,
-		CostKnown:          aggregateCostKnown(a, b),
-	}
-}
-
 func cloneToolSpecs(specs []llm.ToolSchema) []llm.ToolSchema {
 	out := append([]llm.ToolSchema(nil), specs...)
 	for i := range out {
@@ -4670,19 +4657,6 @@ func mergeCostKnown(acc, in llm.Usage) bool {
 		return false
 	}
 	return acc.CostKnown
-}
-
-func aggregateCostKnown(a, b llm.Usage) bool {
-	aHasUsage := usageHasTokens(a)
-	bHasUsage := usageHasTokens(b)
-	switch {
-	case aHasUsage && !a.CostKnown:
-		return false
-	case bHasUsage && !b.CostKnown:
-		return false
-	default:
-		return a.CostKnown || b.CostKnown
-	}
 }
 
 func usageHasTokens(u llm.Usage) bool {

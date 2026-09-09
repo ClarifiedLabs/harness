@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -247,7 +248,7 @@ func (t *Tree) validateEntryLinks(entry Entry) error {
 	if _, ok := t.byID[entry.FirstKeptEntryID]; !ok {
 		return fmt.Errorf("compaction retained entry %q not found", entry.FirstKeptEntryID)
 	}
-	path, err := t.Path(entry.ParentID)
+	path, err := t.path(entry.ParentID)
 	if err != nil {
 		return err
 	}
@@ -591,7 +592,7 @@ func (t *Tree) commitCompaction(messages []llm.Message) error {
 		// standalone original-tree node for the retained suffix to link to.
 		materializeBoundary = true
 	}
-	checkpoint := cloneMessagesForTree(messages[:1])[0]
+	checkpoint := llm.CloneMessage(messages[0])
 	summarySource := ""
 	fallbackReason := ""
 	if checkpoint.Compaction != nil {
@@ -712,7 +713,7 @@ func (t *Tree) AppendBranch(targetParent, fromLeaf, common, summary, customFocus
 // IDs are preserved so the child session can name its exact parent point while
 // subsequently growing an independent append-only tree.
 func (t *Tree) Extract(leaf string, created time.Time, cwd string) (*Tree, error) {
-	path, err := t.Path(leaf)
+	path, err := t.path(leaf)
 	if err != nil {
 		return nil, err
 	}
@@ -738,7 +739,7 @@ func (t *Tree) BuildContext() ([]llm.Message, error) {
 }
 
 func (t *Tree) buildContext(leaf string) ([]llm.Message, []messageRef, error) {
-	path, err := t.Path(leaf)
+	path, err := t.path(leaf)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -828,25 +829,37 @@ func contextCheckpoint(entry Entry) (llm.Message, error) {
 	if entry.Checkpoint == nil {
 		return llm.Message{}, fmt.Errorf("session: compaction %q has no checkpoint", entry.ID)
 	}
-	checkpoint := cloneMessagesForTree([]llm.Message{*entry.Checkpoint})[0]
-	readFilesOmitted := 0
-	if checkpoint.Compaction != nil {
-		readFilesOmitted = checkpoint.Compaction.ReadFilesOmitted
+	checkpoint := llm.CloneMessage(*entry.Checkpoint)
+	if checkpoint.Compaction == nil {
+		checkpoint.Compaction = &llm.CompactionMetadata{}
 	}
-	checkpoint.Compaction = &llm.CompactionMetadata{
-		Summary:          entry.Summary,
-		SummarySource:    entry.SummarySource,
-		FallbackReason:   entry.FallbackReason,
-		Focus:            entry.CustomFocus,
-		ReadFiles:        append([]string(nil), entry.ReadFiles...),
-		ReadFilesOmitted: readFilesOmitted,
-		ModifiedFiles:    append([]string(nil), entry.ModifiedFiles...),
-	}
+	// Entry fields are authoritative, but retain checkpoint-only metadata such
+	// as verbatim user instructions and the omitted-file count.
+	meta := checkpoint.Compaction
+	meta.Summary = entry.Summary
+	meta.SummarySource = entry.SummarySource
+	meta.FallbackReason = entry.FallbackReason
+	meta.Focus = entry.CustomFocus
+	meta.ReadFiles = slices.Clone(entry.ReadFiles)
+	meta.ModifiedFiles = slices.Clone(entry.ModifiedFiles)
 	return checkpoint, nil
 }
 
-// Path returns entries from the root to id. An empty id means an empty path.
+// Path returns independent copies of entries from the root to id. An empty id
+// means an empty path.
 func (t *Tree) Path(id string) ([]Entry, error) {
+	path, err := t.path(id)
+	if err != nil {
+		return nil, err
+	}
+	for i := range path {
+		path[i] = cloneEntry(path[i])
+	}
+	return path, nil
+}
+
+// path is the internal read-only view; callers must clone before mutation.
+func (t *Tree) path(id string) ([]Entry, error) {
 	if id == "" {
 		return nil, nil
 	}
@@ -880,11 +893,11 @@ func (t *Tree) Path(id string) ([]Entry, error) {
 
 // CommonAncestor returns the deepest shared entry of two paths.
 func (t *Tree) CommonAncestor(a, b string) (string, error) {
-	pa, err := t.Path(a)
+	pa, err := t.path(a)
 	if err != nil {
 		return "", err
 	}
-	pb, err := t.Path(b)
+	pb, err := t.path(b)
 	if err != nil {
 		return "", err
 	}
@@ -897,7 +910,7 @@ func (t *Tree) CommonAncestor(a, b string) (string, error) {
 
 // DivergentMessages returns model-visible material after common on the old path.
 func (t *Tree) DivergentMessages(oldLeaf, common string) ([]llm.Message, error) {
-	path, err := t.Path(oldLeaf)
+	path, err := t.path(oldLeaf)
 	if err != nil {
 		return nil, err
 	}
@@ -928,7 +941,7 @@ func (t *Tree) Entry(id string) (Entry, bool) {
 	if !ok {
 		return Entry{}, false
 	}
-	return t.Entries[idx], true
+	return cloneEntry(t.Entries[idx]), true
 }
 
 // Nodes returns all entries as a deterministic hierarchy.
@@ -936,7 +949,7 @@ func (t *Tree) Nodes() []*TreeNode {
 	nodes := make(map[string]*TreeNode, len(t.Entries))
 	var roots []*TreeNode
 	for _, entry := range t.Entries {
-		nodes[entry.ID] = &TreeNode{Entry: entry}
+		nodes[entry.ID] = &TreeNode{Entry: cloneEntry(entry)}
 	}
 	for _, entry := range t.Entries {
 		node := nodes[entry.ID]
@@ -1149,50 +1162,28 @@ func repairTreeTail(path string) error {
 	return nil
 }
 
+// cloneMessagesForTree retains the tree's historical non-nil empty transcript.
 func cloneMessagesForTree(messages []llm.Message) []llm.Message {
-	out := make([]llm.Message, len(messages))
-	for i := range messages {
-		out[i] = messages[i]
-		out[i].Content = append([]llm.ContentBlock(nil), messages[i].Content...)
-		for j := range out[i].Content {
-			out[i].Content[j].ResultContent = append([]llm.ContentBlock(nil), messages[i].Content[j].ResultContent...)
-			out[i].Content[j].ResponsesToolSearch = append(json.RawMessage(nil), messages[i].Content[j].ResponsesToolSearch...)
-			out[i].Content[j].AnthropicToolSearch = append(json.RawMessage(nil), messages[i].Content[j].AnthropicToolSearch...)
-			if messages[i].Content[j].ProviderCompaction != nil {
-				out[i].Content[j].ProviderCompaction = make([]json.RawMessage, len(messages[i].Content[j].ProviderCompaction))
-				for k := range messages[i].Content[j].ProviderCompaction {
-					out[i].Content[j].ProviderCompaction[k] = append(json.RawMessage(nil), messages[i].Content[j].ProviderCompaction[k]...)
-				}
-			}
-		}
-		out[i].ParallelToolBatches = append([]llm.ParallelToolBatch(nil), messages[i].ParallelToolBatches...)
-		for j := range out[i].ParallelToolBatches {
-			out[i].ParallelToolBatches[j].ToolUseIDs = append([]string(nil), messages[i].ParallelToolBatches[j].ToolUseIDs...)
-		}
-		if messages[i].Compaction != nil {
-			meta := *messages[i].Compaction
-			meta.ReadFiles = append([]string(nil), messages[i].Compaction.ReadFiles...)
-			meta.ModifiedFiles = append([]string(nil), messages[i].Compaction.ModifiedFiles...)
-			out[i].Compaction = &meta
-		}
+	if messages == nil {
+		return []llm.Message{}
 	}
-	return out
+	return llm.CloneMessages(messages)
 }
 
 func cloneEntry(entry Entry) Entry {
-	entry.Messages = cloneMessagesForTree(entry.Messages)
+	entry.Messages = llm.CloneMessages(entry.Messages)
 	if entry.ContextDelta != nil {
 		delta := *entry.ContextDelta
-		delta.Splices = append([]ContextSplice(nil), entry.ContextDelta.Splices...)
+		delta.Splices = slices.Clone(entry.ContextDelta.Splices)
 		for i := range delta.Splices {
-			delta.Splices[i].Messages = cloneMessagesForTree(entry.ContextDelta.Splices[i].Messages)
+			delta.Splices[i].Messages = llm.CloneMessages(entry.ContextDelta.Splices[i].Messages)
 		}
 		entry.ContextDelta = &delta
 	}
-	entry.ReadFiles = append([]string(nil), entry.ReadFiles...)
-	entry.ModifiedFiles = append([]string(nil), entry.ModifiedFiles...)
+	entry.ReadFiles = slices.Clone(entry.ReadFiles)
+	entry.ModifiedFiles = slices.Clone(entry.ModifiedFiles)
 	if entry.Checkpoint != nil {
-		checkpoint := cloneMessagesForTree([]llm.Message{*entry.Checkpoint})[0]
+		checkpoint := llm.CloneMessage(*entry.Checkpoint)
 		entry.Checkpoint = &checkpoint
 	}
 	return entry

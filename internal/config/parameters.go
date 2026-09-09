@@ -29,7 +29,6 @@ func derived[T any](value func(RuntimeDefaults) T, display, name string) default
 
 type parameterDefinition interface {
 	parameter() configmeta.Parameter
-	register(*flagState)
 	resolve(*resolveContext) error
 	validateFile(fileConfig, string) error
 	project(Config) any
@@ -45,16 +44,10 @@ type scalarDefinition[T any] struct {
 	parseEnv     func(string, string) (T, error)
 	skipEnv      func(string, string) bool
 	normalize    func(T) (T, error)
-	boolFlag     bool
 	redact       func(T) any
 }
 
 func (definition scalarDefinition[T]) parameter() configmeta.Parameter { return definition.meta }
-func (definition scalarDefinition[T]) register(state *flagState) {
-	for _, name := range definition.meta.Flags {
-		state.addSettingFlag(name, definition.meta.Key, definition.meta.Description, definition.boolFlag)
-	}
-}
 func (definition scalarDefinition[T]) resolve(context *resolveContext) error {
 	value := definition.defaultValue.value(context.options.Defaults)
 	sourceKind := configmeta.SourceDefault
@@ -153,7 +146,7 @@ func floatDef(key, jsonPath string, flags, env []string, def defaultSpec[float64
 	return scalarDefinition[float64]{meta: metadata(key, "number", jsonPath, flags, env, def.meta, "Harness "+strings.ReplaceAll(key, "_", " ")+" setting.", nil, false), defaultValue: def, fileValue: file, set: set, get: get, parse: parseFloat, normalize: normalize}
 }
 func boolDef(key, jsonPath string, flags, env []string, def defaultSpec[bool], file func(fileConfig) optional[bool], set func(*Config, bool), get func(Config) bool) scalarDefinition[bool] {
-	return scalarDefinition[bool]{meta: metadata(key, "boolean", jsonPath, flags, env, def.meta, "Harness "+strings.ReplaceAll(key, "_", " ")+" setting.", []string{"true", "false"}, false), defaultValue: def, fileValue: file, set: set, get: get, parse: parseBool, normalize: identity[bool], boolFlag: true}
+	return scalarDefinition[bool]{meta: metadata(key, "boolean", jsonPath, flags, env, def.meta, "Harness "+strings.ReplaceAll(key, "_", " ")+" setting.", []string{"true", "false"}, false), defaultValue: def, fileValue: file, set: set, get: get, parse: parseBool, normalize: identity[bool]}
 }
 
 var definitions = []parameterDefinition{
@@ -377,7 +370,6 @@ type customDefinition struct {
 }
 
 func (d customDefinition) parameter() configmeta.Parameter { return d.meta }
-func (d customDefinition) register(*flagState)             {}
 func (d customDefinition) resolve(c *resolveContext) error { return d.resolveFn(c) }
 func (d customDefinition) validateFile(f fileConfig, p string) error {
 	if d.validateFn == nil {
