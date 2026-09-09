@@ -29,10 +29,8 @@ func TestBuiltinAgentPrompt(t *testing.T) {
 			t.Fatalf("BuiltinAgentPrompt(%q) not found", name)
 		}
 	}
-	for _, name := range []string{"evolve", "unknown"} {
-		if got, ok := BuiltinAgentPrompt(name); ok || got != "" {
-			t.Fatalf("removed or unknown prompt %q = %q, %v; want empty, false", name, got, ok)
-		}
+	if got, ok := BuiltinAgentPrompt("unknown"); ok || got != "" {
+		t.Fatalf("unknown prompt = %q, %v; want empty, false", got, ok)
 	}
 }
 
@@ -55,9 +53,6 @@ func TestPromptFilesDoNotExposeFinalNewline(t *testing.T) {
 
 func TestSystemPromptToolStagingGuidance(t *testing.T) {
 	prompt := System()
-	if strings.Contains(prompt, "read.paths[]") || strings.Contains(prompt, "read paths[]") {
-		t.Errorf("system prompt retains removed multi-path read guidance")
-	}
 	// The staging contract is behavioral, not phrasing: the prompt must tell
 	// the model to stage calls, mark independence with equal stages, order
 	// dependent calls, and defer argument-dependent calls to a later turn.

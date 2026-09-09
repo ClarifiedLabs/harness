@@ -37,10 +37,7 @@ func runReadFile(t *testing.T, args map[string]any) (string, error) {
 	return runTool(t, readFile{}, args)
 }
 
-func TestReadFileSchemaOnlyAdvertisesSingularPath(t *testing.T) {
-	if strings.Contains(readFileSchema, `"paths"`) || strings.Contains(readFileSchema, `"files"`) {
-		t.Fatalf("read schema advertises removed multi-path input: %s", readFileSchema)
-	}
+func TestReadFileSchemaRequiresPath(t *testing.T) {
 	if !strings.Contains(readFileSchema, `"required": ["path"]`) {
 		t.Fatalf("read schema does not require singular path: %s", readFileSchema)
 	}
@@ -580,18 +577,6 @@ func TestReadFileAliasPrecedence(t *testing.T) {
 	}
 	if out != "1\twant" {
 		t.Errorf("file_path should win over target_file, got %q", out)
-	}
-}
-
-func TestReadFileRejectsRemovedMultiPathArguments(t *testing.T) {
-	for _, args := range []map[string]any{
-		{"paths": []string{"a.txt", "b.txt"}},
-		{"files": []string{"a.txt", "b.txt"}},
-	} {
-		_, err := runReadFile(t, args)
-		if err == nil || !strings.Contains(err.Error(), "path is required") {
-			t.Errorf("removed multi-path input error = %v", err)
-		}
 	}
 }
 

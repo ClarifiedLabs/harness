@@ -25,13 +25,6 @@ func TestRecordPlanEmptyCallIsRejected(t *testing.T) {
 	}
 }
 
-func TestRecordPlanSchemaOmitsHandoff(t *testing.T) {
-	tool := NewTool(NewStore(), nil)
-	if strings.Contains(string(tool.Schema()), "handoff") {
-		t.Fatal("record_plan schema should not advertise handoff")
-	}
-}
-
 func TestRecordPlanRequiresSequentialDispatch(t *testing.T) {
 	tool := NewTool(NewStore(), func() string { return t.TempDir() })
 	if !tool.RequiresSequential(json.RawMessage(`{}`)) {

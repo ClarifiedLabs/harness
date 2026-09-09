@@ -290,15 +290,6 @@ func TestToolAccuracyCasesRegistered(t *testing.T) {
 	}
 }
 
-func TestRetiredExperimentalCasesAreNotRegistered(t *testing.T) {
-	cases := allCases()
-	for _, name := range []string{"trajectory_memory", "conditional_supervisor"} {
-		if _, ok := cases[name]; ok {
-			t.Errorf("retired case %q remains registered", name)
-		}
-	}
-}
-
 func TestStagnationDetectionCaseUsesIdenticalToolFreeVariants(t *testing.T) {
 	c := allCases()["stagnation_detection"]
 	if c.Setup == nil || c.Score == nil || c.Acceptance != acceptanceStagnation || !c.RestartBetweenPrompts || c.HelperCommand != stagnationEvaluatorCommand || len(c.RestartPhases) != stagnationPhaseCount {

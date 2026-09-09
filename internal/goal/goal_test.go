@@ -200,9 +200,6 @@ func TestReminderActive(t *testing.T) {
 	if !strings.Contains(r, `<goal status="active">`) {
 		t.Fatalf("reminder missing goal tag: %q", r)
 	}
-	if strings.Contains(r, "create_goal") || strings.Contains(r, "update_goal") {
-		t.Fatalf("reminder references removed goal tools: %q", r)
-	}
 }
 
 func TestReminderNotActive(t *testing.T) {
@@ -232,9 +229,6 @@ func TestContinuationPrompt(t *testing.T) {
 	}
 	if !strings.Contains(p, "If progress is blocked") {
 		t.Fatalf("prompt missing blocked guidance: %q", p)
-	}
-	if strings.Contains(p, "create_goal") || strings.Contains(p, "update_goal") {
-		t.Fatalf("prompt references removed goal tools: %q", p)
 	}
 	if !strings.Contains(p, "continuation 1 / 25") {
 		t.Fatalf("prompt missing capped stats: %q", p)

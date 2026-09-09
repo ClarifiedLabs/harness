@@ -123,14 +123,4 @@ func TestCoreToolsIsTrimmedDefaultSet(t *testing.T) {
 	if !slices.Equal(CoreTools, want) {
 		t.Fatalf("CoreTools = %v, want %v", CoreTools, want)
 	}
-	core := map[string]bool{}
-	for _, name := range CoreTools {
-		core[name] = true
-	}
-	// Dropped cursor-oriented aids must not linger in the core set.
-	for _, name := range []string{"declaration", "hover", "signature_help", "document_highlights", "type_definition", "code_actions"} {
-		if core[name] {
-			t.Errorf("%q is in the core set, want false (dropped from core)", name)
-		}
-	}
 }

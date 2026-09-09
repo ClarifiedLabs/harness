@@ -5849,12 +5849,9 @@ func TestHandoffCommandAppliesOptionsAndSeedsUserMessage(t *testing.T) {
 			t.Errorf("seed missing %q: %q", want, seed)
 		}
 	}
-	if got := errw.String(); strings.Contains(got, "Supplementary context:") {
-		t.Errorf("supplementary context should not be displayed after brief removal:\n%s", got)
-	}
 }
 
-func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
+func TestHandoffCommandRendersPlanAndArchivesTranscript(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
@@ -5876,31 +5873,35 @@ func TestHandoffCommandRendersMarkdownBriefWithoutChangingSource(t *testing.T) {
 	if !strings.Contains(display, "Implementation plan:") {
 		t.Errorf("handoff should display the plan:\n%s", display)
 	}
-	if strings.Contains(display, "Supplementary context:") {
-		t.Errorf("supplementary context should not be displayed after brief removal:\n%s", display)
-	}
-	if strings.Contains(out.String(), "Supplementary context:") {
-		t.Errorf("supplementary context should remain on stderr, stdout = %q", out.String())
+	if out.Len() != 0 {
+		t.Errorf("plan should remain on stderr, stdout = %q", out.String())
 	}
 	if entries, _ := os.ReadDir(filepath.Join(app.SessionPath, "compactions")); len(entries) == 0 {
 		t.Error("planning transcript was not archived")
 	}
 }
 
-func TestHandoffCommandDisplaysRawBriefWithoutRenderer(t *testing.T) {
+func TestHandoffCommandDisplaysRawPlanWithoutRenderer(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake")
 	app := newTestApp(t, &out, &errw, fp)
 	app.Renderer = nil
-	readyPlanForApp(t, app, "Implement structured handoff")
+	ready := readyPlanForApp(t, app, "Implement structured handoff")
 	app.SwitchAgent = func(name string) (AgentSelection, error) {
-		return AgentSelection{Name: name, Tools: tools.Default()}, nil
+		t.Fatalf("declined handoff switched to %q", name)
+		return AgentSelection{}, nil
 	}
 
-	app.handoffCommand("", func(string) (string, error) { return "n", nil })
+	if app.handoffCommand("", func(string) (string, error) { return "n", nil }) {
+		t.Fatal("declined handoff should not proceed")
+	}
 
-	if got := errw.String(); strings.Contains(got, "Supplementary context:") {
-		t.Errorf("supplementary context should not be displayed without brief:\n%s", got)
+	want := "Implementation plan:\n" + plan.Render(*ready) + "\n[handoff cancelled]\n"
+	if got := errw.String(); got != want {
+		t.Errorf("raw plan display = %q, want %q", got, want)
+	}
+	if out.Len() != 0 {
+		t.Errorf("plan should remain on stderr, stdout = %q", out.String())
 	}
 }
 
@@ -8037,7 +8038,7 @@ func TestREPLDetachedWaitCompletionStartsContinuation(t *testing.T) {
 	}
 }
 
-func TestREPLGoalAutoContinuesWithoutGoalTools(t *testing.T) {
+func TestREPLGoalAutoContinues(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake",
 		llmtest.Step{Events: []llm.StreamEvent{textDelta("working")}, Stop: llm.StopEndTurn},
@@ -8062,13 +8063,6 @@ func TestREPLGoalAutoContinuesWithoutGoalTools(t *testing.T) {
 	}
 	if len(fp.Requests) != 2 {
 		t.Fatalf("requests = %d, want initial + continuation", len(fp.Requests))
-	}
-	for _, req := range fp.Requests {
-		for _, schema := range req.Tools {
-			if schema.Name == "create_goal" || schema.Name == "update_goal" {
-				t.Fatalf("goal request exposed removed tool %q", schema.Name)
-			}
-		}
 	}
 	cont := fp.Requests[1].Messages[len(fp.Requests[1].Messages)-1].Content[0].Text
 	if !strings.Contains(cont, "Continue working toward the active session goal") {

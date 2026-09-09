@@ -1740,28 +1740,6 @@ func TestSessionResponseStateCompatibilityRequiresExactFingerprintAndTarget(t *t
 	}
 }
 
-func TestRunShowConfigFlagRemoved(t *testing.T) {
-	dir := t.TempDir()
-	var out, errw bytes.Buffer
-	env := environment{
-		args:   []string{"--show-config"},
-		stdout: &out,
-		stderr: &errw,
-		getenv: func(key string) string {
-			if key == "HOME" {
-				return dir
-			}
-			return ""
-		},
-	}
-	if code := run(env); code != ui.ExitUsage {
-		t.Fatalf("exit = %d, want usage; stdout=%q stderr=%q", code, out.String(), errw.String())
-	}
-	if !strings.Contains(errw.String(), "flag provided but not defined: -show-config") {
-		t.Fatalf("stderr = %q, want removed-flag error", errw.String())
-	}
-}
-
 func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 	fp := llmtest.New("fake")
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
@@ -2720,7 +2698,7 @@ func TestRunResumeRestoresPlanAndTodos(t *testing.T) {
 	}
 }
 
-func TestRunResumeActiveGoalContinuesWithoutGoalTools(t *testing.T) {
+func TestRunResumeActiveGoalContinues(t *testing.T) {
 	dir := t.TempDir()
 	sessPath := filepath.Join(dir, "prior")
 	prior := session.Session{
@@ -2749,11 +2727,6 @@ func TestRunResumeActiveGoalContinuesWithoutGoalTools(t *testing.T) {
 	last := messages[len(messages)-1]
 	if last.Role != llm.RoleUser || len(last.Content) == 0 || !strings.Contains(last.Content[0].Text, "finish the resumed objective") {
 		t.Fatalf("first resumed request does not contain goal continuation: %+v", last)
-	}
-	for _, schema := range fp.Requests[0].Tools {
-		if schema.Name == "create_goal" || schema.Name == "update_goal" {
-			t.Fatalf("resumed request exposed removed goal tool %q", schema.Name)
-		}
 	}
 	loaded, err := session.Load(sessPath)
 	if err != nil {

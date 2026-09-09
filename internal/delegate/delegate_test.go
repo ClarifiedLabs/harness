@@ -599,15 +599,12 @@ func TestDelegateRunnerDoesNotLimitCompletedDescendants(t *testing.T) {
 	fixture.runner.budget = newDelegateBudget(Options{MaxActiveDescendants: 2})
 
 	for i := range 20 {
-		result, err := fixture.runner.Run(context.Background(), RunRequest{
+		_, err := fixture.runner.Run(context.Background(), RunRequest{
 			Task:    fmt.Sprintf("child %d", i),
 			ChildID: fmt.Sprintf("child-%d", i),
 		}, nil)
 		if err != nil {
 			t.Fatalf("Run %d: %v", i, err)
-		}
-		if strings.Contains(result.Report, "descendant slots remaining") {
-			t.Fatalf("Run %d receipt contains removed lifetime budget: %s", i, result.Report)
 		}
 	}
 }

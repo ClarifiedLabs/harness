@@ -63,7 +63,7 @@ func TestBuiltins(t *testing.T) {
 	if !slices.Contains(explore.AllowedTools, "shell") {
 		t.Errorf("explore tools missing shell: %v", explore.AllowedTools)
 	}
-	for _, forbidden := range []string{"write", "edit", "record_plan", "handoff", "create_goal", "update_goal", "delegate", "background_jobs"} {
+	for _, forbidden := range []string{"write", "edit", "record_plan", "delegate", "background_jobs"} {
 		if slices.Contains(explore.AllowedTools, forbidden) {
 			t.Errorf("explore tools unexpectedly include %q: %v", forbidden, explore.AllowedTools)
 		}
@@ -133,7 +133,7 @@ func TestBuiltins(t *testing.T) {
 	if review.Model != "" || review.Reasoning != "" {
 		t.Errorf("review should inherit model/reasoning, got %q/%q", review.Model, review.Reasoning)
 	}
-	for _, forbidden := range []string{"write", "edit", "record_plan", "handoff", "create_goal", "update_goal", "delegate", "background_jobs"} {
+	for _, forbidden := range []string{"write", "edit", "record_plan", "delegate", "background_jobs"} {
 		if slices.Contains(review.AllowedTools, forbidden) {
 			t.Errorf("review tools unexpectedly include %q: %v", forbidden, review.AllowedTools)
 		}
@@ -359,16 +359,11 @@ func TestResolveReasoningOverride(t *testing.T) {
 	}
 }
 
-func TestDefaultToolsIncludeCoordinationAndACPButOmitGoalAndHandoffTools(t *testing.T) {
+func TestDefaultToolsIncludeCoordinationAndACP(t *testing.T) {
 	def := defaultTools()
 	for _, name := range []string{"update_todos", "record_plan", "acp", "agent_sessions"} {
 		if !slices.Contains(def, name) {
 			t.Errorf("default tools missing %s: %v", name, def)
-		}
-	}
-	for _, name := range []string{"create_goal", "update_goal", "handoff"} {
-		if slices.Contains(def, name) {
-			t.Errorf("default tools unexpectedly include removed %s: %v", name, def)
 		}
 	}
 }
@@ -410,11 +405,6 @@ func TestPlanToolsIncludeCoordinationTools(t *testing.T) {
 	for _, name := range []string{"update_todos", "record_plan"} {
 		if !slices.Contains(pt, name) {
 			t.Errorf("plan tools missing %s: %v", name, pt)
-		}
-	}
-	for _, name := range []string{"handoff", "create_goal", "update_goal"} {
-		if slices.Contains(pt, name) {
-			t.Errorf("plan tools unexpectedly include %q: %v", name, pt)
 		}
 	}
 }

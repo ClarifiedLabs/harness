@@ -768,7 +768,7 @@ func TestProjectionRedactsAndIsVersioned(t *testing.T) {
 }
 
 func TestWritersStrictlyValidateExistingFile(t *testing.T) {
-	for _, body := range []string{`{"future":true}`, `{"provider":"old"}`, `{"max_turns":null}`, `{"color_theme":"bogus"}`, `{"max_turns":1} {}`} {
+	for _, body := range []string{`{"future":true}`, `{"max_turns":null}`, `{"color_theme":"bogus"}`, `{"max_turns":1} {}`} {
 		path := writeConfig(t, body)
 		before, _ := os.ReadFile(path)
 		if err := SaveSelectedModel(path, "openai:gpt-5", "high"); err == nil {

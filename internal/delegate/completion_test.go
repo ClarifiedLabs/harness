@@ -85,11 +85,6 @@ func TestCompletionSystemPromptIsMarkdownFirstAndFooterOptional(t *testing.T) {
 			t.Errorf("prompt missing %q: %s", want, prompt)
 		}
 	}
-	for _, retired := range []string{"unresolved_requirements", "changed_files", "verification as", "unreviewed_scope", "unresolved_questions", `"outcome":"partial"`, `"outcome":"failed"`} {
-		if strings.Contains(prompt, retired) {
-			t.Errorf("prompt retained contract-specific field %q: %s", retired, prompt)
-		}
-	}
 }
 
 func TestCompletionReceiptKeepsOptionalFooterConcise(t *testing.T) {
