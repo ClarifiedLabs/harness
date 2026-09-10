@@ -14,8 +14,9 @@ var executionStageSchema = json.RawMessage(`{"type":"integer","minimum":1}`)
 // ExecutionMetadata is Harness-owned scheduling metadata extracted from a
 // model-emitted tool input. It is never forwarded to the tool implementation.
 type ExecutionMetadata struct {
-	Stage    int
-	HasStage bool
+	Stage        int
+	HasStage     bool
+	EmittedStage json.RawMessage
 }
 
 // ExtractExecutionMetadata returns an execution copy of input with Harness's
@@ -43,15 +44,17 @@ func ExtractExecutionMetadata(input json.RawMessage) (json.RawMessage, Execution
 		return input, ExecutionMetadata{}, fmt.Errorf("remove %s: %w", executionStageKey, err)
 	}
 
+	metadata := ExecutionMetadata{EmittedStage: stageValue}
 	trimmed := bytes.TrimSpace(stageValue)
 	if len(trimmed) == 0 || !jsonIntegerToken(trimmed) {
-		return clean, ExecutionMetadata{}, fmt.Errorf("%s must be a JSON integer greater than or equal to 1", executionStageKey)
+		return clean, metadata, fmt.Errorf("%s must be a JSON integer greater than or equal to 1", executionStageKey)
 	}
 	stage64, err := strconv.ParseInt(string(trimmed), 10, 0)
 	if err != nil || stage64 < 1 {
-		return clean, ExecutionMetadata{}, fmt.Errorf("%s must be a JSON integer greater than or equal to 1", executionStageKey)
+		return clean, metadata, fmt.Errorf("%s must be a JSON integer greater than or equal to 1", executionStageKey)
 	}
-	return clean, ExecutionMetadata{Stage: int(stage64), HasStage: true}, nil
+	metadata.Stage, metadata.HasStage = int(stage64), true
+	return clean, metadata, nil
 }
 
 func jsonIntegerToken(value []byte) bool {

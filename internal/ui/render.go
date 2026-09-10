@@ -509,6 +509,9 @@ func (r *Renderer) TurnComplete(usage agent.TurnUsage) string {
 }
 
 func (r *Renderer) ToolUseStart(call llm.ToolCall) {
+	// Generation precedes stage validation. Escape model-owned identifiers even
+	// when a later preflight rejection prevents any tool execution.
+	name, id := escapedToolIdentity(call.Name), escapedToolIdentity(call.ID)
 	// A streamed tool call is still model work: after visible commentary the
 	// provider may spend seconds generating hidden function-call arguments and the
 	// final usage frame before local tool execution can begin. Resume the live
@@ -517,7 +520,7 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 	if r.liveStatus {
 		label := "turn: tool call"
 		if call.Name != "" {
-			label = "turn: tool call " + call.Name
+			label = "turn: tool call " + name
 		}
 		r.beginWait(label, agent.ContextEstimate{})
 	}
@@ -525,8 +528,15 @@ func (r *Renderer) ToolUseStart(call llm.ToolCall) {
 		return
 	}
 	r.renderMu.Lock()
-	r.pendingToolUses = append(r.pendingToolUses, fmt.Sprintf("[tool-call: %s id=%s]", call.Name, call.ID))
+	r.pendingToolUses = append(r.pendingToolUses, fmt.Sprintf("[tool-call: %s id=%s]", name, id))
 	r.renderMu.Unlock()
+}
+
+// escapedToolIdentity preserves ordinary identifiers while making controls and
+// other non-printing characters visible, not executable terminal instructions.
+func escapedToolIdentity(value string) string {
+	quoted := fmt.Sprintf("%q", value)
+	return quoted[1 : len(quoted)-1]
 }
 
 func (r *Renderer) ToolUseDelta(_ int, _ string) {}
@@ -555,6 +565,9 @@ func (r *Renderer) resumeLiveModelWaitAfterAssistantText(delta string, lineOpen 
 func (r *Renderer) ToolStart(call llm.ToolCall) {
 	r.flushToolUseStarts()
 	r.pending[call.ID] = call
+	if call.Stage != nil && call.Stage.BatchRejected {
+		return
+	}
 	if r.toolProgress() {
 		r.dimLine(fmt.Sprintf("[tool: %s started%s]", call.Name, formatToolArgs(call.Name, call.Input, r.cwd)))
 	}
@@ -570,6 +583,9 @@ func (r *Renderer) ToolResult(result llm.ToolResult) {
 	r.flushToolUseStarts()
 	call := r.pending[result.ForID]
 	delete(r.pending, result.ForID)
+	if call.Stage != nil && call.Stage.BatchRejected {
+		return
+	}
 
 	if line, concise := r.conciseReadResultLine(call, result); concise {
 		if line == "" {

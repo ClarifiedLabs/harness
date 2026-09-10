@@ -1264,10 +1264,19 @@ func (r *Runner) defaultWorkspaceAccess(runtime Runtime, req RunRequest, continu
 	}
 	if r.opts.AgentCandidates != nil {
 		for _, candidate := range r.opts.AgentCandidates(runtime) {
-			if candidate.Name == agentName && candidate.WorkspaceAccess == tools.BackgroundAccessReadOnly {
-				return tools.BackgroundAccessReadOnly
+			if candidate.Name == agentName {
+				return effectiveWorkspaceAccess(candidate.WorkspaceAccess)
 			}
 		}
+	}
+	return effectiveWorkspaceAccess("")
+}
+
+// effectiveWorkspaceAccess shares a lease only for the exact read_only value.
+// Missing or unrecognized candidate metadata conservatively uses exclusive access.
+func effectiveWorkspaceAccess(access string) string {
+	if access == tools.BackgroundAccessReadOnly {
+		return tools.BackgroundAccessReadOnly
 	}
 	return tools.BackgroundAccessExclusive
 }
@@ -1822,6 +1831,9 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 			catalog.WriteString(candidate.Name)
 			catalog.WriteString(": ")
 			catalog.WriteString(candidate.Description)
+			catalog.WriteString(" [background access: ")
+			catalog.WriteString(effectiveWorkspaceAccess(candidate.WorkspaceAccess))
+			catalog.WriteString("]")
 		}
 		agentDescription += catalog.String()
 	}
@@ -1868,7 +1880,7 @@ func schema(agents []AgentCandidate, maxTurns int) json.RawMessage {
 		"access": map[string]any{
 			"type":        "string",
 			"enum":        []string{tools.BackgroundAccessReadOnly, tools.BackgroundAccessExclusive},
-			"description": "Background lease; defaults by agent. Override only when stricter. Requires background:true.",
+			"description": "Background lease; defaults by agent. Override only when stricter. mode:implementation forces exclusive. Requires background:true.",
 		},
 	}
 	body := map[string]any{
@@ -2303,9 +2315,12 @@ func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.flushDisplay()
 	summary := safeToolActivity(call)
 	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
+	s.rec.ToolStart(call)
+	if call.Stage != nil && call.Stage.BatchRejected {
+		return // The batch notice represents these unexecuted calls in the UI.
+	}
 	s.progress.markTool()
 	s.activity.MarkActivity(summary)
-	s.rec.ToolStart(call)
 	s.activity.publishText(ActivityEventToolStart, summary, s.turn, s.attempt, false)
 }
 
@@ -2325,6 +2340,10 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 	pending := s.pending[result.ForID]
 	delete(s.pending, result.ForID)
 	call := pending.call
+	if call.Stage != nil && call.Stage.BatchRejected {
+		s.rec.ToolResult(result)
+		return
+	}
 	summary := pending.summary
 	if summary == "" {
 		summary = safeToolActivity(call)

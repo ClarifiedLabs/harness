@@ -121,6 +121,27 @@ identical `raw.ndjson` output.
   stable attribution. Legacy logs without those fields use the preceding
   `model_request`, then session metadata. Legacy failures without a kind are
   text-classified from the recorded display line.
+- Lease-conflict tool results additionally carry
+  `error_details.lease_conflict`: `blocking_job_id`, optional `blocking_agent`
+  and `blocking_status`, `resource_key`, `requested_access`, `active_access`,
+  and `guidance`. These diagnostics snapshot the blocking reservation; owner
+  status does not prove release. They are separate from the model-facing error
+  text and never become transcript fields. Display and wait/retry semantics are
+  documented in [tools.md](tools.md#command-execution).
+- Both `tool_start` and `tool_result` carry diagnostics-only `tool_stage`:
+  `emission_index` is 1-based within the original emitted batch; `emitted` is
+  the exact JSON `_stage` value (absent when omitted, explicit `null` preserved);
+  `resolved` is the positive effective numeric label, including default/inherited
+  labels, and is absent for an invalid/unresolved value. `batch_rejected:true`
+  marks every call in an invalid batch, including calls with valid labels.
+  This metadata comes from `llm.ToolCall.Stage` on private execution copies;
+  `_stage` is stripped from executable inputs without changing model-emitted
+  inputs or the transcript.
+- Invalid-stage batches record one batch-rejection `notice` plus every per-call
+  start/result diagnostic event. Those result events omit `display`, avoiding
+  repeated per-call errors in replay while the model still receives every error
+  result in the transcript. Terminal, curated child activity, and ACP projections
+  are documented in [tools.md](tools.md#parallelism).
 - `skill_activation` records preserve the legacy event type but new events
   carry only the explicit/injected source and summary, not instruction
   contents; the `<skill>` body itself is ordinary user transcript content.

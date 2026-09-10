@@ -25,7 +25,7 @@ func executionErrorKind(kind llm.ToolErrorKind) string {
 	case llm.ToolErrorUnknownTool, llm.ToolErrorInvalidArgs, llm.ToolErrorTimeout,
 		llm.ToolErrorCancelled, llm.ToolErrorPanic, llm.ToolErrorPathNotFound,
 		llm.ToolErrorEditOldTextNotFound, llm.ToolErrorEditOldTextAmbiguous,
-		llm.ToolErrorStaleFile, llm.ToolErrorHookBlocked, llm.ToolErrorBlocked,
+		llm.ToolErrorStaleFile, llm.ToolErrorHookBlocked, llm.ToolErrorBlocked, llm.ToolErrorLeaseConflict,
 		llm.ToolErrorUnsupportedModality, llm.ToolErrorInvalidResult,
 		llm.ToolErrorRegexInvalid, llm.ToolErrorBatchFailed,
 		llm.ToolErrorProviderInternalError, llm.ToolErrorProviderAuth,

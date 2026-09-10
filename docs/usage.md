@@ -1917,9 +1917,12 @@ sandbox for real isolation.
 
 `workspace_access` controls the default background-delegate lease:
 `read_only` permits concurrent children on one scope, while `exclusive`
-conflicts with every active lease for that scope. Built-in `explore`, `plan`,
-and `review` use `read_only`; `auto`, `independent`, and new custom agents
-default to `exclusive`. Implementation-mode delegates are always exclusive.
+conflicts with other leases for that scope except the requesting job's ancestors.
+Nested jobs may reuse an ancestor's reservation; siblings still follow the normal
+access conflict rules. See [background jobs](tools.md#command-execution) for lease
+lifetime and coordination details. Built-in `explore`, `plan`, and `review` use
+`read_only`; `auto`, `independent`, and new custom agents default to `exclusive`.
+Implementation-mode delegates are always exclusive.
 
 ### Planning and implementation handoff
 

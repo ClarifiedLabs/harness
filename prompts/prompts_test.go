@@ -61,6 +61,8 @@ func TestSystemPromptToolStagingGuidance(t *testing.T) {
 		"parallel-eligible",
 		"increasing",
 		"dependencies",
+		"numerically",
+		"1,2,1",
 		"another model turn",
 	} {
 		if !strings.Contains(prompt, want) {

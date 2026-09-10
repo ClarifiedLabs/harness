@@ -301,10 +301,12 @@ func (r *Recorder) ToolStart(call llm.ToolCall) {
 	if r == nil {
 		return
 	}
+	call.Stage = llm.CloneToolStage(call.Stage)
 	r.pending[call.ID] = pendingCall{call: call, started: r.now(), model: r.model}
 	r.Append(session.Event{
 		Type: session.EventToolStart, Prompt: r.cfg.Prompt, Turn: r.turn,
 		ToolID: call.ID, Tool: call.Name, Input: call.Input,
+		ToolStage:   llm.CloneToolStage(call.Stage),
 		ModelTarget: r.model.targetID, Provider: r.model.provider,
 		APIType: r.model.apiType, Model: r.model.model,
 	})
@@ -356,16 +358,24 @@ func (r *Recorder) ToolResult(res llm.ToolResult) {
 	if res.Truncated {
 		artifactRef = session.ToolResultArtifactReference(r.cfg.Prompt, r.turn, res.ForID)
 	}
+	display := ToolResultLine(pending.call, res, r.cfg.CWD)
+	if pending.call.Stage != nil && pending.call.Stage.BatchRejected {
+		// The preflight notice is the only display line; retain every result for
+		// diagnostics and model/transcript pairing without replaying duplicates.
+		display = ""
+	}
 	r.Append(session.Event{
 		Type:                session.EventToolResult,
 		Prompt:              r.cfg.Prompt,
 		Turn:                r.turn,
 		ToolID:              res.ForID,
 		Tool:                pending.call.Name,
-		Display:             ToolResultLine(pending.call, res, r.cfg.CWD),
+		Display:             display,
+		ToolStage:           llm.CloneToolStage(pending.call.Stage),
 		DurationMS:          durationMS,
 		ResultError:         res.IsError,
 		ErrorKind:           string(res.ErrorKind),
+		ErrorDetails:        llm.CloneToolErrorDetails(res.ErrorDetails),
 		ErrorExcerpt:        errorExcerpt,
 		ResultTruncated:     res.Truncated,
 		ResultOriginalBytes: originalBytes,

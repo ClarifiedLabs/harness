@@ -1,11 +1,12 @@
 // Package agent runs one user prompt as a loop of turns until the model stops
 // asking for tools, executing each turn's tool calls with default parallelism,
-// explicit sequential barriers, and emission-ordered overlapping file mutations
+// explicit sequential barriers, and same-stage emission-ordered file mutations
 // (best-effort on shared cwd/files; no sandbox), while upholding the transcript
 // invariant after every mutation (design §8, §4).
 package agent
 
 import (
+	"cmp"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -2957,22 +2958,28 @@ type callStage struct {
 	end   int
 }
 
-// planToolStages validates a complete emitted batch before dispatch and builds
-// stripped execution copies. Calls without _stage inherit the current stage;
-// malformed provider input keeps its assembler diagnostic and current stage.
-func planToolStages(calls []llm.ToolCall) ([]llm.ToolCall, []callStage, error) {
+// planToolStages validates a complete emitted batch before dispatch and stably
+// orders stripped execution copies by stage. Calls without _stage inherit the
+// preceding emitted call's stage; malformed provider input keeps its assembler
+// diagnostic and current stage. order maps execution indexes to emission indexes.
+func planToolStages(calls []llm.ToolCall) ([]llm.ToolCall, []callStage, []int, error) {
 	executionCalls := append([]llm.ToolCall(nil), calls...)
 	resolvedStages := make([]int, len(calls))
+	order := make([]int, len(calls))
 	currentStage := 1
 	var planErr error
 	for i, call := range calls {
+		order[i] = i
+		executionCalls[i].Stage = &llm.ToolStage{EmissionIndex: i + 1, Resolved: currentStage}
 		if call.InvalidInputError != "" || call.Name == kimiWebSearchToolName {
 			resolvedStages[i] = currentStage
 			continue
 		}
 		clean, metadata, err := tools.ExtractExecutionMetadata(call.Input)
 		executionCalls[i].Input = clean
+		executionCalls[i].Stage.Emitted = metadata.EmittedStage
 		if err != nil {
+			executionCalls[i].Stage.Resolved = 0
 			if planErr == nil {
 				planErr = fmt.Errorf("call %d (%q): %w", i+1, call.Name, err)
 			}
@@ -2980,39 +2987,51 @@ func planToolStages(calls []llm.ToolCall) ([]llm.ToolCall, []callStage, error) {
 			continue
 		}
 		if metadata.HasStage {
-			if metadata.Stage < currentStage {
-				if planErr == nil {
-					planErr = fmt.Errorf("call %d (%q) decreases _stage from %d to %d", i+1, call.Name, currentStage, metadata.Stage)
-				}
-			} else {
-				currentStage = metadata.Stage
-			}
+			currentStage = metadata.Stage
 		}
 		resolvedStages[i] = currentStage
+		executionCalls[i].Stage.Resolved = currentStage
+	}
+	if planErr != nil {
+		for i := range executionCalls {
+			executionCalls[i].Stage.BatchRejected = true
+		}
+		return executionCalls, nil, order, planErr
 	}
 
+	slices.SortStableFunc(order, func(i, j int) int {
+		return cmp.Compare(resolvedStages[i], resolvedStages[j])
+	})
+	orderedCalls := make([]llm.ToolCall, len(calls))
+	for i, original := range order {
+		orderedCalls[i] = executionCalls[original]
+	}
 	stages := make([]callStage, 0, len(calls))
 	for start := 0; start < len(calls); {
 		end := start + 1
-		for end < len(calls) && resolvedStages[end] == resolvedStages[start] {
+		for end < len(calls) && resolvedStages[order[end]] == resolvedStages[order[start]] {
 			end++
 		}
 		stages = append(stages, callStage{start: start, end: end})
 		start = end
 	}
-	return executionCalls, stages, planErr
+	return orderedCalls, stages, order, nil
 }
 
-// executionToolCalls returns the same stripped copies used for dispatch to
-// post-dispatch classifiers and guards. dispatchCalls remains the authoritative
-// preflight gate and performs the complete validation before any side effect.
+// executionToolCalls returns stripped copies in emission order so post-dispatch
+// classifiers and guards can pair them with transcript results. dispatchCalls
+// remains the authoritative preflight gate before any side effect.
 func executionToolCalls(calls []llm.ToolCall) []llm.ToolCall {
-	executionCalls, _, _ := planToolStages(calls)
-	return executionCalls
+	executionCalls, _, order, _ := planToolStages(calls)
+	emittedCalls := make([]llm.ToolCall, len(calls))
+	for i, original := range order {
+		emittedCalls[original] = executionCalls[i]
+	}
+	return emittedCalls
 }
 
 func invalidStagePlanText(err error) string {
-	return "invalid tool stage plan: " + err.Error() + ". _stage must be an integer greater than or equal to 1, and explicit stages must be non-decreasing"
+	return "invalid tool stage plan: " + err.Error() + ". _stage must be an integer greater than or equal to 1"
 }
 
 const (
@@ -3081,15 +3100,16 @@ func (a *Agent) readResultBatchByteBudget(liveInputTokens int) int {
 // dispatchCalls runs one turn's tool calls. It preflights Harness-owned stage
 // metadata, executes stages serially, and retains the existing default-parallel,
 // hook-barrier, and mutation-dependency scheduler within each stage. Sink events
-// and returned blocks remain in global emission order (design §8).
+// follow execution order; returned blocks retain original emission order (design §8).
 func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptID, turnID int, sink EventSink) ([]llm.ContentBlock, []llm.ParallelToolBatch, llm.Usage) {
 	// All calls are queued before stage/dependency/semaphore waits. Reused
 	// speculative results never enter Registry.Run again.
 	ctx = execution.WithToolQueued(execution.WithScope(ctx, a.executionScope()), time.Now())
-	executionCalls, stages, planErr := planToolStages(calls)
+	executionCalls, stages, order, planErr := planToolStages(calls)
 	blocks := make([]llm.ContentBlock, len(calls))
 	if planErr != nil {
 		text := invalidStagePlanText(planErr)
+		sink.Notice(fmt.Sprintf("[tool batch rejected: %d calls not executed; %s]", len(calls), text))
 		for i, call := range executionCalls {
 			sink.ToolStart(call)
 			result := llm.ToolResult{ForID: call.ID, Text: text, IsError: true, ErrorKind: llm.ToolErrorInvalidArgs}
@@ -3119,7 +3139,13 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 		parallelBatches = append(parallelBatches, batches...)
 		total = llm.AddUsage(total, usage)
 	}
-	return blocks, parallelBatches, total
+	// Dispatch indexes follow stage order; the transcript must retain emission
+	// order, including suppressed calls and errors, without changing call IDs.
+	emittedBlocks := make([]llm.ContentBlock, len(calls))
+	for i, original := range order {
+		emittedBlocks[original] = blocks[i]
+	}
+	return emittedBlocks, parallelBatches, total
 }
 
 func withPerReadResultLimits(ctx context.Context, calls []llm.ToolCall, suppressed map[int]string) context.Context {
@@ -3459,6 +3485,7 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 }
 
 func safeToolResultForSink(r llm.ToolResult) llm.ToolResult {
+	r.ErrorDetails = llm.CloneToolErrorDetails(r.ErrorDetails)
 	if len(r.Content) == 0 {
 		return r
 	}
@@ -3757,6 +3784,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 			r.Content = nil
 			r.IsError = true
 			r.ErrorKind = llm.ToolErrorHookBlocked
+			r.ErrorDetails = nil
 		}
 	}
 	return r, completion

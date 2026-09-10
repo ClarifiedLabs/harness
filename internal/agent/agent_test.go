@@ -4407,7 +4407,7 @@ func TestPlanToolStagesResolvesInheritanceAndPreservesUnannotatedInput(t *testin
 		{ID: "c", Name: "read", Input: json.RawMessage(`{"path":"c"}`)},
 		{ID: "d", Name: "read", Input: json.RawMessage(`{"_stage":7,"path":"d"}`)},
 	}
-	execution, stages, err := planToolStages(calls)
+	execution, stages, _, err := planToolStages(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -4449,7 +4449,7 @@ func TestPlanToolStagesKeepsProviderInvalidInputInCurrentStage(t *testing.T) {
 		Input:             llm.InvalidToolInputObject(errors.New("unexpected EOF")),
 		InvalidInputError: "unexpected EOF",
 	}
-	execution, stages, err := planToolStages([]llm.ToolCall{
+	execution, stages, _, err := planToolStages([]llm.ToolCall{
 		{ID: "a", Name: "read", Input: json.RawMessage(`{"_stage":4}`)},
 		invalid,
 		{ID: "c", Name: "read", Input: json.RawMessage(`{}`)},
@@ -4466,89 +4466,98 @@ func TestPlanToolStagesKeepsProviderInvalidInputInCurrentStage(t *testing.T) {
 }
 
 func TestDispatchCallsRunsStagesSeriallyAndCallsWithinStagesConcurrently(t *testing.T) {
-	stage1Started := []chan struct{}{make(chan struct{}), make(chan struct{})}
-	stage2Started := []chan struct{}{make(chan struct{}), make(chan struct{})}
-	releaseStage1 := make(chan struct{})
-	releaseStage2 := make(chan struct{})
-	stage2Barrier := barrierRun(2)
-	reg := &tools.Registry{}
-	for i, name := range []string{"a", "b"} {
-		started := stage1Started[i]
-		reg.Register(&meteredRecordTool{
-			recordTool: &recordTool{name: name, run: func(context.Context, json.RawMessage) (string, error) {
-				close(started)
-				<-releaseStage1
-				return "stage 1", nil
-			}},
-			usage: llm.Usage{InputTokens: i + 1, OutputTokens: 1},
-		})
-	}
-	for i, name := range []string{"c", "d"} {
-		started := stage2Started[i]
-		reg.Register(&meteredRecordTool{
-			recordTool: &recordTool{name: name, run: func(ctx context.Context, input json.RawMessage) (string, error) {
-				close(started)
-				result, err := stage2Barrier(ctx, input)
-				<-releaseStage2
-				return result, err
-			}},
-			usage: llm.Usage{InputTokens: i + 3, OutputTokens: 1},
-		})
-	}
-	a := newAgent(llmtest.New("fake"), reg, Options{})
-	sink := &stageRecordSink{}
-	type dispatchOutcome struct {
-		blocks  []llm.ContentBlock
-		batches []llm.ParallelToolBatch
-		usage   llm.Usage
-	}
-	done := make(chan dispatchOutcome, 1)
-	calls := []llm.ToolCall{
-		{ID: "a", Name: "a", Input: json.RawMessage(`{"_stage":1}`)},
-		{ID: "b", Name: "b", Input: json.RawMessage(`{"_stage":1}`)},
-		{ID: "c", Name: "c", Input: json.RawMessage(`{"_stage":2}`)},
-		{ID: "d", Name: "d", Input: json.RawMessage(`{}`)},
-	}
-	go func() {
-		blocks, batches, usage := a.dispatchCalls(context.Background(), calls, 1, 1, sink)
-		done <- dispatchOutcome{blocks: blocks, batches: batches, usage: usage}
-	}()
+	for _, order := range [][]int{{0, 1, 2, 3}, {0, 2, 1, 3}, {2, 0, 3, 1}} {
+		t.Run(fmt.Sprint(order), func(t *testing.T) {
+			stage1Started := []chan struct{}{make(chan struct{}), make(chan struct{})}
+			stage2Started := []chan struct{}{make(chan struct{}), make(chan struct{})}
+			releaseStage1 := make(chan struct{})
+			releaseStage2 := make(chan struct{})
+			stage2Barrier := barrierRun(2)
+			reg := &tools.Registry{}
+			for i, name := range []string{"a", "b"} {
+				started := stage1Started[i]
+				reg.Register(&meteredRecordTool{
+					recordTool: &recordTool{name: name, run: func(context.Context, json.RawMessage) (string, error) {
+						close(started)
+						<-releaseStage1
+						return "stage 1", nil
+					}},
+					usage: llm.Usage{InputTokens: i + 1, OutputTokens: 1},
+				})
+			}
+			for i, name := range []string{"c", "d"} {
+				started := stage2Started[i]
+				reg.Register(&meteredRecordTool{
+					recordTool: &recordTool{name: name, run: func(ctx context.Context, input json.RawMessage) (string, error) {
+						close(started)
+						result, err := stage2Barrier(ctx, input)
+						<-releaseStage2
+						return result, err
+					}},
+					usage: llm.Usage{InputTokens: i + 3, OutputTokens: 1},
+				})
+			}
+			a := newAgent(llmtest.New("fake"), reg, Options{})
+			sink := &stageRecordSink{}
+			type dispatchOutcome struct {
+				blocks  []llm.ContentBlock
+				batches []llm.ParallelToolBatch
+				usage   llm.Usage
+			}
+			done := make(chan dispatchOutcome, 1)
+			calls := []llm.ToolCall{
+				{ID: "a", Name: "a", Input: json.RawMessage(`{"_stage":1}`)},
+				{ID: "b", Name: "b", Input: json.RawMessage(`{"_stage":1}`)},
+				{ID: "c", Name: "c", Input: json.RawMessage(`{"_stage":2}`)},
+				{ID: "d", Name: "d", Input: json.RawMessage(`{"_stage":2}`)},
+			}
+			emitted := make([]llm.ToolCall, len(calls))
+			for i, original := range order {
+				emitted[i] = calls[original]
+			}
+			calls = emitted
+			go func() {
+				blocks, batches, usage := a.dispatchCalls(context.Background(), calls, 1, 1, sink)
+				done <- dispatchOutcome{blocks: blocks, batches: batches, usage: usage}
+			}()
 
-	awaitSignal(t, stage1Started[0], "stage-1 call a start")
-	awaitSignal(t, stage1Started[1], "stage-1 call b start")
-	assertNotSignaled(t, stage2Started[0], "stage 2 started before stage 1 settled")
-	assertNotSignaled(t, stage2Started[1], "stage 2 started before stage 1 settled")
-	close(releaseStage1)
-	awaitSignal(t, stage2Started[0], "stage-2 call c start")
-	awaitSignal(t, stage2Started[1], "stage-2 call d start")
-	if got := sink.resultCount.Load(); got != 2 {
-		t.Fatalf("stage 2 started after %d stage-1 results, want 2", got)
-	}
-	close(releaseStage2)
-	outcome := <-done
-	if got := idsFromCalls(sink.starts); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
-		t.Fatalf("ToolStart order = %v", got)
-	}
-	if got := idsFromResults(sink.results); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
-		t.Fatalf("ToolResult order = %v", got)
-	}
-	for i, block := range outcome.blocks {
-		if block.ResultError || block.ResultForID != calls[i].ID {
-			t.Fatalf("block %d = %+v", i, block)
-		}
-	}
-	if len(outcome.batches) != 2 ||
-		!slices.Equal(outcome.batches[0].ToolUseIDs, []string{"a", "b"}) ||
-		!slices.Equal(outcome.batches[1].ToolUseIDs, []string{"c", "d"}) {
-		t.Fatalf("parallel batches = %+v", outcome.batches)
-	}
-	if outcome.usage.InputTokens != 10 || outcome.usage.OutputTokens != 4 {
-		t.Fatalf("global usage = %+v, want input=10 output=4", outcome.usage)
-	}
-	for _, start := range sink.starts {
-		if strings.Contains(string(start.Input), "_stage") {
-			t.Fatalf("ToolStart saw scheduling metadata: %+v", start)
-		}
+			awaitSignal(t, stage1Started[0], "stage-1 call a start")
+			awaitSignal(t, stage1Started[1], "stage-1 call b start")
+			assertNotSignaled(t, stage2Started[0], "stage 2 started before stage 1 settled")
+			assertNotSignaled(t, stage2Started[1], "stage 2 started before stage 1 settled")
+			close(releaseStage1)
+			awaitSignal(t, stage2Started[0], "stage-2 call c start")
+			awaitSignal(t, stage2Started[1], "stage-2 call d start")
+			if got := sink.resultCount.Load(); got != 2 {
+				t.Fatalf("stage 2 started after %d stage-1 results, want 2", got)
+			}
+			close(releaseStage2)
+			outcome := <-done
+			if got := idsFromCalls(sink.starts); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
+				t.Fatalf("ToolStart order = %v", got)
+			}
+			if got := idsFromResults(sink.results); !slices.Equal(got, []string{"a", "b", "c", "d"}) {
+				t.Fatalf("ToolResult order = %v", got)
+			}
+			for i, block := range outcome.blocks {
+				if block.ResultError || block.ResultForID != calls[i].ID {
+					t.Fatalf("block %d = %+v", i, block)
+				}
+			}
+			if len(outcome.batches) != 2 ||
+				!slices.Equal(outcome.batches[0].ToolUseIDs, []string{"a", "b"}) ||
+				!slices.Equal(outcome.batches[1].ToolUseIDs, []string{"c", "d"}) {
+				t.Fatalf("parallel batches = %+v", outcome.batches)
+			}
+			if outcome.usage.InputTokens != 10 || outcome.usage.OutputTokens != 4 {
+				t.Fatalf("global usage = %+v, want input=10 output=4", outcome.usage)
+			}
+			for _, start := range sink.starts {
+				if strings.Contains(string(start.Input), "_stage") {
+					t.Fatalf("ToolStart saw scheduling metadata: %+v", start)
+				}
+			}
+		})
 	}
 }
 
@@ -4605,10 +4614,13 @@ func TestFailureGuardFoldingRemainsGlobalAcrossStages(t *testing.T) {
 	})
 	a := newAgent(llmtest.New("fake"), reg, Options{})
 	a.failGuard = newFailureGuard()
-	a.dispatchCalls(context.Background(), []llm.ToolCall{
-		{ID: "failure", Name: "check", Input: json.RawMessage(`{"_stage":1}`)},
+	blocks, _, _ := a.dispatchCalls(context.Background(), []llm.ToolCall{
 		{ID: "mutation", Name: "mutation", Input: json.RawMessage(`{"_stage":2}`)},
+		{ID: "failure", Name: "check", Input: json.RawMessage(`{"_stage":1}`)},
 	}, 1, 1, &recordSink{})
+	if blocks[0].ResultError || !blocks[1].ResultError {
+		t.Fatalf("mutation/failure results = %+v", blocks)
+	}
 	a.failGuard.mu.Lock()
 	defer a.failGuard.mu.Unlock()
 	if len(a.failGuard.records) != 0 {
@@ -4726,10 +4738,11 @@ func TestTimedOutMutationDoesNotReleaseSuccessorBeforeActualCompletion(t *testin
 	}
 	done := make(chan dispatchOutcome, 1)
 	go func() {
+		// Stage order, not emission order, must govern actual-completion edges.
 		blocks, batches, _ := a.dispatchCalls(context.Background(), []llm.ToolCall{
-			{ID: "first", Name: "first", Input: json.RawMessage(`{"_stage":1}`)},
 			{ID: "successor", Name: "successor", Input: json.RawMessage(`{"_stage":2}`)},
 			{ID: "unrelated", Name: "unrelated", Input: json.RawMessage(`{}`)},
+			{ID: "first", Name: "first", Input: json.RawMessage(`{"_stage":1}`)},
 		}, 1, 1, &recordSink{})
 		done <- dispatchOutcome{blocks: blocks, batches: batches}
 	}()
@@ -4740,7 +4753,7 @@ func TestTimedOutMutationDoesNotReleaseSuccessorBeforeActualCompletion(t *testin
 	close(releaseFirst)
 	awaitSignal(t, successorStarted, "successor start after actual completion")
 	outcome := <-done
-	if len(outcome.blocks) != 3 || !outcome.blocks[0].ResultError || !strings.Contains(outcome.blocks[0].ResultText, "timed out after 20ms") || outcome.blocks[1].ResultError || outcome.blocks[2].ResultError {
+	if len(outcome.blocks) != 3 || !outcome.blocks[2].ResultError || !strings.Contains(outcome.blocks[2].ResultText, "timed out after 20ms") || outcome.blocks[0].ResultError || outcome.blocks[1].ResultError {
 		t.Fatalf("timeout/successor results = %+v", outcome.blocks)
 	}
 	if len(outcome.batches) != 1 || !slices.Equal(outcome.batches[0].ToolUseIDs, []string{"successor", "unrelated"}) {
@@ -4895,7 +4908,7 @@ func TestInvalidToolStagePlanRejectsWholeBatchBeforeToolsOrHooks(t *testing.T) {
 		inputs []string
 	}{
 		{name: "invalid value", inputs: []string{`{"_stage":"later","value":1}`, `{"value":2}`}},
-		{name: "decreasing stages", inputs: []string{`{"_stage":2,"value":1}`, `{"_stage":1,"value":2}`}},
+		{name: "invalid later value", inputs: []string{`{"_stage":2,"value":1}`, `{"_stage":0,"value":2}`}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -4930,8 +4943,21 @@ func TestInvalidToolStagePlanRejectsWholeBatchBeforeToolsOrHooks(t *testing.T) {
 			if len(sink.starts) != 2 || len(sink.results) != 2 {
 				t.Fatalf("unbalanced sink events: starts=%d results=%d", len(sink.starts), len(sink.results))
 			}
+			batchNotices := 0
+			for _, notice := range sink.notices {
+				if strings.HasPrefix(notice, "[tool batch rejected: 2 calls not executed; ") {
+					batchNotices++
+				}
+			}
+			if batchNotices != 1 {
+				t.Fatalf("batch rejection notices = %d; %v", batchNotices, sink.notices)
+			}
 			for i, result := range sink.results {
-				if !result.IsError || result.ErrorKind != llm.ToolErrorInvalidArgs || !strings.Contains(result.Text, "non-decreasing") || result.ForID != []string{"a", "b"}[i] {
+				stage := sink.starts[i].Stage
+				if stage == nil || !stage.BatchRejected || stage.EmissionIndex != i+1 {
+					t.Fatalf("ToolStart %d missing stage diagnostics: %+v", i, stage)
+				}
+				if !result.IsError || result.ErrorKind != llm.ToolErrorInvalidArgs || !strings.Contains(result.Text, "integer greater than or equal to 1") || result.ForID != []string{"a", "b"}[i] {
 					t.Fatalf("result %d = %+v", i, result)
 				}
 				if strings.Contains(string(sink.starts[i].Input), "_stage") {

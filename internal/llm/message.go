@@ -221,6 +221,8 @@ type ToolCall struct {
 	Namespace         string
 	Input             json.RawMessage
 	InvalidInputError string
+	// Stage is diagnostics-only metadata on the scheduler's execution copy.
+	Stage *ToolStage
 }
 
 // ToolErrorKind is a stable, provider-neutral class for a failed tool result.
@@ -239,6 +241,7 @@ const (
 	ToolErrorStaleFile            ToolErrorKind = "stale_file"
 	ToolErrorHookBlocked          ToolErrorKind = "hook_blocked"
 	ToolErrorBlocked              ToolErrorKind = "blocked"
+	ToolErrorLeaseConflict        ToolErrorKind = "lease_conflict"
 	ToolErrorUnsupportedModality  ToolErrorKind = "unsupported_modality"
 	ToolErrorInvalidResult        ToolErrorKind = "invalid_result"
 	ToolErrorRegexInvalid         ToolErrorKind = "regex_invalid"
@@ -285,4 +288,7 @@ type ToolResult struct {
 	// (empty = unclassified; the analysis layer text-classifies). Like Metrics
 	// it is never copied into a model-visible ContentBlock.
 	ErrorKind ToolErrorKind
+	// ErrorDetails carries diagnostics-only structured context for the failure.
+	// Like ErrorKind, it is never copied into a model-visible ContentBlock.
+	ErrorDetails *ToolErrorDetails
 }

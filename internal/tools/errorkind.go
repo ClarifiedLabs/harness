@@ -35,3 +35,16 @@ func KindOf(err error) llm.ToolErrorKind {
 	}
 	return ""
 }
+
+// DetailsOf walks err's unwrap chain for structured diagnostic details. Errors
+// opt in by implementing ToolErrorDetails() *llm.ToolErrorDetails; ordinary
+// errors return nil. The returned copy is owned by the caller.
+func DetailsOf(err error) *llm.ToolErrorDetails {
+	var detailed interface {
+		ToolErrorDetails() *llm.ToolErrorDetails
+	}
+	if errors.As(err, &detailed) {
+		return llm.CloneToolErrorDetails(detailed.ToolErrorDetails())
+	}
+	return nil
+}

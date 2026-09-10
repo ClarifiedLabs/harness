@@ -307,6 +307,10 @@ func safeModelRequestLine(event llm.ModelRequestEvent) (ActivityEventKind, strin
 	}
 }
 
+// Only the fixed prefix and positive call count are safe to publish; the
+// validation error suffix may contain arbitrary model-provided tool names.
+var rejectedBatchNoticePrefix = regexp.MustCompile(`^\[tool batch rejected: ([1-9][0-9]*) calls not executed; invalid tool stage plan: `)
+
 var safeNoticePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^\[stopped: reached max turns \([0-9]+\)\]$`),
 	regexp.MustCompile(`^\[stopped: prompt token budget [0-9]+ exceeded\]$`),
@@ -332,6 +336,9 @@ var safeFixedNotices = map[string]bool{
 
 func safeNoticeLine(message string) (string, bool) {
 	message = strings.TrimSpace(message)
+	if match := rejectedBatchNoticePrefix.FindStringSubmatch(message); match != nil {
+		return sanitizeInlineText("tool batch rejected: "+match[1]+" calls not executed", activityNoticeMaxBytes), true
+	}
 	if !safeFixedNotices[message] {
 		allowed := false
 		for _, pattern := range safeNoticePatterns {

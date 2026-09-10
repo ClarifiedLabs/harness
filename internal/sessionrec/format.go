@@ -192,6 +192,14 @@ func FormatValue(raw json.RawMessage) string {
 // for is_error results, else a line count (when multi-line) and byte size.
 func ResultSummary(result llm.ToolResult) string {
 	if result.IsError {
+		if result.ErrorKind == llm.ToolErrorLeaseConflict && result.ErrorDetails != nil && result.ErrorDetails.LeaseConflict != nil {
+			conflict := result.ErrorDetails.LeaseConflict
+			// Lead with the blocker, not the often-long resource path. Quote all
+			// fields so diagnostics cannot inject terminal controls or new lines.
+			return fmt.Sprintf("error: lease conflict; job=%q agent=%q access=%q/%q; inspect background_jobs",
+				Clip(conflict.BlockingJobID, 96), Clip(conflict.BlockingAgent, 32),
+				Clip(conflict.RequestedAccess, 16), Clip(conflict.ActiveAccess, 16))
+		}
 		return "error: " + Clip(FirstLine(result.Text), 80)
 	}
 	n := len(result.Text)

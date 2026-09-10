@@ -62,7 +62,7 @@ func TestDelegatePreservesConciseSchemaDescriptions(t *testing.T) {
 	if !strings.Contains(parameters, `"description":"Background workspace; default: cwd. Separate concurrent write scopes. Requires background:true."`) {
 		t.Fatalf("scope description must state the background:true requirement: %s", parameters)
 	}
-	if !strings.Contains(parameters, `"description":"Background lease; defaults by agent. Override only when stricter. Requires background:true."`) {
+	if !strings.Contains(parameters, `"description":"Background lease; defaults by agent. Override only when stricter. mode:implementation forces exclusive. Requires background:true."`) {
 		t.Fatalf("access description must state the background:true requirement: %s", parameters)
 	}
 }
@@ -200,7 +200,7 @@ func TestDelegateSchemaListsOnlyDelegatableAgents(t *testing.T) {
 }
 
 func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
-	long := strings.Repeat("verbose description ", 30)
+	long := strings.Repeat("界", 100)
 	state := NewState(Runtime{ToolNames: []string{"read"}})
 	tool := New(state.Snapshot, nil, Options{
 		AgentCandidates: func(Runtime) []AgentCandidate {
@@ -242,8 +242,16 @@ func TestDelegateSchemaCatalogIsDeterministicNormalizedAndCapped(t *testing.T) {
 		if end := strings.IndexByte(entry, '\n'); end >= 0 {
 			entry = entry[:end]
 		}
-		if len(entry) > maxAgentDescriptionBytes {
-			t.Fatalf("catalog description for %q is %d bytes, want <= %d", name, len(entry), maxAgentDescriptionBytes)
+		const annotation = " [background access: exclusive]"
+		if !strings.HasSuffix(entry, annotation) {
+			t.Fatalf("catalog entry for %q lost access annotation: %q", name, entry)
+		}
+		description := strings.TrimSuffix(entry, annotation)
+		if len(description) > maxAgentDescriptionBytes {
+			t.Fatalf("catalog description for %q is %d bytes, want <= %d", name, len(description), maxAgentDescriptionBytes)
+		}
+		if name == "alpha" && description != strings.Repeat("界", 52)+"..." {
+			t.Fatalf("capped UTF-8 description = %q", description)
 		}
 	}
 }

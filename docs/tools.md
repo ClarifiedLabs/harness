@@ -51,9 +51,10 @@ writes, `edit` for replacements, and `shell` with host commands such as `rg`,
 Models should issue independent schema-visible calls together in one tool turn.
 Registered calls are parallel-eligible by default, regardless of `ReadOnly`; a
 small set of workflow tools explicitly opts ordering-sensitive inputs out.
-Harness automatically queues overlapping built-in `write`/`edit` mutations in
-model emission order using normalized lexical paths, while unrelated calls may
-continue. Results and transcript blocks always remain in emission order.
+Harness runs numeric stages in order and queues overlapping built-in
+`write`/`edit` mutations in same-stage emission order using normalized lexical
+paths, while unrelated calls may continue. Live results follow that execution
+order; transcript blocks always remain in original emission order.
 `shell.steps` still run serially inside one call. No sandbox is added; Harness
 inherits the host sandbox.
 
@@ -201,15 +202,37 @@ coordinates concurrent jobs but neither restricts what the command can do nor
 makes it read-only. Legacy top-level `resource_key` and `access` inputs remain
 accepted but are not advertised. A delegate's access defaults from its selected
 agent, and its `scope` defaults to the canonical cwd. Built-in `explore`,
-`plan`, and `review` agents are read-only; `auto`, `independent`, custom, and
-implementation-mode delegates are exclusive by default. A background `shell`
-call defaults to an exclusive lease even when it runs a search command; callers
-may explicitly select `read_only` when the command cannot mutate the resource.
-Multiple read-only jobs may share a resource,
-while an exclusive job conflicts with every active lease for the same resource
-and reports the existing job id. Jobs on different resources remain concurrent.
-The lease is an exact-key match on the canonical path: it does not protect the
-whole workspace, so two jobs on sibling or nested directories do not conflict.
+`plan`, and `review` agents are read-only; `auto`, `independent`, and custom
+agents are exclusive by default. Implementation mode forces exclusive access.
+A background `shell` call defaults to an exclusive lease even when it runs a
+search command; callers may explicitly select `read_only` when the command
+cannot mutate the resource.
+Multiple read-only jobs may share a resource. An exclusive job conflicts with
+other leases for the same resource and reports the existing job id, except that
+nested jobs may reuse their ancestors' leases. This ancestry comes from Harness's
+running-job context, not a caller-supplied id. Ancestor reuse applies regardless
+of access mode; the child's requested access still governs its conflicts with
+siblings and unrelated jobs. Siblings conflict when either requests exclusive
+access; read-only siblings may share an exclusive ancestor's resource.
+Reuse does not pause the parent or serialize its writes:
+parents must avoid modifying files while their children work on them.
+An ancestor's reused reservation retains its original access until that ancestor
+and all descendants reusing it have actually finished cleanup, even if the
+ancestor returns first. Cancellation, abandonment, and `/clear` do not release
+still-live reservations; `/clear` still resets the visible job table.
+Jobs on different resources remain concurrent. The lease is an exact-key match
+on the canonical path: it does not protect the whole workspace, so two jobs on
+sibling or nested directories do not conflict.
+
+A rejected launch returns `lease_conflict` with the reservation owner's job ID,
+agent/status, resource key, requested/active access, and wait/retry guidance.
+The terminal summary leads with the blocker ID instead of a clipped path.
+Use `background_jobs` to inspect unfinished work and wait before retrying.
+A completed or canceled owner can still retain its reservation until descendants
+and cancellation cleanup finish; waiting on that owner alone does not release it.
+Do not change scope or downgrade access to bypass a conflict. Structured raw
+fields are documented in [session.md](session.md#the-replay-event-stream-rawndjson).
+
 `web_fetch` does not lease the local workspace. `web_fetch` returns text
 only; non-textual responses fail with an error that points at downloading the
 archive or binary with `shell` (for example `curl`) for inspection.
@@ -392,9 +415,14 @@ logical session does not delete its durable child directories.
 `delegate` starts a fresh-context child agent using the requested agent
 definition, or the current agent when omitted. The model-facing `agent` enum and
 its deterministic `Available:` catalog include only agents whose tools
-are a subset of the current parent's live tools. Agent descriptions are selection
-policy, not cosmetic labels: every new custom agent must provide a nonblank
-`description` stating when the parent should use it. Same-named built-in
+are a subset of the current parent's live tools. Each catalog line ends with
+`[background access: read_only]` or `[background access: exclusive]`, showing the
+same effective default used at launch: only exact `read_only` agent metadata
+shares access; missing or unrecognized metadata defaults to `exclusive`.
+`mode:"implementation"` forces exclusive access even for a read-only catalog
+entry or request. Agent descriptions are selection policy, not cosmetic labels:
+every new custom agent must provide a nonblank `description` stating when the
+parent should use it. Same-named built-in
 overrides may inherit the built-in description.
 
 Built-in child roles are:
@@ -478,10 +506,10 @@ Foreground delegates run in the ordinary serialized tool loop because children
 share the checkout and may write. Use `background:true` only for independent
 read-only or disjoint work while useful parent work remains. Background
 `explore`, `plan`, and `review` calls default to shared `read_only` access;
-`auto`/`independent` and implementation mode default to `exclusive`. Set
-`scope` to a narrower workspace path for mutating siblings that own disjoint
-areas.
-Lease conflicts fail before a child starts and identify the active job.
+`auto`/`independent` default to `exclusive`; implementation mode always requests
+`exclusive`. Set `scope` to a narrower workspace path for mutating siblings that
+own disjoint areas.
+Lease conflicts fail before a child starts and identify the reservation owner.
 Completion is delivered automatically as one-shot request context; do not poll or
 duplicate a background child's work. Harness permits one subsequent useful parent
 model round, then joins outstanding background delegates and continues the parent
@@ -591,17 +619,29 @@ configured surface; runtime validation still rejects any explicit unsupported na
 
 ## Parallelism
 
-Every local tool accepts the reserved optional top-level `_stage` integer. Within
-one assistant tool-use turn, execution starts at stage 1. An omitted `_stage`
-inherits the current stage, while an explicit value sets it without moving
-backward; explicit stages must therefore be positive and non-decreasing in model
-emission order. Gaps are accepted as labels; only the relative order matters.
-Harness validates the complete plan before dispatch, so an invalid value or a
-backward stage rejects every call in the batch before tools or hooks run. For
-example, these reads are independent and eligible to overlap:
+Every local tool accepts the reserved optional top-level `_stage` integer. Resolve
+labels in model emission order, starting at 1: an omitted `_stage` inherits the
+preceding call's stage, while any explicit positive integer sets the current
+label. Harness then groups calls by stage and executes stages in numeric order,
+regardless of emission order. Thus `1,2,1` runs both stage-1 calls before stage 2.
+Gaps are accepted as labels; only the relative order matters. Within a stage,
+existing serialization rules retain model emission order.
+Harness validates the complete plan before dispatch, so an invalid value rejects
+every call in the batch before tools or hooks run. The terminal and replay show
+one `[tool batch rejected: N calls not executed; invalid tool stage plan: ...]`
+notice, not per-call result or tool-execution start/progress displays. Verbose
+and tool-stream generation receipts may precede validation; they do not claim
+execution. Their model-owned names/IDs are escaped for terminal display. Each
+call still returns an error to the model and retains its raw event records. Curated
+child activity shows only `tool batch rejected: N calls not executed`; ACP still
+receives per-call completion updates required by its protocol. See
+[session.md](session.md#the-replay-event-stream-rawndjson) for stage diagnostics.
+For example, these reads are eligible to overlap even with the later-stage check
+emitted between them:
 
 ```json
 {"path":"go.mod","_stage":1}
+{"argv":["go","test","./..."],"_stage":2}
 {"path":"README.md","_stage":1}
 ```
 
@@ -626,9 +666,11 @@ Built-in `write` and `edit` report mutation paths. Harness normalizes those path
 lexically (`Abs` + `Clean`) and queues every overlapping same-stage mutation
 behind the latest earlier call, including mixed write/edit and multi-file edits.
 Unrelated members of the stage still overlap. All stages remain one assistant
-turn and produce one user tool-result message; results, usage, sink events, and
-transcript blocks appear in the model's original call order even when execution
-completes differently.
+turn and produce one user tool-result message. Raw tool calls and transcript
+result blocks retain the model's original call order and ids. Live tool events,
+usage, failure-guard folding, and result-budget accounting follow stage execution
+order, preserving emission order within each stage even when workers finish
+differently.
 
 A timeout or cancellation result normally satisfies a stage barrier. When a
 reported mutation conflicts with a later-stage mutation, however, Harness also

@@ -48,6 +48,7 @@ type Manager struct {
 	closed        bool
 	jobs          map[string]*Job
 	order         []string
+	leases        []*Job // live lease owners, including workers from before Clear
 	changed       chan struct{}
 	acceptedSteer chan struct{}
 	// lifecycleAbort is replaced whenever Shutdown or Clear invalidates detached
@@ -104,6 +105,10 @@ type detachedWaitOutcome struct {
 
 // Job is one background run.
 type Job struct {
+	// ancestors is immutable manager-established lineage. leaseUsers is guarded
+	// by Manager.mu and includes descendants reusing this exact resource.
+	ancestors   []*Job
+	leaseUsers  int
 	execution   execution.Scope
 	observation *jobObservation
 	ID          string
@@ -299,7 +304,8 @@ func (m *Manager) start(
 		cancel()
 		return Snapshot{}, err
 	}
-	if conflict := m.leaseConflictLocked(resourceKey, access); conflict != nil {
+	job.ancestors = m.ancestorsLocked(admission)
+	if conflict := m.leaseConflictLocked(resourceKey, access, job.ancestors); conflict != nil {
 		m.mu.Unlock()
 		cancel()
 		return Snapshot{}, conflict
@@ -307,12 +313,14 @@ func (m *Manager) start(
 	// Rejected leases never register. Accepted detached workers retain root
 	// ownership until actual return, even after cancellation or abandonment.
 	workerDone := job.execution.Track()
+	m.acquireLeaseLocked(job)
 	m.jobs[job.ID] = job
 	m.order = append(m.order, job.ID)
 	snap := snapshotJob(job)
 	m.signalLocked()
 	m.mu.Unlock()
 
+	ctx = context.WithValue(ctx, jobContextKey{}, job)
 	job.observe(nil)
 	go func() {
 		defer workerDone()
@@ -329,6 +337,7 @@ func (m *Manager) start(
 			result.Metrics = maps.Clone(result.Metrics)
 			finished := m.now()
 			m.mu.Lock()
+			m.releaseLeaseLocked(job)
 			if job.Status == StatusAbandoned {
 				job.Result = result
 				job.Updated = finished
@@ -367,25 +376,28 @@ func (m *Manager) start(
 	return snap, nil
 }
 
-func (m *Manager) leaseConflictLocked(resourceKey, access string) error {
+func (m *Manager) leaseConflictLocked(resourceKey, access string, ancestors []*Job) error {
 	if resourceKey == "" {
 		return nil
 	}
-	for _, id := range m.order {
-		job := m.jobs[id]
-		if job == nil || job.finished || job.ResourceKey != resourceKey {
+	for _, job := range m.leases {
+		if job.ResourceKey != resourceKey || isAncestor(ancestors, job) {
 			continue
 		}
 		if access == tools.BackgroundAccessReadOnly && job.Access == tools.BackgroundAccessReadOnly {
 			continue
 		}
-		return fmt.Errorf(
-			"background resource %q access %q conflicts with active job %s (%s)",
-			resourceKey,
-			access,
-			job.ID,
-			job.Access,
-		)
+		return tools.WithKind(&tools.BackgroundLeaseConflictError{
+			BlockingJobID:   job.ID,
+			BlockingAgent:   job.Agent,
+			BlockingStatus:  job.Status,
+			ResourceKey:     resourceKey,
+			RequestedAccess: access,
+			ActiveAccess:    job.Access,
+			Guidance: "Use background_jobs to inspect unfinished work and wait for its completion before retrying. " +
+				"This reservation can outlive its owner: all workers using it, including descendants and cancellation cleanup, " +
+				"must return; waiting for a completed owner alone will not release it.",
+		}, llm.ToolErrorLeaseConflict)
 	}
 	return nil
 }

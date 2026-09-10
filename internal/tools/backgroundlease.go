@@ -5,12 +5,36 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"harness/internal/llm"
 )
 
 const (
 	BackgroundAccessReadOnly  = "read_only"
 	BackgroundAccessExclusive = "exclusive"
 )
+
+// BackgroundLeaseConflictError identifies the reservation that rejected a
+// background launch. BlockingJobID is the reservation owner, not necessarily a
+// running worker: descendants may retain a completed owner's reservation.
+// Manager admission wraps this error with ToolErrorLeaseConflict.
+type BackgroundLeaseConflictError llm.LeaseConflictDetails
+
+func (e *BackgroundLeaseConflictError) Error() string {
+	return fmt.Sprintf(
+		"background resource %q access %q conflicts with reservation owned by job %s (agent %q, status %q, access %q). %s",
+		e.ResourceKey, e.RequestedAccess, e.BlockingJobID, e.BlockingAgent, e.BlockingStatus, e.ActiveAccess, e.Guidance,
+	)
+}
+
+// ToolErrorDetails returns an independently owned diagnostics snapshot.
+func (e *BackgroundLeaseConflictError) ToolErrorDetails() *llm.ToolErrorDetails {
+	if e == nil {
+		return nil
+	}
+	details := llm.LeaseConflictDetails(*e)
+	return &llm.ToolErrorDetails{LeaseConflict: &details}
+}
 
 // DefaultBackgroundResource returns the canonical working directory used when
 // a local background tool does not name a narrower resource explicitly.

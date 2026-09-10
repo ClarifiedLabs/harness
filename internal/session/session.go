@@ -680,6 +680,7 @@ type Event struct {
 	// the language for diff colorizing.
 	Path                string                   `json:"path,omitempty"`
 	Input               json.RawMessage          `json:"input,omitempty"`
+	ToolStage           *llm.ToolStage           `json:"tool_stage,omitempty"`
 	Images              []ImageInfo              `json:"images,omitempty"`
 	Usage               *llm.Usage               `json:"usage,omitempty"`
 	Compactions         int                      `json:"compactions,omitempty"`
@@ -709,6 +710,8 @@ type Event struct {
 	// result (llm.ToolErrorKind). It is empty on legacy logs, where the
 	// analysis layer text-classifies instead.
 	ErrorKind string `json:"error_kind,omitempty"`
+	// ErrorDetails is diagnostics-only context, absent on legacy records.
+	ErrorDetails *llm.ToolErrorDetails `json:"error_details,omitempty"`
 	// ErrorExcerpt is the bounded, rune-safe excerpt of the failed result
 	// text (see ErrorExcerpt); stored so analysis never needs tree.ndjson.
 	ErrorExcerpt        string `json:"error_excerpt,omitempty"`

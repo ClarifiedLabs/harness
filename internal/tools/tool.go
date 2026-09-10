@@ -106,7 +106,8 @@ type RichResult struct {
 type BackgroundJobRequest struct {
 	// Execution pins observations to the launching execution across detachment.
 	Execution execution.Scope
-	// AdmissionContext is checked only when accepting the job. Its cancellation
+	// AdmissionContext is checked only when accepting the job. It carries trusted
+	// manager-established ancestry for same-resource lease reuse. Its cancellation
 	// rejects stale launchers after a reset, but never cancels accepted work.
 	AdmissionContext context.Context
 	Kind             string
@@ -976,6 +977,7 @@ func (r *Registry) DispatchWithCompletionLimits(parent context.Context, call llm
 		} else {
 			res.Text = err.Error()
 			res.ErrorKind = KindOf(err)
+			res.ErrorDetails = DetailsOf(err)
 		}
 		res.IsError = true
 		return res, completion

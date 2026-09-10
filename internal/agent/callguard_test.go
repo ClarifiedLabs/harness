@@ -25,7 +25,7 @@ func stageCalls(inputs ...string) []llm.ToolCall {
 
 func TestPlanCallSuppressionSuppressesDuplicatesWithinStage(t *testing.T) {
 	calls := stageCalls(`{"path":"a"}`, `{"path":"a"}`, ` {"path":"a"} `, `{"path":"b"}`)
-	_, stages, err := planToolStages(calls)
+	_, stages, _, err := planToolStages(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestPlanCallSuppressionAllowsStagedReruns(t *testing.T) {
 		`{"_stage":2,"path":"a"}`,
 		`{"_stage":3,"path":"a"}`,
 	)
-	execution, stages, err := planToolStages(calls)
+	execution, stages, _, err := planToolStages(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestPlanCallSuppressionEnforcesTurnLimit(t *testing.T) {
 		inputs = append(inputs, fmt.Sprintf(`{"path":"f%d"}`, i))
 	}
 	calls := stageCalls(inputs...)
-	_, stages, err := planToolStages(calls)
+	_, stages, _, err := planToolStages(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestPlanCallSuppressionDuplicatesDoNotConsumeBudget(t *testing.T) {
 	}
 	inputs = append(inputs, `{"path":"x"}`, `{"path":"y"}`)
 	calls := stageCalls(inputs...)
-	_, stages, err := planToolStages(calls)
+	_, stages, _, err := planToolStages(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +118,7 @@ func TestPlanCallSuppressionSkipsNonDispatchCalls(t *testing.T) {
 	hosted := llm.ToolCall{ID: "hosted1", Name: kimiWebSearchToolName, Input: json.RawMessage(`{"query":"x"}`)}
 	hosted2 := llm.ToolCall{ID: "hosted2", Name: kimiWebSearchToolName, Input: json.RawMessage(`{"query":"x"}`)}
 	calls := []llm.ToolCall{invalid, bad2, hosted, hosted2}
-	_, stages, err := planToolStages(calls)
+	_, stages, _, err := planToolStages(calls)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestCrossStageMutationDependenciesSkipSuppressed(t *testing.T) {
 	for i := range calls {
 		calls[i].Name = "mut"
 	}
-	execution, stages, err := planToolStages(calls)
+	execution, stages, _, err := planToolStages(calls)
 	if err != nil {
 		t.Fatal(err)
 	}

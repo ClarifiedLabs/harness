@@ -1007,6 +1007,12 @@ func sanitizeACPToolCall(call llm.ToolCall) llm.ToolCall {
 	if input, changed := sanitizeACPJSON(call.Input); changed {
 		call.Input = input
 	}
+	call.Stage = llm.CloneToolStage(call.Stage)
+	if call.Stage != nil {
+		if emitted, changed := sanitizeACPJSON(call.Stage.Emitted); changed {
+			call.Stage.Emitted = emitted
+		}
+	}
 	return call
 }
 
@@ -1015,6 +1021,17 @@ func sanitizeACPToolResult(result llm.ToolResult) llm.ToolResult {
 	sanitizeACPString(&result.Text)
 	sanitizeACPString(&result.OriginalText)
 	result.BackgroundJobID = sanitizeACPIdentifier(result.BackgroundJobID)
+	result.ErrorDetails = llm.CloneToolErrorDetails(result.ErrorDetails)
+	if result.ErrorDetails != nil && result.ErrorDetails.LeaseConflict != nil {
+		conflict := result.ErrorDetails.LeaseConflict
+		conflict.BlockingJobID = sanitizeACPIdentifier(conflict.BlockingJobID)
+		for _, field := range []*string{
+			&conflict.BlockingAgent, &conflict.BlockingStatus, &conflict.ResourceKey,
+			&conflict.RequestedAccess, &conflict.ActiveAccess, &conflict.Guidance,
+		} {
+			sanitizeACPString(field)
+		}
+	}
 	if len(result.Content) > 0 {
 		messages, _ := sanitizeACPTranscript([]llm.Message{{Content: result.Content}})
 		result.Content = messages[0].Content

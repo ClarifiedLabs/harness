@@ -339,12 +339,14 @@ type ToolCall struct { // from a BlockToolUse
     Name              string
     Input             json.RawMessage
     InvalidInputError string // malformed streamed args; Input contains a valid diagnostic object
+    Stage             *ToolStage // diagnostics only, on private execution copies
 }
 
 type ToolResult struct { // becomes a BlockToolResult
     ForID         string
     Text          string
     IsError       bool
+    ErrorDetails  *ToolErrorDetails // diagnostics only; never copied into a content block
     Useless       bool   // successful but semantically empty; live content is unchanged
     Truncated     bool   // central cap (§8.3) trimmed the result
     OriginalText  string // full pre-truncation text, archived to artifacts/
@@ -1627,12 +1629,14 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
                 capture usage + stop reason
     append assistant message (text blocks + tool_use blocks, emission order)
     if stopReason == tool_use {
-        resolve effective stages: _stage absent = inherit (starting at 1);
-            otherwise require a positive, non-decreasing integer in emission order
-        if any stage is invalid: return one invalid-args result per call
-            without running hooks or tools
+        resolve effective stages in emission order: _stage absent = inherit
+            the preceding call's stage (starting at 1); otherwise any positive integer
+        if any stage is invalid: emit one batch-rejection notice and return
+            one invalid-args result per call without running hooks or tools
+        stably group private execution copies by ascending stage, preserving
+            original indexes for transcript results // 1,2,1 is valid
         suppress exact-duplicate calls within each stage beyond the first and
-            all calls past the per-turn dispatch limit // guard errors, no run;
+            all calls past the per-turn dispatch limit in execution order // no run;
             // suppressed calls never become dependency targets or writers
         for each effective stage in ascending order:
             wait until every earlier stage has returned a result
@@ -1643,7 +1647,7 @@ for turn := 1; maxTurns <= 0 || turn <= maxTurns; turn++ { // default 0 (unlimit
                     // suppressed calls never become dependency targets or writers
                 run workers after their predecessors complete, bounded by the
                     per-agent concurrent-execution limit // Dispatch always returns a result
-                emit summaries/results in model order
+                emit summaries/results in same-stage model order
         append ONE user message carrying all tool_result blocks, in call order
     }
     emit turn_complete(prompt, turn)
@@ -1676,9 +1680,11 @@ failed validation rollback, a disabled steer, or input recovered for the next
 prompt.
 
 - **Staged, dependency-aware tool execution.** `_stage` is a positive integer whose
-  effective value starts at 1, is inherited when omitted, and must be non-decreasing
-  in model emission order. A later stage waits for result completion of every earlier
-  stage, but an error result does not suppress later stages. Within a stage, every
+  effective value starts at 1 and is inherited from the preceding emitted call when
+  omitted. Explicit labels may decrease: private execution copies are stably sorted
+  by numeric stage, so `1,2,1` runs both stage-1 calls before stage 2. Stage labels
+  take precedence over emission order. A later stage waits for result completion of
+  every earlier stage, but an error result does not suppress later stages. Within a stage, every
   registered call is parallel-eligible unless its tool's input-aware `SequentialTool`
   opt-out applies; unknown calls also join islands because they can only return an
   error. Matching `PreToolUse`/`PostToolUse` hooks remain per-target barriers. Within
@@ -1691,15 +1697,29 @@ prompt.
   mutation with a conflicting later-stage mutation additionally waits for the earlier
   execution goroutine's actual return before releasing that successor. Workers never
   call `EventSink` or mutate the rich-result budget: starts, results, progress cleanup,
-  diffs/notices, usage, and transcript blocks are processed by the parent in emission
-  order. All stages are part of one assistant turn and yield one ordered user result
-  message. `parallel_tool_batches` records a complete ordered same-stage island only
+  diffs/notices, usage, budgets, and failure-guard folding are processed by the parent
+  in stage execution order and same-stage emission order. Raw tool calls remain
+  untouched; result blocks are restored to original emission indexes, as are calls
+  paired with those results by post-dispatch classifiers and guards. All stages are
+  part of one assistant turn and yield one ordered user result message.
+  `parallel_tool_batches` records a complete ordered same-stage island only
   when its graph permits concurrency; fully chained islands omit metadata. A background
   launch receipt completes its call and stage but means queued, not finished. Hidden
   read/write, shell, git, symlink, hard-link, MCP, and LSP effects remain best-effort;
   use later stages when known calls require earlier side effects, `shell.steps` for a
   serial command list inside one call, background leases/jobs for detached work, or a
   separate model turn when later arguments depend on earlier output. No sandbox is added.
+- **Invalid stage plans:** preflight emits one `EventSink.Notice` with shape
+  `[tool batch rejected: N calls not executed; invalid tool stage plan: ...]`.
+  Every call still gets an error result for the model/transcript and a raw
+  start/result record, but terminal and replay views suppress per-call results
+  and tool-execution starts/progress. Curated child activity exposes only
+  `tool batch rejected: N calls not executed`, not the validation suffix.
+  ACP retains per-call lifecycle/completion updates to close its protocol state.
+  Diagnostics-only `llm.ToolCall.Stage` lives on private execution copies with
+  `_stage` stripped from input; model inputs and transcripts remain unchanged.
+  The recorder persists stage metadata on both event kinds; see
+  [session.md](session.md#the-replay-event-stream-rawndjson) for the field contract.
 - **One result per call, always.** Required by both APIs (§4 invariant). `Dispatch`
   produces a result even on panic.
 - **Metered tools:** tools may optionally report token usage (currently synchronous
@@ -1709,7 +1729,7 @@ prompt.
   mutation tools for their affected paths. Each worker snapshots immediately before
   its call and snapshots/renders immediately after dispatch, before releasing any
   same-path successor. The parent later emits the captured unified diff after the
-  normal tool summary in emission order. The same capture/emission helpers serve
+  normal tool summary in stage execution order. The same capture/emission helpers serve
   sequential calls. The diff is generated by a stdlib-only line renderer, not by
   repository `git diff`, so it works in non-git projects and shows incremental
   per-call changes when the same file is edited repeatedly. Displayed
@@ -1725,8 +1745,9 @@ prompt.
 - **Background jobs:** tools with `background:true` start process-local jobs and
   return a job id immediately. `delegate` uses the same flag for background child
   agents. Local jobs carry canonical resource/access leases: read-only leases may
-  coexist, while exclusive access conflicts with every unfinished lease on the
-  same resource. Completed job summaries are delivered once as request-only
+  coexist, while exclusive access conflicts on the same resource except with a
+  requesting job's trusted ancestors (reentrant ownership; see §9.15). Siblings
+  and unrelated jobs retain the normal conflict rules. Completed job summaries are delivered once as request-only
   context on a later parent model request; they are not appended to the parent
   transcript.
 - **Max-turns guard:** `max_turns` defaults to `0` (unlimited). When it is
@@ -1756,8 +1777,8 @@ prompt.
     legitimate re-run after mutations, while identical calls within one stage
     run concurrently and can only multiply load.
   - *Per-turn dispatch limit.* Surviving calls beyond 128 dispatches per turn
-    (emission order) are suppressed; the model is told to split the work across
-    turns.
+    (numeric stage order, then same-stage emission order) are suppressed; the
+    model is told to split the work across turns.
   Suppressed calls are never run: like the invalid-stage preflight path they
   skip hooks and tools and return `blocked`-kinded guard errors, so the
   transcript stays closed and the result text steers the model; one summary
@@ -1810,7 +1831,8 @@ prompt.
     is created and dropped inside `RunAdmittedPromptWithContext`, so a fresh
     prompt always starts clean, and the map is mutex-protected because default-
     parallel workers consult it concurrently. Result folding is serialized in
-    emission order so completion timing cannot change warnings or mutation resets.
+    numeric stage order, then same-stage emission order, so completion timing
+    cannot change warnings or mutation resets.
   - *Prompt-token budget.* When `-max-prompt-tokens` is positive, before each next
     (paid) model request it compares the prompt's cumulative usage
     (input + cache-read + cache-write + output + reasoning) against the budget and
@@ -2036,7 +2058,8 @@ A single SIGINT handler plus a per-prompt `context.CancelFunc`:
 - **Builtin instructions** (`prompts/system.txt`): concise agentic-coding guidance — read before
   editing; emit all currently known calls in one tool turn; `_stage` orders separate tool
   calls: assign independent calls the same `_stage` and dependencies increasing stages
-  (omissions inherit from stage 1); prefer one shell call's `steps[]` for an ordered run of
+  (omissions inherit the preceding emitted stage, starting at 1); numeric stage
+  order wins over emission order, so `1,2,1` is valid; prefer one shell call's `steps[]` for an ordered run of
   shell commands (serial with stop_on_failure, one receipt), reserving increasing stages
   for ordering across different tools; rely on automatic same-file write/edit sequencing;
   defer calls with output-dependent arguments to the next model turn; run focused
@@ -2570,12 +2593,18 @@ this subsection records the runner that surface points at.
   the delegate tool starts a child `agent.Agent`, while `internal/agent` already
   depends on `internal/tools` for dispatch.
 - The `agent` schema description appends a deterministic catalog with exact shape
-  `Available:\n- <name>: <one-line description>`. The enum and catalog
+  `Available:\n- <name>: <one-line description> [background access: <access>]`,
+  where `<access>` is `read_only` or `exclusive`. The enum and catalog
   contain only candidates whose configured tools are a subset of the current
   parent's live tools — the capability-escalation guard; non-subset calls fail
   before any child model request. Candidate descriptions are whitespace-normalized
-  to one line and capped at 160 bytes. `delegate` opts into preserving schema
-  descriptions in `Registry.Specs` (`SchemaDescriptionPreserver`).
+  to one line and capped at 160 bytes before appending the access suffix.
+  `effectiveWorkspaceAccess` supplies both the catalog label and runtime default:
+  only exact `read_only` metadata shares access; omitted or unrecognized metadata
+  conservatively means `exclusive`. `mode:"implementation"` always forces
+  exclusive access, regardless of the catalog default or requested access.
+  `delegate` opts into preserving schema descriptions in `Registry.Specs`
+  (`SchemaDescriptionPreserver`).
 - **Prompt construction:** `prompts/delegate-child.txt` is appended after the
   resolved system prompt only in `Runner.Run` — root prompts, including a
   configured custom static prompt, never receive it. The suffix says the child
@@ -2796,10 +2825,33 @@ delegates.
   process exit and cleared on `/clear`.
 - Resource keys are absolute paths with symlinks resolved through the longest
   existing prefix. Multiple `read_only` jobs may share an exact key;
-  `exclusive` conflicts with every unfinished lease for that key; different
-  keys do not conflict. Completion and failure release immediately;
-  cancellation retains the lease until runner cleanup finishes; abandonment
-  releases it immediately.
+  `exclusive` conflicts with other leases for that key except the requesting
+  job's trusted ancestors. Different keys do not conflict, even for nested paths.
+  `Manager.start` establishes ancestry through a private worker-context capability;
+  `BackgroundJobRequest.AdmissionContext` carries it across nested launches.
+  Caller-supplied ids, stale contexts, and other managers cannot grant ancestry.
+  The ancestor exemption applies regardless of access mode; it does not change the
+  descendant's requested access. Siblings and unrelated jobs retain the normal
+  access conflict rules. Reuse is
+  not a write barrier: an ancestor must avoid modifying its children's files.
+- Lease ownership is tracked separately from the visible job table. An ancestor's
+  original reservation remains until both its own runner and all descendants
+  reusing that exact resource have returned. Thus an exclusive ancestor returning
+  before a read-only child does not admit unrelated readers. Completion, failure,
+  cancellation, and abandonment release only after actual cleanup and reused
+  descendant ownership drains; `/clear` resets visibility but retains live leases.
+- Admission conflicts return `tools.BackgroundLeaseConflictError`, wrapped with
+  the `lease_conflict` error kind. `tools.DetailsOf` uses `errors.As` through
+  wrappers to populate diagnostics-only `llm.ToolResult.ErrorDetails.LeaseConflict`:
+  `BlockingJobID`, `BlockingAgent`, `BlockingStatus`, `ResourceKey`,
+  `RequestedAccess`, `ActiveAccess`, and `Guidance`. The snapshot names the
+  reservation owner, whose completed/canceled status does not prove release.
+  The full model-facing error directs `background_jobs` inspection and a wait
+  for unfinished workers/descendants and cancellation cleanup before retrying;
+  waiting for a completed owner alone is insufficient. Guidance never recommends
+  bypassing the scope or downgrading access. UI result summaries lead with the
+  blocker ID rather than a clipped resource path. Raw diagnostics use the
+  snake_case fields documented in [session.md](session.md#the-replay-event-stream-rawndjson).
 - `wait` is event-driven rather than polling. `id` selects one job, `ids` an
   explicit group, and omitting both snapshots the jobs currently running;
   selection is stable, so later launches never extend an in-flight wait. An
