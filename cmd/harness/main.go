@@ -750,7 +750,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog.Register(todo.NewTool(todoStore))
 	planSessionDir := func() string { return delegateState.Snapshot().SessionPath }
 	toolCatalog.Register(plan.NewTool(planStore, planSessionDir))
-	if cfg.CodexExperimentalContextManagement {
+	if contextManagementToolsEnabled(cfg) {
 		manager := taskcontext.New(planSessionDir)
 		manager.SetEnabled(func() bool { return contextManagementForProvider(cfg, catalog, delegateState.Snapshot().ProviderName) })
 		manager.Register(toolCatalog)
@@ -1756,7 +1756,7 @@ func debugContentBlockBytes(b llm.ContentBlock) int {
 
 func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition, error) {
 	agents := agentdef.Resolve(fileAgentDefinitions(cfg.Agents))
-	if cfg.CodexExperimentalContextManagement {
+	if contextManagementToolsEnabled(cfg) {
 		for name, definition := range agents {
 			for _, tool := range taskcontext.Names {
 				if !slices.Contains(definition.AllowedTools, tool) {
@@ -2610,22 +2610,42 @@ func nativeCompactionForProvider(catalog protocol.Catalog, providerID string) bo
 	return ok && target.NativeCompaction
 }
 
-// Context management is a local harness implementation, restricted for now to
-// the resolved ChatGPT-sign-in provider. Resolve aliases and service-tier variants
-// through the catalog rather than inferring eligibility from a model's name.
+// Keep the tools registered when a later model switch or child may enable them.
+// The legacy opt-out controls auto mode; an explicit new mode takes precedence.
+func contextManagementToolsEnabled(cfg config.Config) bool {
+	switch cfg.ContextManagement {
+	case "on":
+		return true
+	case "", "auto":
+		return cfg.CodexExperimentalContextManagement
+	default:
+		return false
+	}
+}
+
+// Context management is local and provider-neutral. Auto mode is conservative:
+// only the resolved ChatGPT-sign-in Astra family is enabled by default. Resolve
+// aliases and service tiers before checking the actual model, never the alias.
 func contextManagementForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
-	if !cfg.CodexExperimentalContextManagement {
+	if !contextManagementToolsEnabled(cfg) {
 		return false
 	}
 	target, ok := catalogTarget(catalog, providerID)
 	if !ok {
 		return false
 	}
-	provider := target.ProviderLabel
-	if provider == "" {
-		provider, _, _ = strings.Cut(target.ID, ":")
+	if cfg.ContextManagement == "on" {
+		return true
 	}
-	return provider == "openai-codex"
+	provider, model, _ := strings.Cut(target.ID, ":")
+	if target.ProviderLabel != "" {
+		provider = target.ProviderLabel
+	}
+	if target.ModelLabel != "" {
+		model = target.ModelLabel
+	}
+	model, _, _ = strings.Cut(model, ":")
+	return provider == "openai-codex" && (model == "gpt-6-astra" || strings.HasPrefix(model, "gpt-6-astra-"))
 }
 
 func prewarmForProvider(catalog protocol.Catalog, providerID string) bool {

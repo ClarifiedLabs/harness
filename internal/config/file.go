@@ -40,6 +40,7 @@ type fileConfig struct {
 	AstraNativeSteering                optional[bool]                       `json:"astra_native_steering"`
 	ExperimentalAsyncTools             optional[bool]                       `json:"experimental_async_tools"`
 	CodexExperimentalContextManagement optional[bool]                       `json:"codex_experimental_context_management"`
+	ContextManagement                  optional[string]                     `json:"context_management"`
 	Model                              optional[string]                     `json:"model"`
 	ModelProxyURL                      optional[string]                     `json:"model_proxy_url"`
 	ModelProxyAPIKey                   optional[string]                     `json:"model_proxy_api_key"`

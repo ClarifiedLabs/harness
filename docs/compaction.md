@@ -315,13 +315,15 @@ a low-water mark below each enabled threshold to avoid immediate retriggers.
 
 ## Experimental context management
 
-With `codex_experimental_context_management:true`, resolved `openai-codex` targets
-use persistent notes and searchable history in place of model-written
-compaction summaries. Other providers retain the ordinary compaction behavior.
-Provider aliases and service-tier variants are resolved through the catalog;
-model names alone do not enable the feature. All models on `openai-codex` are
-eligible. This top-level config setting defaults to `true`; set it to `false`
-to restore ordinary compaction for `openai-codex` too.
+With the default `context_management:"auto"`, catalog-resolved Astra-family
+models on `openai-codex` use persistent notes and searchable history in place
+of model-written compaction summaries. Other targets retain ordinary compaction.
+Aliases, snapshots, and service-tier variants follow the resolved provider/model,
+not alias text. Set `context_management:"on"` to opt any model/provider in, or
+`"off"` to restore ordinary compaction. The legacy
+`codex_experimental_context_management:false` still disables `auto`; explicit
+`on`/`off` wins. Root and ACP sessions, model switches, and fresh delegates resolve
+their own eligibility; compatible delegate continuations keep their pinned policy.
 
 `internal/taskcontext` owns the notes and history tools. `internal/agent` owns
 budget accounting, reminders, and reset installation inside `compactInternal`.
@@ -354,17 +356,27 @@ old input-usage anchor. Archive failures leave the transcript and continuation
 state intact; an instruction-only context that cannot shrink reports a failure
 instead of repeatedly resetting without reclaiming space.
 
-The comparison was made against Codex CLI **0.153.4**:
+The original comparison used Codex CLI **0.153.4**:
 [activation and token-budget handling](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/session/token_budget.rs),
 [window accounting](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/session/context_window.rs),
 [notes/history contract](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/ext/history-notes/src/tools.rs),
 and [reset lifecycle](https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/core/src/compact_token_budget.rs).
-Codex's explicit activation checks the backend and eligible ChatGPT subscription,
-not an Astra-only model name. Its note contract also caps each file at 1,000,000
-UTF-8 bytes. Harness uses its own canonical tree IDs and existing tool interface
+Codex **0.154.0** additionally checks the starting model's
+`supports_experimental_context` capability (default false; bundled Astra enabled),
+and resolves fresh children's model defaults independently
+([#43147](https://github.com/openai/codex/pull/43147)). Its hosted activation also
+requires an eligible Codex backend/account. Harness instead uses a conservative
+Astra/Codex auto policy plus explicit provider-neutral opt-in. Codex's subsequent
+originating-model history fix
+([#44243](https://github.com/openai/codex/pull/44243)) motivates model-switch and
+multimodal recovery regression coverage, not a dependency on its private protocol.
+Its note contract also caps each file at 1,000,000 UTF-8 bytes.
+Harness uses its own canonical tree IDs and existing tool interface
 rather than duplicating Codex's hosted storage or private protocol. Notes stay
 isolated per Harness session/delegate. Forks, clones, and compatible delegate continuations inherit
 independent note copies and the saved canonical tree so historical IDs remain
 valid; the source delegate is unchanged. Original user instructions remain
 in the fresh context. Exact billing and task-quality parity require live paired
-evaluations; the deterministic suite verifies lifecycle and recovery behavior.
+evaluations; the deterministic suite verifies lifecycle and recovery behavior,
+including HTTP-fake Anthropic, Gemini Interactions, OpenAI Chat, and Responses
+encoders/decoders. It is not evidence of equal task quality across models.

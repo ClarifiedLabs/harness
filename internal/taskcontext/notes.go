@@ -88,6 +88,10 @@ func atomicWrite(path string, data []byte) error {
 		f.Close()
 		return err
 	}
+	if err = f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
 	if err = f.Close(); err != nil {
 		return err
 	}

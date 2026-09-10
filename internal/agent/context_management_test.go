@@ -227,6 +227,77 @@ func TestContextToolsDisappearImmediatelyOnProviderSwitch(t *testing.T) {
 	}
 }
 
+func TestNotesRefreshAfterModelSwitchPreservesCanonicalImages(t *testing.T) {
+	const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII="
+	image := llm.ContentBlock{Kind: llm.BlockImage, ImageMediaType: "image/png", ImageData: png, ImageDetail: "high"}
+	original := userText("Keep the original user instruction and screenshot.")
+	original.Origin = llm.MessageOriginPrompt
+	original.Content = append(original.Content, image)
+	evidence := toolResult("screenshot", "Original tool screenshot evidence. "+strings.Repeat("diagnostic detail ", 2000))
+	evidence.Content[0].ResultContent = []llm.ContentBlock{image}
+	source := llmtest.New("source", summaryStep("source finished", 70_000, 10))
+	a, registry, dir, tree := notesTestAgent(t, source, Options{Model: "source-model", ContextWindow: 100_000, DisableAutoCompaction: true, RetentionPolicy: RetentionPolicyDisabled, Now: func() time.Time { return time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC) }})
+	a.SetTranscript([]llm.Message{original, asstToolUse("screenshot", "view_image", `{"path":"screen.png"}`), evidence})
+	if err := a.RunPrompt(context.Background(), "Inspect the screenshot.", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	before := a.Transcript()
+	notes, _ := registry.Lookup("task_notes")
+	if _, err := notes.Run(context.Background(), json.RawMessage(`{"text":"Continue inspecting the screenshot; recover original evidence."}`)); err != nil {
+		t.Fatal(err)
+	}
+	destination := llmtest.New("destination", llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "refresh", "new_context", `{}`)}, Stop: llm.StopToolUse}, summaryStep("destination finished", 500, 10))
+	a.SetProvider(destination)
+	a.SetModel("destination-model", 50_000)
+	if !reflect.DeepEqual(before, a.Transcript()) {
+		t.Fatal("model switch mutated canonical source history")
+	}
+	if err := a.RunPrompt(context.Background(), "Continue on the new model.", &recordSink{}); err != nil {
+		t.Fatal(err)
+	}
+	if len(destination.Requests) != 2 || destination.Requests[0].Model != "destination-model" {
+		t.Fatalf("destination requests=%+v", destination.Requests)
+	}
+	if got := destination.Requests[0].Messages[2].Content[0].ResultContent; !reflect.DeepEqual(got, []llm.ContentBlock{image}) {
+		t.Fatalf("switch changed the originating tool image: %+v", got)
+	}
+	fresh := destination.Requests[1]
+	if fresh.PreviousResponseID != "" || fresh.EstimatedInputTokens >= 50_000 || len(fresh.Messages) != 1 {
+		t.Fatal("reset retained previous model state or context usage")
+	}
+	if got := fresh.Messages[0].Compaction.UserInstructions[1]; !reflect.DeepEqual(got, image) {
+		t.Fatalf("reset changed original user image: %+v", got)
+	}
+	if err := tree.SyncTranscript(a.Transcript()); err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := session.LoadTree(dir, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := loaded.BuildContext()
+	if err != nil || !reflect.DeepEqual(transcript, a.Transcript()) {
+		t.Fatalf("saved context failed to restore after switch/reset: %v", err)
+	}
+	if err := llm.ValidateTranscript(transcript); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "compactions", "0001.input.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var archived []llm.Message
+	if err := json.Unmarshal(data, &archived); err != nil {
+		t.Fatal(err)
+	}
+	if got := archived[2].Content[0].ResultContent; !reflect.DeepEqual(got, []llm.ContentBlock{image}) {
+		t.Fatalf("archive lost originating tool image: %+v", got)
+	}
+}
+
 func TestContextReminderUsesMeasuredUsageWithinOnePrompt(t *testing.T) {
 	p := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{toolDone(0, "budget", "get_context_remaining", `{}`)}, Stop: llm.StopToolUse, Usage: llm.Usage{InputTokens: 75_000, OutputTokens: 20}}, summaryStep("done", 76000, 10))
 	a, _, _, _ := notesTestAgent(t, p, Options{ContextWindow: 100_000})

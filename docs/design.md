@@ -2981,13 +2981,16 @@ request implementation; `/handoff` is a user command (§10, §14).
 
 ### 9.18 Experimental context tools
 
-`codex_experimental_context_management` exposes `task_notes`, `history_search`,
-`history_read`, `history_list`, `get_context_remaining`, and `new_context` only
-for resolved `openai-codex` targets. This top-level config setting defaults to
-`true` and can be disabled with `false`. Provider policy is resolved by the CLI;
-core agent code remains provider-neutral. Optional tool availability keeps the
-model-facing schema current after provider switches, and the tools reject calls
-when unavailable. Each delegate uses its own resolved policy and session store.
+`context_management` exposes `task_notes`, `history_search`, `history_read`,
+`history_list`, `get_context_remaining`, and `new_context`. Its default `auto`
+policy enables only catalog-resolved Astra-family models on `openai-codex`;
+`on` explicitly enables any resolved model/provider, and `off` disables it.
+The legacy `codex_experimental_context_management:false` disables `auto`, but
+explicit `on`/`off` wins. Target policy is resolved by the CLI; core agent code
+remains provider-neutral. Optional tool availability keeps the model-facing
+schema current after model/provider switches, and tools reject unavailable calls.
+Each fresh delegate uses its own resolved policy and session store; compatible
+continuations retain their pinned launch policy.
 
 Notes are working data, not a replacement for user instructions. The agent
 owns context estimates and the existing compaction lifecycle: low-budget
@@ -2997,6 +3000,14 @@ small recovery hint. No summary call is made in this mode. Manual compaction and
 `new_context` share hooks and accounting. Existing session checkpoints preserve
 history before/after replacement; canonical tree entry IDs identify historical
 items and windows. `internal/sessionrec` remains the sole raw replay recorder.
+
+History text includes zero-based `[image N]` markers for user images and shallow
+rich tool-result images. `history_read` reports `image_count`; optional
+`image_index` materializes one validated image to a content-addressed local
+artifact and returns a path for `view_image`. Indices cover the whole entry,
+not the current text page. Plain reads/search/list do not decode images. The
+canonical tree remains the source of truth, including after reset or fork;
+artifacts are derived and do not require a new recorder or persistent index.
 See [compaction.md](compaction.md#experimental-context-management) for budgets
 and the Codex comparison, and [tools.md](tools.md#experimental-context-management)
 for note-file and lookup operations.

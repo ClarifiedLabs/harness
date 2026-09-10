@@ -415,7 +415,7 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	toolCatalog.Register(background.NewJobsTool(jobs))
 	toolCatalog.Register(todo.NewToolWithTextSanitizer(todos, acp.SanitizeModelFacingText))
 	toolCatalog.Register(plan.NewToolWithTextSanitizer(plans, func() string { return sessionPath }, acp.SanitizeModelFacingText))
-	if cfg.CodexExperimentalContextManagement {
+	if contextManagementToolsEnabled(cfg) {
 		manager := taskcontext.New(func() string { return sessionPath })
 		manager.SetEnabled(func() bool { return contextManagementForProvider(cfg, catalog, state.Snapshot().ProviderName) })
 		manager.Register(toolCatalog)

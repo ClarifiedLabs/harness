@@ -37,7 +37,7 @@ func TestHistoryLookupIsBoundedAndOmitsOpaqueState(t *testing.T) {
 	if len(result.Hits) != 1 {
 		t.Fatalf("hits: %s", body)
 	}
-	body, err = readEntry(dir, result.Hits[0].Offset, 0, 12)
+	body, err = readEntry(dir, result.Hits[0].Offset, 0, 12, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestHistoryLookupIsBoundedAndOmitsOpaqueState(t *testing.T) {
 	if err != nil || strings.Contains(body, "secret-opaque") {
 		t.Fatalf("opaque state exposed: %s %v", body, err)
 	}
-	if _, err := readEntry(dir, result.Hits[0].Offset+2, 0, 12); err == nil {
+	if _, err := readEntry(dir, result.Hits[0].Offset+2, 0, 12, nil); err == nil {
 		t.Fatal("accepted offset inside an entry")
 	}
 }

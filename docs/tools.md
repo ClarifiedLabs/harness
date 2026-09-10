@@ -761,14 +761,15 @@ These warnings are suppressed by `-q` / `--quiet` or `--log-level error`.
 
 ## Experimental context management
 
-The top-level Harness config setting `codex_experimental_context_management` defaults
-to `true`, enabling context tools for **`openai-codex` targets only**, including
-aliases and service tiers. It applies to all models on that provider; set it to
-`false` to disable the tools and restore ordinary compaction.
-Other providers omit the tools and reject direct calls. Provider and agent
-switches re-evaluate eligibility; delegates use their own resolved provider and
-session directory. The implementation is local and uses the existing session
-storage, without calling Codex's private notes/history endpoints.
+The top-level Harness config setting `context_management` defaults to `"auto"`,
+enabling context tools only for **Astra on `openai-codex`**, including snapshots,
+aliases, and service tiers. Set it to `"on"` to explicitly opt in any model/provider,
+or `"off"` to disable the tools and restore ordinary compaction. The legacy
+`codex_experimental_context_management:false` disables `auto`; explicit `on`/`off`
+takes precedence. Ineligible targets omit the tools and reject direct calls.
+Provider and model/agent switches re-evaluate eligibility; delegates use their
+own resolved target and session directory. The implementation is local and uses
+existing session storage, without calling Codex's private notes/history endpoints.
 
 - `task_notes`: `action` is `read`, `write`, `append`, `list`, or `search`.
   Omitting `action` reads unless `text` is supplied, which replaces the note.
@@ -791,8 +792,19 @@ storage, without calling Codex's private notes/history endpoints.
 - `history_read`: select a stable `id` or a returned byte `offset`, then
   paginate the rendered entry using `text_offset` and `max_bytes` (default
   4096, maximum 16384). IDs remain valid across subsequent saves and resets.
-  Provider reasoning and encrypted checkpoints are omitted; images appear as
-  markers. Existing full-output artifact references can be read with `read`.
+  Provider reasoning and encrypted checkpoints are omitted. User and tool-result
+  images appear as zero-based `[image N]` markers; `image_count` reports the total
+  for the entry, independent of the text page. Optional `image_index:N` recovers
+  just that image and returns `image.path`, an absolute path usable with
+  `view_image`, plus validated MIME type, byte size, and available dimensions.
+  Recovery validates PNG/JPEG/WebP/GIF using the existing 10 MiB per-image limit;
+  malformed images and invalid indices fail without exposing payloads. Retry
+  without `image_index` to read text from an entry with an invalid image.
+  Selected images are written atomically under session-local
+  `artifacts/history-images/<sha256>.<ext>`. The canonical tree retains the source
+  bytes, so a fork/clone can recreate its own artifact even if the original is
+  gone. Search, list, and unselected reads never decode or materialize images.
+  Existing full-output artifact references can be read with `read`.
 - `get_context_remaining`: estimated `tokens_left` before the working-window
   threshold, its `limit`, and `estimated:true`. This uses the agent's existing
   context estimator and compaction budgets, not a separate tokenizer or paid

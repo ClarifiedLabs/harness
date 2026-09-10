@@ -453,7 +453,10 @@ replacement in the canonical tree. Stable entry IDs and existing
 compaction/context-reset entries supply history and window references; there
 is no duplicate replay recorder or persistent search index. History lookup
 omits encrypted provider state and follows existing tool-output artifact
-references for full evidence. See [tools.md](tools.md#experimental-context-management)
+references for full evidence. Selected history images can be recreated from the
+tree as content-addressed files under `artifacts/history-images/`; these derived
+files need not be copied to recover an image in a fork or clone.
+See [tools.md](tools.md#experimental-context-management)
 for retrieval operations.
 
 Native steering stores unresolved submissions in continuation state as

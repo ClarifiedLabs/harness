@@ -695,6 +695,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `compact_keep_turns` | `integer` | - | - | - | `compact_keep_turns` | 0 (all retained) | no | Harness compact keep turns setting. |
 | `compact_keep_tokens` | `integer` | - | - | - | `compact_keep_tokens` | 20000 | no | Harness compact keep tokens setting. |
 | `compact_auto_enabled` | `boolean` | `true`, `false` | - | - | `compact_auto_enabled` | true | no | Harness compact auto enabled setting. |
+| `context_management` | `string` | `auto`, `on`, `off` | - | - | `context_management` | "auto" | no | Harness context management setting. |
 | `codex_experimental_context_management` | `boolean` | `true`, `false` | - | - | `codex_experimental_context_management` | true | no | Harness codex experimental context management setting. |
 | `experimental_async_tools` | `boolean` | `true`, `false` | - | - | `experimental_async_tools` | false | no | Harness experimental async tools setting. |
 | `astra_native_steering` | `boolean` | `true`, `false` | - | - | `astra_native_steering` | true | no | Harness astra native steering setting. |
@@ -777,14 +778,20 @@ environment variables, JSON paths, types, and defaults. The concise
   output includes `interactive_selectable` for every agent. `--models` prints
   the configured proxy model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
-- `codex_experimental_context_management` is a top-level config-file setting, enabled
-  by default for **all models on `openai-codex` only**. Set it to `false` to
-  restore ordinary compaction for that provider. Aliases and service
-  tiers follow their resolved provider; other providers retain ordinary
-  compaction. The agent saves/retrieves durable notes and history across fresh
-  windows, with budget reminders before automatic reset. `/compact` uses the
-  same notes-based reset while enabled. See [context tools](tools.md#experimental-context-management)
-  and [compaction internals](compaction.md#experimental-context-management).
+- `context_management` is a top-level config-file setting: `"auto"` (default)
+  enables notes-based context management only for **Astra on `openai-codex`**,
+  including snapshots, aliases, and service tiers; `"on"` explicitly opts in any
+  model/provider; `"off"` restores ordinary compaction. For example,
+  `{"context_management":"on"}` enables the tools for Claude or Gemini too.
+  Model switches and delegates use their own resolved target. The legacy
+  `codex_experimental_context_management:false` still disables `auto` mode;
+  explicit `on`/`off` takes precedence. There is no flag or environment override.
+  The agent saves/retrieves durable notes and history across fresh windows,
+  with budget reminders before automatic reset. `/compact` uses the same
+  notes-based reset while enabled. Non-default models are experimental: quality
+  depends on maintaining notes and recovering evidence reliably. See
+  [context tools](tools.md#experimental-context-management) and
+  [compaction internals](compaction.md#experimental-context-management).
 - Context-efficiency knobs are config-file-only except where noted:
   `agents_md_warn_bytes`, `compact_keep_turns`, `compact_keep_tokens`,
   `compact_auto_enabled`, `compact_trigger_percent`,

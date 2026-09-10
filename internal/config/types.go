@@ -97,6 +97,7 @@ type Config struct {
 	AstraNativeSteering                bool   `json:"astra_native_steering"`
 	ExperimentalAsyncTools             bool   `json:"experimental_async_tools"`
 	CodexExperimentalContextManagement bool   `json:"codex_experimental_context_management"`
+	ContextManagement                  string `json:"context_management"`
 	Provider                           string `json:"-"` // derived from a provider-qualified Model
 	Model                              string `json:"model"`
 	ModelProxyURL                      string `json:"model_proxy_url"`

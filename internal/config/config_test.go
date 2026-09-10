@@ -116,6 +116,35 @@ func TestDefaultDelegateMaxActive(t *testing.T) {
 	}
 }
 
+func TestContextManagementMode(t *testing.T) {
+	result := load(t, nil, nil, "")
+	if result.Config.ContextManagement != "auto" || result.Sources["context_management"].Kind != configmeta.SourceDefault {
+		t.Fatalf("mode=%q source=%+v", result.Config.ContextManagement, result.Sources["context_management"])
+	}
+	for _, mode := range []string{"auto", "on", "off"} {
+		result := load(t, nil, nil, writeConfig(t, `{"context_management":"`+mode+`"}`))
+		if result.Config.ContextManagement != mode || result.Sources["context_management"].Kind != configmeta.SourceFile {
+			t.Fatalf("mode=%q source=%+v", result.Config.ContextManagement, result.Sources["context_management"])
+		}
+	}
+	for _, value := range []string{`"invalid"`, `true`, `null`} {
+		_, err := Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: writeConfig(t, `{"context_management":`+value+`}`)})
+		if err == nil {
+			t.Fatalf("accepted mode %s", value)
+		}
+	}
+	global := fileConfig{ContextManagement: optional[string]{Set: true, Value: "off"}}
+	project := fileConfig{ContextManagement: optional[string]{Set: true, Value: "on"}}
+	merged, sources := mergeFileConfig(global, project, "global.json", "project.json")
+	if merged.ContextManagement != project.ContextManagement || sources["context_management"] != "project.json" {
+		t.Fatalf("project mode not applied: %+v %+v", merged.ContextManagement, sources)
+	}
+	merged, sources = mergeFileConfig(global, fileConfig{}, "global.json", "project.json")
+	if merged.ContextManagement != global.ContextManagement || sources["context_management"] != "global.json" {
+		t.Fatalf("global mode not inherited: %+v %+v", merged.ContextManagement, sources)
+	}
+}
+
 func TestContextManagementDefaultsOnAndCanBeDisabled(t *testing.T) {
 	result := load(t, nil, nil, "")
 	if !result.Config.CodexExperimentalContextManagement || result.Sources["codex_experimental_context_management"].Kind != configmeta.SourceDefault {

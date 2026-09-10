@@ -48,12 +48,16 @@ func openHistory(dir string, offset int64) (*os.File, error) {
 	}
 	return f, nil
 }
-func entryText(data []byte) (string, string, error) {
-	var entry session.Entry
-	if err := json.Unmarshal(data, &entry); err != nil {
-		return "", "", err
-	}
+
+// Render and enumerate together so image indices follow the visible text order.
+// Supplementary tool content is deliberately shallow; opaque state is excluded.
+func entryText(entry session.Entry) (string, []llm.ContentBlock) {
 	var b strings.Builder
+	var images []llm.ContentBlock
+	image := func(part llm.ContentBlock) {
+		fmt.Fprintf(&b, "[image %d]", len(images))
+		images = append(images, part)
+	}
 	for _, m := range entryMessages(entry) {
 		fmt.Fprintf(&b, "%s:\n", m.Role)
 		for _, part := range m.Content {
@@ -64,13 +68,19 @@ func entryText(data []byte) (string, string, error) {
 				fmt.Fprintf(&b, "tool %s %s", part.ToolName, part.ToolInput)
 			case llm.BlockToolResult:
 				b.WriteString(part.ResultText)
+				for _, child := range part.ResultContent {
+					if child.Kind == llm.BlockImage {
+						b.WriteByte('\n')
+						image(child)
+					}
+				}
 			case llm.BlockImage:
-				b.WriteString("[image]")
+				image(part)
 			}
 			b.WriteByte('\n')
 		}
 	}
-	return entry.ID, b.String(), nil
+	return b.String(), images
 }
 
 func entryMessages(entry session.Entry) []llm.Message {
@@ -156,10 +166,7 @@ func lookupHistory(ctx context.Context, dir string, in historyInput) (string, er
 		if !historyEntryMatches(entry, in.Role, in.ToolName) {
 			continue
 		}
-		id, text, err := entryText(sc.Bytes())
-		if err != nil {
-			return "", err
-		}
+		text, _ := entryText(entry)
 		match := []int{0, 0}
 		if needle != nil {
 			match = needle.FindStringIndex(text)
@@ -169,7 +176,7 @@ func lookupHistory(ctx context.Context, dir string, in historyInput) (string, er
 			for start > 0 && !utf8.RuneStart(text[start]) {
 				start--
 			}
-			matches = append(matches, hit{Offset: at, ID: id, WindowID: window, ParentID: entry.ParentID, Type: entry.Type, Text: clip(text[start:], 512)})
+			matches = append(matches, hit{Offset: at, ID: entry.ID, WindowID: window, ParentID: entry.ParentID, Type: entry.Type, Text: clip(text[start:], 512)})
 		}
 		if len(matches) >= in.Limit || next-offset >= scanBudget {
 			end = false
@@ -217,11 +224,14 @@ func historyEntryMatches(entry session.Entry, role, toolName string) bool {
 	return false
 }
 func readHistory(ctx context.Context, dir string, in historyInput) (string, error) {
+	if in.ImageIndex != nil && *in.ImageIndex < 0 {
+		return "", fmt.Errorf("image_index must be nonnegative")
+	}
 	if in.ID == "" {
 		if in.Offset == nil {
 			return "", fmt.Errorf("id or offset is required")
 		}
-		return readEntry(dir, *in.Offset, in.TextOffset, in.MaxBytes)
+		return readEntry(dir, *in.Offset, in.TextOffset, in.MaxBytes, in.ImageIndex)
 	}
 	f, err := openHistory(dir, 0)
 	if err != nil {
@@ -240,7 +250,7 @@ func readHistory(ctx context.Context, dir string, in historyInput) (string, erro
 			return "", err
 		}
 		if entry.ID == in.ID {
-			return readEntry(dir, offset, in.TextOffset, in.MaxBytes)
+			return readEntry(dir, offset, in.TextOffset, in.MaxBytes, in.ImageIndex)
 		}
 		offset += int64(len(sc.Bytes()) + 1)
 	}
@@ -249,7 +259,7 @@ func readHistory(ctx context.Context, dir string, in historyInput) (string, erro
 	}
 	return "", fmt.Errorf("history entry %q was not found", in.ID)
 }
-func readEntry(dir string, offset int64, textOffset, limit int) (string, error) {
+func readEntry(dir string, offset int64, textOffset, limit int, imageIndex *int) (string, error) {
 	f, err := openHistory(dir, offset)
 	if err != nil {
 		return "", err
@@ -263,23 +273,33 @@ func readEntry(dir string, offset int64, textOffset, limit int) (string, error) 
 		}
 		return "", io.EOF
 	}
-	id, text, err := entryText(sc.Bytes())
-	if err != nil {
+	var entry session.Entry
+	if err := json.Unmarshal(sc.Bytes(), &entry); err != nil {
 		return "", err
 	}
-	if textOffset > len(text) || (textOffset < len(text) && !utf8.RuneStart(text[textOffset])) {
-		return "", fmt.Errorf("text_offset is outside the entry or splits UTF-8")
-	}
+	text, images := entryText(entry)
 	body, err := readPage(text, textOffset, limit)
 	if err != nil {
 		return "", err
 	}
+	var image *historyImage
+	if imageIndex != nil {
+		if *imageIndex < 0 || *imageIndex >= len(images) {
+			return "", fmt.Errorf("image_index is outside the entry's %d images", len(images))
+		}
+		image, err = recoverHistoryImage(dir, *imageIndex, images[*imageIndex])
+		if err != nil {
+			return "", err
+		}
+	}
 	data, err := json.Marshal(struct {
-		ID   string `json:"id"`
-		Text string `json:"text"`
-		Next int    `json:"next_text_offset"`
-		End  bool   `json:"end"`
-	}{id, body, textOffset + len(body), textOffset+len(body) == len(text)})
+		ID         string        `json:"id"`
+		Text       string        `json:"text"`
+		Next       int           `json:"next_text_offset"`
+		End        bool          `json:"end"`
+		ImageCount int           `json:"image_count"`
+		Image      *historyImage `json:"image,omitempty"`
+	}{entry.ID, body, textOffset + len(body), textOffset+len(body) == len(text), len(images), image})
 	return string(data), err
 }
 func clip(s string, n int) string {
