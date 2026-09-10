@@ -749,12 +749,22 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	toolCatalog.Register(background.NewJobsTool(backgroundManager))
 	toolCatalog.Register(todo.NewTool(todoStore))
 	planSessionDir := func() string { return delegateState.Snapshot().SessionPath }
-	toolCatalog.Register(plan.NewTool(planStore, planSessionDir))
-	if contextManagementToolsEnabled(cfg) {
-		manager := taskcontext.New(planSessionDir)
-		manager.SetEnabled(func() bool { return contextManagementForProvider(cfg, catalog, delegateState.Snapshot().ProviderName) })
-		manager.Register(toolCatalog)
+	toolCatalog.Register(plan.NewTool(planStore, planSessionDir).WithNoteReader(taskcontext.ReadNote))
+	memorySessionDir := planSessionDir
+	if runOptions.DebugRequest && runOptions.Resume != "" {
+		// A preview does not copy notes/state to the destination. Read inherited
+		// memory from the source without acknowledging or mutating it.
+		memorySessionDir = func() string { return runOptions.Resume }
 	}
+	manager := taskcontext.New(memorySessionDir)
+	manager.SetPreview(runOptions.DebugRequest)
+	if resumed != nil {
+		manager.InheritTranscript(memorySessionDir(), resumed.Messages)
+	}
+	manager.SetPolicy(func() taskcontext.Policy {
+		return contextPolicy(cfg, catalog, delegateState.Snapshot().ProviderName)
+	})
+	manager.Register(toolCatalog)
 	toolCatalog.Register(acptool.NewTool(agentSessionManager, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
 		argv := append([]string{target.Command}, target.Args...)
 		return acpclient.NewFactory(acpclient.Options{
@@ -1756,15 +1766,15 @@ func debugContentBlockBytes(b llm.ContentBlock) int {
 
 func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition, error) {
 	agents := agentdef.Resolve(fileAgentDefinitions(cfg.Agents))
-	if contextManagementToolsEnabled(cfg) {
-		for name, definition := range agents {
-			for _, tool := range taskcontext.Names {
-				if !slices.Contains(definition.AllowedTools, tool) {
-					definition.AllowedTools = append(definition.AllowedTools, tool)
-				}
+	// Keep registered continuity tools even for off: schemas and dispatch remain
+	// disabled, but a resumed session may need a final recovery handoff.
+	for name, definition := range agents {
+		for _, tool := range taskcontext.Names {
+			if !slices.Contains(definition.AllowedTools, tool) {
+				definition.AllowedTools = append(definition.AllowedTools, tool)
 			}
-			agents[name] = definition
 		}
+		agents[name] = definition
 	}
 	if err := agentdef.Validate(agents); err != nil {
 		return nil, err
@@ -2410,6 +2420,7 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 	}
 	return delegate.Launch{
 		ContextManagement:     contextManagementForProvider(cfg, modelCatalog, providerName),
+		ContextMemoryOff:      !contextManagementToolsEnabled(cfg),
 		Provider:              provider,
 		ProviderName:          providerName,
 		Model:                 model,
@@ -2610,7 +2621,18 @@ func nativeCompactionForProvider(catalog protocol.Catalog, providerID string) bo
 	return ok && target.NativeCompaction
 }
 
-// Keep the tools registered when a later model switch or child may enable them.
+func contextPolicy(cfg config.Config, catalog protocol.Catalog, providerID string) taskcontext.Policy {
+	identity := providerID
+	if target, ok := catalogTarget(catalog, providerID); ok {
+		identity = target.ID
+	}
+	return taskcontext.Policy{
+		Reset:    contextManagementForProvider(cfg, catalog, providerID),
+		Off:      !contextManagementToolsEnabled(cfg),
+		Identity: identity,
+	}
+}
+
 // The legacy opt-out controls auto mode; an explicit new mode takes precedence.
 func contextManagementToolsEnabled(cfg config.Config) bool {
 	switch cfg.ContextManagement {

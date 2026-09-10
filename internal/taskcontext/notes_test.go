@@ -91,8 +91,8 @@ func TestProviderAvailabilityAndSessionScopedRefresh(t *testing.T) {
 		t.Fatal("refresh crossed session boundary")
 	}
 	enabled = false
-	if len(r.Specs()) != 0 {
-		t.Fatal("disabled tools were advertised")
+	if len(r.Specs()) != len(Names)-1 {
+		t.Fatal("ordinary mode did not retain sticky memory tools")
 	}
 	if _, err := refresh.Run(context.Background(), json.RawMessage(`{}`)); err == nil {
 		t.Fatal("disabled tool executed")
@@ -114,5 +114,28 @@ func TestNoteReadCannotReturnNonadvancingUTF8Page(t *testing.T) {
 	}
 	if _, err := runNotes(context.Background(), dir, noteInput{MaxBytes: 4}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestCopyNotesRejectsNestedSourceDestination(t *testing.T) {
+	from := t.TempDir()
+	text := "historical evidence"
+	if _, err := runNotes(context.Background(), from, noteInput{Text: &text}); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(from, alias); err != nil {
+		t.Fatal(err)
+	}
+	for _, to := range []string{filepath.Join(from, "fork"), filepath.Join(alias, "fork")} {
+		if err := CopyNotes(context.Background(), from, to); err == nil {
+			t.Fatalf("nested source destination accepted: %s", to)
+		}
+		if _, err := os.Stat(to); !os.IsNotExist(err) {
+			t.Fatalf("copy wrote inside source: %v", err)
+		}
+	}
+	if err := CopyNotes(context.Background(), from, filepath.Dir(from)); err == nil {
+		t.Fatal("copy destination containing source accepted")
 	}
 }

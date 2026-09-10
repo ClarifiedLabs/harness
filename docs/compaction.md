@@ -323,7 +323,18 @@ not alias text. Set `context_management:"on"` to opt any model/provider in, or
 `"off"` to restore ordinary compaction. The legacy
 `codex_experimental_context_management:false` still disables `auto`; explicit
 `on`/`off` wins. Root and ACP sessions, model switches, and fresh delegates resolve
-their own eligibility; compatible delegate continuations keep their pinned policy.
+their own reset eligibility; compatible delegate continuations keep their pinned policy.
+Memory activation is session-sticky: after activation, notes/history and current
+model budget estimates remain available on other models and across resume.
+Only `new_context` and notes-based automatic/manual resets follow model eligibility.
+Explicit off hides all six tools, but supplies a bounded recovery handoff with
+ordinary file paths before the next request. Saved memory is never deleted.
+
+A strategy change preserves the active transcript, cancels queued resets, and
+supplies note/plan references and unresolved TODOs. Returning from ordinary/off
+mode does not immediately reset from potentially stale notes: the model must
+reconcile intervening work with a changed nonempty note write/append first.
+Until then, ordinary compaction is used, including under context pressure.
 
 `internal/taskcontext` owns the notes and history tools. `internal/agent` owns
 budget accounting, reminders, and reset installation inside `compactInternal`.
@@ -348,7 +359,9 @@ Before replacement, the complete previous transcript is archived. Its user
 inputs, including steering and images, survive verbatim through typed
 `UserInstructions`; prior recovery hints are not treated as user instructions.
 The replacement includes a recovery hint of at most 4,000 bytes with a preview
-of `task-notes.md`. Other notes are read on demand. Stored notes may reach
+of `task-notes.md`, plus up to 2,000 bytes each of unresolved TODOs and the latest
+published plan reference. TODOs remain the canonical execution checklist; notes
+hold reasoning/evidence/drafts, not a duplicated checklist. Other notes are read on demand. Stored notes may reach
 1,000,000 UTF-8 bytes **per file** without increasing this bootstrap budget.
 Completed tool rounds leave active context and remain in the canonical tree.
 An explicit refresh immediately checkpoints the replacement and clears the
@@ -374,7 +387,7 @@ Its note contract also caps each file at 1,000,000 UTF-8 bytes.
 Harness uses its own canonical tree IDs and existing tool interface
 rather than duplicating Codex's hosted storage or private protocol. Notes stay
 isolated per Harness session/delegate. Forks, clones, and compatible delegate continuations inherit
-independent note copies and the saved canonical tree so historical IDs remain
+independent note/continuity-state copies and the saved canonical tree so historical IDs remain
 valid; the source delegate is unchanged. Original user instructions remain
 in the fresh context. Exact billing and task-quality parity require live paired
 evaluations; the deterministic suite verifies lifecycle and recovery behavior,

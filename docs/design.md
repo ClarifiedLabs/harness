@@ -126,7 +126,7 @@ internal/sysprompt       embedded prompt files + environment context + AGENTS.md
 internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/model target) (§14)
 internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSubmit/Pre+PostToolUse/Pre+PostCompact/Stop)
 internal/skills          skill discovery + `$skillName` prompt expansion
-internal/taskcontext     durable note files and bounded canonical session-tree lookup (§9)
+internal/taskcontext     durable notes, session continuity policy/state, bounded tree lookup (§9)
 internal/todo            advisory update_todos store and renderer (§9.13)
 internal/plan            immutable record_plan artifact and latest-plan store (§9.17)
 internal/handoff         /handoff request DTO shared by the interactive drivers (§14)
@@ -2969,15 +2969,22 @@ their concise operation descriptions without adding cross-tool search steering.
 
 ### 9.17 `record_plan`
 
-`record_plan` (`internal/plan`) accepts `{title, plan}`, both required after
-trimming, renders `# <title>` plus the self-contained Markdown body, and
+`record_plan` (`internal/plan`) requires `title` and exactly one of `plan`
+(inline Markdown, backwards compatible) or `path` (a task-notes draft). A host
+note-reader callback enforces `internal/taskcontext` path/content limits without
+introducing a package cycle. The tool copies the draft, renders `# <title>` plus
+the self-contained Markdown body, and
 writes `<session>/plans/NNNN-<slug>.plan.md` via temp-file-then-rename (0644).
 Each recording call creates a new immutable artifact; the synchronized store
 keeps only the latest `plan.Plan` pointer for persistence, display, and user
 `/handoff`. It is part of the default coordination tool set (`auto`,
 `independent`, default-inheriting custom agents, and `plan`), requires a live
 session directory, and is private per delegate child. The tool does not
-request implementation; `/handoff` is a user command (§10, §14).
+request implementation; `/handoff` is a user command (§10, §14). Execution status
+belongs to `update_todos`; working memory/drafts belong to `task_notes`.
+Publication is optional, not a prerequisite for ordinary implementation. Recovery
+projects unresolved TODOs and the latest immutable plan reference, not a second
+copy of the plan body.
 
 ### 9.18 Experimental context tools
 
@@ -2987,16 +2994,31 @@ policy enables only catalog-resolved Astra-family models on `openai-codex`;
 `on` explicitly enables any resolved model/provider, and `off` disables it.
 The legacy `codex_experimental_context_management:false` disables `auto`, but
 explicit `on`/`off` wins. Target policy is resolved by the CLI; core agent code
-remains provider-neutral. Optional tool availability keeps the model-facing
-schema current after model/provider switches, and tools reject unavailable calls.
-Each fresh delegate uses its own resolved policy and session store; compatible
-continuations retain their pinned launch policy.
+remains provider-neutral. `internal/taskcontext.Manager` persists sticky memory
+activation and reconciliation state in atomic `context-state.json`, independently
+of the reset policy. Once activated, notes/history/budget tools survive model
+switches and resume; `new_context` remains model-policy-gated. Optional tool
+availability keeps schemas and dispatch current. Off still prepares a bounded
+recovery handoff using ordinary file paths before dropping memory access.
+Handoff inspection is non-consuming; the agent acknowledges it after a successful
+model attempt (failed sends retain it for retry). Policy/model/session changes
+cancel pending resets. Returning from
+ordinary/off mode requires a changed nonempty checkpoint before notes-based
+compaction; ordinary compaction remains available meanwhile. Directory changes
+load separate state and clear pending requests and budget measurements. Unreadable
+note previews produce a repair hint rather than blocking ordinary requests;
+corrupt continuity-state files fail closed with an error.
+Each fresh delegate uses its own policy and session store; compatible
+continuations copy notes/state/history and retain their pinned launch policy.
+Delegate fingerprints include registered context contracts and reset/off policy,
+not mutable activation or parent tool availability.
 
 Notes are working data, not a replacement for user instructions. The agent
 owns context estimates and the existing compaction lifecycle: low-budget
 reminders precede a bounded handoff buffer, then reset archives and validates
 the complete old window before replacing it with original user inputs and a
-small recovery hint. No summary call is made in this mode. Manual compaction and
+small recovery hint plus bounded unresolved TODOs and latest-plan reference.
+No summary call is made in this mode. Manual compaction and
 `new_context` share hooks and accounting. Existing session checkpoints preserve
 history before/after replacement; canonical tree entry IDs identify historical
 items and windows. `internal/sessionrec` remains the sole raw replay recorder.

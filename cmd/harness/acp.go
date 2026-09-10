@@ -414,12 +414,12 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	toolCatalog.Register(delegate.NewToolWithSessions(runner, agentSessions, jobs))
 	toolCatalog.Register(background.NewJobsTool(jobs))
 	toolCatalog.Register(todo.NewToolWithTextSanitizer(todos, acp.SanitizeModelFacingText))
-	toolCatalog.Register(plan.NewToolWithTextSanitizer(plans, func() string { return sessionPath }, acp.SanitizeModelFacingText))
-	if contextManagementToolsEnabled(cfg) {
-		manager := taskcontext.New(func() string { return sessionPath })
-		manager.SetEnabled(func() bool { return contextManagementForProvider(cfg, catalog, state.Snapshot().ProviderName) })
-		manager.Register(toolCatalog)
-	}
+	toolCatalog.Register(plan.NewToolWithTextSanitizer(plans, func() string { return sessionPath }, acp.SanitizeModelFacingText).WithNoteReader(taskcontext.ReadNote))
+	manager := taskcontext.New(func() string { return sessionPath })
+	manager.SetPolicy(func() taskcontext.Policy {
+		return contextPolicy(cfg, catalog, state.Snapshot().ProviderName)
+	})
+	manager.Register(toolCatalog)
 	toolCatalog.Register(acptool.NewTool(agentSessions, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
 		return acpclient.NewFactory(acpclient.Options{Argv: append([]string{target.Command}, target.Args...), Env: acpTargetEnvironment(os.Environ(), target.Env), CWD: cwd, ClientInfo: &acp.Implementation{Name: "harness", Title: "Harness", Version: build.Version}, Logger: logger, LogStderr: func(line string) { logger.Warn("acp: child stderr: "+line, logging.Category("acp")) }})
 	}))

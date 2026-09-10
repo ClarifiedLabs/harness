@@ -66,14 +66,17 @@ func TestContextToolsFollowREPLModelSwitches(t *testing.T) {
 				if request.TargetID != targets[i] {
 					t.Fatalf("request %d target=%s", i, request.TargetID)
 				}
-				want := mode == "on" || mode == "auto" && (i == 0 || i == 3)
 				for _, name := range taskcontext.Names {
+					want := mode != "off" && (name != "new_context" || mode == "on" || i == 0 || i == 3)
 					if got := slices.Contains(toolNames(request.Request), name); got != want {
 						t.Errorf("request %d %s exposed=%v want=%v", i, name, got, want)
 					}
 				}
-				if got := strings.Contains(strings.Join(request.Request.RequestContext, "\n"), "Experimental context management"); got != want {
-					t.Errorf("request %d guidance=%v want=%v", i, got, want)
+				// Returning to Astra exposes new_context, but must not invite a
+				// destructive automatic reset until intervening work is reconciled.
+				wantReset := mode == "on" || mode == "auto" && i == 0
+				if got := strings.Contains(strings.Join(request.Request.RequestContext, "\n"), "Experimental context management"); got != wantReset {
+					t.Errorf("request %d guidance=%v want=%v", i, got, wantReset)
 				}
 			}
 		})

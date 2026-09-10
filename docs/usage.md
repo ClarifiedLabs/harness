@@ -783,7 +783,12 @@ environment variables, JSON paths, types, and defaults. The concise
   including snapshots, aliases, and service tiers; `"on"` explicitly opts in any
   model/provider; `"off"` restores ordinary compaction. For example,
   `{"context_management":"on"}` enables the tools for Claude or Gemini too.
-  Model switches and delegates use their own resolved target. The legacy
+  Reset eligibility follows the current model; once activated, notes/history and
+  budget tools remain available across switches and resume. Only `new_context`
+  disappears on non-Astra models in `auto`. Returning to notes-reset mode requires
+  an updated note checkpoint first; ordinary compaction remains active until then.
+  `off` hides all tools but prepares recovery references for an existing session.
+  Fresh delegates resolve their own target and activation. The legacy
   `codex_experimental_context_management:false` still disables `auto` mode;
   explicit `on`/`off` takes precedence. There is no flag or environment override.
   The agent saves/retrieves durable notes and history across fresh windows,

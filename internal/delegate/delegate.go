@@ -86,6 +86,7 @@ type Runtime struct {
 // Launch is the fully resolved child-agent runtime for one delegate call.
 type Launch struct {
 	ContextManagement     bool
+	ContextMemoryOff      bool
 	Provider              llm.Provider
 	ProviderName          string
 	Model                 string
@@ -668,11 +669,16 @@ func (r *Runner) runPrepared(ctx context.Context, prepared preparedRun, progress
 	if err != nil {
 		return RunResult{}, err
 	}
-	childDir := runtime.SessionPath
+	// Do not inspect or activate the parent's memory while preparing a fresh child.
+	childDir := ""
+	var childContext *taskcontext.Manager
 	for _, name := range taskcontext.Names {
 		if slices.Contains(toolNames, name) {
 			manager := taskcontext.New(func() string { return childDir })
-			manager.SetEnabled(func() bool { return launch.ContextManagement })
+			childContext = manager
+			manager.SetPolicy(func() taskcontext.Policy {
+				return taskcontext.Policy{Reset: launch.ContextManagement, Off: launch.ContextMemoryOff, Identity: launch.ProviderName + "/" + launch.Model}
+			})
 			manager.Register(launch.Tools, toolNames...)
 			break
 		}
@@ -771,11 +777,14 @@ func (r *Runner) runPrepared(ctx context.Context, prepared preparedRun, progress
 	}
 	defer finish()
 
-	if continuation != nil && launch.ContextManagement {
+	if continuation != nil {
 		sourceDir := session.ChildSessionDir(runtime.SessionPath, req.ContinueChildID)
 		if err := taskcontext.CopyNotes(ctx, sourceDir, childDir); err != nil {
 			terminalErr = fmt.Errorf("delegate continuation notes: %w", err)
 			return result, terminalErr
+		}
+		if childContext != nil {
+			childContext.InheritTranscript(childDir, continuation.state.Messages)
 		}
 	}
 
@@ -812,7 +821,7 @@ func (r *Runner) runPrepared(ctx context.Context, prepared preparedRun, progress
 		childTools.Register(todo.NewToolWithTextSanitizer(childTodos, launch.StateTextSanitizer))
 	}
 	if slices.Contains(toolNames, recordPlanToolName) {
-		childTools.Register(plan.NewToolWithTextSanitizer(childPlans, func() string { return childDir }, launch.StateTextSanitizer))
+		childTools.Register(plan.NewToolWithTextSanitizer(childPlans, func() string { return childDir }, launch.StateTextSanitizer).WithNoteReader(taskcontext.ReadNote))
 	}
 	child := agent.New(launch.Provider, childTools, agent.Options{
 		Execution:                 runtime.Execution,
@@ -872,7 +881,7 @@ func (r *Runner) runPrepared(ctx context.Context, prepared preparedRun, progress
 	// One tree per child run keeps tree.ndjson identity stable across the
 	// per-closed-turn checkpoints and the final consolidated save.
 	var childTree *session.Tree
-	if continuation != nil && launch.ContextManagement {
+	if continuation != nil {
 		// Keep historical IDs referenced by notes, including archived windows
 		// absent from the active transcript, using the existing fork operation.
 		childTree, err = continuation.state.Tree.Extract(continuation.state.Tree.ActiveLeaf, created, runtime.CWD)
@@ -1437,10 +1446,22 @@ func continuationCheckpointContextError(childID string, estimate agent.ContextEs
 	)
 }
 
+// Fingerprint the registered context contract, not session-dependent availability.
+// Activation is memory state; explicit reset/off policy remains fingerprinted.
+type contextFingerprintTool struct{ tools.Tool }
+
+func (contextFingerprintTool) Available() bool                  { return true }
+func (contextFingerprintTool) PreserveSchemaDescriptions() bool { return true }
+
 func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunRequest, maxTurns int, toolNames []string) (string, error) {
 	toolRegistry, err := launch.Tools.Subset(toolNames)
 	if err != nil {
 		return "", fmt.Errorf("delegate runtime fingerprint: %w", err)
+	}
+	for _, name := range taskcontext.Names {
+		if tool, ok := toolRegistry.Lookup(name); ok {
+			toolRegistry.Register(contextFingerprintTool{tool})
+		}
 	}
 	providerImplementation := ""
 	if launch.Provider != nil {
@@ -1474,6 +1495,7 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ResponsesStateful      bool                  `json:"responses_stateful"`
 		NativeCompaction       bool                  `json:"native_compaction"`
 		ContextManagement      bool                  `json:"context_management"`
+		ContextMemoryOff       bool                  `json:"context_memory_off"`
 		RetentionPolicy        agent.RetentionPolicy `json:"retention_policy"`
 		System                 string                `json:"system"`
 		Tools                  []llm.ToolSchema      `json:"tools"`
@@ -1510,6 +1532,7 @@ func (r *Runner) runtimeFingerprint(runtime Runtime, launch Launch, req RunReque
 		ResponsesStateful:      launch.ResponsesStateful,
 		NativeCompaction:       launch.NativeCompaction,
 		ContextManagement:      launch.ContextManagement,
+		ContextMemoryOff:       launch.ContextMemoryOff,
 		RetentionPolicy:        r.opts.RetentionPolicy,
 		System:                 launch.System,
 		Tools:                  toolRegistry.Specs(),

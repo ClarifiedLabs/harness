@@ -51,6 +51,7 @@ type Tool struct {
 	store        *Store
 	sessionDir   func() string
 	sanitizeText func(string) string
+	readNote     func(dir, path string) (string, error)
 }
 
 func NewTool(store *Store, sessionDir func() string) *Tool {
@@ -63,10 +64,31 @@ func NewToolWithTextSanitizer(store *Store, sessionDir func() string, sanitize f
 	return &Tool{store: store, sessionDir: sessionDir, sanitizeText: sanitize}
 }
 
+// WithNoteReader enables publication from a session-relative task_notes draft.
+// The reader must enforce note path and content limits; it is called once per
+// publication with the current session directory. The draft is never modified.
+func (t *Tool) WithNoteReader(read func(dir, path string) (string, error)) *Tool {
+	t.readNote = read
+	return t
+}
+
 func (*Tool) Name() string { return "record_plan" }
 
 func (*Tool) Description() string {
-	return "Record a complete implementation plan."
+	return "Publish an immutable plan snapshot from inline text or a task_notes draft."
+}
+
+// RecoveryContext names the immutable publication, never the mutable draft.
+func (t *Tool) RecoveryContext() string {
+	p, ok := t.store.Latest()
+	if !ok || p.Path == "" {
+		return ""
+	}
+	hint := fmt.Sprintf("Latest published plan: %q (%s). Use read for its immutable snapshot; execution status is in update_todos.", p.Path, p.Title)
+	if t.sessionDir != nil && t.sessionDir() != "" {
+		hint += fmt.Sprintf(" If the original artifact is unavailable, its saved plan body is in %q.", filepath.Join(t.sessionDir(), "state.json"))
+	}
+	return hint
 }
 
 func (*Tool) PreserveSchemaDescriptions() bool { return true }
@@ -76,9 +98,10 @@ func (*Tool) Schema() json.RawMessage {
   "type": "object",
   "properties": {
     "title": {"type": "string", "description": "Short title."},
-    "plan": {"type": "string", "description": "Self-contained Markdown implementation plan."}
+    "plan": {"type": "string", "description": "Complete Markdown plan; provide exactly one of plan or path."},
+    "path": {"type": "string", "description": "Session-relative task_notes draft; provide exactly one of plan or path."}
   },
-  "required": ["title", "plan"]
+  "required": ["title"]
 }`)
 }
 
@@ -87,21 +110,31 @@ func (*Tool) ReadOnly(json.RawMessage) bool { return false }
 // RequiresSequential preserves artifact allocation and latest-plan ordering.
 func (*Tool) RequiresSequential(json.RawMessage) bool { return true }
 
-func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
+func (t *Tool) Run(ctx context.Context, input json.RawMessage) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	var args struct {
 		Title string `json:"title"`
 		Plan  string `json:"plan"`
+		Path  string `json:"path"`
 	}
 	if err := json.Unmarshal(input, &args); err != nil {
 		return "", err
 	}
 	if t.sanitizeText != nil {
 		args.Title = t.sanitizeText(args.Title)
-		args.Plan = t.sanitizeText(args.Plan)
 	}
-	title, body := strings.TrimSpace(args.Title), strings.TrimSpace(args.Plan)
-	if title == "" || body == "" {
-		return "", fmt.Errorf("title and plan are both required to record a plan")
+	title := strings.TrimSpace(args.Title)
+	if title == "" {
+		return "", fmt.Errorf("title is required to record a plan")
+	}
+	notePath := strings.TrimSpace(args.Path)
+	if (strings.TrimSpace(args.Plan) != "") == (notePath != "") {
+		return "", fmt.Errorf("provide exactly one nonempty plan or path")
+	}
+	if notePath != "" && t.readNote == nil {
+		return "", fmt.Errorf("record_plan note reader is not configured")
 	}
 	dir := ""
 	if t.sessionDir != nil {
@@ -109,6 +142,24 @@ func (t *Tool) Run(_ context.Context, input json.RawMessage) (string, error) {
 	}
 	if dir == "" {
 		return "", fmt.Errorf("record_plan requires a session directory")
+	}
+	body := args.Plan
+	if notePath != "" {
+		var err error
+		body, err = t.readNote(dir, notePath)
+		if err != nil {
+			return "", fmt.Errorf("plan: read note: %w", err)
+		}
+	}
+	if t.sanitizeText != nil {
+		body = t.sanitizeText(body)
+	}
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "", fmt.Errorf("plan body must not be empty")
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
 	}
 	p := Plan{Title: title, Body: body}
 	path, err := writeFile(dir, p)

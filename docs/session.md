@@ -25,6 +25,14 @@ A session path is a directory:
 - `diagnostics.ndjson` — JSON slog diagnostics.
 - `compactions/` — raw messages removed from active context.
 - `artifacts/tool-results/` — full truncated tool output.
+- `task-notes.md`, `notes/` — durable working memory and drafts.
+- `context-state.json` — session-sticky memory activation, last model/reset/off
+  policy, pending handoff, and stale-note reconciliation guard. Owned by
+  `internal/taskcontext`, written atomically on transitions/resume, independent of
+  provider continuation and `state.json` schema. Forks/clones/compatible delegate
+  continuations copy it with notes; new sessions start independently. Legacy
+  note files or a restored notes-reset checkpoint activate memory when no marker
+  exists. Queued resets and budget measurements are process-local and never copied.
 
 All session writes use temp-file then rename. The fields that drive resume and
 branching: `ActiveLeaf` anchors the active provider context, which is

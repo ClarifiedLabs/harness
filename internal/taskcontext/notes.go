@@ -45,7 +45,14 @@ func notePath(dir, name string) (string, error) {
 	return filepath.Join(dir, "notes", filepath.FromSlash(name)), nil
 }
 
-func readNote(dir, name string) (string, error) {
+func readNote(dir, name string) (string, error) { return ReadNote(dir, name) }
+
+// ReadNote reads one bounded, validated note for durable plan references.
+// Blank directories are rejected rather than interpreted relative to the cwd.
+func ReadNote(dir, name string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		return "", fmt.Errorf("session directory is required")
+	}
 	path, err := notePath(dir, name)
 	if err != nil {
 		return "", err
@@ -136,6 +143,52 @@ func noteNames(ctx context.Context, dir string) ([]string, error) {
 // CopyNotes gives a fork or continued delegate its own writable notes. The source
 // remains unchanged, just as its canonical session tree does on continuation.
 func CopyNotes(ctx context.Context, from, to string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(from) == "" || strings.TrimSpace(to) == "" {
+		return fmt.Errorf("source and destination session directories are required")
+	}
+	source, err := filepath.Abs(from)
+	if err != nil {
+		return err
+	}
+	destination, err := filepath.Abs(to)
+	if err != nil {
+		return err
+	}
+	source, err = resolvedCopyPath(source)
+	if err != nil {
+		return err
+	}
+	destination, err = resolvedCopyPath(destination)
+	if err != nil {
+		return err
+	}
+	if source == destination {
+		return nil
+	}
+	rel, err := filepath.Rel(source, destination)
+	if err != nil {
+		return err
+	}
+	if rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("copy destination must not be inside the historical source session")
+	}
+	reverse, err := filepath.Rel(destination, source)
+	if err != nil {
+		return err
+	}
+	if reverse != ".." && !strings.HasPrefix(reverse, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("copy destination must not contain the historical source session")
+	}
+	from, to = source, destination
+	// Copy the persisted state verbatim: reading a historical source must never
+	// activate or migrate it, and future unknown fields must survive a fork.
+	state, err := readStateBytes(from)
+	if err != nil {
+		return err
+	}
 	names, err := noteNames(ctx, from)
 	if err != nil {
 		return err
@@ -152,11 +205,71 @@ func CopyNotes(ctx context.Context, from, to string) error {
 		if err != nil {
 			return err
 		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// Existing session roots are allowed, but a notes subdirectory must
+		// not redirect the copy into the historical source (or elsewhere).
+		for parent := filepath.Dir(path); parent != filepath.Clean(to); parent = filepath.Dir(parent) {
+			info, err := os.Lstat(parent)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+			if err == nil && info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("copy destination note directory must not be a symlink: %s", parent)
+			}
+		}
 		if err := atomicWrite(path, []byte(text)); err != nil {
 			return err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if state != nil {
+		return atomicWrite(filepath.Join(to, stateFile), state)
+	}
 	return nil
+}
+
+// Resolve existing ancestors without creating the destination. This recognizes
+// aliases even when the copy's final directory does not yet exist.
+func resolvedCopyPath(path string) (string, error) {
+	var missing []string
+	for {
+		resolved, err := filepath.EvalSymlinks(path)
+		if err == nil {
+			for i := len(missing) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, missing[i])
+			}
+			return resolved, nil
+		}
+		parent := filepath.Dir(path)
+		if !errors.Is(err, os.ErrNotExist) || parent == path {
+			return "", err
+		}
+		missing = append(missing, filepath.Base(path))
+		path = parent
+	}
+}
+
+func readStateBytes(dir string) ([]byte, error) {
+	f, err := os.Open(filepath.Join(dir, stateFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxState+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxState || !json.Valid(data) || !strings.HasPrefix(strings.TrimSpace(string(data)), "{") {
+		return nil, fmt.Errorf("context state must be valid JSON at most %d bytes", maxState)
+	}
+	return data, nil
 }
 
 func runNotes(ctx context.Context, dir string, in noteInput) (string, error) {

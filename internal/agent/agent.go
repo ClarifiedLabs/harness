@@ -1708,6 +1708,9 @@ func (a *Agent) DebugRequest(includeUser bool, userText string, images []llm.Con
 		transcript = cloneMessages(a.transcript)
 		transcript = append(transcript, a.userMessage(userText, images))
 	}
+	if guidance := a.contextManagementContext(); guidance != "" {
+		extraContext = append(append([]string(nil), extraContext...), guidance)
+	}
 	mr := a.modelRequestForTranscript(extraContext, transcript)
 	return RequestSnapshot{
 		Request:      mr.request,
@@ -2486,7 +2489,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		checkpoint(PromptCheckpointToolDispatch)
 		executionCalls := executionToolCalls(res.toolCalls)
 		liveInputTokens := a.toolDispatchLiveInputTokens(lastInput, appendBoundary, lastContext)
-		if manager := a.contextManager(); manager != nil {
+		if manager := a.continuityManager(); manager != nil {
 			manager.SetContextBudget(max(0, a.contextRemaining(liveInputTokens)), a.contextSoftLimit())
 		}
 		_, reserveReadArchiveHint := sink.(ToolResultArchiver)
@@ -4029,6 +4032,14 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		if err := ctx.Err(); err != nil {
 			return res, wasted, err
 		}
+		if manager := a.continuityManager(); manager != nil {
+			if err := manager.ContextPrepare(); err != nil {
+				return res, wasted, fmt.Errorf("prepare context continuity: %w", err)
+			}
+			if _, err := manager.ContextRecovery(); err != nil {
+				return res, wasted, fmt.Errorf("prepare context recovery: %w", err)
+			}
+		}
 		physicalAttempt := startAttempt + attempt
 		sink.TurnAttemptStart(turn, physicalAttempt, estimate)
 		attemptCtx := ctx
@@ -4037,6 +4048,11 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		}
 		observeRequestContext(a.executionScope(), req, estimate.Total, a.window())
 		res, err = a.stream(attemptCtx, req, sink)
+		if err == nil {
+			if manager := a.continuityManager(); manager != nil {
+				manager.CommitContextRequest()
+			}
+		}
 		res.attempts = physicalAttempt
 		sink.TurnAttemptComplete(TurnAttemptUsage{Turn: turn, Attempt: physicalAttempt, Usage: res.usage})
 		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {

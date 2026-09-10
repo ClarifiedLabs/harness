@@ -201,7 +201,7 @@ func TestNotesResetRunsExistingCompactionHooks(t *testing.T) {
 	}
 }
 
-func TestContextToolsDisappearImmediatelyOnProviderSwitch(t *testing.T) {
+func TestContextMemorySurvivesProviderSwitch(t *testing.T) {
 	dir := t.TempDir()
 	enabled := true
 	m := taskcontext.New(func() string { return dir })
@@ -214,16 +214,19 @@ func TestContextToolsDisappearImmediatelyOnProviderSwitch(t *testing.T) {
 	}
 	enabled = false
 	a.SetProvider(llmtest.New("api"))
-	if len(a.ToolSpecs()) != 0 {
-		t.Fatal("tool specs survived provider switch")
+	if len(a.ToolSpecs()) != len(taskcontext.Names)-1 {
+		t.Fatal("memory tools disappeared on provider switch")
 	}
-	if got := a.contextManagementContext(); got != "" {
-		t.Fatal("notes guidance survived provider switch")
+	if got := a.contextManagementContext(); !strings.Contains(got, "ordinary compaction") || strings.Contains(got, "Experimental context management") {
+		t.Fatal("guidance did not switch to ordinary compaction")
 	}
 	enabled = true
 	a.SetProvider(llmtest.New("codex"))
 	if len(a.ToolSpecs()) != len(taskcontext.Names) {
 		t.Fatal("tools did not return on switching back")
+	}
+	if a.contextManager() != nil {
+		t.Fatal("stale notes enabled automatic reset before reconciliation")
 	}
 }
 

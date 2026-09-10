@@ -139,7 +139,18 @@ func NewToolWithTextSanitizer(store *Store, sanitize func(string) string) *Tool 
 func (*Tool) Name() string { return "update_todos" }
 
 func (*Tool) Description() string {
-	return "Replace the whole advisory TODO list; one in_progress at most."
+	return "Replace the canonical execution checklist; one in_progress at most."
+}
+
+// RecoveryContext projects only unresolved execution status, not working notes.
+func (t *Tool) RecoveryContext() string {
+	var items []Item
+	for _, item := range t.store.Snapshot() {
+		if item.Status != StatusCompleted {
+			items = append(items, item)
+		}
+	}
+	return RequestContext(items)
 }
 
 func (*Tool) PreserveSchemaDescriptions() bool { return true }

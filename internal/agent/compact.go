@@ -332,17 +332,7 @@ func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result 
 		}
 		archiveRef = ref
 	}
-	compacted[0] = a.checkpointMessage(
-		candidate.archive.Summary,
-		candidate.archive.Messages,
-		archiveRef,
-		candidate.archive.SummarySource,
-		candidate.archive.FallbackReason,
-		candidate.archive.Focus,
-		candidate.archive.ReadFiles,
-		candidate.archive.ReadFilesOmitted,
-		candidate.archive.ModifiedFiles,
-	)
+	appendCheckpointArchive(&compacted[0], archiveRef)
 	a.transcript = compacted
 	a.validatedPrefix = 0
 	a.clearMeasuredContext()
@@ -685,7 +675,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 	// Adding an archive reference changes only checkpoint text, so the transcript
 	// shape validated above cannot become invalid after the side-effectful archive
 	// callback succeeds.
-	compacted[0] = a.checkpointMessage(summary, older, archiveRef, summarySource, fallbackReason, focus, readFiles, readFilesOmitted, modifiedFiles)
+	appendCheckpointArchive(&compacted[0], archiveRef)
 
 	a.transcript = compacted
 	a.validatedPrefix = 0        // the transcript was rewritten; re-validate from scratch (r62)
@@ -1583,6 +1573,8 @@ func hasNonResult(m llm.Message) bool {
 
 func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRef, summarySource, fallbackReason, focus string, readFiles []string, readFilesOmitted int, modifiedFiles []string) llm.Message {
 	var b strings.Builder
+	var originals []llm.ContentBlock
+	preserveInstructions := false
 	b.WriteString(checkpointHeader)
 	b.WriteString(checkpointPreamble)
 	for _, message := range activeInstructionMessages(older) {
@@ -1594,11 +1586,22 @@ func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRe
 		default:
 			b.WriteString("\nPrompt (verbatim):\n")
 		}
-		text := messageTextForCheckpoint(message)
-		if message.Origin == llm.MessageOriginCompactionCheckpoint {
-			text = checkpointInstructionText(text)
+		parts := message.Content
+		if message.Compaction != nil && message.Compaction.UserInstructions != nil {
+			parts = message.Compaction.UserInstructions
+			preserveInstructions = true
+		} else if message.Origin == llm.MessageOriginCompactionCheckpoint {
+			parts = []llm.ContentBlock{{Kind: llm.BlockText, Text: checkpointInstructionText(messageTextForCheckpoint(message))}}
 		}
-		b.WriteString(text)
+		for _, block := range parts {
+			if block.Kind == llm.BlockText || block.Kind == llm.BlockImage {
+				originals = append(originals, block)
+			}
+			if block.Kind == llm.BlockText {
+				b.WriteString(block.Text)
+				b.WriteByte('\n')
+			}
+		}
 		b.WriteByte('\n')
 	}
 	b.WriteString(checkpointProgress)
@@ -1618,7 +1621,17 @@ func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRe
 		b.WriteString("\n\nRaw compacted transcript archive: ")
 		b.WriteString(archiveRef)
 	}
+	// Carry the notes-reset continuity chain through ordinary compaction, but
+	// retain ordinary latest-prompt aging for sessions that never used it.
+	if !preserveInstructions {
+		originals = nil
+	}
 	message := a.textMessage(llm.RoleUser, b.String())
+	for _, block := range originals {
+		if block.Kind == llm.BlockImage {
+			message.Content = append(message.Content, block)
+		}
+	}
 	message.Origin = llm.MessageOriginCompactionCheckpoint
 	message.Compaction = &llm.CompactionMetadata{
 		Summary:          summary,
@@ -1628,8 +1641,23 @@ func (a *Agent) checkpointMessage(summary string, older []llm.Message, archiveRe
 		ReadFiles:        append([]string(nil), readFiles...),
 		ReadFilesOmitted: readFilesOmitted,
 		ModifiedFiles:    append([]string(nil), modifiedFiles...),
+		UserInstructions: originals,
 	}
 	return message
+}
+
+// The candidate may already have degraded text/images to fit its budget. Only
+// attach the new archive reference; reconstructing it would resurrect payloads.
+func appendCheckpointArchive(message *llm.Message, ref string) {
+	if ref == "" {
+		return
+	}
+	text := "\n\nRaw compacted transcript archive: " + ref
+	if len(message.Content) > 0 && message.Content[0].Kind == llm.BlockText {
+		message.Content[0].Text += text
+	} else {
+		message.Content = append(message.Content, llm.ContentBlock{Kind: llm.BlockText, Text: text})
+	}
 }
 
 func (a *Agent) compactionSummaryTimeout() time.Duration {
@@ -1795,8 +1823,12 @@ func sortedPathValues(paths map[string]string) []string {
 
 func activeInstructionMessages(msgs []llm.Message) []llm.Message {
 	start := -1
+	typedCheckpoint := false
 	for i := range msgs {
-		if msgs[i].Origin == llm.MessageOriginPrompt || msgs[i].Origin == llm.MessageOriginCompactionCheckpoint {
+		if msgs[i].Origin == llm.MessageOriginCompactionCheckpoint {
+			start = i
+			typedCheckpoint = msgs[i].Compaction != nil && msgs[i].Compaction.UserInstructions != nil
+		} else if msgs[i].Origin == llm.MessageOriginPrompt && !typedCheckpoint {
 			start = i
 		}
 	}

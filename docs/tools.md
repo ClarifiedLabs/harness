@@ -20,7 +20,7 @@ This page is the operational overview.
 | `agent_sessions` | list or control reusable process-local agent sessions |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `tool_catalog` | conditionally list, describe, and activate optional MCP/LSP tools |
-| `record_plan` | Record a complete implementation plan |
+| `record_plan` | Publish an immutable plan snapshot from text or a task-notes draft |
 
 The default registry is `read`, `view_image`, `edit`, `write`, `shell`, and
 `web_fetch`, in that order; the constructible catalog is the same set.
@@ -279,6 +279,8 @@ an advisory checklist for meaningful multi-step work, update it at phase
 boundaries, and do not spend a turn only on bookkeeping. Each call replaces
 the complete list with `{step,status}` entries. Status is `pending`,
 `in_progress`, or `completed`, and at most one item may be `in_progress`.
+This is the canonical execution checklist: keep step status here, and reasoning,
+evidence, and drafts in `task_notes`, rather than maintaining duplicate lists.
 Harness assigns no lifecycle or completion authority to the list.
 
 The root TODO list is saved in `state.json`, restored by `-resume`, and cleared
@@ -298,7 +300,15 @@ self-contained Markdown artifact to `<session>/plans/NNNN-<slug>.plan.md` with
 temp-file-then-rename durability and makes that artifact the session's latest
 plan. Older plan files remain immutable. Delegated plan agents record private
 child plans. `/handoff` is the user command that reviews and approves a
-recorded plan for implementation.
+recorded plan for implementation. Publication is optional for ordinary work.
+
+Pass a `title` and exactly one of `plan` (the existing full Markdown input) or
+`path` (a session-relative task-notes draft), for example
+`{"title":"Cache fix","path":"plan.md"}`. Note-backed publication uses the same
+path validation and 1,000,000-byte file limit as `task_notes`, then copies the
+current draft into a new immutable artifact. Editing the draft later never changes
+the reviewed snapshot. Recovery context includes unresolved TODOs and a reference
+to the latest publication automatically; notes need not duplicate either.
 
 ## File Mutation
 
@@ -762,14 +772,24 @@ These warnings are suppressed by `-q` / `--quiet` or `--log-level error`.
 ## Experimental context management
 
 The top-level Harness config setting `context_management` defaults to `"auto"`,
-enabling context tools only for **Astra on `openai-codex`**, including snapshots,
-aliases, and service tiers. Set it to `"on"` to explicitly opt in any model/provider,
-or `"off"` to disable the tools and restore ordinary compaction. The legacy
-`codex_experimental_context_management:false` disables `auto`; explicit `on`/`off`
-takes precedence. Ineligible targets omit the tools and reject direct calls.
-Provider and model/agent switches re-evaluate eligibility; delegates use their
-own resolved target and session directory. The implementation is local and uses
-existing session storage, without calling Codex's private notes/history endpoints.
+activating notes-based resets only for **Astra on `openai-codex`**, including
+snapshots, aliases, and service tiers. Set it to `"on"` to explicitly opt in any
+model/provider. Once activated, the five memory/budget tools stay available across
+model switches and resume. In `auto`, other models use ordinary compaction and
+omit/reject `new_context`; a fresh non-Astra session does not activate memory.
+Delegates use their own resolved target and private session, not parent activation.
+
+`"off"` hides/rejects all six tools and restores ordinary compaction, but an
+activated session receives a bounded recovery handoff with a note preview,
+TODO/plan references, and paths usable by ordinary `read`. The legacy
+`codex_experimental_context_management:false` has the same opt-out effect in
+`auto`; explicit `on`/`off` takes precedence. No notes or history are deleted.
+Strategy changes preserve the active transcript, explain the new strategy, and
+cancel queued resets. On returning to notes-reset mode, ordinary compaction
+remains active until a nonempty, changed `task_notes` write/append reconciles
+intervening work; `new_context` reports this requirement rather than resetting
+from stale notes. Saving an unchanged or empty note does not acknowledge it.
+The implementation is local, without Codex's private notes/history endpoints.
 
 - `task_notes`: `action` is `read`, `write`, `append`, `list`, or `search`.
   Omitting `action` reads unless `text` is supplied, which replaces the note.
@@ -780,7 +800,7 @@ existing session storage, without calling Codex's private notes/history endpoint
   pagination. List/search accept `prefix`, `limit` (default 10, maximum 20),
   and ordinal `offset`; search is a case-sensitive literal query with bounded
   excerpts. Record objectives, constraints, decisions, failed approaches,
-  completed checks, next steps, and stable history IDs. Additional files hold
+  check results, draft plans, and stable history IDs, not a duplicate TODO checklist. Additional files hold
   accumulated details without inflating the active context.
 - `history_search`: case-insensitive literal `query` over saved session-tree
   messages. Returns at most 20 excerpts of 512 bytes, stable entry `id`,
@@ -808,7 +828,8 @@ existing session storage, without calling Codex's private notes/history endpoint
 - `get_context_remaining`: estimated `tokens_left` before the working-window
   threshold, its `limit`, and `estimated:true`. This uses the agent's existing
   context estimator and compaction budgets, not a separate tokenizer or paid
-  counting call.
+  counting call. It continues to report the active model's budget in ordinary
+  compaction mode, without enabling notes-based resets.
 - `new_context`: queue a fresh window after the complete tool round. Save notes
   first. The agent runs the existing compaction hooks, archives the previous
   window, then preserves original user inputs and a bounded note-recovery hint.
@@ -823,9 +844,9 @@ searchable at the ordinary session checkpoint. Scans process at most roughly
 preceding tree metadata to resolve windows or locate a stable ID can require
 scanning the earlier file. Reads and search results remain bounded.
 
-The agent supplies incremental-note guidance, a low-context reminder, and an
-exhausted-window handoff prompt. Automatic and manual compaction use the same
-notes-based reset lifecycle while this mode is active; they do not call a
+In reset-ready mode, the agent supplies incremental-note guidance, a low-context
+reminder, and an exhausted-window handoff prompt. Automatic and manual compaction
+use the same notes-based reset lifecycle while this mode is active; they do not call a
 summarization model. See [compaction internals](compaction.md#experimental-context-management)
 for thresholds, failure behavior, and the Codex comparison.
 
