@@ -44,6 +44,9 @@ type ServerConfig struct {
 	URL     string            `json:"url"`
 	Headers map[string]string `json:"headers"`
 	Auth    *auth.Config      `json:"auth,omitempty"`
+
+	// ExcludedTools contains exact, case-sensitive downstream tool names.
+	ExcludedTools []string `json:"excludedTools,omitempty"`
 }
 
 // ProxySettings carries proxy-level overrides. Empty fields fall back to
@@ -83,7 +86,8 @@ type ResolvedServer struct {
 	Headers map[string]string
 	Auth    *auth.Config
 
-	ConfigDir string
+	ConfigDir     string
+	ExcludedTools []string
 }
 
 // Config is the resolved, validated proxy configuration. Servers is sorted by
@@ -283,12 +287,13 @@ func resolveServer(name string, sc ServerConfig, expand func(string) string, con
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: stdio server must not set url", name)
 		}
 		return ResolvedServer{
-			Name:      name,
-			Transport: TransportStdio,
-			Command:   command,
-			Args:      args,
-			Env:       env,
-			ConfigDir: configDir,
+			Name:          name,
+			Transport:     TransportStdio,
+			Command:       command,
+			Args:          args,
+			Env:           env,
+			ConfigDir:     configDir,
+			ExcludedTools: slices.Clone(sc.ExcludedTools),
 		}, ""
 	case "http", "streamable-http":
 		if rawURL == "" {
@@ -302,12 +307,13 @@ func resolveServer(name string, sc ServerConfig, expand func(string) string, con
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: url must use http or https scheme", name)
 		}
 		return ResolvedServer{
-			Name:      name,
-			Transport: TransportHTTP,
-			URL:       rawURL,
-			Headers:   headers,
-			Auth:      authCfg,
-			ConfigDir: configDir,
+			Name:          name,
+			Transport:     TransportHTTP,
+			URL:           rawURL,
+			Headers:       headers,
+			Auth:          authCfg,
+			ConfigDir:     configDir,
+			ExcludedTools: slices.Clone(sc.ExcludedTools),
 		}, ""
 	default:
 		return ResolvedServer{}, fmt.Sprintf("server %q skipped: unknown type %q (want \"\", \"stdio\", \"http\", or \"streamable-http\")", name, sc.Type)

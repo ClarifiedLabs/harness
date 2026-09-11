@@ -104,24 +104,36 @@ func (r *Registry) onSupervisorToolsChanged() {
 }
 
 // rebuild recomputes the merged namespaced tool list and the reverse route map
-// under the write lock. Tools whose qualified name is not provider-safe are
-// dropped with a warning (never rewritten/truncated — a truncated name could
-// collide and break routing).
+// under the write lock. Per-server exclusions match bare names so excluded tools
+// are neither listed nor routable, including after refreshes. Qualified names
+// that collide with advertised excluded tools are also omitted.
+// Tools whose qualified name is not provider-safe are dropped with a warning
+// (never rewritten/truncated — a truncated name could collide and break routing).
 func (r *Registry) rebuild() {
+	// Serialize snapshots as well as publication: an older concurrent rebuild
+	// must not restore a route removed by a newer exclusion-bearing snapshot.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var tools []mcp.Tool
 	routes := map[string]route{}
+	excluded := map[string]bool{}
 
 	for _, sup := range r.supervisors {
 		for _, t := range sup.Tools() {
 			qualified := qualifiedPrefix + sup.Name() + "__" + t.Name
+			if slices.Contains(sup.cfg.ExcludedTools, t.Name) {
+				excluded[qualified] = true
+				continue
+			}
 			if !serverNameRE.MatchString(qualified) {
 				r.logger.Warn("tool omitted: qualified name not provider-safe",
 					logging.Category(categoryGate), "server", sup.Name(), "tool", t.Name, "qualified", qualified)
 				continue
 			}
 			if _, dup := routes[qualified]; dup {
-				// Structurally impossible given distinct server names and unique
-				// per-server tool names, but guard defensively.
+				// Names containing __ can collide after qualification. Keep the
+				// first route unless an exclusion blocks this name below.
 				r.logger.Warn("tool omitted: duplicate qualified name",
 					logging.Category(categoryGate), "qualified", qualified)
 				continue
@@ -132,6 +144,18 @@ func (r *Registry) rebuild() {
 			routes[qualified] = route{supervisor: sup, bareName: t.Name}
 		}
 	}
+
+	// Do not let an excluded identity redirect to a different server's tool,
+	// regardless of supervisor order. Only advertised exclusions reserve names.
+	tools = slices.DeleteFunc(tools, func(t mcp.Tool) bool {
+		if !excluded[t.Name] {
+			return false
+		}
+		delete(routes, t.Name)
+		r.logger.Warn("tool omitted: qualified name collides with excluded tool",
+			logging.Category(categoryGate), "qualified", t.Name)
+		return true
+	})
 
 	slices.SortFunc(tools, func(a, b mcp.Tool) int {
 		switch {
@@ -144,10 +168,8 @@ func (r *Registry) rebuild() {
 		}
 	})
 
-	r.mu.Lock()
 	r.tools = tools
 	r.routes = routes
-	r.mu.Unlock()
 }
 
 // ListTools returns one page of the merged namespaced list, paginated by an
