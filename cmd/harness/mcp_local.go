@@ -83,7 +83,10 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 	// retry never double-registers. A connection error fails fast.
 	regCtx, cancel := context.WithTimeout(ctx, mcpRegisterTimeout)
 	defer cancel()
-	sum, err := registerLocalWhenReady(regCtx, catalog, c, mcptools.RegisterOptions{TrustReadOnlyHint: true})
+	sum, err := registerLocalWhenReady(regCtx, catalog, c, mcptools.RegisterOptions{
+		TrustReadOnlyHint: true,
+		FallbackNamespace: "local",
+	})
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			_ = c.Close()
@@ -101,7 +104,7 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 
 	logger.Info("mcp: local "+mcpConnectedLine(sum), logging.Category("mcp"))
 	for _, name := range sum.Skipped {
-		logger.Warn(fmt.Sprintf("mcp: skipping local tool %q: name must match [a-zA-Z0-9_-]{1,64}", name), logging.Category("mcp"))
+		logger.Warn(fmt.Sprintf("mcp: skipping local tool %q: names must match [a-zA-Z0-9_-]{1,64} and qualification must not collide with another tool", name), logging.Category("mcp"))
 	}
 	return c, sum, func() { _ = c.Close(); reap() }, true
 }

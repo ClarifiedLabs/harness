@@ -3894,7 +3894,12 @@ servers directly in that path: the proxy owns them and presents their merged
 tools to harness as a single MCP server over streamable HTTP (JSON-RPC 2.0,
 protocol revision `2025-06-18`; `internal/mcp`, `internal/mcp/jsonrpc`).
 Separately, `mcp.local` is an explicit local-stdio slot where harness itself
-spawns one configured command and registers its tools.
+spawns one configured command and registers its tools. The `internal/mcptools`
+adapter qualifies bare local tool names as `mcp__local__<tool>`, preserving
+already-prefixed `mcp__` names. Dispatch always uses the original advertised name;
+provider-safe charset and length validation applies before and after qualification.
+Within a registration pass, the first advertised target for a qualified name wins;
+later conflicting targets are skipped so dispatch and read-only metadata agree.
 
 **Why a separate process.** The remote daemon decouples downstream-server
 lifetime from any one harness session: stdio children are spawned once and

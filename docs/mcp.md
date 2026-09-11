@@ -41,6 +41,32 @@ Precedence is **env > config file > default**. `proxy` must be an `http(s)://`
 URL. The separate `mcp.local.enable` setting has its own env override,
 `HARNESS_MCP_LOCAL_ENABLE`.
 
+## Local Stdio MCP
+
+To run one MCP server directly as a child of Harness, enable `mcp.local` and
+configure its command. For example, Maestro needs no separate proxy:
+
+```json
+{
+  "mcp": {
+    "local": {
+      "enable": true,
+      "command": "maestro",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Local MCP is independent of the remote `mcp.enable` setting. Bare tool names such
+as `list_devices` are exposed to the model as `mcp__local__list_devices`; Harness
+still sends the original `list_devices` name to the server when calling it.
+Already-prefixed `mcp__...` names are preserved, so a local proxy remains
+compatible. Both the original and final names must match
+`[a-zA-Z0-9_-]{1,64}`; invalid or overlong names are skipped, never truncated.
+If distinct advertised names qualify to the same name, the first wins and later
+conflicting tools are skipped with a warning.
+
 ## Configuring Downstream Servers
 
 The proxy has its own config file, separate from harness:

@@ -23,7 +23,7 @@ var toolNameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
 // Summary reports the outcome of a Register pass.
 type Summary struct {
 	Servers       map[string]int // display-only server name -> tool count
-	Skipped       []string       // names skipped for failing validation
+	Skipped       []string       // invalid names or conflicting advertised targets
 	Names         []string       // full names of tools registered, in list order
 	ReadOnlyNames []string       // registered names whose adapted tool is trusted read-only
 	Total         int            // count of tools registered
@@ -33,10 +33,14 @@ type Summary struct {
 // MCP annotations are treated as untrusted and do not affect scheduling.
 type RegisterOptions struct {
 	TrustReadOnlyHint bool
-	// Namespace adapts bare downstream tool names into mcp__<namespace>__<tool>
-	// names. Empty preserves the default proxy behavior, where the downstream
-	// must already advertise fully-qualified mcp__ names.
+	// Namespace wraps every downstream tool name as mcp__<namespace>__<tool>.
+	// Empty preserves the default proxy behavior, where the downstream must
+	// already advertise fully-qualified mcp__ names, unless FallbackNamespace
+	// is set.
 	Namespace string
+	// FallbackNamespace qualifies only names without the mcp__ prefix, leaving
+	// already-qualified names unchanged. Namespace takes precedence when set.
+	FallbackNamespace string
 }
 
 // Register lists the proxy's tools and registers each valid one on reg as an
@@ -56,12 +60,25 @@ func RegisterWithOptions(ctx context.Context, reg *tools.Registry, conn *Conn, o
 		return Summary{}, err
 	}
 	sum := Summary{Servers: make(map[string]int)}
+	targets := make(map[string]string, len(defs))
 	for _, d := range defs {
-		name, target, ok := registrationNames(d.Name, opts.Namespace)
+		namespace := strings.TrimSpace(opts.Namespace)
+		if namespace == "" && !strings.HasPrefix(d.Name, namePrefix) {
+			namespace = opts.FallbackNamespace
+		}
+		name, target, ok := registrationNames(d.Name, namespace)
 		if !ok {
 			sum.Skipped = append(sum.Skipped, d.Name)
 			continue
 		}
+		// Fallback qualification can map distinct advertised names to the same
+		// name. Keep the first target so dispatch and read-only metadata agree.
+		// This map is per pass: later refreshes still replace tools in place.
+		if prior, exists := targets[name]; exists && prior != target {
+			sum.Skipped = append(sum.Skipped, d.Name)
+			continue
+		}
+		targets[name] = target
 		readOnly := opts.TrustReadOnlyHint && readOnlyHint(d)
 		reg.Register(&Tool{
 			name:     name,
@@ -102,6 +119,9 @@ func validName(name string) bool {
 }
 
 func registrationNames(advertised, namespace string) (name, target string, ok bool) {
+	if !toolNameRe.MatchString(advertised) {
+		return "", "", false
+	}
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {
 		if !validName(advertised) {

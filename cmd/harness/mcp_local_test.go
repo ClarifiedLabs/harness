@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"harness/internal/config"
+	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/mcp"
 	"harness/internal/tools"
@@ -22,10 +24,10 @@ import (
 // procStart anchors the fake child's optional tool-exposure delay.
 var procStart = time.Now()
 
-// fakeLocalProvider exposes one already-namespaced tool, mimicking what a local
-// harness-mcp-proxy presents to harness. With HARNESS_LOCAL_DELAY_MS set it
-// reports zero tools until that delay elapses, modeling the proxy's asynchronous
-// downstream registration.
+// fakeLocalProvider exposes one already-namespaced tool by default, mimicking a
+// local harness-mcp-proxy. HARNESS_LOCAL_TOOL_NAME overrides the advertised name
+// to model a direct MCP server. HARNESS_LOCAL_DELAY_MS delays tool exposure to
+// model the proxy's asynchronous downstream registration.
 type fakeLocalProvider struct{}
 
 func (fakeLocalProvider) ListTools(ctx context.Context, cursor string) (mcp.ListToolsResult, error) {
@@ -34,8 +36,12 @@ func (fakeLocalProvider) ListTools(ctx context.Context, cursor string) (mcp.List
 			return mcp.ListToolsResult{}, nil
 		}
 	}
+	name := os.Getenv("HARNESS_LOCAL_TOOL_NAME")
+	if name == "" {
+		name = "mcp__fake__ping"
+	}
 	return mcp.ListToolsResult{Tools: []mcp.Tool{{
-		Name:        "mcp__fake__ping",
+		Name:        name,
 		Description: "ping",
 		InputSchema: json.RawMessage(`{"type":"object"}`),
 		Annotations: json.RawMessage(`{"readOnlyHint":true}`),
@@ -43,7 +49,7 @@ func (fakeLocalProvider) ListTools(ctx context.Context, cursor string) (mcp.List
 }
 
 func (fakeLocalProvider) CallTool(ctx context.Context, name string, args json.RawMessage) (*mcp.CallToolResult, error) {
-	return &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: "pong"}}}, nil
+	return &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: name}}}, nil
 }
 
 // TestHelperProcess runs a minimal stdio MCP server when HARNESS_LOCAL_HELPER is
@@ -62,23 +68,49 @@ func TestHelperProcess(t *testing.T) {
 }
 
 func TestSetupLocalMCPHappyPath(t *testing.T) {
-	reg := &tools.Registry{}
-	cfg := config.LocalMCPConfig{
-		Enable:  true,
-		Command: os.Args[0],
-		Args:    []string{"-test.run=TestHelperProcess$"},
-		Env:     map[string]string{"HARNESS_LOCAL_HELPER": "1"},
-	}
-	conn, sum, cleanup, ok := setupLocalMCP(context.Background(), cfg, true, reg, slog.New(slog.DiscardHandler))
-	defer cleanup()
-	if !ok || conn == nil {
-		t.Fatalf("setupLocalMCP ok=%v conn=%v", ok, conn)
-	}
-	if sum.Total != 1 || !slices.Contains(sum.Names, "mcp__fake__ping") {
-		t.Fatalf("summary = %+v", sum)
-	}
-	if !slices.Contains(sum.ReadOnlyNames, "mcp__fake__ping") {
-		t.Fatalf("summary ReadOnlyNames = %v, want mcp__fake__ping", sum.ReadOnlyNames)
+	for _, tc := range []struct {
+		name       string
+		advertised string
+		registered string
+		server     string
+	}{
+		{"qualified", "mcp__fake__ping", "mcp__fake__ping", "fake"},
+		{"bare", "list_devices", "mcp__local__list_devices", "local"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := &tools.Registry{}
+			cfg := config.LocalMCPConfig{
+				Enable:  true,
+				Command: os.Args[0],
+				Args:    []string{"-test.run=TestHelperProcess$"},
+				Env: map[string]string{
+					"HARNESS_LOCAL_HELPER":    "1",
+					"HARNESS_LOCAL_TOOL_NAME": tc.advertised,
+				},
+			}
+			var logs strings.Builder
+			conn, sum, cleanup, ok := setupLocalMCP(context.Background(), cfg, true, reg, slog.New(slog.NewTextHandler(&logs, nil)))
+			defer cleanup()
+			if !ok || conn == nil {
+				t.Fatalf("setupLocalMCP ok=%v conn=%v; logs=%s", ok, conn, logs.String())
+			}
+			if sum.Total != 1 || !slices.Equal(sum.Names, []string{tc.registered}) || len(sum.Skipped) != 0 {
+				t.Fatalf("summary = %+v", sum)
+			}
+			if len(sum.Servers) != 1 || sum.Servers[tc.server] != 1 {
+				t.Fatalf("summary Servers = %v, want %s=1", sum.Servers, tc.server)
+			}
+			if !slices.Equal(sum.ReadOnlyNames, []string{tc.registered}) {
+				t.Fatalf("summary ReadOnlyNames = %v, want %s", sum.ReadOnlyNames, tc.registered)
+			}
+			if strings.Contains(logs.String(), "level=WARN") {
+				t.Fatalf("unexpected startup warning: %s", logs.String())
+			}
+			res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: tc.registered, Input: json.RawMessage(`{}`)})
+			if res.IsError || res.Text != tc.advertised {
+				t.Fatalf("dispatch = %+v, want downstream name %q", res, tc.advertised)
+			}
+		})
 	}
 }
 

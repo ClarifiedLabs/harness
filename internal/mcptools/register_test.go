@@ -192,6 +192,133 @@ func TestRegisterWithNamespaceWrapsBareTools(t *testing.T) {
 	}
 }
 
+func TestRegisterWithFallbackNamespace(t *testing.T) {
+	const prefix = "mcp__local__"
+	bareBoundary := strings.Repeat("a", 64-len(prefix))
+	qualifiedBoundary := "mcp__fake__" + strings.Repeat("b", 64-len("mcp__fake__"))
+	advertised := []mcp.Tool{
+		{Name: "run", Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+		{Name: "mcp__fake__ping"},
+		{Name: bareBoundary},
+		{Name: qualifiedBoundary},
+		{Name: ""},
+		{Name: "bad.name"},
+		{Name: bareBoundary + "a"},
+		{Name: qualifiedBoundary + "b"},
+	}
+	provider := &scriptedProvider{result: &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: "ok"}}}}
+	conn, cleanup := newScriptedConn(t, provider, advertised)
+	defer cleanup()
+
+	reg := &tools.Registry{}
+	sum, err := RegisterWithOptions(context.Background(), reg, conn, RegisterOptions{
+		TrustReadOnlyHint: true,
+		FallbackNamespace: "local",
+	})
+	if err != nil {
+		t.Fatalf("RegisterWithOptions: %v", err)
+	}
+	wantNames := []string{prefix + "run", "mcp__fake__ping", prefix + bareBoundary, qualifiedBoundary}
+	if sum.Total != len(wantNames) || !slices.Equal(sum.Names, wantNames) || !slices.Equal(reg.Names(), wantNames) {
+		t.Fatalf("summary = %+v, registry = %v, want names %v", sum, reg.Names(), wantNames)
+	}
+	if !slices.Equal(sum.ReadOnlyNames, []string{prefix + "run"}) {
+		t.Fatalf("ReadOnlyNames = %v, want namespaced run", sum.ReadOnlyNames)
+	}
+	if sum.Servers["local"] != 2 || sum.Servers["fake"] != 2 {
+		t.Fatalf("Servers = %v, want local=2 fake=2", sum.Servers)
+	}
+	wantSkipped := []string{"", "bad.name", bareBoundary + "a", qualifiedBoundary + "b"}
+	if !slices.Equal(sum.Skipped, wantSkipped) {
+		t.Fatalf("Skipped = %v, want %v", sum.Skipped, wantSkipped)
+	}
+	for _, name := range wantNames {
+		res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: name, Input: json.RawMessage(`{}`)})
+		if res.IsError || res.Text != "ok" {
+			t.Fatalf("dispatch %q = %+v, want ok", name, res)
+		}
+	}
+	wantTargets := []string{"run", "mcp__fake__ping", bareBoundary, qualifiedBoundary}
+	if got := provider.callNames(); !slices.Equal(got, wantTargets) {
+		t.Fatalf("downstream call names = %v, want %v", got, wantTargets)
+	}
+}
+
+func TestRegisterFallbackNamespaceCollision(t *testing.T) {
+	for _, qualifiedFirst := range []bool{false, true} {
+		name := "bare first"
+		if qualifiedFirst {
+			name = "qualified first"
+		}
+		t.Run(name, func(t *testing.T) {
+			advertised := []mcp.Tool{
+				{Name: "run", Annotations: json.RawMessage(`{"readOnlyHint":true}`)},
+				{Name: "mcp__local__run"},
+			}
+			if qualifiedFirst {
+				slices.Reverse(advertised)
+			}
+			provider := &scriptedProvider{result: &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: "ok"}}}}
+			conn, cleanup := newScriptedConn(t, provider, advertised)
+			defer cleanup()
+			reg := &tools.Registry{}
+			sum, err := RegisterWithOptions(context.Background(), reg, conn, RegisterOptions{
+				TrustReadOnlyHint: true,
+				FallbackNamespace: "local",
+			})
+			if err != nil {
+				t.Fatalf("RegisterWithOptions: %v", err)
+			}
+			wantNames := []string{"mcp__local__run"}
+			if sum.Total != 1 || sum.Servers["local"] != 1 || !slices.Equal(sum.Names, wantNames) || !slices.Equal(reg.Names(), wantNames) {
+				t.Fatalf("summary = %+v, registry = %v, want one tool", sum, reg.Names())
+			}
+			if !slices.Equal(sum.Skipped, []string{advertised[1].Name}) {
+				t.Fatalf("Skipped = %v, want %s", sum.Skipped, advertised[1].Name)
+			}
+			var wantReadOnly []string
+			if !qualifiedFirst {
+				wantReadOnly = wantNames
+			}
+			if !slices.Equal(sum.ReadOnlyNames, wantReadOnly) {
+				t.Fatalf("ReadOnlyNames = %v, want %v", sum.ReadOnlyNames, wantReadOnly)
+			}
+			call := llm.ToolCall{ID: "1", Name: "mcp__local__run", Input: json.RawMessage(`{}`)}
+			if reg.CallReadOnly(call) != !qualifiedFirst {
+				t.Fatal("registered read-only hint does not match the first tool")
+			}
+			res := reg.Dispatch(context.Background(), call)
+			if res.IsError || res.Text != "ok" {
+				t.Fatalf("dispatch = %+v, want ok", res)
+			}
+			if got := provider.callNames(); !slices.Equal(got, []string{advertised[0].Name}) {
+				t.Fatalf("downstream call names = %v, want %s", got, advertised[0].Name)
+			}
+		})
+	}
+}
+
+func TestRegisterNamespaceOverridesFallback(t *testing.T) {
+	provider := &scriptedProvider{}
+	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{
+		{Name: "find_symbol"},
+		{Name: "mcp__other__ping"},
+	})
+	defer cleanup()
+
+	sum, err := RegisterWithOptions(context.Background(), &tools.Registry{}, conn, RegisterOptions{
+		Namespace:         "serena",
+		FallbackNamespace: "local",
+	})
+	if err != nil {
+		t.Fatalf("RegisterWithOptions: %v", err)
+	}
+	want := []string{"mcp__serena__find_symbol", "mcp__serena__mcp__other__ping"}
+	if !slices.Equal(sum.Names, want) {
+		t.Fatalf("Names = %v, want %v", sum.Names, want)
+	}
+}
+
 func TestRegisterReplacesInPlace(t *testing.T) {
 	provider := &scriptedProvider{}
 	conn, cleanup := newScriptedConn(t, provider, []mcp.Tool{
