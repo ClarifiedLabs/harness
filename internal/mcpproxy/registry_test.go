@@ -386,10 +386,14 @@ func TestRegistryUnknownToolError(t *testing.T) {
 }
 
 func TestRegistryCallRoutesVerbatim(t *testing.T) {
-	// Use a real supervisor backed by the helper to verify verbatim passthrough.
-	rs := ResolvedServer{Name: "h", Transport: TransportStdio, Command: "helper"}
-	sup := NewSupervisor(rs, slog.New(slog.DiscardHandler))
-	sup.spawn = helperSpawn(t, map[string]string{"HELPER_TOOLS": "echo"})
+	// Use a real supervisor backed by the helper to verify verbatim passthrough
+	// for allowed tools and rejection of excluded tools advertised downstream.
+	cfg, err := LoadConfig(writeConfig(t, `{"mcpServers":{"h":{"command":"helper","excludedTools":["blocked"]}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sup := NewSupervisor(cfg.Servers[0], slog.New(slog.DiscardHandler))
+	sup.spawn = helperSpawn(t, map[string]string{"HELPER_TOOLS": "echo,blocked"})
 	sup.sleep = func(context.Context, time.Duration) {}
 	reg := NewRegistry([]*Supervisor{sup}, slog.New(slog.DiscardHandler))
 	ctx := t.Context()
@@ -403,6 +407,12 @@ func TestRegistryCallRoutesVerbatim(t *testing.T) {
 	}
 	if res.IsError || res.Content[0].Text != `{"k":"v"}` {
 		t.Fatalf("verbatim passthrough failed: %+v", res)
+	}
+
+	res, err = reg.CallTool(t.Context(), "mcp__h__blocked", json.RawMessage(`{}`))
+	var rpcErr *jsonrpc.Error
+	if res != nil || !errors.As(err, &rpcErr) || rpcErr.Code != jsonrpc.CodeInvalidParams {
+		t.Fatalf("excluded call = (%+v, %v), want unknown-tool error", res, err)
 	}
 }
 

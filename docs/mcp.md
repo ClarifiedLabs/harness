@@ -145,6 +145,45 @@ Stdio servers inherit the proxy's full environment plus the per-server `env`
 overrides. Do not configure untrusted stdio servers when secrets live in the
 environment, since the child process can read them.
 
+### Excluding individual tools
+
+Add `excludedTools` to a downstream server entry to remove selected tools from
+both the proxy's `tools/list` and `tools/call` routing. For example, to keep
+Maestro's local tools without its cloud tools:
+
+```json
+{
+  "mcpServers": {
+    "maestro": {
+      "command": "maestro",
+      "args": ["mcp"],
+      "excludedTools": [
+        "describe_cloud_run",
+        "get_cloud_run_status",
+        "list_cloud_devices",
+        "run_on_cloud"
+      ]
+    }
+  }
+}
+```
+
+Entries match exact, case-sensitive names advertised by that server, **before**
+the proxy adds `mcp__<server>__`. There is no glob matching or environment-variable
+expansion in this list. Omitted, `null`, or empty lists exclude nothing; duplicate
+entries and names the server does not advertise are harmless. Exclusions apply
+only to that server and work with both stdio and HTTP downstream connections,
+regardless of whether the proxy itself serves HTTP or stdio. They remain in force
+when tools refresh or a downstream server reconnects. If an advertised excluded
+tool's qualified name collides with another server's tool, the proxy omits that
+qualified name entirely rather than redirecting calls to the other tool.
+
+Restart the proxy after editing its config, then start a new Harness session to
+rediscover the filtered surface. Excluded tools cannot be restored through an
+agent's `allowed_tools`: the proxy rejects calls to them as unknown tools. This
+setting belongs to the proxy's `mcpServers` entries, not Harness's direct
+`mcp.local` configuration.
+
 ### Proxy commands and configuration inspection
 
 `harness-mcp-proxy --help` renders the generated root command catalog; use

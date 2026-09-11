@@ -3923,6 +3923,13 @@ Architecture rules:
   provider-safe charset check applies to the entire qualified string, and a
   failing name is dropped with a warning, never truncated (truncation could
   collide and misroute).
+- Per-server `excludedTools` entries match exact, case-sensitive downstream names
+  before qualification. The registry omits matching tools from both discovery
+  and routing on every rebuild, including after downstream refresh/reconnect;
+  explicit agent allowlists cannot bypass these exclusions. A qualified name
+  colliding with an advertised excluded tool is also omitted, so an exclusion
+  cannot redirect the old identity to another server. See [mcp.md](mcp.md) for
+  configuration semantics.
 - The proxy's HTTP handler is tools-only and JSON-only (never
   `text/event-stream`); sessions are carried by `Mcp-Session-Id` with a
   30-minute idle TTL (distinct from the HTTP server's 120 s connection
