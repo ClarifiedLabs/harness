@@ -3,6 +3,7 @@ package agent
 import (
 	"os"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -42,11 +43,18 @@ func (w *InterruptWatcher) Start() (stop func()) {
 			select {
 			case <-done:
 				return
-			case _, ok := <-w.sig:
+			case sig, ok := <-w.sig:
 				if !ok {
 					return
 				}
-				w.handle()
+				switch sig {
+				case syscall.SIGTERM, syscall.SIGHUP:
+					// Termination is process-wide, not the first Ctrl-C of a turn.
+					w.CancelPrompt()
+					w.requestExit()
+				default:
+					w.handle()
+				}
 			}
 		}
 	}()

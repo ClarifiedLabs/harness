@@ -2221,12 +2221,17 @@ harness prints one warning per prompt to stderr.
 
 ## Interrupts
 
+- SIGTERM or SIGHUP requests process exit immediately, canceling active work and
+  running LSP/local MCP/agent-session cleanup. Unlike the first Ctrl-C, it does
+  not return to the prompt. Cleanup joins owned subprocess teardown, including
+  cleanup that outlived an earlier agent-session close timeout.
+
 - Ctrl-C during a prompt, or Esc twice in short succession during a REPL prompt,
   cancels the prompt. It aborts the HTTP stream, kills any `shell` process
   group, keeps streamed partial text, strips unexecuted tool calls, prints
   `[cancelled]`, and returns to the prompt. Any text typed during the prompt is
   preserved and deposited into the next prompt as editable pre-filled text.
-- A second Ctrl-C within about one second, or Ctrl-C at the idle prompt, saves,
+- A second Ctrl-C while the same prompt remains active, or Ctrl-C at the idle prompt, saves,
   prints the session token summary, and exits 130.
 - Ctrl-D at the prompt saves, prints the summary, and exits 0.
 - Ctrl-C during startup (including `SessionStart` hooks) or helper-command

@@ -27,6 +27,9 @@ import (
 // initTimeout bounds the MCP initialize handshake on a fresh connection.
 const initTimeout = 10 * time.Second
 
+// ErrClosed means this connection's owner has permanently shut it down.
+var ErrClosed = errors.New("mcp connection closed")
+
 // Options configures a Conn.
 type Options struct {
 	// Endpoint is the HTTP proxy URL.
@@ -73,8 +76,12 @@ type Conn struct {
 
 	dirty atomic.Bool // set by OnToolsChanged, consumed at prompt boundaries
 
-	mu     sync.Mutex
-	client *mcp.Client // nil when disconnected
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
+	mu        sync.Mutex
+	client    *mcp.Client // nil when disconnected
 	// http is the persistent streamable-HTTP transport, created lazily on first
 	// connect and REUSED across reconnects (matching the proxy supervisor's
 	// connectHTTP): after a session expiry the transport has cleared its session,
@@ -97,7 +104,10 @@ func NewConn(opts Options) *Conn {
 	if now == nil {
 		now = time.Now
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Conn{
+		ctx:    ctx,
+		cancel: cancel,
 		info:   opts.Info,
 		logger: logger,
 		now:    now,
@@ -159,8 +169,18 @@ func (c *Conn) CallTool(ctx context.Context, name string, args json.RawMessage) 
 // reconnect is deliberately a single contended operation rather than a reconnect
 // storm.
 func (c *Conn) ensure(ctx context.Context) (*mcp.Client, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(c.ctx, cancel)
+	defer stop()
+	defer cancel()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.ctx.Err() != nil {
+		return nil, ErrClosed
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if c.client != nil {
 		return c.client, nil
@@ -178,6 +198,10 @@ func (c *Conn) ensure(ctx context.Context) (*mcp.Client, error) {
 		c.nextTry = c.now().Add(retry.Next(c.failures, 0))
 		c.failures++
 		return nil, err
+	}
+	if c.ctx.Err() != nil {
+		_ = cl.Close()
+		return nil, ErrClosed
 	}
 	c.failures = 0
 	c.client = cl
@@ -277,23 +301,21 @@ func (c *Conn) ClearDirty() { c.dirty.Store(false) }
 // directly too. HTTPTransport.Close clears its session id after the DELETE, so
 // the two Close calls below emit at most one DELETE for one session.
 func (c *Conn) Close() error {
-	c.mu.Lock()
-	cl := c.client
-	tr := c.http
-	c.client = nil
-	c.http = nil
-	c.mu.Unlock()
-	var err error
-	if cl != nil {
-		err = cl.Close()
-	}
-	if tr != nil {
-		// Best-effort: if cl != nil the client Close above already DELETEd this
-		// session and cleared it, so this is a no-op; it matters only when cl is
-		// nil but the transport still holds a session.
-		_ = tr.Close()
-	}
-	return err
+	// Cancel before locking: ensure holds mu across dialing/initialization.
+	c.cancel()
+	c.closeOnce.Do(func() {
+		c.mu.Lock()
+		cl, tr := c.client, c.http
+		c.client, c.http = nil, nil
+		c.mu.Unlock()
+		if cl != nil {
+			c.closeErr = cl.Close()
+		}
+		if tr != nil {
+			_ = tr.Close()
+		}
+	})
+	return c.closeErr
 }
 
 // isConnError reports whether err means the transport is dead (so the connection

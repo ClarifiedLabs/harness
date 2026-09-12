@@ -16,17 +16,53 @@ import (
 	"harness/internal/logging"
 	"harness/internal/lspproxy"
 	"harness/internal/lsptools"
+	"harness/internal/mcp"
 	"harness/internal/mcptools"
 	"harness/internal/tools"
 	"harness/internal/ui"
 )
 
 type lspRuntime struct {
-	mgr     *lspproxy.Manager
-	summary mcptools.Summary
-	enabled bool
-	prewarm bool
-	logger  *slog.Logger
+	control       sync.Mutex // serializes enable/disable/close and prewarm joining
+	mu            sync.RWMutex
+	mgr           *lspproxy.Manager
+	cfg           lspproxy.Config
+	summary       mcptools.Summary
+	enabled       bool
+	closed        bool
+	prewarm       bool
+	logger        *slog.Logger
+	prewarmCancel context.CancelFunc
+	prewarmDone   chan struct{}
+}
+
+func (r *lspRuntime) snapshot() (*lspproxy.Manager, bool) {
+	if r == nil {
+		return nil, false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.mgr, r.enabled && !r.closed
+}
+
+func (r *lspRuntime) Enabled() bool {
+	_, enabled := r.snapshot()
+	return enabled
+}
+
+// Tools keep this stable provider while enable/disable swaps manager generations.
+// A call that captured the old manager cannot resurrect it after its shutdown.
+func (r *lspRuntime) ListTools(ctx context.Context, cursor string) (mcp.ListToolsResult, error) {
+	mgr, _ := r.snapshot()
+	return mgr.ListTools(ctx, cursor)
+}
+
+func (r *lspRuntime) CallTool(ctx context.Context, name string, args json.RawMessage) (*mcp.CallToolResult, error) {
+	mgr, enabled := r.snapshot()
+	if !enabled {
+		return nil, fmt.Errorf("LSP is disabled or shutting down")
+	}
+	return mgr.CallTool(ctx, name, args)
 }
 
 const maxPostMutationDiagnosticFiles = 8
@@ -35,7 +71,8 @@ const maxPostMutationDiagnosticFiles = 8
 // successfully changed through Harness's built-in write/edit tools. Unsupported
 // paths and unavailable servers are silent so LSP remains optional.
 func (r *lspRuntime) PostMutationDiagnostics(ctx context.Context, paths []string) string {
-	if r == nil || !r.enabled || len(paths) == 0 {
+	mgr, enabled := r.snapshot()
+	if !enabled || len(paths) == 0 {
 		return ""
 	}
 	unique := make([]string, 0, min(len(paths), maxPostMutationDiagnosticFiles))
@@ -57,7 +94,7 @@ func (r *lspRuntime) PostMutationDiagnostics(ctx context.Context, paths []string
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			text, applicable, err := r.mgr.DiagnosticsAfterWrite(ctx, path, 3*time.Second)
+			text, applicable, err := mgr.DiagnosticsAfterWrite(ctx, path, 3*time.Second)
 			if !applicable {
 				return
 			}
@@ -172,13 +209,14 @@ func newLSPRuntime(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.
 		logger.Warn(warning, logging.Category("lsp"))
 	}
 	mgr := lspproxy.NewManager(cfg, "", logger)
-	summary, err := lsptools.Register(ctx, catalog, mgr, lspCfg.Tools...)
+	runtime := &lspRuntime{mgr: mgr, cfg: cfg, enabled: lspCfg.Enable, prewarm: lspCfg.Prewarm, logger: logger}
+	summary, err := lsptools.Register(ctx, catalog, runtime, lspCfg.Tools...)
 	if err != nil {
 		mgr.Shutdown(context.Background())
 		return nil, err
 	}
 	warnUnknownLSPTools(lspCfg.Tools, summary.Names, logger)
-	runtime := &lspRuntime{mgr: mgr, summary: summary, enabled: lspCfg.Enable, prewarm: lspCfg.Prewarm, logger: logger}
+	runtime.summary = summary
 	runtime.startPrewarm()
 	return runtime, nil
 }
@@ -187,58 +225,94 @@ func newLSPRuntime(ctx context.Context, lspCfg config.LSPConfig, catalog *tools.
 // files in the detected workspace root, so early lsp_* calls are warm. It is a
 // best-effort optimization: it never blocks startup and never fails it.
 func (r *lspRuntime) startPrewarm() {
-	if r == nil || !r.enabled || !r.prewarm {
+	mgr, enabled := r.snapshot()
+	if !enabled || !r.prewarm {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	r.prewarmCancel = cancel
+	r.prewarmDone = make(chan struct{})
+	done := r.prewarmDone
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer close(done)
 		defer cancel()
-		languages := r.mgr.Prewarm(ctx)
+		languages := mgr.Prewarm(ctx)
 		r.logger.Info("lsp: prewarmed language servers", logging.Category("lsp"), slog.Any("languages", languages))
 	}()
 }
 
 func (r *lspRuntime) ActiveSummary() mcptools.Summary {
-	if r == nil || !r.enabled {
+	if !r.Enabled() {
 		return mcptools.Summary{}
 	}
 	return r.summary
 }
 
 func (r *lspRuntime) SetEnabled(enabled bool) {
-	if r == nil || r.enabled == enabled {
+	if r == nil {
+		return
+	}
+	r.control.Lock()
+	defer r.control.Unlock()
+	r.mu.Lock()
+	if r.closed || r.enabled == enabled {
+		r.mu.Unlock()
 		return
 	}
 	r.enabled = enabled
 	if enabled {
-		r.mgr.RefreshAvailability()
-		r.startPrewarm()
-		return
+		r.mgr = lspproxy.NewManager(r.cfg, "", r.logger)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	r.mgr.Shutdown(ctx)
+	r.mu.Unlock()
+	if enabled {
+		r.startPrewarm()
+	} else {
+		r.stopManager(context.Background())
+	}
 }
 
-func (r *lspRuntime) Shutdown() {
-	if r != nil {
-		r.mgr.Shutdown(context.Background())
+func (r *lspRuntime) Shutdown() { r.shutdown(context.Background()) }
+
+func (r *lspRuntime) shutdown(ctx context.Context) {
+	if r == nil {
+		return
+	}
+	r.control.Lock()
+	defer r.control.Unlock()
+	r.mu.Lock()
+	r.closed, r.enabled = true, false
+	r.mu.Unlock()
+	r.stopManager(ctx)
+}
+
+// Caller holds control, so no new prewarm can race the join.
+func (r *lspRuntime) stopManager(ctx context.Context) {
+	if r.prewarmCancel != nil {
+		r.prewarmCancel()
+	}
+	mgr, _ := r.snapshot()
+	mgr.Shutdown(ctx)
+	if r.prewarmDone != nil {
+		<-r.prewarmDone
+		r.prewarmCancel, r.prewarmDone = nil, nil
 	}
 }
 
 func (r *lspRuntime) SystemHint() string {
-	if r == nil || !r.enabled {
+	mgr, enabled := r.snapshot()
+	if !enabled {
 		return ""
 	}
-	return lspSystemHint(r.mgr.InstalledLanguages())
+	return lspSystemHint(mgr.InstalledLanguages())
 }
 
 func (r *lspRuntime) Status() ui.LSPStatus {
 	if r == nil {
 		return ui.LSPStatus{}
 	}
-	r.mgr.RefreshAvailability()
-	servers := r.mgr.ServerStatuses()
+	mgr, enabled := r.snapshot()
+	mgr.RefreshAvailability()
+	servers := mgr.ServerStatuses()
 	uiServers := make([]ui.LSPServerStatus, 0, len(servers))
 	installedLanguages := map[string]bool{}
 	readyLanguages := map[string]bool{}
@@ -269,7 +343,7 @@ func (r *lspRuntime) Status() ui.LSPStatus {
 		})
 	}
 	return ui.LSPStatus{
-		Enabled: r.enabled, Tools: slices.Clone(r.summary.Names),
+		Enabled: enabled, Tools: slices.Clone(r.summary.Names),
 		InstalledLanguages: slices.Sorted(maps.Keys(installedLanguages)),
 		ReadyLanguages:     slices.Sorted(maps.Keys(readyLanguages)),
 		Servers:            uiServers,

@@ -90,6 +90,21 @@ func (i *jsonRunInterrupts) requestExit() {
 	i.exitOnce.Do(func() { close(i.exitCh) })
 }
 
+// buildPromptWithExit also makes text-mode piped input interruptible after the
+// active watcher has taken ownership of signals.
+func buildPromptWithExit(exit <-chan struct{}, flagText string, stdin io.Reader, readStdin bool) (string, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		select {
+		case <-exit:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return buildPromptWithStartupContext(ctx, flagText, stdin, readStdin)
+}
+
 type startupPromptResult struct {
 	prompt string
 	err    error

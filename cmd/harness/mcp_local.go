@@ -44,6 +44,7 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 	// drop; a stale child is reaped in the background so reconnect never blocks.
 	var mu sync.Mutex
 	var current *mcpchild.Child
+	var reapers sync.WaitGroup
 	dial := func(ctx context.Context) (io.ReadWriteCloser, error) {
 		child, err := mcpchild.Spawn(command, args, env, func(line string) {
 			logger.Debug(line, logging.Category("mcp"), "stream", "local")
@@ -56,7 +57,7 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 		current = child
 		mu.Unlock()
 		if prev != nil {
-			go prev.Close(context.Background())
+			reapers.Go(func() { prev.Close(context.Background()) })
 		}
 		return child.Conn(), nil
 	}
@@ -68,6 +69,7 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 	})
 
 	reap := func() {
+		// Conn.Close has stopped admission and joined any dial before this runs.
 		mu.Lock()
 		child := current
 		current = nil
@@ -75,6 +77,7 @@ func setupLocalMCP(ctx context.Context, localCfg config.LocalMCPConfig, explicit
 		if child != nil {
 			child.Close(context.Background())
 		}
+		reapers.Wait()
 	}
 
 	// A local proxy registers its downstream servers (the shim) asynchronously

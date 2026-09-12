@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -30,6 +32,16 @@ func TestHelperProcess(t *testing.T) {
 		os.Exit(1)
 	case "lsp":
 		runFakeLSPStdio()
+	case "linger":
+		runFakeLSPStdio()
+		_, _ = io.Copy(io.Discard, os.NewFile(3, "hold"))
+	case "no-init":
+		decoder := NewDecoder(os.Stdin)
+		if _, err := decoder.Decode(); err != nil {
+			os.Exit(2)
+		}
+		fmt.Fprintln(os.NewFile(3, "ready"), os.Getpid())
+		_, _ = io.Copy(io.Discard, os.Stdin)
 	}
 	os.Exit(0)
 }

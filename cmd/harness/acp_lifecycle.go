@@ -17,6 +17,46 @@ import (
 // process exporter can include cleanup observations from a late root.
 const acpRootSettleTimeout = time.Second
 
+// Allows the child owner's 15s EOF grace, TERM grace, and final reap. This is
+// independent of protocol/telemetry deadlines, not an extension of fake roots.
+const acpOwnedCleanupTimeout = 30 * time.Second
+
+// Start all independent owners before joining any of them. Each receives a
+// fresh bounded lifetime, so one slow owner cannot consume another's grace.
+func startACPCleanups(cleanups []func(context.Context)) func() {
+	var wg sync.WaitGroup
+	for i := len(cleanups) - 1; i >= 0; i-- {
+		cleanup := cleanups[i]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), acpOwnedCleanupTimeout)
+			defer cancel()
+			cleanup(ctx)
+		}()
+	}
+	return wg.Wait
+}
+
+// Only the concrete production root exposes this join. Its resource owners
+// have finite teardown bounds; a generic RootSession.Close may ignore ctx.
+// Resources are immutable after construction and do not require the prompt mu.
+func (r *acpRootSession) startOwnedCleanup(ctx context.Context) <-chan struct{} {
+	r.cleanupOnce.Do(func() {
+		r.cleanupDone = make(chan struct{})
+		go func() {
+			defer close(r.cleanupDone)
+			join := startACPCleanups(r.cleanups)
+			r.cleanupErr = r.agentSessions.CloseAll(ctx)
+			if r.jobs != nil {
+				r.jobs.ShutdownAndWait(time.Second)
+			}
+			join()
+		}()
+	})
+	return r.cleanupDone
+}
+
 type acpTrackedRoot struct {
 	root          acpagent.RootSession
 	lifetime      context.Context
@@ -117,6 +157,7 @@ func (f *acpRootFactory) Close() {
 type acpConstruction struct {
 	done   chan struct{}
 	cancel context.CancelFunc
+	owned  bool // production builder: cancellation includes bounded resource teardown
 }
 
 func (f *acpRootFactory) beginConstruction(parent context.Context) (context.Context, func(), error) {
@@ -132,7 +173,7 @@ func (f *acpRootFactory) beginConstruction(parent context.Context) (context.Cont
 		f.pending = make(map[*acpConstruction]struct{})
 	}
 	ctx, cancel := context.WithCancel(parent)
-	pending := &acpConstruction{done: make(chan struct{}), cancel: cancel}
+	pending := &acpConstruction{done: make(chan struct{}), cancel: cancel, owned: f.build == nil}
 	f.pending[pending] = struct{}{}
 	gate := f.construct
 	f.mu.Unlock()
@@ -222,11 +263,32 @@ func (f *acpRootFactory) close(ctx context.Context) {
 		construction.cancel()
 	}
 	waits := make([]<-chan struct{}, 0, len(roots)+len(pending))
+	var owned []<-chan struct{}
 	for _, root := range roots {
 		root.startClose(ctx)
+		if production, ok := root.root.(*acpRootSession); ok {
+			owned = append(owned, production.startOwnedCleanup(ctx))
+		}
 		waits = append(waits, root.settled)
 	}
+	// Serve's deadline and the final telemetry budget may both have expired.
+	// Neither permits the executable to abandon bounded owned process teardown.
+	// Do not join closeDone/settled here: generic roots or prompts may hang.
+	for _, done := range owned {
+		<-done
+	}
+	// Construction may include non-context-aware filesystem reads, not just
+	// teardown. Give production rollback its own cleanup budget, but never
+	// treat completion of arbitrary initialization as an unbounded owner join.
+	constructionCtx, cancelConstruction := context.WithTimeout(context.Background(), acpOwnedCleanupTimeout)
+	defer cancelConstruction()
 	for _, construction := range pending {
+		if construction.owned {
+			select {
+			case <-construction.done:
+			case <-constructionCtx.Done():
+			}
+		}
 		waits = append(waits, construction.done)
 	}
 	for _, settled := range waits {

@@ -5,9 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"harness/internal/buildinfo"
 	"harness/internal/cli"
@@ -29,13 +27,11 @@ func (c lspRWConn) Write(p []byte) (int, error) { return c.w.Write(p) }
 func (c lspRWConn) Close() error                { return nil }
 
 func runLSPVersion(env environment, _ cli.Invocation) int {
-	signal.Ignore(syscall.SIGHUP)
 	fmt.Fprintf(env.stdout, "%s (MCP protocol %s)\n", buildinfo.Line("harness lsp"), mcp.ProtocolVersion)
 	return ui.ExitOK
 }
 
 func runLSPServe(env environment, invocation cli.Invocation) int {
-	signal.Ignore(syscall.SIGHUP)
 	values := invocation.Flags
 	configPath := cliLast(values, "config", "")
 	namespace := cliLast(values, "namespace", "lsp")

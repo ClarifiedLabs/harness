@@ -638,6 +638,12 @@ func TestRuntimeObservesProcessAndPeerDeath(t *testing.T) {
 			if err := runtime.Err(); err == nil {
 				t.Fatal("Err = nil after unexpected death")
 			}
+			waitDone(t, runtime.CleanupDone())
+			select {
+			case <-runtime.child.Done():
+			default:
+				t.Fatal("cleanup completion did not include child reap")
+			}
 		})
 	}
 }

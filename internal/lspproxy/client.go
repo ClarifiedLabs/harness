@@ -210,7 +210,11 @@ func (c *lspClient) Initialize(ctx context.Context, initOptions json.RawMessage)
 // DidOpen tells the server a document is open, sending its full text. The shim
 // reads text from disk; the manager tracks which documents are open.
 func (c *lspClient) DidOpen(uri, languageID string, version int, text string) error {
-	return jsonNotify(c.peer, "textDocument/didOpen", DidOpenParams{
+	return c.DidOpenContext(context.Background(), uri, languageID, version, text)
+}
+
+func (c *lspClient) DidOpenContext(ctx context.Context, uri, languageID string, version int, text string) error {
+	return jsonNotifyContext(ctx, c.peer, "textDocument/didOpen", DidOpenParams{
 		TextDocument: TextDocumentItem{URI: uri, LanguageID: languageID, Version: version, Text: text},
 	})
 }
@@ -218,7 +222,11 @@ func (c *lspClient) DidOpen(uri, languageID string, version int, text string) er
 // DidChange resyncs a previously-opened document with full text (the shim uses
 // full-document sync only).
 func (c *lspClient) DidChange(uri string, version int, text string) error {
-	return jsonNotify(c.peer, "textDocument/didChange", DidChangeParams{
+	return c.DidChangeContext(context.Background(), uri, version, text)
+}
+
+func (c *lspClient) DidChangeContext(ctx context.Context, uri string, version int, text string) error {
+	return jsonNotifyContext(ctx, c.peer, "textDocument/didChange", DidChangeParams{
 		TextDocument:   VersionedTextDocumentIdentifier{URI: uri, Version: version},
 		ContentChanges: []TextDocumentContentChangeEvent{{Text: text}},
 	})
@@ -544,7 +552,9 @@ func (c *lspClient) Shutdown(ctx context.Context) error {
 
 // Exit sends the LSP exit notification, asking the server to terminate.
 func (c *lspClient) Exit() error {
-	return c.peer.Notify("exit", nil)
+	// Teardown must reach Close/reaping even if the server stopped reading and
+	// the outbound queue is full.
+	return c.peer.TryNotify("exit", nil)
 }
 
 // Done is closed when the underlying connection ends (server exit, EOF, or
@@ -570,9 +580,13 @@ func jsonCall(ctx context.Context, peer *jsonrpc.Peer, method string, params any
 
 // jsonNotify marshals params and sends method as a notification.
 func jsonNotify(peer *jsonrpc.Peer, method string, params any) error {
+	return jsonNotifyContext(context.Background(), peer, method, params)
+}
+
+func jsonNotifyContext(ctx context.Context, peer *jsonrpc.Peer, method string, params any) error {
 	raw, err := json.Marshal(params)
 	if err != nil {
 		return fmt.Errorf("lspproxy: encode %s params: %w", method, err)
 	}
-	return peer.Notify(method, raw)
+	return peer.NotifyContext(ctx, method, raw)
 }

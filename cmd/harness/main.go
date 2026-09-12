@@ -75,7 +75,7 @@ const rgSystemHint = "When you search for text or files, prefer `rg` or `rg --fi
 
 func main() {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 	defer signal.Stop(sigCh)
 
 	os.Exit(run(environment{
@@ -166,8 +166,10 @@ func writeInformationalJSON(w io.Writer, value any) error {
 func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.CancelFunc, func() bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var interrupted atomic.Bool
+	done := make(chan struct{})
 	if sigCh != nil {
 		go func() {
+			defer close(done)
 			select {
 			case _, ok := <-sigCh:
 				if ok {
@@ -177,8 +179,12 @@ func signalCancelContext(sigCh <-chan os.Signal) (context.Context, context.Cance
 			case <-ctx.Done():
 			}
 		}()
+	} else {
+		close(done)
 	}
-	return ctx, cancel, interrupted.Load
+	// Join the startup receiver before handing this signal channel to the
+	// active watcher. A canceled but still-running receiver could steal SIGTERM.
+	return ctx, func() { cancel(); <-done }, interrupted.Load
 }
 
 // run wires everything together and returns the process exit code (design §10
@@ -832,6 +838,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// processes remain lazy and no binary is launched here.
 	if cfg.LSP.Enable || !runOptions.PromptSet {
 		runtime, err := newLSPRuntime(startupCtx, cfg.LSP, toolCatalog, logger)
+		if runtime != nil {
+			defer runtime.Shutdown()
+		}
 		if startupInterrupted() {
 			return ui.ExitInterrupt
 		}
@@ -839,10 +848,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			logger.Warn(fmt.Sprintf("lsp: cannot initialize: %v; LSP tools unavailable", err), logging.Category("lsp"))
 		} else {
 			lspControl = runtime
-			defer runtime.Shutdown()
 			lspSummary = runtime.ActiveSummary()
 			lspHint = runtime.SystemHint()
-			if runtime.enabled {
+			if runtime.Enabled() {
 				logger.Info(fmt.Sprintf("lsp: registered %d tools", runtime.summary.Total), logging.Category("lsp"))
 			}
 		}
@@ -885,7 +893,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	mcpReadOnlyNames = append(mcpReadOnlyNames, serenaSummary.ReadOnlyNames...)
 	augmentAgentsWithMCP(agents, mcpNames, mcpReadOnlyNames)
 	if lspControl != nil {
-		applyLSPExposure(agents, lspControl.summary, lspControl.enabled, lspExplicit)
+		applyLSPExposure(agents, lspControl.summary, lspControl.Enabled(), lspExplicit)
 	} else {
 		applyLSPExposure(agents, mcptools.Summary{}, false, lspExplicit)
 	}
@@ -996,7 +1004,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	var controlLSP func(action, agentName string) (ui.LSPSelection, error)
 	if lspControl != nil && !runOptions.PromptSet {
 		controlLSP = func(action, currentAgentName string) (ui.LSPSelection, error) {
-			wantEnabled := lspControl.enabled
+			wantEnabled := lspControl.Enabled()
 			switch action {
 			case "status":
 				previousHint := lspHint
@@ -1019,14 +1027,14 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			default:
 				return ui.LSPSelection{}, fmt.Errorf("unknown action %q", action)
 			}
-			previousEnabled := lspControl.enabled
+			previousEnabled := lspControl.Enabled()
 			previousHint := lspHint
 			previousSummary := lspSummary
 			changed := wantEnabled != previousEnabled
 			lspControl.SetEnabled(wantEnabled)
 			lspSummary = lspControl.ActiveSummary()
 			lspHint = lspControl.SystemHint()
-			applyLSPExposure(agents, lspControl.summary, lspControl.enabled, lspExplicit)
+			applyLSPExposure(agents, lspControl.summary, lspControl.Enabled(), lspExplicit)
 			selection := ui.LSPSelection{}
 			if !changed {
 				selection.Status = lspControl.Status()
@@ -1363,7 +1371,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			reg, notice := refreshMCP(ctx, agentName)
 			if reg != nil {
 				if lspControl != nil {
-					applyLSPExposure(agents, lspControl.summary, lspControl.enabled, lspExplicit)
+					applyLSPExposure(agents, lspControl.summary, lspControl.Enabled(), lspExplicit)
 					if definition, ok := agents[agentName]; ok {
 						if reconciled, err := subsetForAgentTools(toolCatalog, definition.AllowedTools, pendingMCP); err == nil {
 							reg = reconciled
@@ -1457,6 +1465,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 	} else if env.sigCh != nil {
 		stopStartup()
+		if startupInterrupted() {
+			return ui.ExitInterrupt
+		}
 		var exitOnce sync.Once
 		watcher := agent.NewInterruptWatcher(env.sigCh, now, func() {
 			exitOnce.Do(func() { close(exitCh) })
@@ -1486,9 +1497,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if jsonRunMode {
 			prompt, err = buildPromptWithStartupContext(startupCtx, runOptions.Prompt, stdin, env.stdinPiped)
 		} else {
-			prompt, err = ui.BuildPrompt(runOptions.Prompt, stdin, env.stdinPiped)
+			prompt, err = buildPromptWithExit(exitCh, runOptions.Prompt, stdin, env.stdinPiped)
 		}
-		if jsonRunMode && startupInterruptedOrCanceled(startupInterrupted, err) {
+		if errors.Is(err, context.Canceled) || (jsonRunMode && startupInterruptedOrCanceled(startupInterrupted, err)) {
 			return ui.ExitInterrupt
 		}
 		if err != nil {

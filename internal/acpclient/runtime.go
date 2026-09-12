@@ -30,11 +30,12 @@ const (
 	defaultInitializeTimeout = 10 * time.Second
 	defaultCancelGrace       = 2 * time.Second
 	defaultCloseTimeout      = 2 * time.Second
-	defaultReapTimeout       = 8 * time.Second
-	maximumProtocolTimeout   = 30 * time.Second
-	maximumReapTimeout       = 15 * time.Second
-	maxEventTextBytes        = 2048
-	maxInvalidUpdateReports  = 8
+	// Leave room for mcpchild's 15s EOF grace and TERM/KILL cleanup.
+	defaultReapTimeout      = 20 * time.Second
+	maximumProtocolTimeout  = 30 * time.Second
+	maximumReapTimeout      = 30 * time.Second
+	maxEventTextBytes       = 2048
+	maxInvalidUpdateReports = 8
 )
 
 // Options configures one ACP stdio runtime. Argv is executed directly, without
@@ -122,8 +123,9 @@ var (
 	// ErrRuntimeClosed reports that explicit teardown has begun.
 	ErrRuntimeClosed = errors.New("acp client: runtime is closing")
 
-	_ agentsession.Runtime    = (*Runtime)(nil)
-	_ agentsession.Observable = (*Runtime)(nil)
+	_ agentsession.Runtime           = (*Runtime)(nil)
+	_ agentsession.Observable        = (*Runtime)(nil)
+	_ agentsession.CleanupObservable = (*Runtime)(nil)
 )
 
 // NewFactory returns an agentsession factory that opens one fresh process and
@@ -457,6 +459,15 @@ func (r *Runtime) Close(ctx context.Context) error {
 	}
 }
 
+// CleanupDone closes only after bounded peer and owned-process teardown has
+// finished. Unlike Done, it is safe for an exiting owner to use as a cleanup join.
+func (r *Runtime) CleanupDone() <-chan struct{} {
+	if r == nil {
+		return r.Done()
+	}
+	return r.closeFinished
+}
+
 // Done closes when the peer or process exits, including explicit Close.
 func (r *Runtime) Done() <-chan struct{} {
 	if r == nil {
@@ -623,9 +634,9 @@ func (r *Runtime) call(ctx context.Context, method string, request, response any
 	return nil
 }
 
-// callBounded also bounds time spent waiting to enqueue on a peer whose writer
-// is stuck. jsonrpc.Peer.Call observes ctx only after enqueue, so Close uses a
-// goroutine and then force-closes the peer when this deadline wins.
+// callBounded lets teardown also react to peer shutdown while a call completes.
+// Ordinary calls (including Open's handshake) are already context-bounded by
+// jsonrpc.Peer.Call, including enqueue onto a blocked writer's queue.
 func (r *Runtime) callBounded(ctx context.Context, method string, request, response any) error {
 	done := make(chan error, 1)
 	go func() { done <- r.call(ctx, method, request, response) }()

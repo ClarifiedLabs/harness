@@ -31,6 +31,7 @@ func setupSerena(ctx context.Context, serenaCfg config.SerenaConfig, catalog *to
 
 	var mu sync.Mutex
 	var current *mcpchild.Child
+	var reapers sync.WaitGroup
 	dial := func(ctx context.Context) (io.ReadWriteCloser, error) {
 		child, err := mcpchild.Spawn(serenaCfg.Command, serenaCfg.Args, env, func(line string) {
 			logger.Debug(line, logging.Category("lsp"), "stream", serenaNamespace)
@@ -43,7 +44,7 @@ func setupSerena(ctx context.Context, serenaCfg config.SerenaConfig, catalog *to
 		current = child
 		mu.Unlock()
 		if prev != nil {
-			go prev.Close(context.Background())
+			reapers.Go(func() { prev.Close(context.Background()) })
 		}
 		return child.Conn(), nil
 	}
@@ -55,6 +56,7 @@ func setupSerena(ctx context.Context, serenaCfg config.SerenaConfig, catalog *to
 	})
 
 	reap := func() {
+		// Conn.Close has stopped admission and joined any dial before this runs.
 		mu.Lock()
 		child := current
 		current = nil
@@ -62,6 +64,7 @@ func setupSerena(ctx context.Context, serenaCfg config.SerenaConfig, catalog *to
 		if child != nil {
 			child.Close(context.Background())
 		}
+		reapers.Wait()
 	}
 
 	regCtx, cancel := context.WithTimeout(ctx, mcpRegisterTimeout)

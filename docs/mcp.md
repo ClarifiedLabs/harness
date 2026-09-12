@@ -67,6 +67,25 @@ compatible. Both the original and final names must match
 If distinct advertised names qualify to the same name, the first wins and later
 conflicting tools are skipped with a warning.
 
+### Owned-process cleanup
+
+Local MCP and Serena processes are owned by the Harness root, shared with its
+ordinary delegates, and shut down when that root exits—not when each delegate
+finishes. Connection closure is terminal at owner shutdown: late tool calls
+cannot reconnect. Reconnect cleanup for previous children is joined too.
+
+Cleanup first closes stdio, then escalates to TERM/KILL for the owned process
+group. The immediate child exiting does not leave its remaining group members
+running. A local service gets up to 15 seconds of EOF grace so a nested MCP
+proxy can finish its own concurrent downstream cleanup. The proxy allows its
+LSP shim children to shut down their separately grouped language servers before
+escalating. This can make exit take longer for an unresponsive service.
+
+The shared HTTP MCP daemon and its servers are **not** owned by a Harness client
+and intentionally survive that client's exit. SIGKILL/crashes cannot run cleanup;
+third-party descendants that detach into another group/session must be managed
+by their own server or external supervisor.
+
 ## Configuring Downstream Servers
 
 The proxy has its own config file, separate from harness:

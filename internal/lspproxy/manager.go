@@ -34,11 +34,16 @@ type Manager struct {
 	namespace string // tools are exposed as mcp__<namespace>__<tool>; empty = bare names
 	logger    *slog.Logger
 
-	mu        sync.Mutex
-	instances map[string]*serverInstance
-	docs      map[openDocKey]*docState
-	available []string
-	present   map[string]bool // configured server name -> command found on PATH
+	ctx        context.Context
+	cancel     context.CancelFunc
+	stopOnce   sync.Once
+	operations sync.WaitGroup
+	closed     bool
+	mu         sync.Mutex
+	instances  map[string]*serverInstance
+	docs       map[openDocKey]*docState
+	available  []string
+	present    map[string]bool // configured server name -> command found on PATH
 
 	// Test/production seams.
 	spawn     func() *exec.Cmd             // injected into instances
@@ -74,7 +79,10 @@ func NewManager(cfg Config, namespace string, logger *slog.Logger) *Manager {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{
+		ctx:       ctx,
+		cancel:    cancel,
 		cfg:       cfg,
 		namespace: namespace,
 		logger:    logger,
@@ -906,11 +914,20 @@ func (m *Manager) selectServer(absPath string) (ResolvedServer, string, bool) {
 
 // acquire returns a live client for (s, root), via the test seam if set.
 func (m *Manager) acquire(ctx context.Context, s ResolvedServer, root string) (*lspClient, error) {
+	ctx, finish, err := m.begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finish()
 	if m.acquireFn != nil {
 		return m.acquireFn(ctx, s, root)
 	}
 	key := instanceKey(s.Name, root)
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return nil, context.Canceled
+	}
 	inst := m.instances[key]
 	if inst == nil {
 		inst = newServerInstance(s, root, m.logger)
@@ -938,12 +955,20 @@ const prewarmScanMaxEntries = 20000
 // evidence are skipped. Launch failures are logged by the server instance. It
 // returns the sorted unique languages whose servers were successfully warmed.
 func (m *Manager) Prewarm(ctx context.Context) []string {
+	ctx, finish, err := m.begin(ctx)
+	if err != nil {
+		return nil
+	}
+	defer finish()
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil
 	}
 	warmed := map[string]bool{}
 	for _, s := range m.cfg.Servers {
+		if ctx.Err() != nil {
+			break
+		}
 		m.mu.Lock()
 		present := m.present[s.Name]
 		m.mu.Unlock()
@@ -1016,14 +1041,14 @@ func (m *Manager) prepareDoc(ft *fileTarget, uri string) (string, []string, erro
 	switch {
 	case st == nil:
 		ft.cl.MarkDocPending(uri)
-		if err := ft.cl.DidOpen(uri, ft.lang, 1, text); err != nil {
+		if err := ft.cl.DidOpenContext(m.ctx, uri, ft.lang, 1, text); err != nil {
 			return "", nil, err
 		}
 		m.docs[docKey] = &docState{version: 1, mtime: mtime}
 	case st.mtime != mtime:
 		version := st.version + 1
 		ft.cl.MarkDocPending(uri)
-		if err := ft.cl.DidChange(uri, version, text); err != nil {
+		if err := ft.cl.DidChangeContext(m.ctx, uri, version, text); err != nil {
 			return "", nil, err
 		}
 		st.version = version
@@ -1044,19 +1069,50 @@ func (m *Manager) snippetFunc(lr *lineReader) func(uri string, line int) string 
 	}
 }
 
-// Shutdown gracefully stops all launched language servers.
-func (m *Manager) Shutdown(ctx context.Context) {
+// begin admits work before shutdown and links its cancellation to this manager.
+// Adding under mu makes Shutdown's Wait a barrier, not a snapshot of workers.
+func (m *Manager) begin(ctx context.Context) (context.Context, func(), error) {
 	m.mu.Lock()
-	insts := make([]*serverInstance, 0, len(m.instances))
-	for _, inst := range m.instances {
-		insts = append(insts, inst)
+	defer m.mu.Unlock()
+	if m.closed || m.ctx.Err() != nil {
+		return nil, nil, context.Canceled
 	}
-	m.instances = make(map[string]*serverInstance)
-	m.docs = make(map[openDocKey]*docState)
-	m.mu.Unlock()
-	for _, inst := range insts {
-		inst.shutdown(ctx)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
 	}
+	m.operations.Add(1)
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(m.ctx, cancel)
+	return ctx, func() { stop(); cancel(); m.operations.Done() }, nil
+}
+
+// Shutdown permanently closes admission, cancels initialization/prewarm, and
+// concurrently stops all instances. A new manager is required to enable again.
+func (m *Manager) Shutdown(ctx context.Context) {
+	// Document sync may be holding mu while enqueueing to a blocked peer.
+	m.cancel()
+	m.stopOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+		defer cancel()
+		m.mu.Lock()
+		m.closed = true
+		insts := make([]*serverInstance, 0, len(m.instances))
+		for _, inst := range m.instances {
+			inst.cancel()
+			insts = append(insts, inst)
+		}
+		m.mu.Unlock()
+		var wg sync.WaitGroup
+		for _, inst := range insts {
+			wg.Go(func() { inst.shutdown(ctx) })
+		}
+		wg.Wait()
+		m.operations.Wait()
+		m.mu.Lock()
+		m.instances = make(map[string]*serverInstance)
+		m.docs = make(map[openDocKey]*docState)
+		m.mu.Unlock()
+	})
 }
 
 // instanceKey keys an instance by server name and workspace root.

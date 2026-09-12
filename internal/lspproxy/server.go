@@ -8,10 +8,10 @@ import (
 	"log/slog"
 	"os/exec"
 	"sync"
-	"syscall"
 	"time"
 
 	"harness/internal/mcp"
+	"harness/internal/procgroup"
 	"harness/internal/retry"
 )
 
@@ -26,10 +26,9 @@ const (
 	// allowed to revive it (one fresh attempt), so a user who installs the binary
 	// or fixes config mid-session recovers without restarting harness.
 	failedCooldown = 30 * time.Second
-	// shutdownStdinWait/shutdownTermWait bound the graceful child teardown before
-	// escalating to SIGTERM then SIGKILL.
-	shutdownStdinWait = 5 * time.Second
-	shutdownTermWait  = 2 * time.Second
+	// One shared graceful budget leaves time for an enclosing MCP owner to reap.
+	shutdownTimeout   = 5 * time.Second
+	shutdownStdinWait = time.Second
 )
 
 // serverInstance lazily launches and supervises one language-server child for a
@@ -45,10 +44,12 @@ type serverInstance struct {
 	spawn func() *exec.Cmd
 	clock func() time.Time
 
+	ctx      context.Context
+	cancel   context.CancelFunc
+	stopOnce sync.Once
 	mu       sync.Mutex
 	client   *lspClient
-	cmd      *exec.Cmd
-	done     chan struct{} // closed when the current cmd exits
+	process  *procgroup.Process
 	failures int
 	lastErr  error
 	nextTry  time.Time
@@ -61,7 +62,8 @@ func newServerInstance(cfg ResolvedServer, root string, logger *slog.Logger) *se
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &serverInstance{cfg: cfg, root: root, logger: logger, clock: time.Now}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &serverInstance{cfg: cfg, root: root, logger: logger, clock: time.Now, ctx: ctx, cancel: cancel}
 }
 
 // ensure returns a ready client, lazily launching one (and running the LSP
@@ -69,14 +71,31 @@ func newServerInstance(cfg ResolvedServer, root string, logger *slog.Logger) *se
 // maxRestarts it enters failedCooldown and fast-fails until the cooldown elapses,
 // at which point the next ensure makes a fresh attempt.
 func (s *serverInstance) ensure(ctx context.Context) (*lspClient, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(s.ctx, cancel)
+	defer stop()
+	defer cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.ctx.Err() != nil {
+		return nil, s.ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	if s.client != nil {
 		if s.alive() {
 			return s.client, nil
 		}
-		s.client = nil // the child died; fall through to relaunch
+		_ = s.client.Close()
+		s.client = nil
+	}
+	if s.process != nil {
+		// A dead connection need not mean a dead process. Retire ownership before
+		// replacing it, even when the subsequent launch fails.
+		s.process.Stop(ctx, 0)
+		s.process = nil
 	}
 
 	if now := s.now(); now.Before(s.nextTry) {
@@ -87,7 +106,7 @@ func (s *serverInstance) ensure(ctx context.Context) (*lspClient, error) {
 		s.failures = 0
 	}
 
-	cl, cmd, done, err := s.launch(ctx)
+	cl, process, err := s.launch(ctx)
 	if err != nil {
 		s.failures++
 		s.lastErr = err
@@ -97,8 +116,7 @@ func (s *serverInstance) ensure(ctx context.Context) (*lspClient, error) {
 		return nil, s.unavailable()
 	}
 	s.client = cl
-	s.cmd = cmd
-	s.done = done
+	s.process = process
 	s.failures = 0
 	s.lastErr = nil
 	s.nextTry = time.Time{}
@@ -128,41 +146,31 @@ func (s *serverInstance) backoff() time.Duration {
 
 // launch starts the child, wires its stdio to a new lspClient, and runs the LSP
 // handshake under initTimeout. On any failure nothing is left running.
-func (s *serverInstance) launch(ctx context.Context) (*lspClient, *exec.Cmd, chan struct{}, error) {
+func (s *serverInstance) launch(ctx context.Context) (*lspClient, *procgroup.Process, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
 	cmd := s.newCmd()
-	stdin, err := cmd.StdinPipe()
+	process, pipes, err := procgroup.StartPiped(cmd)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("stderr pipe: %w", err)
-	}
-	if err := cmd.Start(); err != nil {
-		return nil, nil, nil, fmt.Errorf("start %s: %w", s.cfg.Name, err)
+		return nil, nil, fmt.Errorf("start %s: %w", s.cfg.Name, err)
 	}
 
-	go drainStderr(stderr, s.logger, s.cfg.Name)
-	done := make(chan struct{})
 	go func() {
-		_ = cmd.Wait()
-		close(done)
+		defer pipes.Stderr.Close()
+		drainStderr(pipes.Stderr, s.logger, s.cfg.Name)
 	}()
 
-	conn := mcp.NewStdioConn(stdout, stdin)
+	conn := mcp.NewStdioConn(pipes.Stdout, pipes.Stdin)
 	cl := newClient(conn, s.root, s.logger)
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
 	if _, err := cl.Initialize(initCtx, s.cfg.InitOptions); err != nil {
 		_ = cl.Close()
-		s.reap(context.Background(), cmd, done)
-		return nil, nil, nil, fmt.Errorf("initialize %s: %w", s.cfg.Name, err)
+		process.Stop(ctx, 0)
+		return nil, nil, fmt.Errorf("initialize %s: %w", s.cfg.Name, err)
 	}
-	return cl, cmd, done, nil
+	return cl, process, nil
 }
 
 // newCmd builds the child command, using the injected spawn seam when set and
@@ -179,47 +187,33 @@ func (s *serverInstance) newCmd() *exec.Cmd {
 		cmd = exec.Command(s.cfg.Command[0], s.cfg.Command[1:]...) // nosemgrep: dangerous-exec-command
 		cmd.Env = ChildEnv(s.cfg.Env)
 	}
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setpgid = true
 	return cmd
 }
 
 // shutdown gracefully stops the current child: LSP shutdown+exit, then close the
 // connection, then escalate SIGTERM/SIGKILL on the process group if needed.
 func (s *serverInstance) shutdown(ctx context.Context) {
-	s.mu.Lock()
-	cl, cmd, done := s.client, s.cmd, s.done
-	s.client, s.cmd, s.done = nil, nil, nil
-	s.mu.Unlock()
-	if cl == nil {
-		return
-	}
-
-	shutCtx, cancel := context.WithTimeout(ctx, shutdownStdinWait)
-	_ = cl.Shutdown(shutCtx)
-	cancel()
-	_ = cl.Exit()
-	_ = cl.Close()
-	if cmd != nil && cmd.Process != nil && done != nil {
-		s.reap(ctx, cmd, done)
-	}
-}
-
-// reap waits for the child to exit, escalating to SIGTERM then SIGKILL on the
-// whole process group.
-func (s *serverInstance) reap(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
-	pid := cmd.Process.Pid
-	if waitExit(ctx, done, shutdownStdinWait) {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	if waitExit(ctx, done, shutdownTermWait) {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	waitExit(ctx, done, shutdownTermWait)
+	// Cancel initialize before taking the lock that ensure holds across launch.
+	s.cancel()
+	s.stopOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(ctx, shutdownTimeout)
+		defer cancel()
+		s.mu.Lock()
+		cl, process := s.client, s.process
+		s.client, s.process = nil, nil
+		s.mu.Unlock()
+		if cl != nil {
+			_ = cl.Shutdown(ctx)
+			_ = cl.Exit()
+			// Allow the queued exit notification to reach a cooperative server
+			// before closing its transport. This wait shares the shutdown budget.
+			if process != nil {
+				waitExit(ctx, process.Done(), shutdownStdinWait)
+			}
+			_ = cl.Close()
+		}
+		process.Stop(ctx, shutdownStdinWait)
+	})
 }
 
 // Starts returns the number of successful launches, for deterministic restart

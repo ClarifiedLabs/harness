@@ -399,7 +399,9 @@ func defaultTypeScriptServer() ResolvedServer {
 }
 
 func newTypeScriptTestManager(server ResolvedServer) *Manager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
+		ctx: ctx, cancel: cancel,
 		cfg:       Config{Servers: []ResolvedServer{server}},
 		logger:    slog.New(slog.DiscardHandler),
 		instances: make(map[string]*serverInstance),

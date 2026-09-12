@@ -30,6 +30,17 @@ operation semantically depends on another.
 This is independent of `mcp.enable` and `mcp.local`; a custom local stdio MCP
 service can run at the same time.
 
+Language servers belong to the Harness root and are shared by its ordinary
+in-process delegates. Finishing a delegate does not stop a server still available
+to the parent or siblings. Root exit and `/lsp disable` cancel/join prewarming and
+initialization, stop servers concurrently, and clean up surviving process-group
+members. Re-enabling starts a fresh manager; late calls cannot restart the retired
+one. A disconnected server is reaped before a replacement launches.
+
+SIGTERM/SIGHUP run orderly cleanup, including in `harness lsp serve`. External
+SIGKILL/crashes cannot run that cleanup, and third-party daemon processes that
+escape the server's process group remain the server's responsibility.
+
 ## Enabling LSP
 
 LSP is disabled by default. To enable it, set `lsp.enable` or

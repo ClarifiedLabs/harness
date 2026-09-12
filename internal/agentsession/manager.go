@@ -153,6 +153,9 @@ type Manager struct {
 	changed             chan struct{}
 	lifecycle           uint64
 	accepting           bool
+	constructing        sync.WaitGroup
+	constructors        map[*session]context.CancelFunc
+	cleanups            map[<-chan struct{}]struct{}
 	background          tools.BackgroundJobStarter
 	canceler            tools.BackgroundJobCanceler
 	now                 func() time.Time
@@ -185,6 +188,8 @@ func NewManager(opts Options) *Manager {
 		sessions:            make(map[string]*session),
 		changed:             make(chan struct{}),
 		accepting:           true,
+		constructors:        make(map[*session]context.CancelFunc),
+		cleanups:            make(map[<-chan struct{}]struct{}),
 		background:          opts.Background,
 		canceler:            opts.Canceler,
 		now:                 now,
@@ -419,7 +424,7 @@ func (m *Manager) runOperation(ctx context.Context, s *session, generation uint6
 
 	m.mu.Lock()
 	current := m.sessions[s.id]
-	if current != s || current.generation != generation || current.operation != operation || !activeState(current.state) {
+	if !m.accepting || current != s || current.generation != generation || current.operation != operation || !activeState(current.state) {
 		m.mu.Unlock()
 		return result, context.Canceled
 	}
@@ -430,13 +435,21 @@ func (m *Manager) runOperation(ctx context.Context, s *session, generation uint6
 	runtime := current.runtime
 	factory := current.factory
 	info := SessionInfo{ID: s.id, Kind: s.kind, Label: s.label, Generation: generation}
+	openCtx := ctx
+	if opening && factory != nil {
+		var cancel context.CancelFunc
+		openCtx, cancel = context.WithCancel(ctx)
+		defer cancel() // Preserve the factory context through its first operation.
+		m.constructors[s] = cancel
+		m.constructing.Add(1) // Admission and Add share CloseAll's lock.
+	}
 	m.mu.Unlock()
 
 	if opening {
 		if factory == nil {
 			return result, fmt.Errorf("agent session runtime factory is not initialized")
 		}
-		opened, err := factory(ctx, info)
+		opened, err := m.openRuntime(openCtx, s, generation, operation, factory, info)
 		if err != nil {
 			m.finishOperation(s, generation, operation, Outcome{}, err, progress)
 			return result, err
@@ -447,21 +460,6 @@ func (m *Manager) runOperation(ctx context.Context, s *session, generation uint6
 			return result, err
 		}
 		runtime = opened
-		m.mu.Lock()
-		current = m.sessions[s.id]
-		if current != s || current.generation != generation || current.operation != operation || !activeState(current.state) {
-			m.mu.Unlock()
-			m.closeRuntime(opened)
-			return result, context.Canceled
-		}
-		current.runtime = opened
-		current.factory = nil
-		current.capabilities = capabilitiesFor(opened, m.canceler != nil)
-		current.state = StateRunning
-		current.updated = m.now()
-		m.signalLocked()
-		m.mu.Unlock()
-		m.observeRuntime(s, generation, opened)
 	}
 
 	if runtime == nil {
@@ -474,6 +472,54 @@ func (m *Manager) runOperation(ctx context.Context, s *session, generation uint6
 	result = outcome.Result
 	m.finishOperation(s, generation, operation, outcome, err, progress)
 	return result, err
+}
+
+// openRuntime keeps construction registered until its runtime is either owned
+// by the session or rejected and closed. Shutdown cannot miss late arrivals.
+func (m *Manager) openRuntime(ctx context.Context, s *session, generation uint64, operation int, factory Factory, info SessionInfo) (Runtime, error) {
+	defer func() {
+		m.mu.Lock()
+		delete(m.constructors, s)
+		m.mu.Unlock()
+		m.constructing.Done()
+	}()
+	opened, err := factory(ctx, info)
+	if err != nil || opened == nil {
+		return opened, err
+	}
+	m.mu.Lock()
+	m.trackCleanupLocked(opened)
+	current := m.sessions[s.id]
+	if !m.accepting || current != s || current.generation != generation || current.operation != operation || !activeState(current.state) {
+		m.mu.Unlock()
+		m.closeRuntime(opened)
+		return nil, context.Canceled
+	}
+	current.runtime = opened
+	current.factory = nil
+	current.capabilities = capabilitiesFor(opened, m.canceler != nil)
+	current.state = StateRunning
+	current.updated = m.now()
+	m.signalLocked()
+	m.mu.Unlock()
+	m.observeRuntime(s, generation, opened)
+	return opened, nil
+}
+
+func (m *Manager) trackCleanupLocked(runtime Runtime) {
+	// Retain only unfinished joins, independently of prunable session history.
+	for done := range m.cleanups {
+		select {
+		case <-done:
+			delete(m.cleanups, done)
+		default:
+		}
+	}
+	if observable, ok := runtime.(CleanupObservable); ok {
+		if done := observable.CleanupDone(); done != nil {
+			m.cleanups[done] = struct{}{}
+		}
+	}
 }
 
 func (m *Manager) finishOperation(s *session, generation uint64, operation int, outcome Outcome, runErr error, progress *operationProgress) {
@@ -590,10 +636,8 @@ func (m *Manager) Interrupt(sessionID string) (string, error) {
 
 // Close transitions the session through closing to closed (or abandoned on
 // error). A caller that observes an in-progress close waits only for the active
-// operation to quiesce, not for the first caller's runtime teardown to finish;
-// teardown is bounded by the manager's close timeout. Runtimes are expected to
-// own stdio-style child processes, so the OS reaps them even when the process
-// exits mid-teardown.
+// operation to quiesce. CloseAll additionally joins owned resource cleanup,
+// including teardown continuing after a Close timeout or unexpected death.
 func (m *Manager) Close(ctx context.Context, sessionID string) error {
 	if m == nil {
 		return nil
@@ -679,9 +723,7 @@ func (m *Manager) closeRuntime(runtime Runtime) {
 	if runtime == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), m.closeTimeout)
-	defer cancel()
-	_ = runtime.Close(ctx)
+	_ = m.closeRuntimeContext(context.Background(), runtime)
 }
 
 func (m *Manager) closeRuntimeContext(parent context.Context, runtime Runtime) error {
@@ -690,7 +732,14 @@ func (m *Manager) closeRuntimeContext(parent context.Context, runtime Runtime) e
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), m.closeTimeout)
 	defer cancel()
-	return runtime.Close(ctx)
+	finished := make(chan error, 1)
+	go func() { finished <- runtime.Close(ctx) }()
+	select {
+	case err := <-finished:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (m *Manager) observeRuntime(s *session, generation uint64, runtime Runtime) {
@@ -759,13 +808,18 @@ func (m *Manager) Changed() <-chan struct{} {
 
 // CloseAll stops admission and initiates closure of every runtime before
 // waiting. Independent closes run concurrently so one wedged runtime cannot
-// prevent teardown from reaching later subprocesses.
+// prevent teardown from reaching later subprocesses. After canceling and joining
+// constructors, it joins CleanupObservable runtimes under their own finite
+// bounds, even if ctx expires or a previous Close already detached the runtime.
 func (m *Manager) CloseAll(ctx context.Context) error {
 	if m == nil {
 		return nil
 	}
 	m.mu.Lock()
 	m.accepting = false
+	for _, cancel := range m.constructors {
+		cancel()
+	}
 	ids := make([]string, 0, m.maxSessions)
 	for _, id := range m.order {
 		if current := m.sessions[id]; current != nil && needsClose(current) {
@@ -784,6 +838,16 @@ func (m *Manager) CloseAll(ctx context.Context) error {
 		}(i, id)
 	}
 	wg.Wait()
+	m.constructing.Wait()
+	m.mu.Lock()
+	cleanups := make([]<-chan struct{}, 0, len(m.cleanups))
+	for done := range m.cleanups {
+		cleanups = append(cleanups, done)
+	}
+	m.mu.Unlock()
+	for _, done := range cleanups {
+		<-done
+	}
 	var errs []error
 	for i, err := range closeErrs {
 		if err != nil {

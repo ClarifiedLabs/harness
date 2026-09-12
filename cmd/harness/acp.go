@@ -210,6 +210,9 @@ func (f *acpRootFactory) New(ctx context.Context, request acpagent.SessionConfig
 }
 
 func newACPRootSession(ctx context.Context, env environment, request acpagent.SessionConfig, logger *slog.Logger, result config.Result, telemetry *rootTelemetry) (_ *acpRootSession, retErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	now := env.now
 	if now == nil {
 		now = time.Now
@@ -264,6 +267,64 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		return nil, err
 	}
 
+	// These reads need not honor ctx (an instruction file may even be a FIFO).
+	// Keep them before any MCP/LSP ownership so a stuck read cannot strand a
+	// child when the factory's bounded construction wait expires.
+	for name, value := range agents {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		value.Prompt, err = resolveAtFile(value.Prompt)
+		if err != nil {
+			return nil, fmt.Errorf("agent %q prompt: %w", name, err)
+		}
+		agents[name] = value
+	}
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	configuredSystem, err := resolveAtFile(cfg.SystemPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("system prompt: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	userPath := userAgentsMDPath(env.lookup)
+	userAgents, err := loadAgentsMDFile(userPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	projectPath := projectAgentsMDPath(request.CWD)
+	projectAgents, err := loadAgentsMDFile(projectPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var skillWarnings skills.Warnings
+	skillDirs := skills.AncestorSkillDirs(request.CWD, homeDir(env.lookup))
+	discoveredSkills := skills.Discover(skillDirs, &skillWarnings)
+	for _, warning := range skillWarnings {
+		logger.Warn("skills: " + warning)
+	}
+	skillCatalog, skillReport := skills.BuildCatalogBudgeted(discoveredSkills, skills.CatalogBudget(llm.EffectiveContextWindow(cfg.ContextWindow, registry.ContextWindow(selection.RegistryModel))))
+	// Build the filesystem/git-dependent prefix before acquiring child services.
+	// Later root/delegate composition must only append in-memory sections.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	baseSystem := sysprompt.Build(sysprompt.Options{StaticPrompt: configuredSystem, NoEnv: cfg.NoEnv, UserAgentsMD: userAgents, ProjectAgentsMD: projectAgents, SkillsCatalog: skillCatalog, Env: sysprompt.EnvOptions{Dir: request.CWD}})
+	backend := searchBackend()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	created := now()
 	recordingID, err := tracing.NewSpanID()
 	if err != nil {
@@ -283,21 +344,20 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	agentSessions := agentsession.NewManager(agentsession.Options{Background: jobs, Canceler: jobs, Now: now})
 	toolCatalog := newRootToolCatalog(cfg, jobs)
 	var cleanups []func(context.Context)
-	cleanupAll := func(cleanupCtx context.Context) {
-		for i := len(cleanups) - 1; i >= 0; i-- {
-			cleanups[i](cleanupCtx)
-		}
-	}
 	defer func() {
 		if retErr != nil {
 			closeCtx, cancel := context.WithTimeout(context.Background(), acpRootCloseTimeout)
 			defer cancel()
+			join := startACPCleanups(cleanups)
 			_ = agentSessions.CloseAll(closeCtx)
 			jobs.ShutdownAndWait(time.Second)
-			cleanupAll(closeCtx)
+			join()
 		}
 	}()
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var summaries []mcptools.Summary
 	if cfg.MCP.Enable {
 		_, summary, cleanup, connected := setupMCP(ctx, cfg.MCP, toolCatalog, logger, tracer)
@@ -306,6 +366,9 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 			summaries = append(summaries, summary)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if localMCPEnabled(cfg.MCP.Local, true) {
 		_, summary, cleanup, connected := setupLocalMCP(ctx, cfg.MCP.Local, cfg.MCP.Local.EnableSet, toolCatalog, logger)
 		cleanups = append(cleanups, func(context.Context) { cleanup() })
@@ -313,13 +376,21 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 			summaries = append(summaries, summary)
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	clientSummary, clientCleanups, err := setupACPClientMCP(ctx, request.CWD, request.MCPServers, toolCatalog, logger)
+	// Partial setup returns ownership too: rollback must start these and the
+	// previously acquired local services together, not consume serial grace.
+	cleanups = append(cleanups, clientCleanups...)
 	if err != nil {
 		return nil, err
 	}
-	cleanups = append(cleanups, clientCleanups...)
 	summaries = append(summaries, clientSummary)
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	var lspRuntime *lspRuntime
 	var lspSummary mcptools.Summary
 	var lspHint string
@@ -328,16 +399,19 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		if err != nil {
 			return nil, fmt.Errorf("lsp: %w", err)
 		}
-		cleanups = append(cleanups, func(context.Context) { lspRuntime.Shutdown() })
+		cleanups = append(cleanups, func(ctx context.Context) { lspRuntime.shutdown(ctx) })
 		lspSummary, lspHint = lspRuntime.ActiveSummary(), lspRuntime.SystemHint()
 		installMutationDiagnostics(toolCatalog, lspRuntime)
 	}
 	var runtimeHints []string
-	if ripgrepAvailable() {
+	if backend == "rg" {
 		runtimeHints = append(runtimeHints, rgSystemHint)
 	}
 	if lspHint != "" {
 		runtimeHints = append(runtimeHints, lspHint)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	if cfg.LSP.Serena.Enable {
 		summary, cleanup, connected := setupSerena(ctx, cfg.LSP.Serena, toolCatalog, logger)
@@ -349,44 +423,18 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 			}
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	allMCP := mergeMCPSummaries(summaries...)
 	augmentAgentsWithMCP(agents, allMCP.Names, allMCP.ReadOnlyNames)
 	if lspRuntime != nil {
 		bases := mcpExposingAgentBases(agents)
 		applyLSPExposure(agents, lspSummary, true, captureLSPExplicitTools(agents, bases))
 	}
-	for name, value := range agents {
-		value.Prompt, err = resolveAtFile(value.Prompt)
-		if err != nil {
-			return nil, fmt.Errorf("agent %q prompt: %w", name, err)
-		}
-		agents[name] = value
-	}
 	definition = agents[agentName]
-
-	configuredSystem, err := resolveAtFile(cfg.SystemPrompt)
-	if err != nil {
-		return nil, fmt.Errorf("system prompt: %w", err)
-	}
-	userPath := userAgentsMDPath(env.lookup)
-	userAgents, err := loadAgentsMDFile(userPath)
-	if err != nil {
-		return nil, err
-	}
-	projectPath := projectAgentsMDPath(request.CWD)
-	projectAgents, err := loadAgentsMDFile(projectPath)
-	if err != nil {
-		return nil, err
-	}
-	var skillWarnings skills.Warnings
-	skillDirs := skills.AncestorSkillDirs(request.CWD, homeDir(env.lookup))
-	discoveredSkills := skills.Discover(skillDirs, &skillWarnings)
-	for _, warning := range skillWarnings {
-		logger.Warn("skills: " + warning)
-	}
-	skillCatalog, skillReport := skills.BuildCatalogBudgeted(discoveredSkills, skills.CatalogBudget(llm.EffectiveContextWindow(cfg.ContextWindow, registry.ContextWindow(selection.RegistryModel))))
 	buildSystem := func(agentPrompt string) string {
-		return acp.SanitizeModelFacingText(sysprompt.Build(sysprompt.Options{StaticPrompt: configuredSystem, NoEnv: cfg.NoEnv, UserAgentsMD: userAgents, ProjectAgentsMD: projectAgents, SkillsCatalog: skillCatalog, RuntimeHints: runtimeHints, AgentPrompt: agentPrompt, Env: sysprompt.EnvOptions{Dir: request.CWD}}))
+		return acp.SanitizeModelFacingText(sysprompt.Build(sysprompt.Options{StaticPrompt: baseSystem, NoEnv: true, RuntimeHints: runtimeHints, AgentPrompt: agentPrompt}))
 	}
 
 	var otelSink *otel.Sink
@@ -399,7 +447,7 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	}
 	build := buildinfo.Current()
 	buildMeta := session.BuildMetadata{Version: build.Version, Commit: build.Commit, Date: build.Date, Modified: build.Modified}
-	runtimeProfile := session.RuntimeProfile{RetentionPolicy: cfg.RetentionPolicy, ContextWindow: cfg.ContextWindow, ToolResultMaxBytes: cfg.ToolResultMaxBytes, ToolResultMaxLines: cfg.ToolResultMaxLines, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, CompactTimeoutSeconds: cfg.CompactTimeoutSeconds, ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), DelegateMaxTurns: cfg.DelegateMaxTurns, DelegateMaxActive: cfg.DelegateMaxActive, SearchBackend: searchBackend(), StagnationNudge: cfg.StagnationNudge}
+	runtimeProfile := session.RuntimeProfile{RetentionPolicy: cfg.RetentionPolicy, ContextWindow: cfg.ContextWindow, ToolResultMaxBytes: cfg.ToolResultMaxBytes, ToolResultMaxLines: cfg.ToolResultMaxLines, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, CompactTimeoutSeconds: cfg.CompactTimeoutSeconds, ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), DelegateMaxTurns: cfg.DelegateMaxTurns, DelegateMaxActive: cfg.DelegateMaxActive, SearchBackend: backend, StagnationNudge: cfg.StagnationNudge}
 	state := delegate.NewState(delegate.Runtime{Execution: scope, ProviderName: cfg.Provider, Model: cfg.Model, ReasoningReplayDomain: selection.ReasoningReplayDomain, ContextWindow: cfg.ContextWindow, MaxOutputTokens: cfg.MaxOutputTokens, Registry: registry, Reasoning: reasoning, ServerTools: webSearchServerToolsForModel(cfg.Provider, registry, selection.RegistryModel, cfg.WebSearch), ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), Agent: agentName, SessionPath: sessionPath, CWD: request.CWD, MaxPromptTokens: cfg.MaxPromptTokens, MaxPromptCostUSD: cfg.MaxPromptCostUSD, Build: buildMeta, RuntimeProfile: runtimeProfile})
 	resolveDelegate := func(runtime delegate.Runtime, name string) (delegate.Launch, error) {
 		launch, err := resolveDelegateLaunch(runtime, name, agents, toolCatalog, nil, catalog, proxyClient, buildSystem, cfg)
@@ -445,6 +493,9 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		return session.SaveCompaction(sessionPath, session.Compaction{Time: now(), Messages: archive.Messages, Summary: archive.Summary, SummarySource: archive.SummarySource, FallbackReason: archive.FallbackReason, Usage: archive.Usage, Focus: archive.Focus, ReadFiles: archive.ReadFiles, ReadFilesOmitted: archive.ReadFilesOmitted, ModifiedFiles: archive.ModifiedFiles})
 	})
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return &acpRootSession{otel: otelSink, agent: ag, cfg: cfg, registry: registry, registryModel: selection.RegistryModel, agentName: agentName, system: systemPrompt, path: sessionPath, cwd: request.CWD, created: created, now: now, build: buildMeta, runtime: runtimeProfile, todos: todos, plans: plans, jobs: jobs, agentSessions: agentSessions, lock: lock, cleanups: cleanups}, nil
 }
 
@@ -458,6 +509,8 @@ func acpDelegateLaunch(launch delegate.Launch) delegate.Launch {
 	return launch
 }
 
+// setupACPClientMCP returns all acquired cleanup functions, including on error.
+// Its root owner starts rollback concurrently with previously acquired services.
 func setupACPClientMCP(ctx context.Context, cwd string, servers []acp.MCPServer, catalog *tools.Registry, logger *slog.Logger) (mcptools.Summary, []func(context.Context), error) {
 	if err := validateACPClientMCP(servers); err != nil {
 		return mcptools.Summary{}, nil, err
@@ -465,14 +518,12 @@ func setupACPClientMCP(ctx context.Context, cwd string, servers []acp.MCPServer,
 	var summaries []mcptools.Summary
 	var cleanups []func(context.Context)
 	fail := func(err error) (mcptools.Summary, []func(context.Context), error) {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), acpRootCloseTimeout)
-		defer cancel()
-		for i := len(cleanups) - 1; i >= 0; i-- {
-			cleanups[i](cleanupCtx)
-		}
-		return mcptools.Summary{}, nil, err
+		return mcptools.Summary{}, cleanups, err
 	}
 	for _, spec := range servers {
+		if err := ctx.Err(); err != nil {
+			return fail(err)
+		}
 		name := spec.Name
 		env, err := acpMCPEnvironment(os.Environ(), spec.Env)
 		if err != nil {
@@ -495,7 +546,14 @@ func setupACPClientMCP(ctx context.Context, cwd string, servers []acp.MCPServer,
 			dialed = true
 			return child.Conn(), nil
 		}})
-		cleanup := func(closeCtx context.Context) { _ = conn.Close(); child.Close(closeCtx) }
+		cleanup := func(context.Context) {
+			// A root/manager deadline may already be depleted. This owner needs
+			// its own EOF and TERM grace to let nested owners reap their groups.
+			closeCtx, cancel := context.WithTimeout(context.Background(), acpOwnedCleanupTimeout)
+			defer cancel()
+			_ = conn.Close()
+			child.Close(closeCtx)
+		}
 		cleanups = append(cleanups, cleanup)
 		summary, err := mcptools.RegisterWithOptions(ctx, catalog, conn, mcptools.RegisterOptions{TrustReadOnlyHint: true, Namespace: name})
 		if err != nil {
@@ -580,6 +638,10 @@ func acpMCPEnvironment(parent []string, entries []acp.EnvVariable) ([]string, er
 type acpRootSession struct {
 	mu sync.Mutex
 
+	cleanupOnce sync.Once
+	cleanupDone chan struct{}
+	cleanupErr  error // published by closing cleanupDone
+
 	agent         *agent.Agent
 	otel          *otel.Sink
 	cfg           config.Config
@@ -640,6 +702,9 @@ func (r *acpRootSession) Prompt(ctx context.Context, text string, updates acpage
 }
 
 func (r *acpRootSession) Close(ctx context.Context) error {
+	// Owned cleanup must not wait behind a prompt holding mu. The factory
+	// joins this separately from arbitrary prompt/Close/telemetry settlement.
+	cleanupDone := r.startOwnedCleanup(ctx)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
@@ -647,15 +712,12 @@ func (r *acpRootSession) Close(ctx context.Context) error {
 	}
 	r.closed = true
 	var errs []error
-	if err := r.agentSessions.CloseAll(ctx); err != nil {
-		errs = append(errs, err)
+	<-cleanupDone
+	if r.cleanupErr != nil {
+		errs = append(errs, r.cleanupErr)
 	}
-	r.jobs.ShutdownAndWait(time.Second)
 	if r.otel != nil {
 		r.otel.RecordSession(r.usage.CostUSD, llm.PromptInputTokens(r.usage.Usage)+r.usage.OutputTokens+r.usage.ReasoningTokens)
-	}
-	for i := len(r.cleanups) - 1; i >= 0; i-- {
-		r.cleanups[i](ctx)
 	}
 	if err := r.save(nil); err != nil {
 		errs = append(errs, err)

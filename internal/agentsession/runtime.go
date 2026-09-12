@@ -44,13 +44,26 @@ type Outcome struct {
 
 // Runtime is one long-lived backend conversation. Prompt is finite; Close owns
 // persistent resource cleanup and must not rely on a prompt context remaining
-// alive.
+// alive. Close must honor its context; the manager bounds non-cooperative
+// implementations but cannot reclaim goroutines blocked inside their Close.
 type Runtime interface {
 	Prompt(context.Context, Prompt, EventSink) (Outcome, error)
 	Close(context.Context) error
 }
 
-// Factory opens a runtime inside the first operation's background job.
+// CleanupObservable is implemented by runtimes whose Close may return before
+// owned resource cleanup finishes. CleanupDone must be stable and close under
+// the runtime's own finite teardown bounds after Close or unexpected death.
+// CloseAll joins it even when its caller's context is canceled; ordinary Close
+// remains bounded by the caller/manager timeout.
+type CleanupObservable interface {
+	CleanupDone() <-chan struct{}
+}
+
+// Factory opens a runtime inside the first operation's background job. It must
+// honor cancellation under finite bounds and release any resources before
+// returning an error. CloseAll cancels and joins in-flight factories before
+// joining runtime cleanup.
 type Factory func(context.Context, SessionInfo) (Runtime, error)
 
 // Steerable is implemented by runtimes that accept live input during a prompt.

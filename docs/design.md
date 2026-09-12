@@ -136,6 +136,7 @@ cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with gene
 internal/mcp             tools-only MCP slice: schema, client, server, stdio + streamable-HTTP transports
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
+internal/procgroup       protocol-neutral owned process-group lifecycle: non-reaping exit observation, bounded TERM/KILL escalation, and final Wait (shared by LSP, MCP children, and proxy supervisors)
 internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
 internal/otel            stdlib-only cumulative OTLP/HTTP JSON exporter and execution.Observer sink; exclusive physical billing, work/context diagnostics, root-inclusive session distributions, bounded cardinality/payloads, retry/partial-response handling, and exporter self-health (see telemetry.md)
 internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
@@ -2037,14 +2038,18 @@ context.
 
 ### 8.4 Interrupts
 
-A single SIGINT handler plus a per-prompt `context.CancelFunc`:
+One signal receiver plus a per-prompt `context.CancelFunc`:
+
+- **SIGTERM/SIGHUP** → cancel active work and request process exit immediately,
+  running owned-resource cleanup rather than treating the signal as first ^C.
+  Startup receiver handoff is joined so a retired receiver cannot steal a signal.
 
 - **^C during a prompt** → cancel the prompt context (aborts the HTTP stream; kills
   `shell` process groups). Apply the cancel repair rule (§4): keep streamed
   partial text, strip un-executed tool calls. Print `[cancelled]`, return to prompt.
 - **Esc-Esc during a REPL prompt** → same prompt cancellation as the first ^C, without
   the second-^C exit behavior.
-- **Second ^C within ~1 s, or ^C at the idle prompt** → save session, print the
+- **Second ^C while the same prompt is active, or ^C at the idle prompt** → save session, print the
   session token summary, exit 130.
 - **^C during startup or helper-command network work** → cancel the in-flight
   request and exit 130. `session replay --follow` uses its own context on the
@@ -2784,6 +2789,18 @@ opaque remote session, or its remote transcript, so an `as_…` session cannot b
 recovered after process exit or `/clear`. Interactive delegates are the
 exception only at the child layer: each fresh child has the canonical durable
 delegate transcript and `continued_from` lineage described above; the reusable wrapper is still process-local.
+
+`agentsession.Manager.CloseAll` stops construction admission, cancels/joins
+in-flight factories, and joins `CleanupObservable.CleanupDone` independently of
+session history or a prior `Close` timeout. Outbound ACP runtimes expose this
+separate resource-completion channel: peer failure is not process cleanup.
+Their process-reap budget defaults to 20 seconds (maximum 30), covering the
+local child's 15-second EOF grace plus escalation. Caller cancellation may
+return from an individual `Close`, but process exit joins the bounded cleanup.
+The ACP host also joins its production roots' resource cleanup independently of
+protocol-close and telemetry deadlines. Independent owners and partial-startup
+rollback run concurrently with fresh grace budgets. Potentially blocking
+instruction, prompt, skill, and environment reads precede child acquisition.
 
 Outbound `acpclient` speaks exactly ACP v1: `initialize`, `session/new`, serialized
 text `session/prompt`, `session/update`, `session/cancel`, and advertised
@@ -3949,6 +3966,22 @@ not generic MCP: `lsp.enable=true` registers short `lsp_*` tools directly
 through `internal/lsptools` (§9.16a) while `internal/lspproxy` owns the
 language-server supervisors. This is distinct from the secrets-isolated remote
 `harness-mcp-proxy`, because a language server needs local filesystem access.
+
+Each LSP manager is one permanent lifecycle generation. Shutdown closes
+admission, cancels initialization and prewarm, joins admitted work, and stops
+instances concurrently under a shared graceful budget. The CLI keeps a stable
+tool-provider wrapper but replaces the manager on re-enable; stale calls cannot
+restart an old generation. Delegates share the parent's tool instances and do
+not own independent language servers. Reconnect retires a disconnected process
+before replacing it, even when the connection died but the process did not.
+
+`internal/procgroup` pins group identity using `waitid(WNOWAIT)` until all group
+signals finish, then calls `cmd.Wait`; numeric PGIDs are never signaled after
+reaping. Surviving group members are killed when their leader exits. This is
+owned-process cleanup, not a recursive kill of arbitrary processes: nested
+Harness owners receive enough graceful time to stop their own separate groups.
+External SIGKILL/crashes and third-party daemons escaping their group are not
+covered by an orderly-shutdown guarantee.
 
 - Tool annotations drive scheduling and agent exposure: read-only LSP tools
   join the read-only gate, while `lsp_code_action`, `lsp_format_document`, and

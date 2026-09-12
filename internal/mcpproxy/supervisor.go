@@ -8,18 +8,17 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"reflect"
 	"slices"
 	"sync"
-	"syscall"
 	"time"
 
 	"harness/internal/auth"
 	"harness/internal/buildinfo"
 	"harness/internal/logging"
 	"harness/internal/mcp"
+	"harness/internal/procgroup"
 	"harness/internal/retry"
 )
 
@@ -31,9 +30,8 @@ const (
 	maxRestarts = 5
 	// shutdownStdinWait is how long Shutdown waits after closing stdin before
 	// escalating to SIGTERM.
-	shutdownStdinWait = 5 * time.Second
-	// shutdownTermWait is how long Shutdown waits after SIGTERM before SIGKILL.
-	shutdownTermWait = 2 * time.Second
+	// Leave room for a nested LSP shim's 5s graceful budget and final reap.
+	shutdownStdinWait = 8 * time.Second
 	// childOutputDrainWait bounds how long a crashed stdio child may keep stdout
 	// open after its process exits. Normally EOF is immediate; the bound prevents
 	// an inherited descriptor in a stray grandchild from blocking restarts.
@@ -95,17 +93,17 @@ type Supervisor struct {
 	// the raw stdio connection.
 	wrapConn func(io.ReadWriteCloser) io.ReadWriteCloser
 
-	mu     sync.Mutex
-	state  State
-	tools  []mcp.Tool
-	client *mcp.Client
-	cmd    *exec.Cmd          // stdio only
-	http   *mcp.HTTPTransport // http only; owned with client
-	auth   *auth.Source       // http only, optional dynamic request headers
+	mu      sync.Mutex
+	state   State
+	tools   []mcp.Tool
+	client  *mcp.Client
+	process *procgroup.Process // stdio only
+	http    *mcp.HTTPTransport // http only; owned with client
+	auth    *auth.Source       // http only, optional dynamic request headers
 
-	// childDone is closed after the live stdio child's cmd.Wait returns and
-	// s.cmd is cleared. Shutdown selects on it instead of polling.
-	childDone chan struct{}
+	closing     bool
+	shutdownCtx context.Context // set by Shutdown before cancelling the run loop
+	ctx         context.Context // whole supervisor lifetime
 
 	// starts counts successful initializes (initial + each restart). Exposed via
 	// Starts for tests to await a restart deterministically.
@@ -137,7 +135,7 @@ func NewSupervisor(rs ResolvedServer, logger *slog.Logger) *Supervisor {
 // lifetime — cancelling it stops the run loop.
 func (s *Supervisor) Start(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
-	s.stop = cancel
+	s.ctx, s.stop = runCtx, cancel
 	if s.sleep == nil {
 		s.sleep = sleepCtx
 	}
@@ -163,7 +161,7 @@ func (s *Supervisor) runStdio(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		cmd, client, conn, done, waitErr, err := s.startChild()
+		process, client, conn, err := s.startChild()
 		if err != nil {
 			if !s.afterFailedStart(ctx, &attempt, "spawn", err) {
 				return
@@ -171,44 +169,37 @@ func (s *Supervisor) runStdio(ctx context.Context) {
 			continue
 		}
 
-		// Wire the client and run the handshake under a timeout.
-		fatal, initErr := s.initChild(ctx, cmd, client)
-		if fatal {
-			// Version error: terminal, do not retry.
-			s.cleanupChild(ctx, client, conn, cmd, done)
-			return
-		}
+		fatal, initErr := s.initChild(ctx, client)
 		if initErr != nil {
-			s.cleanupChild(ctx, client, conn, cmd, done)
-			if ctx.Err() != nil {
-				return
-			}
-			if !s.afterFailedStart(ctx, &attempt, "initialize", initErr) {
+			s.cleanupChild(client, conn, process)
+			if fatal || ctx.Err() != nil || !s.afterFailedStart(ctx, &attempt, "initialize", initErr) {
 				return
 			}
 			continue
 		}
-
-		// Successful (re)start: reset the restart counter.
 		attempt = 0
 
-		// Block until the child dies or the supervisor is stopped.
-		<-done
-		childErr := <-waitErr
-		if ctx.Err() == nil {
-			// Stop routing new calls to this client while its reader consumes any
-			// response bytes the child wrote immediately before exiting.
-			s.setState(StateRestarting)
+		// Cancellation must wake the run loop even when the process ignores EOF.
+		// This loop is the sole cleanup owner; Shutdown never snapshots a child
+		// that could still be replaced by an in-flight start.
+		select {
+		case <-ctx.Done():
+		case <-process.Done():
+			if ctx.Err() == nil {
+				s.setState(StateRestarting)
+			}
+			// Preserve response bytes written immediately before a process exit.
+			if !waitForDone(ctx, client.Done(), childOutputDrainWait) && ctx.Err() == nil {
+				s.logger.Warn("timed out draining downstream stdout after exit", logging.Category(categoryServer))
+			}
+		case <-client.Done():
+			// A lost protocol connection is not proof that its process exited.
 		}
-		if !waitForDone(ctx, client.Done(), childOutputDrainWait) && ctx.Err() == nil {
-			s.logger.Warn("timed out draining downstream stdout after exit", logging.Category(categoryServer))
-		}
-		client.Close()
-
+		s.cleanupChild(client, conn, process)
 		if ctx.Err() != nil {
 			return
 		}
-		// Crash: restart with backoff.
+		childErr := process.Err()
 		s.logger.Warn("downstream server exited; restarting", logging.Category(categoryServer), "err", childErr)
 		if !s.afterFailedStart(ctx, &attempt, "restart", childErr) {
 			return
@@ -220,39 +211,21 @@ func (s *Supervisor) runStdio(ctx context.Context) {
 // error nothing is left running. It takes no ctx: the child's lifetime is owned
 // by the supervisor (newCmd uses exec.Command, not CommandContext), so no
 // request ctx may govern it.
-func (s *Supervisor) startChild() (*exec.Cmd, *mcp.Client, io.ReadWriteCloser, <-chan struct{}, <-chan error, error) {
+func (s *Supervisor) startChild() (*procgroup.Process, *mcp.Client, io.ReadWriteCloser, error) {
 	cmd := s.newCmd()
-	stdin, err := cmd.StdinPipe()
+	process, pipes, err := procgroup.StartPiped(cmd)
 	if err != nil {
-		return nil, nil, nil, nil, nil, fmt.Errorf("stdin pipe: %w", err)
+		return nil, nil, nil, fmt.Errorf("start: %w", err)
 	}
-	stdout, stdoutW, err := os.Pipe()
-	if err != nil {
-		_ = stdin.Close()
-		return nil, nil, nil, nil, nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	cmd.Stdout = stdoutW
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stdoutW.Close()
-		return nil, nil, nil, nil, nil, fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		_ = stdoutW.Close()
-		return nil, nil, nil, nil, nil, fmt.Errorf("start: %w", err)
-	}
-	_ = stdoutW.Close()
 
 	// Drain stderr line-by-line into the proxy log. stderr is logging, not a
 	// failure signal (per spec).
-	go s.drainStderr(stderr)
+	go func() {
+		defer pipes.Stderr.Close()
+		s.drainStderr(pipes.Stderr)
+	}()
 
-	conn := mcp.NewStdioConn(stdout, stdin)
+	conn := mcp.NewStdioConn(pipes.Stdout, pipes.Stdin)
 	if s.wrapConn != nil {
 		conn = s.wrapConn(conn)
 	}
@@ -261,22 +234,11 @@ func (s *Supervisor) startChild() (*exec.Cmd, *mcp.Client, io.ReadWriteCloser, <
 		OnToolsChanged: s.handleDownstreamListChanged,
 		Logger:         s.logger,
 	})
-	done := make(chan struct{})
-	waitErr := make(chan error, 1)
-
 	s.mu.Lock()
-	s.cmd = cmd
+	s.process = process
 	s.client = client
-	s.childDone = done
 	s.mu.Unlock()
-
-	go func() {
-		waitErr <- cmd.Wait()
-		s.clearPublishedChild(cmd, client, done)
-		close(done)
-	}()
-
-	return cmd, client, conn, done, waitErr, nil
+	return process, client, conn, nil
 }
 
 // newCmd builds the child *exec.Cmd, using the injected spawn func when set
@@ -293,17 +255,13 @@ func (s *Supervisor) newCmd() *exec.Cmd {
 		cmd = exec.Command(s.cfg.Command, s.cfg.Args...) // nosemgrep: dangerous-exec-command
 		cmd.Env = ChildEnv(s.cfg.Env)
 	}
-	if cmd.SysProcAttr == nil {
-		cmd.SysProcAttr = &syscall.SysProcAttr{}
-	}
-	cmd.SysProcAttr.Setpgid = true
 	return cmd
 }
 
 // initChild runs initialize + tools/list under a timeout and records ready
 // state. The first return is true only for a terminal version error (caller must
 // not retry); the second is a retryable error.
-func (s *Supervisor) initChild(ctx context.Context, cmd *exec.Cmd, client *mcp.Client) (fatal bool, err error) {
+func (s *Supervisor) initChild(ctx context.Context, client *mcp.Client) (fatal bool, err error) {
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
 
@@ -336,25 +294,20 @@ func (s *Supervisor) initChild(ctx context.Context, cmd *exec.Cmd, client *mcp.C
 	return false, nil
 }
 
-func (s *Supervisor) cleanupChild(ctx context.Context, client *mcp.Client, conn io.Closer, cmd *exec.Cmd, done <-chan struct{}) {
+func (s *Supervisor) cleanupChild(client *mcp.Client, conn io.Closer, process *procgroup.Process) {
+	s.mu.Lock()
+	ctx := s.shutdownCtx
+	s.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(ctx, shutdownWait)
+	defer cancel()
 	client.Close()
 	_ = conn.Close()
-	if cmd != nil && cmd.Process != nil && done != nil {
-		s.reapChild(ctx, cmd, done)
-	}
-}
-
-func (s *Supervisor) clearPublishedChild(cmd *exec.Cmd, client *mcp.Client, done chan struct{}) {
+	process.Stop(ctx, shutdownStdinWait)
 	s.mu.Lock()
-	if s.cmd == cmd {
-		s.cmd = nil
-	}
-	if s.client == client {
-		s.client = nil
-	}
-	if s.childDone == done {
-		s.childDone = nil
-	}
+	s.process, s.client = nil, nil
 	s.mu.Unlock()
 }
 
@@ -435,6 +388,12 @@ func (s *Supervisor) runHTTP(ctx context.Context) {
 // connectHTTP builds a fresh transport/client pair, initializes, and caches
 // tools. It is reused for the initial connect and for session-expiry recovery.
 func (s *Supervisor) connectHTTP(ctx context.Context) error {
+	s.mu.Lock()
+	closing := s.closing || (s.ctx != nil && s.ctx.Err() != nil)
+	s.mu.Unlock()
+	if closing {
+		return context.Canceled
+	}
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
 	headerSource, err := s.authHeaderSource()
@@ -476,6 +435,10 @@ func (s *Supervisor) connectHTTP(ctx context.Context) error {
 	}
 
 	s.mu.Lock()
+	if s.closing || (s.ctx != nil && s.ctx.Err() != nil) {
+		s.mu.Unlock()
+		return context.Canceled
+	}
 	prev := s.client
 	prevTransport := s.http
 	s.client = client
@@ -523,7 +486,7 @@ func (s *Supervisor) authHeaderSource() (func(context.Context) (map[string]strin
 // worker; concurrent notifications coalesce via the refreshing flag.
 func (s *Supervisor) handleDownstreamListChanged() {
 	s.mu.Lock()
-	if s.refreshing {
+	if s.refreshing || s.closing {
 		s.mu.Unlock()
 		return
 	}
@@ -598,7 +561,11 @@ func (s *Supervisor) CallTool(ctx context.Context, name string, args json.RawMes
 	s.mu.Lock()
 	client := s.client
 	state := s.state
+	closing := s.closing || (s.ctx != nil && s.ctx.Err() != nil)
 	s.mu.Unlock()
+	if closing {
+		return nil, context.Canceled
+	}
 
 	// HTTP lazy reconnect: an initial-connect failure leaves no client; a call
 	// attempts to connect on demand (the process is not ours, so there is no
@@ -647,49 +614,15 @@ func (s *Supervisor) CallTool(ctx context.Context, name string, args json.RawMes
 // loop. ctx bounds the stdio reap waits: if it is cancelled, the SIGTERM/SIGKILL
 // escalation fires immediately rather than honoring the per-stage timeouts.
 func (s *Supervisor) Shutdown(ctx context.Context) {
+	s.mu.Lock()
+	if !s.closing {
+		s.closing, s.shutdownCtx = true, ctx
+	}
+	s.mu.Unlock()
 	if s.stop != nil {
 		s.stop()
-	}
-
-	s.mu.Lock()
-	client := s.client
-	cmd := s.cmd
-	done := s.childDone
-	s.mu.Unlock()
-
-	if s.cfg.Transport == TransportHTTP {
-		if client != nil {
-			client.Close()
-		}
 		<-s.stopped
-		return
 	}
-
-	// stdio: close stdin via the client, then escalate.
-	if client != nil {
-		client.Close()
-	}
-	if cmd != nil && cmd.Process != nil && done != nil {
-		s.reapChild(ctx, cmd, done)
-	}
-	<-s.stopped
-}
-
-// reapChild waits for the child to exit after stdin close, escalating to SIGTERM
-// then SIGKILL on the whole process group (negative pid) so grandchildren die.
-// done is closed by the run loop once cmd.Wait returns; reapChild selects on it
-// rather than polling. A cancelled ctx collapses each wait stage to zero.
-func (s *Supervisor) reapChild(ctx context.Context, cmd *exec.Cmd, done <-chan struct{}) {
-	pid := cmd.Process.Pid
-	if waitForDone(ctx, done, shutdownStdinWait) {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	if waitForDone(ctx, done, shutdownTermWait) {
-		return
-	}
-	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	waitForDone(ctx, done, shutdownTermWait)
 }
 
 // waitForDone reports whether done closed within d. A cancelled ctx returns
@@ -718,8 +651,13 @@ func waitForDone(ctx context.Context, done <-chan struct{}, d time.Duration) boo
 func (s *Supervisor) childPID() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.cmd != nil && s.cmd.Process != nil {
-		return s.cmd.Process.Pid
+	if s.process != nil {
+		select {
+		case <-s.process.Done():
+			return 0
+		default:
+			return s.process.PID()
+		}
 	}
 	return 0
 }
