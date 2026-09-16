@@ -1,0 +1,7 @@
+{
+  "plan_type":"plus",
+  "rate_limit":{"allowed":true,"limit_reached":false,"primary_window":{"used_percent":100,"limit_window_seconds":18000,"reset_at":1789606800,"reset_after_seconds":0},"secondary_window":null},
+  "additional_rate_limits":[{"limit_name":"\u001b[31mReview\u001b[0m","metered_feature":"codex_review","rate_limit":{"allowed":false,"limit_reached":true,"primary_window":{"used_percent":0}}}],
+  "rate_limit_reset_credits":{"available_count":0},
+  "account_id":"private-account", "user_id":"private-user", "rate_limit_upsell":{"email":"private@example.invalid"}
+}

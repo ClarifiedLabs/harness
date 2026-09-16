@@ -15,6 +15,9 @@ type commandHandler func(environment, cli.Invocation) int
 
 var commandHandlers = map[string]commandHandler{
 	"root":             runRoot,
+	"limits":           runLimits,
+	"limits.resets":    runLimits,
+	"limits.reset":     runLimits,
 	"config.list":      runConfigList,
 	"config.show":      runConfigShow,
 	"config.check":     runConfigCheck,
@@ -47,6 +50,14 @@ func commandCatalog(env environment) cli.Catalog {
 		Flags:       config.CLIFlags(),
 		Args:        cli.Args{Max: -1, Check: false},
 		Commands: []cli.Command{
+			{
+				ID: "limits", Name: "limits", Summary: "Show account-wide subscription quotas, not session usage.", Runnable: true,
+				Args: cli.Args{Usage: "[provider]", Min: 0, Max: 1, Check: true}, Flags: limitsCLIFlags(false),
+				Commands: []cli.Command{
+					{ID: "limits.resets", Name: "resets", Summary: "List Codex reset credits.", Runnable: true, Args: exactArgs(1, "openai-codex"), Flags: limitsCLIFlags(false)},
+					{ID: "limits.reset", Name: "reset", Summary: "Redeem one selected Codex reset credit (no automatic retry).", Runnable: true, Args: exactArgs(2, "openai-codex <credit-id>"), Flags: limitsCLIFlags(true)},
+				},
+			},
 			{
 				ID: "config", Name: "config", Summary: "Inspect and validate Harness configuration.",
 				Commands: []cli.Command{
@@ -106,7 +117,7 @@ func commandCatalog(env environment) cli.Catalog {
 
 func run(env environment) int {
 	catalog := commandCatalog(env)
-	args := normalizeLegacyCommandArgs(env.args)
+	args := normalizeLimitsCommandArgs(normalizeLegacyCommandArgs(env.args))
 	invocation, err := catalog.Parse(args)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness: %v\n", err)

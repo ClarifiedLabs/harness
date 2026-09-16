@@ -33,6 +33,7 @@ import (
 	"harness/internal/modelproxy/modeldiscovery"
 	"harness/internal/modelproxy/pricing"
 	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelproxy/subscription"
 	"harness/internal/tracing"
 )
 
@@ -104,7 +105,9 @@ type Options struct {
 	// InstanceID identifies this proxy process in diagnostics and per-process
 	// usage reports. Empty generates a random 16-byte hexadecimal identifier.
 	InstanceID string
-	wsPool     wsPoolOptions
+	// SubscriptionHTTPClient is used only for on-demand quota requests.
+	SubscriptionHTTPClient *http.Client
+	wsPool                 wsPoolOptions
 }
 
 // usageKey identifies an aggregate usage bucket by provider and model.
@@ -151,6 +154,7 @@ type Handler struct {
 
 	providers            []llm.ProviderConfig
 	authSources          map[string]*auth.Source
+	limits               *subscription.Client
 	defaultContextWindow int
 	configDir            string
 	configSourceDate     time.Time
@@ -273,6 +277,7 @@ func NewHandler(opts Options) (*Handler, error) {
 		keyBudgets:           map[string]*costBudgetTracker{},
 		usage:                map[usageKey]*protocol.ModelUsage{},
 	}
+	h.limits = subscription.New(subscription.Options{Client: opts.SubscriptionHTTPClient, Now: now, Resolve: h.subscriptionCredentials})
 	if opts.Metrics != nil {
 		h.metrics = opts.Metrics
 		h.metricFams = registerMetricFamilies(opts.Metrics)
@@ -610,6 +615,12 @@ func providerConfigSourceDate(configDir string, files []string) time.Time {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
+	case r.URL.Path == "/v1/limits":
+		h.serveLimits(w, r, h.handleLimits)
+	case r.URL.Path == "/v1/limits/reset-credits":
+		h.serveLimits(w, r, h.handleResetCredits)
+	case r.URL.Path == "/v1/limits/reset":
+		h.serveLimits(w, r, h.handleLimitsReset)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/models":
 		h.handleModels(w, r)
 	case r.Method == http.MethodGet && r.URL.Path == "/v1/usage":
@@ -1685,27 +1696,9 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 	if apiType == "" {
 		apiType = pc.Name
 	}
-	apiKey := ""
-	var authHeaders map[string]string
-	if src := h.authSources[pc.Name]; src != nil {
-		var err error
-		authHeaders, err = src.Headers(ctx)
-		if err != nil {
-			return factory.Options{}, err
-		}
-	} else {
-		for _, name := range pc.APIKeyEnv {
-			if value := h.getenv(name); value != "" {
-				apiKey = value
-				break
-			}
-		}
-		if apiKey == "" {
-			apiKey = providerAPIKeyEnv(apiType, h.getenv)
-		}
-		if apiKey == "" {
-			apiKey = pc.APIKey
-		}
+	apiKey, authHeaders, err := h.providerCredentials(ctx, pc)
+	if err != nil {
+		return factory.Options{}, err
 	}
 	contextWindow := entry.ContextWindow
 	if contextWindow <= 0 {

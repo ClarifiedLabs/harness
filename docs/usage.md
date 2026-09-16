@@ -1582,6 +1582,92 @@ reported as unpriced instead of using a cheaper estimate. Anthropic hosted
 web-search request fees are excluded from `cost_usd` and cost-budget spend; its
 token charges remain included.
 
+## Subscription Limits
+
+`harness limits` queries account-wide subscription quotas on demand through the
+model proxy. Supported configured provider names are `kimi-for-coding`,
+`zai-coding-plan`, and `openai-codex`; these are provider names, not model target
+IDs. Without a provider argument, it queries all configured supported providers
+in name order and preserves each provider's result even when another fails.
+With none configured, it reports that fact rather than inventing quotas.
+
+This is separate from `/usage` (session token/cost/compaction totals),
+`GET /v1/usage` (the serving proxy's accounting), model pricing, and cost budgets.
+Quotas include activity from other clients using the same provider account, not
+just this Harness session or proxy API key. Provider quota units are not
+necessarily literal model tokens; reset credits are not purchased/spend credits.
+
+```text
+harness limits [provider] [-format text|json]
+harness limits resets openai-codex [-format text|json]
+harness limits reset openai-codex <credit-id> [-request-id <id>] [-format text|json]
+```
+
+Flags may appear before or after the positional arguments within each command:
+
+| Flag | Behavior |
+|---|---|
+| `-config <file>` | Select the Harness config file; otherwise use `HARNESS_CONFIG` and normal config discovery. |
+| `-model-proxy-url <url>` | Override `HARNESS_MODEL_PROXY_URL` / `model_proxy_url`; default `http://127.0.0.1:8765`. |
+| `-model-proxy-api-key <key>` | Override `HARNESS_MODEL_PROXY_API_KEY` / `model_proxy_api_key`; this authenticates to the proxy, not the provider. |
+| `-format text\|json` | Text by default; JSON emits one normalized result object, not the model-run NDJSON stream. |
+| `-request-id <id>` | Reset only: reuse the original request identity for an explicit retry; otherwise generate a cryptographically random ID before sending. |
+| `-h`, `--help` | Show help for the selected command. |
+
+Connection settings follow **flag > environment > project config > global
+config > default**, with the normal configuration validation rules. `-format`
+and `-request-id` are command-local flags, not new environment/config settings.
+Unknown flags and invalid syntax are errors, not ignored options. Provider
+credentials stay in `harness-model-proxy`; no new login flow is introduced.
+These commands do not start a model session, tools, MCP/LSP, model discovery, or
+prewarming. Requests have a 45-second command bound and can be interrupted.
+
+Status shows the fetch time, plan when reported, independent pools/windows,
+available counts and percentages, and automatic reset timestamps/countdowns.
+Missing values stay unknown or absent, never zero, unlimited, or permission to
+send a model request. In particular, Codex's reported `allowed` flag is
+independent of rounded percentages: 100% used does not necessarily mean blocked,
+and 0% used does not establish permission. Credit-detail queries are separate
+from normal status and show IDs, status, expiry, and reset scope. An older proxy
+returns an unsupported-feature error; Harness does not synthesize quota data.
+
+### Explicit Codex resets
+
+First inspect `harness limits resets openai-codex`. The singular `reset` verb,
+`openai-codex`, and a selected credit ID authorize one redemption, with no extra
+confirmation prompt. Listing credits or viewing an automatic reset time never
+redeems anything. Unknown future credit types/statuses are not marked redeemable;
+upstream remains authoritative about eligibility and the result.
+
+There are no automatic quota retries, credit redemptions, or prompt retries.
+A timeout, lost response, or unknown reset outcome can mean the credit **was
+consumed**. Harness prints the provider, credit ID, request ID, and complete retry
+commands. Retry only explicitly, with the **same provider, credit ID, and request
+ID**, against the same proxy/account configuration. Do not generate a fresh ID or
+select a different credit to recover an ambiguous operation.
+
+The REPL retains that pending tuple in memory: repeating the same reset without
+a request ID reuses it; changing the credit or request ID is rejected while it
+remains unresolved. After restarting the process, use the printed request ID.
+Successful `reset` or `already_redeemed` results include best-effort quota/credit
+refreshes. A refresh failure is a warning alongside success, not a failed reset
+and not a reason to redeem again. JSON retains the exact outcome, any integer
+`windows_reset` count, and warnings; ambiguous JSON-mode retries are also printed
+to stderr without contaminating JSON stdout.
+
+| CLI exit | Meaning |
+|---|---|
+| `0` | Successful status/credit query (including no configured subscriptions), or reset outcome `reset`, `already_redeemed`, or `nothing_to_reset`; refresh warnings do not change success. |
+| `1` | Unavailable/unsupported provider, partial query failure, `no_credit`, indeterminate reset, or another runtime error; useful results remain in the output. |
+| `2` | Invalid syntax, flags, reset identifiers, format, or configuration. |
+| `130` | Interrupted. |
+
+The equivalent `/limits` commands are in the [REPL table](#repl-commands).
+They do not mutate conversation history, session totals, model selection, or
+continuation state, and never run `/continue` automatically. See
+[proxy operations](proxy.md#subscription-quota-operations) for access scope,
+upstream compatibility caveats, and read-only smoke checks.
+
 ## REPL Commands
 
 Lines starting with `/` are commands; `//` sends a literal leading slash. At an
@@ -1664,6 +1750,9 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/context <file>` | save the current provider-neutral model context as JSON |
 | `/prompt` | show the full system prompt currently sent to the model, including environment, AGENTS.md, skills, runtime capability hints, and active-agent instructions |
 | `/usage` | cumulative input, cached input and token-weighted cache-read ratio, output, reasoning tokens, cost, and successful compactions |
+| `/limits [provider]` | query account-wide subscription quotas on demand, separately from session accounting; see [Subscription Limits](#subscription-limits) |
+| `/limits resets openai-codex` | list reset-credit IDs, availability, expiry, and scope without redeeming |
+| `/limits reset openai-codex <credit-id> [request-id]` | explicitly redeem the selected credit; an ambiguous retry must reuse the same provider, credit, and request ID |
 | `/evidence` | list the newest bounded session evidence metadata without contacting the model or reading artifact bodies |
 | `/evidence list [--kind evaluator\|tool] [--status STATUS] [--prompt N] [--limit N]` | filter evaluator results, archived/truncated tool outputs, and tool errors by metadata |
 | `/evidence show <id>` | inspect one catalog record, including its current local artifact status and resolved path when safe |

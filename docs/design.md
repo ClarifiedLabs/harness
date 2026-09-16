@@ -92,10 +92,11 @@ tool calls dispatch against the local registry:
 ### Package layout
 
 ```
-cmd/harness              config/session/LSP/ACP command dispatch, config load, proxy catalog wiring, signals, and REPL-vs-oneshot execution
+cmd/harness              config/session/limits/LSP/ACP command dispatch, config load, proxy catalog wiring, signals, and REPL-vs-oneshot execution
 cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; generated command dispatch plus config inspection
 internal/cli             immutable nested command/flag catalogs, presence-aware parsing, and deterministic scoped help
-internal/modelproxy      proxy protocol, client Provider, server handler
+internal/modelproxy      proxy protocol (including normalized subscription DTOs), client Provider/account operations, server handler
+internal/modelproxy/subscription isolated Kimi/Z.ai/Codex account-quota adapters and explicit Codex reset-credit redemption; injected HTTP/clock/credential resolver
 internal/modelproxy/config model-proxy top-level setting catalog, source resolution, and safe projections
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
 internal/llm             provider-agnostic types, canonical message cloning and additive usage accounting, Provider interface, model/price registry, and content-free physical attempt/retry/discard source facts
@@ -121,7 +122,7 @@ internal/config          typed harness definitions, strict source resolution, pr
 internal/configmeta      package-neutral parameter catalog, source vocabulary, provenance snapshots, and deterministic reference renderers
 internal/modelcatalog    normalized models.dev/OpenAI Codex baseline catalogs
 internal/modelproxy/modeldiscovery authenticated provider model adapters, caches, and catalog merging
-internal/ui              REPL, streaming renderer, tool summaries, usage line
+internal/ui              REPL, streaming renderer, tool summaries, usage line, shared limits rendering and process-local pending reset identity
 internal/sysprompt       embedded prompt files + environment context + AGENTS.md sections
 internal/agentdef        agent definitions (allowed tools, MCP exposure, prompt/model target) (§14)
 internal/hooks           command-only lifecycle hooks (SessionStart/UserPromptSubmit/Pre+PostToolUse/Pre+PostCompact/Stop)
@@ -1610,6 +1611,61 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   are resolved by `harness-model-proxy` from its config and environment.
 - The optional config-file `mcp` and `lsp` blocks (proxy/local MCP and LSP servers)
   are documented with their subsystems in §15 and §15a.
+
+### 7.1 Subscription quota contract
+
+Account-wide subscription quotas are a separate data path, not `llm.Usage`,
+`protocol.UsageReport`, pricing, budgets, or generation metrics.
+`internal/modelproxy/subscription` owns provider-private decoding and upstream
+calls; `internal/modelproxy/server/limits.go` owns configured-provider selection,
+bounded all-provider fan-out, shared credential resolution, and best-effort
+post-reset refreshes. `internal/modelproxy/client/limits.go` uses the existing
+authenticated proxy transport without loading provider secrets. `cmd/harness/limits_command.go` runs without model/session/tool
+startup; `internal/ui/limits.go` provides shared text rendering and REPL callbacks.
+There is no new model-facing tool, dialect dependency in core `llm`, background
+quota polling, or quota-derived admission enforcement. Commands do not alter
+history, totals, model selection, or continuation state.
+
+`internal/modelproxy/protocol/limits.go` is the normalized wire contract:
+
+| DTO | Contract |
+|---|---|
+| `LimitsReport` | `providers` array, including independent provider errors; an empty array means no supported subscriptions configured. |
+| `ProviderLimits` | Configured `provider`, `fetched_at`, optional `plan`, identifiable `pools`, optional reset-credit summary, safe `error` and `warnings`. |
+| `LimitPool` | `id`, `name`, optional authoritative `allowed` / `limit_reached` flags, and independent `windows`; never merged with another quota pool. |
+| `LimitWindow` | `id`, `name`, provider-defined `unit`; optional `limit`, `used`, `remaining`, `used_percent`, `remaining_percent`, `duration_seconds`, `reset_at`, and `reset_after_seconds`. |
+| `ResetCreditSummary` / `ResetCredits` | Optional integer `available_count`; details include `provider`, `fetched_at`, `credits`, errors/warnings. Status does not require a successful detail query. |
+| `ResetCredit` | Opaque `id`, `reset_type`, `status`, optional `granted_at` / `expires_at`, sanitized title/description, and optional `redeemable`. Known available, unexpired `codex_rate_limits` credits are marked redeemable; unknown future types/statuses are not. |
+| `ResetRequest` | Required `provider`, `credit_id`, `request_id`; provider is `openai-codex`. Credit/request IDs are 1–128 ASCII letters, digits, `.`, `_`, `:`, or `-`, with no leading `-`. |
+| `ResetResult` | Echoed operation identity, `fetched_at`, `outcome`, optional integer **count** `windows_reset`, refreshed `status` / `credits`, safe `error` and `warnings`. |
+| `LimitsError` | Bounded safe `code` / `message`, optional `indeterminate`; never a raw provider body, credential, account identifier, or header. |
+
+Optional numbers, booleans, counts, durations, and timestamps preserve explicit
+zero/false versus absence. Unknown is not zero, unlimited, or allowed. Provider
+admission flags are not inferred from rounded percentages: Codex can report
+`allowed:true` at 100% used or `allowed:false` at 0%. Independent windows remain
+separate, and quota credits, reset credits, and purchased/spend credits are not
+interchangeable. Valid arithmetic can derive missing complementary values;
+inconsistent reported counts are retained with warnings rather than silently
+reconciled. Missing windows do not manufacture healthy quota data.
+
+Normalized timestamps are RFC3339 with nanosecond precision when present;
+durations/countdowns are seconds. Adapters own upstream units and semantics
+(Kimi RFC3339/relative resets, Z.ai epoch milliseconds, Codex epoch seconds),
+including leaving unknown periods absent. Labels are bounded plain text;
+unknown JSON keys are tolerated, known shapes validated, and raw upstream profile
+metadata never crosses this DTO boundary.
+
+A reset captures its provider/auth snapshot and sends exactly the selected credit
+and stable request ID once. Upstream owns idempotency; neither proxy nor client
+uses model retry machinery. Ambiguous outcomes retain the full tuple, including
+across explicit REPL retries within that process; missing/mismatched response
+identity is not evidence that the requested reset failed. Successful redemption
+remains successful when a follow-up refresh warns. Automatic prompt replay and
+`/continue` are not part of this path. HTTP routes, bounds, auth scope, upstream
+source pins, and live-verification caveats belong to
+[proxy operations](proxy.md#subscription-quota-operations); syntax, outputs, and
+exit codes belong to [usage](usage.md#subscription-limits).
 
 ## 8. Agent loop (`internal/agent`)
 

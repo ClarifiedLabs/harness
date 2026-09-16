@@ -156,6 +156,141 @@ start.
 See [mcp.md](mcp.md#proxy-api-key-authentication) for the equivalent MCP proxy
 configuration.
 
+## Subscription quota operations
+
+The [limits commands](usage.md#subscription-limits) use these routes on the
+ordinary API listener, **inside the existing API-key middleware**, never the
+unauthenticated probe surface:
+
+| Method and route | Request / response |
+|---|---|
+| `GET /v1/limits?provider=<optional-name>` | One configured subscription or all supported configured subscriptions; returns a `providers` array with independent results/errors in provider-name order. |
+| `GET /v1/limits/reset-credits?provider=openai-codex` | Codex reset-credit details, separate from the status query. |
+| `POST /v1/limits/reset` | JSON `{ "provider": "openai-codex", "credit_id": "<selected-id>", "request_id": "<stable-id>" }`; all three fields are required. Returns the selected operation's identity and outcome. |
+
+Existing trusted proxy callers can inspect **account-wide** quotas and explicitly
+redeem the selected Codex reset credit. There is no new authorization system,
+per-key quota partition, reset-specific permission, or confirmation prompt.
+If proxy API-key authentication is disabled, the same routes are accessible
+without a key: retain the trusted-network deployment boundary. These operations
+neither charge nor reset model-proxy cost budgets and do not change `/v1/usage`,
+model-generation metrics, or session accounting.
+
+Responses use `Cache-Control: no-store`. Status is fetched on demand, with at
+most three concurrent provider queries; there is no persistent quota cache,
+startup fetch, or background quota polling. A valid query returns HTTP 200 with
+per-provider errors, so one upstream outage does not hide the other results.
+Credit and reset operation failures likewise use their structured result's
+`error`; clients must inspect it, not only the HTTP status. Invalid request or
+provider selection returns 400; a wrong method returns 405. Reset request bodies
+are bounded to 4 KiB. The normalized response contract is in
+[design §7.1](design.md#71-subscription-quota-contract).
+
+Provider credentials are resolved only in the proxy, using the existing shared
+sources: dynamic `auth.Source.Headers` > configured `api_key_env` values >
+existing dialect environment fallback > inline API key. Each operation captures
+one provider/auth snapshot, including its best-effort refreshes; it does not
+create a new OAuth source or change inference authentication. Initial support
+requires the exact configured provider name and an official HTTPS origin/known
+base path. Custom gateways fail with `unsupported_endpoint` rather than sending
+their credentials to an assumed official service; no quota endpoint override is
+provided.
+
+Each upstream call is bounded to 10 seconds and 1 MiB of response data, with
+bounded arrays/strings, no credential-bearing redirects, and no automatic
+retries. Only normalized safe fields cross the proxy: no raw upstream bodies,
+tokens, account/user IDs, email, or unrelated profile/upsell metadata.
+The proxy logs quota request completion at info level even without tracing,
+plus per-provider results. Failures and refresh warnings log safe error codes at
+warn level; request/response bodies, credentials, credit/request IDs, and raw
+upstream errors are not logged.
+Provider-controlled labels are sanitized to bounded plain text. Errors use safe
+codes such as `missing_auth`, `unauthorized`, `unsupported_endpoint`, `throttled`,
+`timeout`, and `invalid_payload`, without echoing upstream bodies or headers.
+
+### Reset identity and outcomes
+
+The proxy forwards `request_id` unchanged as upstream `redeem_request_id`, together
+with exactly the selected `credit_id`. The backend owns idempotency; there is no
+local persistent redemption ledger, credit auto-selection, or generic model-retry
+path. Operators/reverse proxies must not automatically retry these operations.
+An explicit retry must keep the same provider/account configuration, credit ID,
+and request ID, even if the credit has disappeared from a later listing.
+
+Outcomes are `reset`, `nothing_to_reset`, `no_credit`, and `already_redeemed`;
+`windows_reset`, when reported, is an **integer count**, not a list of windows.
+A timeout/transport failure or unrecognized response can be `indeterminate` and
+must not be described as “no credit consumed.” After `reset` or
+`already_redeemed`, status and credit-detail refreshes are best-effort: a refresh
+failure adds a warning without replacing the successful outcome. See the
+[command reference](usage.md#explicit-codex-resets) for retry commands, REPL
+pending-state behavior, and exit codes.
+
+### Upstream compatibility and evidence
+
+These subscription endpoints are unofficial/undocumented integration contracts,
+not stable public API guarantees. Implementations follow the pinned sources
+below; fixture tests are not proof of current live account compatibility.
+Unknown JSON fields are tolerated, but empty/malformed known data is an error,
+not a healthy-looking zero-usage report.
+
+- **Kimi:** `GET https://api.kimi.com/coding/v1/usages`, with
+  `Authorization: Bearer <coding-key>`. The
+  [official Kimi CLI usage implementation](https://github.com/MoonshotAI/kimi-cli/blob/86f136422a0aae6b217ea49e7ea1d2e8a1defcd2/src/kimi_cli/ui/shell/usage.py)
+  supplies the weekly `usage` summary and additional `limits` windows. Numeric
+  strings, nested/flat details, remaining-derived usage, relative resets, and
+  RFC3339 nanosecond timestamps are handled without interpreting quota units as
+  literal model tokens.
+- **Z.ai:** `GET https://api.z.ai/api/monitor/usage/quota/limit`. Static keys are
+  sent directly in `Authorization` **without `Bearer`**, following the
+  [official query script](https://github.com/zai-org/zai-coding-plugins/blob/0446d0bb0bc537d97d3ab3664c4b8b9c4a0e1254/plugins/glm-plan-usage/skills/usage-query-skill/scripts/query-usage.mjs);
+  Harness does not probe alternative auth formats. Coding Plan token/credit
+  quotas and MCP call quotas remain separate. Newer `CREDIT_LIMIT`, multi-period
+  windows, `remaining`, envelope checks, and `nextResetTime` in epoch
+  **milliseconds** also rely on
+  [CodexBar secondary schema evidence](https://github.com/steipete/CodexBar/blob/7d7c7301850827f4469b147639995e02137e9667/Sources/CodexBarCore/Resources/Plugins/zai.js)
+  and its [reset tests](https://github.com/steipete/CodexBar/blob/7d7c7301850827f4469b147639995e02137e9667/TestsPlugin/ZaiPluginResetTests.swift).
+  **Read-only live account verification is still required for this secondary
+  schema.** Not every Coding Plan window is five hours. Duration units are
+  day=1, hour=3, minute=5, week=6; MCP's `TIME_LIMIT` unit=5/number=1 marker means
+  monthly, not one minute or an exact 30-day reset. Implausible reset dates remain
+  provider-reported and may warn; no timezone offset is guessed. China-region,
+  team, historical usage, and balance queries are outside this feature.
+- **Codex:** the
+  [official reset client](https://github.com/openai/codex/blob/105fe8761cd56bb9cf143106435f487f7e902b62/codex-rs/backend-client/src/client/rate_limit_resets.rs)
+  and [types](https://github.com/openai/codex/blob/105fe8761cd56bb9cf143106435f487f7e902b62/codex-rs/backend-client/src/types.rs)
+  use `GET https://chatgpt.com/backend-api/wham/usage`,
+  `GET .../wham/rate-limit-reset-credits`, and
+  `POST .../wham/rate-limit-reset-credits/consume`. The quota path is a sibling
+  of inference's `/backend-api/codex`, **not** `/backend-api/codex/wham`.
+  Existing auth headers include `ChatGPT-Account-ID` and optional FedRAMP routing;
+  passive readers do not opt into Luna Reserve. Window `reset_at` is epoch
+  **seconds**. Admission flags and independent additional pools are preserved;
+  availability of credit details is not required for ordinary quota status.
+
+### Read-only account smoke check
+
+After starting the updated proxy, the user can run these without creating a
+model session or consuming a reset credit:
+
+```sh
+harness limits
+harness limits kimi-for-coding -format json
+harness limits zai-coding-plan -format json
+harness limits openai-codex -format json
+harness limits resets openai-codex -format json
+```
+
+Compare each fetch with the same account's native client or dashboard: plan,
+separate pools/window periods, provider-defined units, used/remaining values,
+reset timestamps/timezones, Codex admission status, and reset-credit IDs/statuses/
+expiry. Allow for activity in other clients between observations. Record missing
+fields and discrepancies rather than filling them in or correcting timestamps.
+Public-source research has not verified these accounts live; in particular,
+confirm Z.ai's secondary-evidence fields before declaring live compatibility.
+**Do not run the singular `reset` command as a test.** Real redemption is a
+separate deliberate user action, not part of the smoke check.
+
 ## Prometheus metrics
 
 The proxy exposes unauthenticated Prometheus metrics on a separate listener,
@@ -201,10 +336,11 @@ handler teardown, and connection-pool closure have completed.
 
 ## Provider failures and retries
 
-Harness retries transient connection failures and retryable provider responses
-such as 429, 500, 502, 503, and 529. A `Retry-After` value or equivalent
-streaming error hint is honored when it is at most 60 seconds. Longer 429/529
-waits fail immediately with the original provider message so an interactive
+For model generation, Harness retries transient connection failures and retryable
+provider responses such as 429, 500, 502, 503, and 529. Subscription quota queries
+and reset operations are excluded from this retry path. A `Retry-After` value or
+equivalent streaming error hint is honored when it is at most 60 seconds. Longer
+429/529 waits fail immediately with the original provider message so an interactive
 prompt is not silently parked for minutes or hours.
 
 Every unsuccessful upstream attempt is logged by the model proxy, including

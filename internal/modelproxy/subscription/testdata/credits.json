@@ -1,0 +1,11 @@
+{
+  "available_count":1,
+  "credits":[
+    {"id":"credit-1","reset_type":"codex_rate_limits","status":"available","granted_at":"2026-09-01T00:00:00Z","expires_at":"2026-10-01T00:00:00Z","title":"\u001b[31mFull reset\u001b[0m","description":"Ready\nnow","profile_user_id":"private"},
+    {"id":"credit-2","granted_at":"2026-09-01T00:00:00Z","reset_type":"codex_rate_limits","status":"available","expires_at":"2026-09-16T00:00:00Z"},
+    {"id":"credit-3","granted_at":"2026-09-01T00:00:00Z","reset_type":"codex_rate_limits","status":"redeeming"},
+    {"id":"credit-4","granted_at":"2026-09-01T00:00:00Z","reset_type":"future","status":"available"},
+    {"id":"credit-5","granted_at":"2026-09-01T00:00:00Z","reset_type":"codex_rate_limits","status":"future"},
+    {"id":"credit-6","granted_at":"2026-09-01T00:00:00Z","reset_type":"codex_rate_limits","status":"redeemed"}
+  ]
+}

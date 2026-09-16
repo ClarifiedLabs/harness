@@ -27,6 +27,7 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
+	"harness/internal/modelproxy/protocol"
 	"harness/internal/otel"
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
@@ -217,6 +218,12 @@ type App struct {
 	// ControlLSP handles session-local status/enable/disable. nil means the
 	// embedding did not wire native LSP support.
 	ControlLSP func(action, agentName string) (LSPSelection, error)
+
+	// Account-wide subscription operations; never model calls or session usage.
+	Limits            func(context.Context, string) (protocol.LimitsReport, error)
+	ResetCredits      func(context.Context, string) (protocol.ResetCredits, error)
+	ResetLimits       func(context.Context, protocol.ResetRequest) (protocol.ResetResult, error)
+	pendingLimitReset *protocol.ResetRequest
 
 	todoPromptStatusBeforeUsage       bool
 	todoPromptStatusBeforeUsagePrompt int
@@ -413,6 +420,11 @@ const helpText = `commands:
   /context [file]  dump current model context, or save it as JSON
   /prompt          show the full system prompt, including runtime hints
   /usage           cumulative session tokens and cost
+  /limits [provider] account-wide subscription quotas (not session usage)
+  /limits resets openai-codex
+                    list reset-credit IDs, availability, expiry, and scope
+  /limits reset openai-codex <credit-id> [request-id]
+                    redeem exactly one selected credit; reuse IDs when retrying
   /evidence        list or inspect bounded session evidence metadata
   /max-turns [n]   show or set turns per prompt for this session (<=0 is unlimited)
   /tools [--raw]   list available tools, or dump model-facing definitions as JSON
@@ -2689,6 +2701,8 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		fmt.Fprintln(app.Errw, app.System)
 	case "/usage":
 		fmt.Fprintln(app.Errw, app.usageSummary())
+	case "/limits":
+		app.limitsCommand(arg)
 	case "/evidence":
 		app.evidenceCommand(arg)
 	case "/max-turns":
@@ -2909,7 +2923,7 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 // knownCommands is the meta-command vocabulary used for "did you mean …?"
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
-	"/help", "/exit", "/quit", "/clear", "/continue", "/compact", "/tree", "/fork", "/clone", "/context", "/prompt", "/usage",
+	"/help", "/exit", "/quit", "/clear", "/continue", "/compact", "/tree", "/fork", "/clone", "/context", "/prompt", "/usage", "/limits",
 	"/evidence", "/max-turns", "/tools", "/lsp", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
 }

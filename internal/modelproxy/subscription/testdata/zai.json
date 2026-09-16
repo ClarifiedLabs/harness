@@ -1,0 +1,9 @@
+{
+  "success":true,"code":200,
+  "data":{"planName":"Pro", "limits":[
+    {"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":0,"usage":100,"currentValue":25,"remaining":50,"nextResetTime":1789606800123},
+    {"type":"CREDIT_LIMIT","unit":6,"number":1,"usage":200,"remaining":0,"nextResetTime":1789693200123},
+    {"type":"TIME_LIMIT","unit":5,"number":1,"percentage":30,"usage":1000,"currentValue":300,"usageDetails":[{"modelCode":"web-search","usage":300}]},
+    {"type":"FUTURE_LIMIT","unit":999,"number":2,"percentage":10}
+  ]}
+}
