@@ -1201,6 +1201,7 @@ no network requests and does not mutate configuration or managed state.
 | `log_format` | `string` | `json`, `text` | `-log-format` | - | `log_format` | json | no | Proxy log format. |
 | `models_dev_cache_ttl` | `duration` | - | `-models-dev-cache-ttl` | - | `models_dev_cache_ttl` | 24h | no | models.dev cache refresh interval; zero disables periodic refresh. |
 | `provider_models_cache_ttl` | `duration` | - | `-provider-models-cache-ttl` | - | `provider_models_cache_ttl` | 1h | no | Authenticated provider model catalog refresh interval; zero disables background refresh. |
+| `subscription_poll_interval` | `duration` | - | `-subscription-poll-interval` | `HARNESS_MODEL_PROXY_SUBSCRIPTION_POLL_INTERVAL` | `subscription_poll_interval` | 5m | no | Subscription quota metrics refresh interval (minimum 1m); zero or disabled metrics disables background polling. |
 | `drain_delay` | `duration` | - | `-drain-delay` | `HARNESS_MODEL_PROXY_DRAIN_DELAY` | `drain_delay` | 5s | no | Readiness propagation delay before API shutdown. |
 | `shutdown_timeout` | `duration` | - | `-shutdown-timeout` | `HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT` | `shutdown_timeout` | 5m | no | Maximum graceful stream drain time. |
 | `instance_id` | `string` | - | `-instance-id` | `HARNESS_MODEL_PROXY_INSTANCE_ID` | `instance_id` | derived: generated at startup | no | Proxy instance identifier. |
@@ -1590,6 +1591,16 @@ model proxy. Supported configured provider names are `kimi-for-coding`,
 IDs. Without a provider argument, it queries all configured supported providers
 in name order and preserves each provider's result even when another fails.
 With none configured, it reports that fact rather than inventing quotas.
+The proxy also refreshes subscription metrics immediately and every five minutes
+when metrics are enabled. Configure `subscription_poll_interval`, the
+`HARNESS_MODEL_PROXY_SUBSCRIPTION_POLL_INTERVAL` environment variable, or
+`serve -subscription-poll-interval <duration>` (flag > env > config > default);
+positive intervals must be at least `1m`, and each interval starts after the
+previous refresh completes. `0` disables background quota polling, as does
+`-no-metrics`. `/limits` still
+fetches fresh status on demand rather than serving the metrics snapshot. See
+[quota metrics](proxy.md#subscription-quota-metrics) for exported values and
+stale-data handling.
 
 This is separate from `/usage` (session token/cost/compaction totals),
 `GET /v1/usage` (the serving proxy's accounting), model pricing, and cost budgets.

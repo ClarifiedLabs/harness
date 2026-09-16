@@ -59,6 +59,7 @@ type environment struct {
 	providerModelsClient   *http.Client
 	providerModelsTimeout  *time.Duration
 	providerModelsTicks    <-chan time.Time
+	subscriptionAfter      func(time.Duration) <-chan time.Time
 	now                    func() time.Time
 }
 
@@ -198,6 +199,9 @@ func runServe(env environment, invocation cli.Invocation) int {
 		return exitRuntime
 	}
 
+	quotaPollingDone := startSubscriptionPolling(backgroundCtx, metricsSettings.Enabled, cfg.SubscriptionPollInterval.Duration, env.subscriptionAfter, handler.RefreshSubscriptionMetrics)
+	defer func() { cancelBackground(); <-quotaPollingDone }()
+
 	protected := server.ObserveAuth(handler, authStore, authStore.Middleware(handler))
 	lifecycle := server.NewLifecycle(protected)
 	srv := httpserve.New("", lifecycle)
@@ -247,6 +251,7 @@ func runServe(env environment, invocation cli.Invocation) int {
 	}
 	lifecycle.BeginTeardown()
 	cancelBackground()
+	<-quotaPollingDone
 	cancelWork()
 	closeErr := handler.Close()
 	metricsCtx, cancelMetrics := context.WithTimeout(context.Background(), httpserve.DefaultShutdownTimeout)

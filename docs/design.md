@@ -1622,8 +1622,15 @@ bounded all-provider fan-out, shared credential resolution, and best-effort
 post-reset refreshes. `internal/modelproxy/client/limits.go` uses the existing
 authenticated proxy transport without loading provider secrets. `cmd/harness/limits_command.go` runs without model/session/tool
 startup; `internal/ui/limits.go` provides shared text rendering and REPL callbacks.
-There is no new model-facing tool, dialect dependency in core `llm`, background
-quota polling, or quota-derived admission enforcement. Commands do not alter
+There is no new model-facing tool, dialect dependency in core `llm`, or
+quota-derived admission enforcement. `cmd/harness-model-proxy` owns cancellable,
+non-overlapping quota polling for metrics (default five minutes after each cycle;
+minimum positive interval one minute; disabled with metrics or a zero interval). It reuses the handler's status fetch and auth rather
+than creating independent sources. `internal/modelproxy/server/subscription_metrics.go`
+keeps only last-good numeric snapshots for gauges; `internal/metrics.Gauge.Replace`
+removes vanished series on a successful refresh. Scrapes make no upstream calls.
+Failed refreshes retain the snapshot with explicit failure/freshness gauges;
+manual status queries remain uncached. Polling never lists or consumes credits. Commands do not alter
 history, totals, model selection, or continuation state.
 
 `internal/modelproxy/protocol/limits.go` is the normalized wire contract:

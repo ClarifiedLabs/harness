@@ -18,7 +18,7 @@ import (
 func TestCatalogCompletenessAndCLIProjection(t *testing.T) {
 	wantKeys := []string{
 		"provider_configs", "default_context_window", "log_level", "log_format",
-		"models_dev_cache_ttl", "provider_models_cache_ttl", "drain_delay", "shutdown_timeout", "instance_id",
+		"models_dev_cache_ttl", "provider_models_cache_ttl", "subscription_poll_interval", "drain_delay", "shutdown_timeout", "instance_id",
 		"api_keys_file", "metrics_enabled", "metrics_listen",
 	}
 	parameters := Catalog().Parameters()
@@ -40,12 +40,12 @@ func TestCatalogCompletenessAndCLIProjection(t *testing.T) {
 			seenFlags[name] = parameter.Key
 		}
 	}
-	if got := parameters[10].Flags; !reflect.DeepEqual(got, []string{"no-metrics"}) {
+	if got := parameters[11].Flags; !reflect.DeepEqual(got, []string{"no-metrics"}) {
 		t.Fatalf("metrics inverse flags = %v", got)
 	}
 	settingFlags := SettingCLIFlags()
-	if len(settingFlags) != 10 {
-		t.Fatalf("setting flags = %d, want 10", len(settingFlags))
+	if len(settingFlags) != 11 {
+		t.Fatalf("setting flags = %d, want 11", len(settingFlags))
 	}
 	for _, flag := range settingFlags {
 		parameter, ok := Catalog().Lookup(flag.ID)

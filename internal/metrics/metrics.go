@@ -342,6 +342,25 @@ func (g *Gauge) Set(value float64, labels map[string]string) {
 	g.mu.Unlock()
 }
 
+// GaugeSample is one value in a replaceable snapshot. Labels are copied.
+type GaugeSample struct {
+	Value  float64
+	Labels map[string]string
+}
+
+// Replace atomically replaces all series in this gauge, removing any absent
+// from the new snapshot. It is safe alongside Set, Add, and concurrent scrapes.
+// If labels repeat, the last sample wins. An empty snapshot clears the gauge.
+func (g *Gauge) Replace(samples []GaugeSample) {
+	var next seriesTable
+	for _, sample := range samples {
+		next.upsert(sample.Labels, sample.Value, false)
+	}
+	g.mu.Lock()
+	g.table = next
+	g.mu.Unlock()
+}
+
 // Add adjusts the gauge value for the given label set, creating it at zero if
 // absent.
 func (g *Gauge) Add(value float64, labels map[string]string) {

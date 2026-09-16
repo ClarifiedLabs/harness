@@ -20,6 +20,7 @@ import (
 	"harness/internal/apikey"
 	"harness/internal/auth"
 	"harness/internal/llm"
+	"harness/internal/metrics"
 	"harness/internal/modelproxy/protocol"
 )
 
@@ -30,7 +31,7 @@ func quotaResponse(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }
 
-func newLimitsHandler(t *testing.T, names []string, transport limitsTransport) *Handler {
+func newLimitsHandler(t *testing.T, names []string, transport limitsTransport, registries ...*metrics.Registry) *Handler {
 	t.Helper()
 	dir := t.TempDir()
 	var files []string
@@ -47,7 +48,11 @@ func newLimitsHandler(t *testing.T, names []string, transport limitsTransport) *
 			t.Fatal(err)
 		}
 	}
-	h, err := NewHandler(Options{ConfigDir: dir, Config: Config{ProviderConfigs: files}, Getenv: func(string) string { return "" }, Now: func() time.Time { return time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC) }, SubscriptionHTTPClient: &http.Client{Transport: transport}})
+	var registry *metrics.Registry
+	if len(registries) != 0 {
+		registry = registries[0]
+	}
+	h, err := NewHandler(Options{Metrics: registry, ConfigDir: dir, Config: Config{ProviderConfigs: files}, Getenv: func(string) string { return "" }, Now: func() time.Time { return time.Date(2026, 9, 16, 0, 0, 0, 0, time.UTC) }, SubscriptionHTTPClient: &http.Client{Transport: transport}})
 	if err != nil {
 		t.Fatal(err)
 	}

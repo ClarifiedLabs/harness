@@ -176,9 +176,10 @@ without a key: retain the trusted-network deployment boundary. These operations
 neither charge nor reset model-proxy cost budgets and do not change `/v1/usage`,
 model-generation metrics, or session accounting.
 
-Responses use `Cache-Control: no-store`. Status is fetched on demand, with at
-most three concurrent provider queries; there is no persistent quota cache,
-startup fetch, or background quota polling. A valid query returns HTTP 200 with
+Responses use `Cache-Control: no-store`. CLI/REPL status is fetched on demand,
+with at most three concurrent provider queries; it never serves cached metrics.
+The separate [quota metrics poller](#subscription-quota-metrics) keeps an in-memory
+snapshot but does not persist quota data. A valid query returns HTTP 200 with
 per-provider errors, so one upstream outage does not hide the other results.
 Credit and reset operation failures likewise use their structured result's
 `error`; clients must inspect it, not only the HTTP status. Invalid request or
@@ -290,6 +291,62 @@ Public-source research has not verified these accounts live; in particular,
 confirm Z.ai's secondary-evidence fields before declaring live compatibility.
 **Do not run the singular `reset` command as a test.** Real redemption is a
 separate deliberate user action, not part of the smoke check.
+
+### Subscription quota metrics
+
+With metrics enabled, the proxy fetches all supported configured subscriptions
+asynchronously at startup and every `subscription_poll_interval` (default `5m`).
+`serve -subscription-poll-interval <duration>` overrides
+`HARNESS_MODEL_PROXY_SUBSCRIPTION_POLL_INTERVAL`, then the config field, then the
+default. Positive intervals must be at least `1m`; the delay starts after each
+refresh completes, including failures, so slow calls cannot queue rapid polls.
+Use `0` to disable polling. `-no-metrics` / `metrics.enabled:false` also
+disables it. Poll cycles do not overlap, run at most three provider queries in
+parallel, and are canceled on shutdown. They reuse the same credentials, bounds,
+and normalization as `/limits`; failures never block model generation.
+
+The existing `/metrics` endpoint exports these **gauges**, prefixed with
+`model_proxy_subscription_`:
+
+| Suffix | Labels | Value |
+|---|---|---|
+| `used_percent`, `remaining_percent` | `provider`, `pool`, `window` | Last normalized quota percentages, not model token usage. |
+| `used`, `remaining`, `limit` | `provider`, `pool`, `window`, `unit` | Provider-defined quota counts; independent pools are not added together. |
+| `window_duration_seconds` | `provider`, `pool`, `window` | Reported window duration. |
+| `reset_timestamp_seconds` | `provider`, `pool`, `window` | Automatic reset Unix timestamp; relative resets use fetch time plus reported seconds. |
+| `allowed`, `limit_reached` | `provider`, `pool` | Authoritative admission flags as 1/0, never inferred from percentages. |
+| `reset_credits_available` | `provider` | Optional reset-credit count from status; not purchased credits. |
+| `refresh_success` | `provider` | Whether the last status refresh succeeded (1) or failed (0). |
+| `last_refresh_timestamp_seconds` | `provider` | Completion time of the latest refresh attempt. |
+| `last_success_timestamp_seconds` | `provider` | Fetch time of the latest successful status. |
+
+Labels use normalized provider/pool/window IDs and units, not plan/display names,
+account IDs, credit IDs, or errors. Unknown values are absent; explicit zero/false
+is exported. A successful refresh replaces all series for that provider, removing
+fields/windows no longer reported. A failed refresh retains the last good quota
+values, sets `refresh_success` to 0, and leaves the success timestamp unchanged.
+Before the first success there are no quota values or success timestamp. Warnings
+such as inconsistent provider counts do not turn a successful query into a
+failed refresh; the reported numbers remain uncorrected.
+
+Scrapes only read the in-memory gauges and **never contact providers**. Manual
+`/limits` queries and best-effort status refreshes after an explicit reset also
+update the gauges, including when polling is disabled. Polling does not list
+credit details, redeem credits, retry failed requests, or send model prompts.
+For example, graph only fresh, successfully refreshed usage with:
+
+```promql
+model_proxy_subscription_used_percent
+  and on (provider) (model_proxy_subscription_refresh_success == 1)
+  and on (provider) (time() - model_proxy_subscription_last_success_timestamp_seconds < 600)
+```
+
+Adjust the freshness threshold to your polling interval. Each proxy instance
+polls independently, so replicas add upstream requests; disable polling on
+replicas that do not need these metrics. Account-wide quota information is
+visible on the existing **unauthenticated metrics listener**. Restrict that
+listener to trusted monitoring clients; API-key authorization on `/v1/limits`
+does not protect `/metrics`.
 
 ## Prometheus metrics
 

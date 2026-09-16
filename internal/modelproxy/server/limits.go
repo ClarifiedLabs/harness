@@ -138,13 +138,33 @@ func (h *Handler) handleLimits(w http.ResponseWriter, r *http.Request) {
 		}
 		providers = append(providers, pc)
 	} else {
-		for _, pc := range h.providers {
-			if subscription.Supported(pc.Name) {
-				providers = append(providers, pc)
-			}
+		providers = h.subscriptionProviders()
+	}
+	report := h.fetchLimits(r.Context(), providers, "status")
+	writeLimitsJSON(w, http.StatusOK, report)
+}
+
+func (h *Handler) subscriptionProviders() []llm.ProviderConfig {
+	var providers []llm.ProviderConfig
+	for _, pc := range h.providers {
+		if subscription.Supported(pc.Name) {
+			providers = append(providers, pc)
 		}
 	}
 	sort.Slice(providers, func(i, j int) bool { return providers[i].Name < providers[j].Name })
+	return providers
+}
+
+// RefreshSubscriptionMetrics performs read-only status queries; it never lists
+// or consumes credits, and is a no-op when metrics are disabled.
+func (h *Handler) RefreshSubscriptionMetrics(ctx context.Context) {
+	if h.subscriptionMetrics == nil || ctx.Err() != nil {
+		return
+	}
+	h.fetchLimits(ctx, h.subscriptionProviders(), "poll")
+}
+
+func (h *Handler) fetchLimits(ctx context.Context, providers []llm.ProviderConfig, operation string) protocol.LimitsReport {
 	report := protocol.LimitsReport{Providers: make([]protocol.ProviderLimits, len(providers))}
 	// At most three supported providers; retain an explicit concurrency bound.
 	sem := make(chan struct{}, 3)
@@ -156,14 +176,14 @@ func (h *Handler) handleLimits(w http.ResponseWriter, r *http.Request) {
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
-			case <-r.Context().Done():
+			case <-ctx.Done():
 				report.Providers[i] = protocol.ProviderLimits{Provider: pc.Name, FetchedAt: h.now(), Error: &protocol.LimitsError{Code: "canceled", Message: "quota request canceled"}}
 				return
 			}
 			status := protocol.ProviderLimits{Provider: pc.Name, FetchedAt: h.now()}
-			account, err := h.limits.Resolve(r.Context(), pc)
+			account, err := h.limits.Resolve(ctx, pc)
 			if err == nil {
-				status, err = account.Status(r.Context())
+				status, err = account.Status(ctx)
 			}
 			if err != nil {
 				status = protocol.ProviderLimits{Provider: pc.Name, FetchedAt: h.now(), Error: limitsError(err)}
@@ -173,9 +193,10 @@ func (h *Handler) handleLimits(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 	for _, p := range report.Providers {
-		h.logLimitsResult("status", p.Provider, "", p.Error, p.Warnings)
+		h.logLimitsResult(operation, p.Provider, "", p.Error, p.Warnings)
+		h.publishSubscriptionStatus(p)
 	}
-	writeLimitsJSON(w, http.StatusOK, report)
+	return report
 }
 
 func (h *Handler) handleResetCredits(w http.ResponseWriter, r *http.Request) {
@@ -250,8 +271,10 @@ func (h *Handler) handleLimitsReset(w http.ResponseWriter, r *http.Request) {
 		if statusErr == nil {
 			result.Status = &status
 		} else {
+			status = protocol.ProviderLimits{Provider: req.Provider, FetchedAt: h.now(), Error: limitsError(statusErr)}
 			result.Warnings = append(result.Warnings, protocol.LimitsError{Code: "status_refresh_failed", Message: "reset succeeded; quota refresh failed"})
 		}
+		h.publishSubscriptionStatus(status)
 		credits, creditsErr := account.ResetCredits(r.Context())
 		if creditsErr == nil {
 			result.Credits = &credits

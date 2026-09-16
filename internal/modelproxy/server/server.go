@@ -42,17 +42,18 @@ const maxStreamRequestBytes = 64 << 20
 var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type Config struct {
-	ProviderConfigs        []string      `json:"provider_configs"`
-	DefaultContextWindow   int           `json:"default_context_window"`
-	LogLevel               string        `json:"log_level,omitempty"`
-	LogFormat              string        `json:"log_format,omitempty"`
-	ModelsDevCacheTTL      Duration      `json:"models_dev_cache_ttl,omitempty"`
-	ProviderModelsCacheTTL Duration      `json:"provider_models_cache_ttl,omitempty"`
-	DrainDelay             Duration      `json:"drain_delay,omitempty"`
-	ShutdownTimeout        Duration      `json:"shutdown_timeout,omitempty"`
-	InstanceID             string        `json:"instance_id,omitempty"`
-	APIKeysFile            string        `json:"api_keys_file,omitempty"`
-	Metrics                MetricsConfig `json:"metrics,omitempty"`
+	ProviderConfigs          []string      `json:"provider_configs"`
+	DefaultContextWindow     int           `json:"default_context_window"`
+	LogLevel                 string        `json:"log_level,omitempty"`
+	LogFormat                string        `json:"log_format,omitempty"`
+	ModelsDevCacheTTL        Duration      `json:"models_dev_cache_ttl,omitempty"`
+	ProviderModelsCacheTTL   Duration      `json:"provider_models_cache_ttl,omitempty"`
+	SubscriptionPollInterval Duration      `json:"subscription_poll_interval,omitempty"`
+	DrainDelay               Duration      `json:"drain_delay,omitempty"`
+	ShutdownTimeout          Duration      `json:"shutdown_timeout,omitempty"`
+	InstanceID               string        `json:"instance_id,omitempty"`
+	APIKeysFile              string        `json:"api_keys_file,omitempty"`
+	Metrics                  MetricsConfig `json:"metrics,omitempty"`
 }
 
 type CostBudgetConfig struct {
@@ -105,7 +106,7 @@ type Options struct {
 	// InstanceID identifies this proxy process in diagnostics and per-process
 	// usage reports. Empty generates a random 16-byte hexadecimal identifier.
 	InstanceID string
-	// SubscriptionHTTPClient is used only for on-demand quota requests.
+	// SubscriptionHTTPClient is used only for subscription quota requests.
 	SubscriptionHTTPClient *http.Client
 	wsPool                 wsPoolOptions
 }
@@ -172,8 +173,9 @@ type Handler struct {
 	instanceID           string
 	startedAt            time.Time
 
-	metrics    *metrics.Registry
-	metricFams *metricsCollectors
+	metrics             *metrics.Registry
+	metricFams          *metricsCollectors
+	subscriptionMetrics *subscriptionMetrics
 
 	keyBudgetMu sync.Mutex
 	keyBudgets  map[string]*costBudgetTracker
@@ -281,6 +283,7 @@ func NewHandler(opts Options) (*Handler, error) {
 	if opts.Metrics != nil {
 		h.metrics = opts.Metrics
 		h.metricFams = registerMetricFamilies(opts.Metrics)
+		h.subscriptionMetrics = newSubscriptionMetrics(opts.Metrics)
 	}
 	for _, pc := range providers {
 		if _, _, err := modeldiscovery.Resolve(pc); err != nil {

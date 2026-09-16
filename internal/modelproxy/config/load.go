@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	drainDelayEnvironment      = "HARNESS_MODEL_PROXY_DRAIN_DELAY"
-	shutdownTimeoutEnvironment = "HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT"
-	instanceIDEnvironment      = "HARNESS_MODEL_PROXY_INSTANCE_ID"
+	drainDelayEnvironment       = "HARNESS_MODEL_PROXY_DRAIN_DELAY"
+	subscriptionPollEnvironment = "HARNESS_MODEL_PROXY_SUBSCRIPTION_POLL_INTERVAL"
+	shutdownTimeoutEnvironment  = "HARNESS_MODEL_PROXY_SHUTDOWN_TIMEOUT"
+	instanceIDEnvironment       = "HARNESS_MODEL_PROXY_INSTANCE_ID"
 )
 
 var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
@@ -142,7 +143,7 @@ func CheckLocalReferences(result Result, getenv func(string) string, warn func(s
 }
 
 func validateIntegerDurationRanges(present map[string]json.RawMessage) error {
-	for _, key := range []string{"models_dev_cache_ttl", "provider_models_cache_ttl", "drain_delay", "shutdown_timeout"} {
+	for _, key := range []string{"models_dev_cache_ttl", "provider_models_cache_ttl", "subscription_poll_interval", "drain_delay", "shutdown_timeout"} {
 		raw, ok := present[key]
 		if !ok {
 			continue
@@ -224,6 +225,16 @@ func resolveDurations(result *Result, file server.Config, flags cli.Values, gete
 	result.Config.ProviderModelsCacheTTL = server.Duration{Duration: providerModelsTTL, Set: true}
 	result.Sources["provider_models_cache_ttl"] = sourceForPath(source, result.Path)
 
+	interval, source, err := resolveDuration("subscription-poll-interval", "subscription_poll_interval", flags, getenv(subscriptionPollEnvironment), file.SubscriptionPollInterval, 5*time.Minute)
+	if err != nil {
+		return err
+	}
+	if interval > 0 && interval < time.Minute {
+		return fmt.Errorf("subscription_poll_interval must be zero (disabled) or at least 1m")
+	}
+	result.Config.SubscriptionPollInterval = server.Duration{Duration: interval, Set: true}
+	result.Sources["subscription_poll_interval"] = sourceForPath(source, result.Path)
+
 	drain, source, err := resolveDuration("drain-delay", "drain_delay", flags, getenv(drainDelayEnvironment), file.DrainDelay, 5*time.Second)
 	if err != nil {
 		return err
@@ -255,6 +266,8 @@ func resolveDuration(flagName, key string, flags cli.Values, environmentValue st
 		environmentName := drainDelayEnvironment
 		if key == "shutdown_timeout" {
 			environmentName = shutdownTimeoutEnvironment
+		} else if key == "subscription_poll_interval" {
+			environmentName = subscriptionPollEnvironment
 		}
 		return parsed, durationSource{kind: configmeta.SourceEnvironment, name: environmentName}, err
 	}
