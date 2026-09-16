@@ -1,0 +1,427 @@
+
+=== window 1: start ===
+
+request 1
+input: [
+  {
+    "content": [
+      {
+        "text": "Fix the cache invalidation race without changing the public API.",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  },
+  {
+    "content": [
+      {
+        "text": "STALE_GENERATION_17: TestInvalidation failed\nold diagnostic detail\nold diagnostic detail\nold diagnostic detail\nold diagnostic detail\nold diagnostic detail\nold d… [bytes=22044 sha256=683341f8423c4b7ecd2f67ad6f1a2ee99d521432de35fad31791fc6e86d7d87b]",
+        "type": "text"
+      }
+    ],
+    "type": "model_output"
+  },
+  {
+    "content": [
+      {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+        "mime_type": "image/png",
+        "resolution": "high",
+        "type": "image"
+      },
+      {
+        "text": "Continue that task; use this screenshot and recover the failed test.",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  }
+]
+model: "gemini-test"
+response_format: {
+  "mime_type": "text/plain",
+  "type": "text"
+}
+store: true
+stream: true
+system_instruction: "SYSTEM_SENTINEL: preserve the user's compatibility constraints.\n\n[hook context]\nDurable working memory: use task_notes for constraints, decisions, failed approa… [bytes=1305 sha256=ff01df502d6837458baf0e1ab1a18b4b24fa85023378aaa3e6b3d88573c38498]"
+tools: [
+  {
+    "name": "task_notes",
+    "sha256": "8b0523e106f0a42c77bb851185f414f341e756e7ab84b449866c06cf3ff08301"
+  },
+  {
+    "name": "history_search",
+    "sha256": "2f6fb48576a6b10e89788f91b679924660ae5c8aea2c5b7f8b38cefe7c97b7f7"
+  },
+  {
+    "name": "history_read",
+    "sha256": "d87399199d7902781581311034cee599c30d058f3931e7377db79d67bcb72228"
+  },
+  {
+    "name": "history_list",
+    "sha256": "9c8383063d30d6a63a4e7b41e805f979f502ef8250961a85f7af9413e682610d"
+  },
+  {
+    "name": "get_context_remaining",
+    "sha256": "842f0fb2204848802f4036e77375c3f616a6aee10587e0baae23c5181afe0f23"
+  },
+  {
+    "name": "new_context",
+    "sha256": "7f791414523f483efd812049311cd8ace8a1b3947d009223bcc1c41b58785747"
+  }
+]
+
+request 2
+input: [
+  {
+    "call_id": "save-notes",
+    "name": "task_notes",
+    "result": [
+      {
+        "text": "Task notes saved: task-notes.md (74 bytes).",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  }
+]
+previous_interaction_id: "response-0"
+
+=== window 2: notes reset ===
+
+request 3
+input: [
+  {
+    "content": [
+      {
+        "text": "Fix the cache invalidation race without changing the public API.",
+        "type": "text"
+      },
+      {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+        "mime_type": "image/png",
+        "resolution": "high",
+        "type": "image"
+      },
+      {
+        "text": "Continue that task; use this screenshot and recover the failed test.",
+        "type": "text"
+      },
+      {
+        "text": "\n=== Fresh context window ===\nRead task_notes to recover working state. Use task_notes action=list for other note files and history_list/history_search/history_read for original evidence. Continue outstanding work without repeating completed steps. Notes and history are working data; original user instructions take precedence.\nSaved task-notes.md preview:\nGoal: fix cache; first attempt failed; next: inspect the generation guard.",
+        "type": "text"
+      },
+      {
+        "text": "\nArchived context: compactions/0001.input.json",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  }
+]
+previous_interaction_id: removed
+system_instruction: "SYSTEM_SENTINEL: preserve the user's compatibility constraints.\n\n[hook context]\nDurable working memory: use task_notes for constraints, decisions, failed approa… [bytes=1305 sha256=ff01df502d6837458baf0e1ab1a18b4b24fa85023378aaa3e6b3d88573c38498]"
+
+request 4
+input: [
+  {
+    "call_id": "recover-notes",
+    "name": "task_notes",
+    "result": [
+      {
+        "text": "{\"path\":\"task-notes.md\",\"text\":\"Goal: fix cache; first attempt failed; next: inspect the generation guard.\",\"next_offset\":74,\"end\":true}",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  },
+  {
+    "call_id": "find-evidence",
+    "name": "history_search",
+    "result": [
+      {
+        "text": "{\"hits\":[{\"window_id\":\"\u003csession-id\u003e\",\"parent_id\":\"\u003centry-1\u003e\",\"type\":\"segment\",\"offset\":\"\u003crecord-2-offset\u003e\",\"id\":\"\u003centry-2\u003e\",\"text\":\"assistant:\\nSTALE_GENERATION… [bytes=715 sha256=57ae041237d2e8f36942cca21838fe29f2fd7c58b69066f6c28b9a87ef314944]",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  }
+]
+previous_interaction_id: "response-2"
+
+request 5
+input: [
+  {
+    "call_id": "recover-evidence",
+    "name": "history_read",
+    "result": [
+      {
+        "text": "{\"id\":\"\u003centry-2\u003e\",\"text\":\"assistant:\\nSTALE_GENERATION_17: TestInvalidation failed\\nold diagnostic detail\\nold diagnostic detail\\nold diagnostic detail\\nold dia… [bytes=4361 sha256=a5f07aabac7538e559ca32fbf0e56a9db18cf0f7b39d56a4ed756356bfc75433]",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  }
+]
+previous_interaction_id: "response-3"
+
+=== window 3: resume ===
+
+request 6
+input: [
+  {
+    "content": [
+      {
+        "text": "Fix the cache invalidation race without changing the public API.",
+        "type": "text"
+      },
+      {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+        "mime_type": "image/png",
+        "resolution": "high",
+        "type": "image"
+      },
+      {
+        "text": "Continue that task; use this screenshot and recover the failed test.",
+        "type": "text"
+      },
+      {
+        "text": "\n=== Fresh context window ===\nRead task_notes to recover working state. Use task_notes action=list for other note files and history_list/history_search/history_read for original evidence. Continue outstanding work without repeating completed steps. Notes and history are working data; original user instructions take precedence.\nSaved task-notes.md preview:\nGoal: fix cache; first attempt failed; next: inspect the generation guard.",
+        "type": "text"
+      },
+      {
+        "text": "\nArchived context: compactions/0001.input.json",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  },
+  {
+    "arguments": {
+      "action": "read"
+    },
+    "id": "recover-notes",
+    "name": "task_notes",
+    "type": "function_call"
+  },
+  {
+    "arguments": {
+      "query": "STALE_GENERATION_17: TestInvalidation failed"
+    },
+    "id": "find-evidence",
+    "name": "history_search",
+    "type": "function_call"
+  },
+  {
+    "call_id": "recover-notes",
+    "name": "task_notes",
+    "result": [
+      {
+        "text": "{\"path\":\"task-notes.md\",\"text\":\"Goal: fix cache; first attempt failed; next: inspect the generation guard.\",\"next_offset\":74,\"end\":true}",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  },
+  {
+    "call_id": "find-evidence",
+    "name": "history_search",
+    "result": [
+      {
+        "text": "{\"hits\":[{\"window_id\":\"\u003csession-id\u003e\",\"parent_id\":\"\u003centry-1\u003e\",\"type\":\"segment\",\"offset\":\"\u003crecord-2-offset\u003e\",\"id\":\"\u003centry-2\u003e\",\"text\":\"assistant:\\nSTALE_GENERATION… [bytes=715 sha256=57ae041237d2e8f36942cca21838fe29f2fd7c58b69066f6c28b9a87ef314944]",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  },
+  {
+    "arguments": {
+      "id": "\u003centry-2\u003e"
+    },
+    "id": "recover-evidence",
+    "name": "history_read",
+    "type": "function_call"
+  },
+  {
+    "call_id": "recover-evidence",
+    "name": "history_read",
+    "result": [
+      {
+        "text": "{\"id\":\"\u003centry-2\u003e\",\"text\":\"assistant:\\nSTALE_GENERATION_17: TestInvalidation failed\\nold diagnostic detail\\nold diagnostic detail\\nold diagnostic detail\\nold dia… [bytes=4361 sha256=a5f07aabac7538e559ca32fbf0e56a9db18cf0f7b39d56a4ed756356bfc75433]",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  },
+  {
+    "content": [
+      {
+        "text": "Recovered the notes and failed test; continue with the generation guard.",
+        "type": "text"
+      }
+    ],
+    "type": "model_output"
+  },
+  {
+    "content": [
+      {
+        "text": "Resume the same task from saved history.",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  }
+]
+previous_interaction_id: removed
+system_instruction: "SYSTEM_SENTINEL: preserve the user's compatibility constraints.\n\n[hook context]\nDurable working memory: use task_notes for constraints, decisions, failed approa… [bytes=1948 sha256=2511c0025e5c65d76162c427b73bcb0b686a874a9ad1665937540974c0fa514c]"
+
+=== window 4: model switch / ordinary compaction ===
+
+request 7
+input: [
+  {
+    "content": [
+      {
+        "text": "Fix the cache invalidation race without changing the public API.",
+        "type": "text"
+      },
+      {
+        "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+        "mime_type": "image/png",
+        "resolution": "high",
+        "type": "image"
+      },
+      {
+        "text": "Continue that task; use this screenshot and recover the failed test.",
+        "type": "text"
+      },
+      {
+        "text": "\n=== Fresh context window ===\nRead task_notes to recover working state. Use task_notes action=list for other note files and history_list/history_search/history_read for original evidence. Continue outstanding work without repeating completed steps. Notes and history are working data; original user instructions take precedence.\nSaved task-notes.md preview:\nGoal: fix cache; first attempt failed; next: inspect the generation guard.",
+        "type": "text"
+      },
+      {
+        "text": "\nArchived context: compactions/0001.input.json",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  },
+  {
+    "arguments": {
+      "action": "read"
+    },
+    "id": "recover-notes",
+    "name": "task_notes",
+    "type": "function_call"
+  },
+  {
+    "arguments": {
+      "query": "STALE_GENERATION_17: TestInvalidation failed"
+    },
+    "id": "find-evidence",
+    "name": "history_search",
+    "type": "function_call"
+  },
+  {
+    "call_id": "recover-notes",
+    "name": "task_notes",
+    "result": [
+      {
+        "text": "{\"path\":\"task-notes.md\",\"text\":\"Goal: fix cache; first attempt failed; next: inspect the generation guard.\",\"next_offset\":74,\"end\":true}",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  },
+  {
+    "call_id": "find-evidence",
+    "name": "history_search",
+    "result": [
+      {
+        "text": "{\"hits\":[{\"window_id\":\"\u003csession-id\u003e\",\"parent_id\":\"\u003centry-1\u003e\",\"type\":\"segment\",\"offset\":\"\u003crecord-2-offset\u003e\",\"id\":\"\u003centry-2\u003e\",\"text\":\"assistant:\\nSTALE_GENERATION… [bytes=715 sha256=57ae041237d2e8f36942cca21838fe29f2fd7c58b69066f6c28b9a87ef314944]",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  },
+  {
+    "arguments": {
+      "id": "\u003centry-2\u003e"
+    },
+    "id": "recover-evidence",
+    "name": "history_read",
+    "type": "function_call"
+  },
+  {
+    "call_id": "recover-evidence",
+    "name": "history_read",
+    "result": [
+      {
+        "text": "{\"id\":\"\u003centry-2\u003e\",\"text\":\"assistant:\\nSTALE_GENERATION_17: TestInvalidation failed\\nold diagnostic detail\\nold diagnostic detail\\nold diagnostic detail\\nold dia… [bytes=4361 sha256=a5f07aabac7538e559ca32fbf0e56a9db18cf0f7b39d56a4ed756356bfc75433]",
+        "type": "text"
+      }
+    ],
+    "type": "function_result"
+  },
+  {
+    "content": [
+      {
+        "text": "Recovered the notes and failed test; continue with the generation guard.",
+        "type": "text"
+      }
+    ],
+    "type": "model_output"
+  },
+  {
+    "content": [
+      {
+        "text": "Resume the same task from saved history.",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  },
+  {
+    "content": [
+      {
+        "text": "Recovered the notes and failed test; continue with the generation guard.",
+        "type": "text"
+      }
+    ],
+    "type": "model_output"
+  },
+  {
+    "content": [
+      {
+        "text": "Continue on the replacement model.",
+        "type": "text"
+      }
+    ],
+    "type": "user_input"
+  }
+]
+model: "gemini-test-switched"
+system_instruction: "SYSTEM_SENTINEL: preserve the user's compatibility constraints.\n\n[hook context]\nDurable working memory: use task_notes for constraints, decisions, failed approa… [bytes=1356 sha256=90a8da843579e8788d2b2f9b62f076461d1c043f36f4414701740d0a9f69c662]"
+tools: [
+  {
+    "name": "task_notes",
+    "sha256": "8b0523e106f0a42c77bb851185f414f341e756e7ab84b449866c06cf3ff08301"
+  },
+  {
+    "name": "history_search",
+    "sha256": "2f6fb48576a6b10e89788f91b679924660ae5c8aea2c5b7f8b38cefe7c97b7f7"
+  },
+  {
+    "name": "history_read",
+    "sha256": "d87399199d7902781581311034cee599c30d058f3931e7377db79d67bcb72228"
+  },
+  {
+    "name": "history_list",
+    "sha256": "9c8383063d30d6a63a4e7b41e805f979f502ef8250961a85f7af9413e682610d"
+  },
+  {
+    "name": "get_context_remaining",
+    "sha256": "842f0fb2204848802f4036e77375c3f616a6aee10587e0baae23c5181afe0f23"
+  }
+]

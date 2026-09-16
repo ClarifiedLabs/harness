@@ -779,8 +779,15 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		sink.Notice(fmt.Sprintf("[native compact failed: %v; using textual compaction]", compactErr))
 		return usage, false, false, nil
 	}
+	// Compaction used the old window's baseline. Only a successful replacement
+	// starts a new one at the selected effort; retain old semantic messages so
+	// rejected checkpoints and cross-domain replay still recover their baseline.
+	reasoningState := a.newReasoningState()
+	if reasoningState != nil {
+		reasoningState.Baseline = reasoningState.Active
+	}
 	checkpoint := llm.Message{
-		ReasoningState: a.newReasoningState(),
+		ReasoningState: reasoningState,
 		Role:           llm.RoleUser,
 		Time:           a.now(),
 		Origin:         llm.MessageOriginProviderCompaction,

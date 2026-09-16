@@ -39,8 +39,16 @@ and are added fresh to every active model round; the system prompt remains on
 `Request.System`.
 
 Native compaction resets any stored-response continuation anchor and starts a
-fresh stateless baseline. A native operation failure falls through to textual
-compaction; permanent rejections disable the path for the replay domain, while
+fresh stateless baseline. For targets supporting in-history reasoning-effort
+updates, the compaction request uses the old window's effort baseline with the
+current summary setting. Only successful native compaction establishes the
+currently selected effort as the new checkpoint's baseline. Failed attempts do
+not establish a new baseline. If a checkpoint is discarded, semantic replay
+restores that history's original baseline and carries the currently selected
+effort as an update; it does not change the selected effort. Notes-based resets
+also start a fresh effort baseline by removing the old working window.
+A native operation failure falls through to textual compaction; permanent
+rejections disable the path for the replay domain, while
 temporary failures apply the cooldown described below.
 If a later request rejects a persisted checkpoint's encrypted content, Harness
 disables that checkpoint and retries once from the preserved semantic
@@ -392,4 +400,10 @@ valid; the source delegate is unchanged. Original user instructions remain
 in the fresh context. Exact billing and task-quality parity require live paired
 evaluations; the deterministic suite verifies lifecycle and recovery behavior,
 including HTTP-fake Anthropic, Gemini Interactions, OpenAI Chat, and Responses
-encoders/decoders. It is not evidence of equal task quality across models.
+encoders/decoders. Wire-request snapshots in `cmd/harness/testdata/context/`
+also cover reset, persisted resume, and switching to ordinary compaction on a
+replacement model. They retain request-setting and tool-inventory changes,
+label known volatile IDs/record offsets, and fingerprint abbreviated content.
+Review intentional changes with
+`go test ./cmd/harness -run TestContextNotesRecoveryAcrossDialects -update-context-snapshots`.
+These checks are not evidence of equal task quality across models.

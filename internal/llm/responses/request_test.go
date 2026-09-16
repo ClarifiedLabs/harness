@@ -1037,6 +1037,34 @@ func TestReasoningUpdatesPreserveCurrentSummary(t *testing.T) {
 	}
 }
 
+func TestReasoningUpdatesRestoreSemanticBaselineAfterCheckpointDiscard(t *testing.T) {
+	// A user prompt admitted against a fresh high-effort checkpoint can survive
+	// its rejection. Full semantic replay must use the original low baseline,
+	// while the admitted prompt still applies the currently selected medium effort.
+	original := &llm.ReasoningState{ReplayDomain: "astra", Baseline: llm.ReasoningConfig{Effort: "low"}, Active: llm.ReasoningConfig{Effort: "low"}}
+	admitted := &llm.ReasoningState{ReplayDomain: "astra", Baseline: llm.ReasoningConfig{Effort: "high"}, Active: llm.ReasoningConfig{Effort: "medium"}}
+	w := buildRequest(llm.Request{
+		Model: "gpt-6-astra", Reasoning: llm.ReasoningConfig{Effort: "low", Summary: "concise"},
+		Messages: []llm.Message{
+			{Role: llm.RoleUser, ReasoningState: original, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "original task"}}},
+			{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "prior work"}}},
+			{Role: llm.RoleUser, ReasoningState: admitted, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "continue after rejection"}}},
+		},
+	}, 0, 0)
+	if w.Reasoning == nil || w.Reasoning.Effort != "low" || w.Reasoning.Summary != "concise" {
+		t.Fatalf("semantic baseline: %+v", w.Reasoning)
+	}
+	var efforts []string
+	for _, item := range w.Input {
+		if item.Type == "configuration_update" {
+			efforts = append(efforts, item.Reasoning.Effort)
+		}
+	}
+	if strings.Join(efforts, ",") != "low,medium" {
+		t.Fatalf("replay lost selected effort: %v", efforts)
+	}
+}
+
 func TestReasoningUpdatesPreserveBaselineAndCompactionOrder(t *testing.T) {
 	state := &llm.ReasoningState{ReplayDomain: "astra", Baseline: llm.ReasoningConfig{Effort: "low"}, Active: llm.ReasoningConfig{Effort: "high"}}
 	req := llm.Request{Model: "gpt-6-astra", Reasoning: llm.ReasoningConfig{Effort: "high"}, Messages: []llm.Message{
