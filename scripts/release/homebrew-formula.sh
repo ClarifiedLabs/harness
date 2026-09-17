@@ -30,6 +30,7 @@ class ${class_name} < Formula
   depends_on "go" => :build
 
   def install
+    ENV["GOWORK"] = "off"
     ldflags = %W[
       -s -w
       -X harness/internal/buildinfo.Version=v#{version}

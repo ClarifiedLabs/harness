@@ -62,7 +62,9 @@ docker run --rm -p 8766:8766 ghcr.io/clarifiedlabs/harness-mcp-proxy:latest serv
 
 The tap repository must already exist with an initialized default branch. No
 formula file is required ahead of time; the release workflow writes the formula
-files and merges the generated bottle metadata.
+files and merges the generated bottle metadata. Go builds in the binary formulae
+set `GOWORK=off` so unrelated workspaces (including a `go.work` in a parent
+temporary directory) cannot interfere with source builds.
 
 ## CI Dry Runs
 
