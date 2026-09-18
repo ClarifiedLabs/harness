@@ -331,64 +331,6 @@
       ]
     },
     {
-      "slug": "gpt-5.4-mini",
-      "display_name": "GPT-5.4-Mini",
-      "context_window": 272000,
-      "max_context_window": 272000,
-      "input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_reasoning_levels": [
-        {
-          "effort": "low"
-        },
-        {
-          "effort": "medium"
-        },
-        {
-          "effort": "high"
-        },
-        {
-          "effort": "xhigh"
-        }
-      ],
-      "supports_reasoning_summary_parameter": true,
-      "supports_reasoning_summaries": true,
-      "visibility": "hide",
-      "supported_in_api": true,
-      "default_service_tier": null
-    },
-    {
-      "slug": "gpt-5.2",
-      "display_name": "GPT-5.2",
-      "context_window": 272000,
-      "max_context_window": 272000,
-      "input_modalities": [
-        "text",
-        "image"
-      ],
-      "supported_reasoning_levels": [
-        {
-          "effort": "low"
-        },
-        {
-          "effort": "medium"
-        },
-        {
-          "effort": "high"
-        },
-        {
-          "effort": "xhigh"
-        }
-      ],
-      "supports_reasoning_summary_parameter": true,
-      "supports_reasoning_summaries": true,
-      "visibility": "list",
-      "supported_in_api": true,
-      "default_service_tier": null
-    },
-    {
       "slug": "codex-auto-review",
       "display_name": "Codex Auto Review",
       "context_window": 272000,
