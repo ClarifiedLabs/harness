@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"harness/internal/codexclient"
 	"harness/internal/llm"
 )
 
@@ -180,6 +181,8 @@ func TestCompactContextUsesCompactionV2ForChatGPTCodex(t *testing.T) {
 		},
 		BaseURL:      srv.URL,
 		ProviderName: "openai-codex",
+		// The Codex User-Agent carries the vendored Codex client version.
+		CodexClientVersion: "0.154.0",
 	})
 	result, err := p.CompactContext(context.Background(), llm.Request{
 		Model:  "gpt-5.5",
@@ -231,6 +234,12 @@ func TestCompactContextUsesCompactionV2ForChatGPTCodex(t *testing.T) {
 		if headers.Get(name) == "" {
 			t.Fatalf("Codex compact request missing %s: %+v", name, headers)
 		}
+	}
+	if got := headers.Get("originator"); got != codexclient.Originator {
+		t.Fatalf("originator = %q, want %q", got, codexclient.Originator)
+	}
+	if values := headers.Values("User-Agent"); len(values) != 1 || !strings.HasPrefix(values[0], "codex_cli_rs/0.154.0 ") {
+		t.Fatalf("User-Agent = %q, want a single codex_cli_rs/0.154.0 value", values)
 	}
 }
 

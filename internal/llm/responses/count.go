@@ -58,6 +58,7 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 	if len(p.authHeaders) == 0 && p.apiKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
 	}
+	p.applyCodexHeaders(httpReq.Header)
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {

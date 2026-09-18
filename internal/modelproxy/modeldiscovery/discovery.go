@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"harness/internal/auth"
+	"harness/internal/codexclient"
 	"harness/internal/llm"
 	"harness/internal/modelcatalog"
 )
@@ -289,6 +290,11 @@ func (f Fetcher) headers(ctx context.Context, pc llm.ProviderConfig, format Form
 	}
 	if format == FormatAnthropic {
 		headers.Set("anthropic-version", "2023-06-01")
+	}
+	// The Codex backend's default client carries the CLI's identity headers on
+	// every request, including this authenticated catalog query.
+	if format == FormatCodex {
+		codexclient.Apply(headers, f.CodexClientVersion)
 	}
 	return headers, nil
 }

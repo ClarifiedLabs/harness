@@ -108,11 +108,15 @@ func Dial(ctx context.Context, rawURL string, header http.Header) (*Conn, *http.
 	req.Header.Set("Upgrade", "websocket")
 	req.Header.Set("Sec-WebSocket-Version", "13")
 	req.Header.Set("Sec-WebSocket-Key", key)
-	req.Header.Set("User-Agent", "harness")
 	for name, values := range header {
 		for _, value := range values {
 			req.Header.Add(name, value)
 		}
+	}
+	// Callers may supply a provider-specific User-Agent; only fall back to the
+	// harness default when none was given.
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", "harness")
 	}
 	if err := req.Write(conn); err != nil {
 		return nil, nil, err

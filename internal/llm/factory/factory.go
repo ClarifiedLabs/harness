@@ -17,6 +17,7 @@ import (
 	"harness/internal/llm/interactions"
 	"harness/internal/llm/openai"
 	"harness/internal/llm/responses"
+	"harness/internal/modelcatalog"
 )
 
 // Options is the resolved, provider-neutral configuration handed to the factory
@@ -116,6 +117,7 @@ func New(opts Options) (llm.Provider, error) {
 			OmitMaxOutputTokens: opts.OmitMaxOutputTokens,
 			UseWebSocket:        opts.ResponsesWebSocket,
 			ProviderName:        opts.ProviderName,
+			CodexClientVersion:  modelcatalog.CodexClientVersion(),
 			PromptCache:         opts.PromptCache,
 			ToolSearch:          opts.ResponsesToolSearch,
 		}), nil

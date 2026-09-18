@@ -121,6 +121,7 @@ internal/trajectory      bounded host-owned evaluator stagnation control state
 internal/config          typed harness definitions, strict source resolution, provenance, and redacted projections
 internal/configmeta      package-neutral parameter catalog, source vocabulary, provenance snapshots, and deterministic reference renderers
 internal/modelcatalog    normalized models.dev/OpenAI Codex baseline catalogs
+internal/codexclient    OpenAI Codex backend client identity: originator + Codex-shaped User-Agent (shared by the Responses dialect and the model proxy; no dialect dependency)
 internal/modelproxy/modeldiscovery authenticated provider model adapters, caches, and catalog merging
 internal/ui              REPL, streaming renderer, tool summaries, usage line, shared limits rendering and process-local pending reset identity
 internal/sysprompt       embedded prompt files + environment context + AGENTS.md sections
@@ -1444,6 +1445,25 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   access/refresh token rotated by a peer. Failure markers are never persisted;
   tolerant decoding ignores old marker fields. Successful token files are written
   under the proxy config dir via temp-file then rename.
+- ChatGPT Codex identity headers: every Responses request the dialect sends to
+  the Codex backend (provider name `openai-codex` or the canonical
+  `chatgpt.com/backend-api/codex` base URL) carries the same client identity as
+  the official Codex CLI: `originator: codex_cli_rs` and a Codex-shaped
+  `User-Agent` of the form
+  `codex_cli_rs/<vendored Codex client version> (<os> <os version>; <arch>) <terminal> (harness/<build>)`.
+  The version is the vendored Codex compatibility version
+  (`modelcatalog.CodexClientVersion`), not the Harness application version; the
+  Harness build is appended as a suffix so requests stay attributable. OS
+  name/version, architecture, and the terminal token are detected locally, and
+  the value is sanitized to printable ASCII. HTTP, WebSocket handshake, native
+  compaction, and input-token count requests all use it, and non-Codex Responses
+  backends are unchanged. The model proxy's non-inference Codex calls carry the
+  same identity, because the Codex CLI installs it on its shared default client:
+  the `openai-codex` limits and reset-credit endpoints and the authenticated
+  `openai-codex` model-catalog discovery query. Codex OAuth login/refresh calls
+  to the auth issuer deliberately do not, matching the CLI's raw auth client,
+  and the other subscription providers (`kimi-for-coding`, `zai-coding-plan`)
+  are untouched.
 - The model proxy logs a structured start and completion record per `/v1/stream`
   request with
   `proxy_instance_id`, requester, provider, model, request/response bytes,

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/codexclient"
 	"harness/internal/llm"
 	"harness/internal/modelproxy/protocol"
 )
@@ -56,6 +57,50 @@ func limitsError(t *testing.T, err error, code string) *protocol.LimitsError {
 		t.Fatalf("unsafe error: %v", e)
 	}
 	return e
+}
+
+func TestCodexAccountRequestsCarryClientIdentity(t *testing.T) {
+	var headers http.Header
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		headers = r.Header.Clone()
+		return response(http.StatusOK, fixture(t, "codex")), nil
+	})
+	c := New(Options{Client: &http.Client{Transport: transport}, Now: func() time.Time { return testNow }, CodexClientVersion: "0.99.0"})
+	a, err := c.Resolve(context.Background(), config("openai-codex"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := headers.Get("originator"); got != codexclient.Originator {
+		t.Fatalf("originator = %q, want %q", got, codexclient.Originator)
+	}
+	if values := headers.Values("User-Agent"); len(values) != 1 || !strings.HasPrefix(values[0], codexclient.Originator+"/0.99.0 ") {
+		t.Fatalf("User-Agent = %q, want a single codex_cli_rs/0.99.0 value", values)
+	}
+	if headers.Get("Authorization") != "Bearer secret-static-key" || headers.Get("Accept") != "application/json" {
+		t.Fatalf("subscription headers = %+v", headers)
+	}
+}
+
+func TestNonCodexAccountRequestsOmitClientIdentity(t *testing.T) {
+	var headers http.Header
+	transport := roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		headers = r.Header.Clone()
+		return response(http.StatusOK, fixture(t, "kimi")), nil
+	})
+	c := New(Options{Client: &http.Client{Transport: transport}, Now: func() time.Time { return testNow }, CodexClientVersion: "0.99.0"})
+	a, err := c.Resolve(context.Background(), config("kimi-for-coding"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Status(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if headers.Get("originator") != "" || headers.Get("User-Agent") != "" {
+		t.Fatalf("non-Codex subscription headers = %+v", headers)
+	}
 }
 
 func TestOfficialEndpointsBeforeCredentials(t *testing.T) {

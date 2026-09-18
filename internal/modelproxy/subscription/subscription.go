@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"harness/internal/codexclient"
 	"harness/internal/llm"
 	"harness/internal/modelproxy/protocol"
 )
@@ -35,12 +36,16 @@ type Options struct {
 	Client  *http.Client
 	Now     func() time.Time
 	Resolve func(context.Context, llm.ProviderConfig) (Credentials, error)
+	// CodexClientVersion is the vendor-compatibility Codex CLI version reported
+	// in the Codex identity headers; empty omits the version segment.
+	CodexClientVersion string
 }
 
 type Client struct {
-	http    *http.Client
-	now     func() time.Time
-	resolve func(context.Context, llm.ProviderConfig) (Credentials, error)
+	http               *http.Client
+	now                func() time.Time
+	resolve            func(context.Context, llm.ProviderConfig) (Credentials, error)
+	codexClientVersion string
 }
 
 // Account captures one credential snapshot, shared by an operation and its
@@ -87,7 +92,7 @@ func New(opts Options) *Client {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
-	return &Client{http: &h, now: opts.Now, resolve: opts.Resolve}
+	return &Client{http: &h, now: opts.Now, resolve: opts.Resolve, codexClientVersion: opts.CodexClientVersion}
 }
 
 func Supported(name string) bool {
@@ -140,6 +145,12 @@ func (c *Client) Resolve(ctx context.Context, pc llm.ProviderConfig) (*Account, 
 	}
 	if strings.TrimSpace(h.Get("Authorization")) == "" || len(h.Get("Authorization")) > 16384 || strings.ContainsAny(h.Get("Authorization"), "\r\n\x00") {
 		return nil, safeError("missing_auth", "subscription credentials are missing or invalid")
+	}
+	// The Codex account endpoints sit behind the same default client as
+	// inference, so they carry the CLI's identity headers too. Applied after
+	// credential headers so it cannot be shadowed by resolved auth values.
+	if pc.Name == "openai-codex" {
+		codexclient.Apply(h, c.codexClientVersion)
 	}
 	return &Account{client: c, provider: pc.Name, headers: h}, nil
 }

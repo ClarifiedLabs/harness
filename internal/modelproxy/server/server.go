@@ -279,7 +279,7 @@ func NewHandler(opts Options) (*Handler, error) {
 		keyBudgets:           map[string]*costBudgetTracker{},
 		usage:                map[usageKey]*protocol.ModelUsage{},
 	}
-	h.limits = subscription.New(subscription.Options{Client: opts.SubscriptionHTTPClient, Now: now, Resolve: h.subscriptionCredentials})
+	h.limits = subscription.New(subscription.Options{Client: opts.SubscriptionHTTPClient, Now: now, Resolve: h.subscriptionCredentials, CodexClientVersion: modelcatalog.CodexClientVersion()})
 	if opts.Metrics != nil {
 		h.metrics = opts.Metrics
 		h.metricFams = registerMetricFamilies(opts.Metrics)

@@ -39,10 +39,13 @@ type Config struct {
 	OmitMaxOutputTokens bool
 	UseWebSocket        bool
 	ProviderName        string
-	PromptCache         llm.PromptCacheConfig
-	ToolSearch          *bool
-	HTTPClient          *http.Client
-	Sleep               func(time.Duration)
+	// CodexClientVersion is the official Codex CLI version reported in the
+	// ChatGPT Codex User-Agent. Empty omits the version segment.
+	CodexClientVersion string
+	PromptCache        llm.PromptCacheConfig
+	ToolSearch         *bool
+	HTTPClient         *http.Client
+	Sleep              func(time.Duration)
 }
 
 type Provider struct {
@@ -56,6 +59,7 @@ type Provider struct {
 	omitMaxOutputTokens bool
 	useWebSocket        bool
 	providerName        string
+	codexClientVersion  string
 	promptCache         llm.PromptCacheConfig
 	toolSearch          *bool
 	client              *http.Client
@@ -82,6 +86,7 @@ func New(cfg Config) *Provider {
 		omitMaxOutputTokens: cfg.OmitMaxOutputTokens,
 		useWebSocket:        cfg.UseWebSocket,
 		providerName:        cfg.ProviderName,
+		codexClientVersion:  cfg.CodexClientVersion,
 		promptCache:         cfg.PromptCache,
 		toolSearch:          cfg.ToolSearch,
 		client:              client,
@@ -301,6 +306,7 @@ func (p *Provider) connect(ctx context.Context, body []byte, promptCacheKey stri
 				r.Header.Set("Authorization", "Bearer "+p.apiKey)
 			}
 			llm.ApplyPromptCacheAffinityHeaders(r.Header, p.promptCache.AffinityHeaders, promptCacheKey)
+			p.applyCodexHeaders(r.Header)
 		},
 		ParseError: parseErrorResponse,
 		Sleep:      p.sleep,

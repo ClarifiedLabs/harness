@@ -355,6 +355,7 @@ func (p *Provider) webSocketHeaders(req llm.Request) http.Header {
 	}
 	header.Set("OpenAI-Beta", responsesWebSocketBeta)
 	header.Set("User-Agent", "harness")
+	p.applyCodexHeaders(header)
 	ids := p.wsIDs
 	header.Set("x-client-request-id", ids.threadID)
 	header.Set("session-id", ids.sessionID)

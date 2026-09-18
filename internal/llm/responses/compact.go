@@ -419,7 +419,7 @@ func (p *Provider) applyCodexCompactHeaders(header http.Header) {
 	if !p.isCodexBackend() {
 		return
 	}
-	header.Set("User-Agent", "harness")
+	p.applyCodexHeaders(header)
 	header.Set("x-codex-installation-id", p.wsIDs.installationID)
 	header.Set("session-id", p.wsIDs.sessionID)
 	header.Set("thread-id", p.wsIDs.threadID)

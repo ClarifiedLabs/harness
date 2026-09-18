@@ -106,6 +106,55 @@ func TestDialSendAndReadText(t *testing.T) {
 	}
 }
 
+func TestDialUsesCallerUserAgentOrDefault(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ua   string
+		want string
+	}{
+		{name: "default when unset", want: "harness"},
+		{name: "caller value wins", ua: "codex_cli_rs/0.154.0 (Mac OS 15.0.1; arm64) Apple_Terminal/450.1", want: "codex_cli_rs/0.154.0 (Mac OS 15.0.1; arm64) Apple_Terminal/450.1"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got <- r.Header.Values("User-Agent")
+				h, ok := w.(http.Hijacker)
+				if !ok {
+					t.Errorf("response writer is not a hijacker")
+					return
+				}
+				conn, rw, err := h.Hijack()
+				if err != nil {
+					t.Errorf("hijack: %v", err)
+					return
+				}
+				defer conn.Close()
+				fmt.Fprintf(rw, "HTTP/1.1 101 Switching Protocols\r\n")
+				fmt.Fprintf(rw, "Upgrade: websocket\r\n")
+				fmt.Fprintf(rw, "Connection: Upgrade\r\n")
+				fmt.Fprintf(rw, "Sec-WebSocket-Accept: %s\r\n\r\n", acceptKey(r.Header.Get("Sec-WebSocket-Key")))
+				_ = rw.Flush()
+			}))
+			defer srv.Close()
+
+			header := http.Header{}
+			if tt.ua != "" {
+				header.Set("User-Agent", tt.ua)
+			}
+			u := "ws" + srv.URL[len("http"):]
+			conn, _, err := Dial(context.Background(), u, header)
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer conn.Close()
+			if values := <-got; len(values) != 1 || values[0] != tt.want {
+				t.Fatalf("User-Agent = %q, want [%q]", values, tt.want)
+			}
+		})
+	}
+}
+
 func TestDialReadPumpAnswersPingAndTracksCloseBetweenReads(t *testing.T) {
 	result := make(chan error, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/codexclient"
 	"harness/internal/llm"
 	"harness/internal/modelcatalog"
 )
@@ -270,6 +271,13 @@ func TestCodexDiscoveryUsesAccountCatalogVisibility(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("client_version") != "0.99.0" {
 			t.Errorf("client_version = %q", r.URL.Query().Get("client_version"))
+		}
+		// The authenticated Codex catalog query carries the CLI identity headers.
+		if got := r.Header.Get("originator"); got != codexclient.Originator {
+			t.Errorf("originator = %q, want %q", got, codexclient.Originator)
+		}
+		if values := r.Header.Values("User-Agent"); len(values) != 1 || !strings.HasPrefix(values[0], codexclient.Originator+"/0.99.0 ") {
+			t.Errorf("User-Agent = %q, want a single codex_cli_rs/0.99.0 value", values)
 		}
 		_, _ = w.Write([]byte(`{"models":[{"slug":"spark","display_name":"Spark","context_window":100000,"visibility":"list","supported_in_api":false,"service_tiers":[{"id":"priority","name":"Fast"}],"additional_speed_tiers":["fast"]},{"slug":"hidden","context_window":100000,"visibility":"hide"}]}`))
 	}))
