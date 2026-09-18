@@ -129,6 +129,30 @@ func TestContextToolsUseResolvedChildModel(t *testing.T) {
 	}
 }
 
+func TestRootContextToolsFollowCodexProfile(t *testing.T) {
+	// A second ChatGPT subscription account under a non-canonical provider name
+	// opts Astra into auto context management through the catalog profile label.
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, []byte(`{}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-config", cfg, "-model", "openai-codex-2:gpt-6-astra", "-p", "hi"}, fp, "")
+	proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: "openai-codex-2:gpt-6-astra", ProviderLabel: "openai-codex-2", Profile: "codex", ModelLabel: "gpt-6-astra", ContextWindow: 100000})
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("run = %d: %s", code, errw.String())
+	}
+	if len(fp.Requests) == 0 {
+		t.Fatal("no model request")
+	}
+	req := fp.Requests[0]
+	for _, name := range taskcontext.Names {
+		if !slices.Contains(toolNames(req), name) {
+			t.Fatalf("%s not exposed for codex-profile Astra target", name)
+		}
+	}
+}
+
 func TestRootContextToolsFollowProviderOnFirstRequest(t *testing.T) {
 	for _, tc := range []struct {
 		name, provider, model, config string

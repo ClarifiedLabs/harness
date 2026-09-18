@@ -37,18 +37,18 @@ func TestLimitsCLIFormatsAndNoModelStartup(t *testing.T) {
 			var calls atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
-				if r.URL.Path != "/v1/limits" || r.URL.Query().Get("provider") != "kimi-for-coding" {
+				if r.URL.Path != "/v1/limits" || r.URL.Query().Get("provider") != "kimi-code-plan-cn" {
 					t.Errorf("unexpected startup request: %s", r.URL)
 				}
-				fmt.Fprint(w, `{"providers":[{"provider":"kimi-for-coding","plan":"coding"}]}`)
+				fmt.Fprint(w, `{"providers":[{"provider":"kimi-code-plan-cn","plan":"coding"}]}`)
 			}))
 			defer srv.Close()
 			state := t.TempDir()
-			env, out, stderr := configCommandEnv(t, []string{"limits", "kimi-for-coding", "-format", format, "-model-proxy-url", srv.URL}, map[string]string{"XDG_STATE_HOME": state})
+			env, out, stderr := configCommandEnv(t, []string{"limits", "kimi-code-plan-cn", "-format", format, "-model-proxy-url", srv.URL}, map[string]string{"XDG_STATE_HOME": state})
 			if code := run(env); code != 0 || calls.Load() != 1 || stderr.Len() != 0 {
 				t.Fatalf("code=%d calls=%d out=%s err=%s", code, calls.Load(), out, stderr)
 			}
-			if !strings.Contains(out.String(), "kimi-for-coding") {
+			if !strings.Contains(out.String(), "kimi-code-plan-cn") {
 				t.Fatal(out.String())
 			}
 			if format == "json" {
@@ -114,7 +114,7 @@ func TestLimitsCLIParsingHelpAndInvalidSyntax(t *testing.T) {
 			t.Fatalf("code=%d out=%s err=%s", code, out, stderr)
 		}
 	}
-	for _, args := range [][]string{{"limits", "-model-proxy-api-key"}, {"limits", "reset", "openai-codex", "credit", "-model-proxy-api-key"}, {"limits", "-format", "yaml"}, {"limits", "a", "b"}, {"limits", "reset"}, {"limits", "resets", "kimi-for-coding"}, {"limits", "reset", "openai-codex", "credit", "-request-id", ""}, {"limits", "reset", "openai-codex", "bad/id"}, {"limits", "resets", "openai-codex", "-request-id", "id"}, {"limits", "reset", "openai-codex", "credit", "-unknown", "x"}} {
+	for _, args := range [][]string{{"limits", "-model-proxy-api-key"}, {"limits", "reset", "openai-codex", "credit", "-model-proxy-api-key"}, {"limits", "-format", "yaml"}, {"limits", "a", "b"}, {"limits", "reset"}, {"limits", "reset", "openai-codex", "credit", "-request-id", ""}, {"limits", "reset", "openai-codex", "bad/id"}, {"limits", "resets", "openai-codex", "-request-id", "id"}, {"limits", "reset", "openai-codex", "credit", "-unknown", "x"}} {
 		env, _, stderr := configCommandEnv(t, args, nil)
 		if code := run(env); code != ui.ExitUsage {
 			t.Errorf("args=%v code=%d err=%s", args, code, stderr)
@@ -197,7 +197,7 @@ func TestLimitsCLIPartialFailureAndOldProxy(t *testing.T) {
 	for _, tc := range []struct {
 		name, body, want string
 		status           int
-	}{{"partial", `{"providers":[{"provider":"kimi-for-coding"},{"provider":"openai-codex","error":{"code":"timeout","message":"unavailable"}}]}`, "kimi-for-coding", 200}, {"old", "404 page not found", "unsupported_feature", 404}} {
+	}{{"partial", `{"providers":[{"provider":"kimi-code-plan-cn"},{"provider":"openai-codex","error":{"code":"timeout","message":"unavailable"}}]}`, "kimi-code-plan-cn", 200}, {"old", "404 page not found", "unsupported_feature", 404}} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status); fmt.Fprint(w, tc.body) }))
 			defer srv.Close()

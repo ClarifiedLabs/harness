@@ -39,6 +39,10 @@ type Config struct {
 	OmitMaxOutputTokens bool
 	UseWebSocket        bool
 	ProviderName        string
+	// Profile is the provider config's profile (llm.ProviderConfig.Profile).
+	// llm.ProfileCodex selects the Codex backend behavior even when the
+	// provider name and base URL are not the canonical Codex ones.
+	Profile string
 	// CodexClientVersion is the official Codex CLI version reported in the
 	// ChatGPT Codex User-Agent. Empty omits the version segment.
 	CodexClientVersion string
@@ -59,6 +63,7 @@ type Provider struct {
 	omitMaxOutputTokens bool
 	useWebSocket        bool
 	providerName        string
+	profile             string
 	codexClientVersion  string
 	promptCache         llm.PromptCacheConfig
 	toolSearch          *bool
@@ -86,6 +91,7 @@ func New(cfg Config) *Provider {
 		omitMaxOutputTokens: cfg.OmitMaxOutputTokens,
 		useWebSocket:        cfg.UseWebSocket,
 		providerName:        cfg.ProviderName,
+		profile:             cfg.Profile,
 		codexClientVersion:  cfg.CodexClientVersion,
 		promptCache:         cfg.PromptCache,
 		toolSearch:          cfg.ToolSearch,

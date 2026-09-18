@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"harness/internal/codexclient"
+	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/ws"
 )
@@ -40,6 +41,34 @@ func TestStreamSendsCodexIdentityHeaders(t *testing.T) {
 	}
 	if got := headers.Values("User-Agent"); len(got) != 1 || !strings.HasPrefix(got[0], "codex_cli_rs/0.154.0 ") {
 		t.Fatalf("User-Agent = %q, want a single codex_cli_rs/0.154.0 value", got)
+	}
+}
+
+func TestStreamSendsCodexIdentityHeadersViaProfile(t *testing.T) {
+	var headers http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headers = r.Header.Clone()
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.completed\n" +
+			`data: {"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}` + "\n\n"))
+	}))
+	defer srv.Close()
+
+	// A second ChatGPT subscription account under a non-canonical provider name
+	// and a local base URL still selects Codex behavior via its profile.
+	p := New(Config{
+		APIKey:             "k",
+		BaseURL:            srv.URL,
+		ProviderName:       "openai-codex-2",
+		Profile:            llm.ProfileCodex,
+		CodexClientVersion: "0.154.0",
+		Sleep:              func(time.Duration) {},
+	})
+	if _, err := llmtest.Drain(p.Stream(context.Background(), llmtest.SimpleRequest("gpt-5.5"))); err != nil {
+		t.Fatalf("Stream: %v", err)
+	}
+	if got := headers.Get("originator"); got != codexclient.Originator {
+		t.Fatalf("originator = %q, want %q", got, codexclient.Originator)
 	}
 }
 

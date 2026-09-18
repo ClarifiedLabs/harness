@@ -144,7 +144,7 @@ func (h *Handler) effectiveProviders(md *modelcatalog.Catalog, providerCatalogs 
 			switch {
 			case !pc.Managed:
 				entry.Price = configuredPrice
-			case pc.Name == modelcatalog.OpenAICodexProviderID:
+			case pc.CodexBackend():
 				entry.Price = llm.Price{}
 			case strings.TrimSpace(pc.PriceSource) != "":
 				entry.Price = llm.Price{}

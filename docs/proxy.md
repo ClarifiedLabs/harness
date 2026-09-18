@@ -235,7 +235,9 @@ below; fixture tests are not proof of current live account compatibility.
 Unknown JSON fields are tolerated, but empty/malformed known data is an error,
 not a healthy-looking zero-usage report.
 
-- **Kimi:** `GET https://api.kimi.com/coding/v1/usages`, with
+- **Kimi:** `GET https://api.kimi.com/coding/v1/usages` (China deployment,
+  `kimi-code-plan-cn`) or `GET https://api.kimi.ai/coding/v1/usages` (global
+  deployment, `kimi-code-plan-global`), with
   `Authorization: Bearer <coding-key>`. The
   [official Kimi CLI usage implementation](https://github.com/MoonshotAI/kimi-cli/blob/86f136422a0aae6b217ea49e7ea1d2e8a1defcd2/src/kimi_cli/ui/shell/usage.py)
   supplies the weekly `usage` summary and additional `limits` windows. Numeric
@@ -276,7 +278,7 @@ model session or consuming a reset credit:
 
 ```sh
 harness limits
-harness limits kimi-for-coding -format json
+harness limits kimi-code-plan-cn -format json
 harness limits zai-coding-plan -format json
 harness limits openai-codex -format json
 harness limits resets openai-codex -format json

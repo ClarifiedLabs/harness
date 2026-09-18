@@ -43,7 +43,11 @@ func (a *Account) kimi(ctx context.Context) (protocol.ProviderLimits, error) {
 		Limits []kimiLimit `json:"limits"`
 	}
 	var out protocol.ProviderLimits
-	if err := a.request(ctx, http.MethodGet, "https://api.kimi.com/coding/v1/usages", nil, &raw); err != nil {
+	usagesURL := a.usagesURL
+	if usagesURL == "" {
+		usagesURL = "https://api.kimi.com/coding/v1/usages"
+	}
+	if err := a.request(ctx, http.MethodGet, usagesURL, nil, &raw); err != nil {
 		return out, err
 	}
 	pool := protocol.LimitPool{ID: "coding", Name: "Coding Plan"}

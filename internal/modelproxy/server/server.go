@@ -201,6 +201,9 @@ func ValidateConfigReferences(configDir string, cfg Config, getenv func(string) 
 		return fmt.Errorf("model proxy: no provider configs are configured")
 	}
 	for _, pc := range providers {
+		if err := llm.ValidateProfile(pc); err != nil {
+			return fmt.Errorf("provider %q: %w", pc.Name, err)
+		}
 		if _, _, err := modeldiscovery.Resolve(pc); err != nil {
 			return err
 		}
@@ -229,6 +232,11 @@ func NewHandler(opts Options) (*Handler, error) {
 	_, providers, err := llm.LoadProviderConfigs(opts.ConfigDir, opts.Config.ProviderConfigs, warn)
 	if err != nil {
 		return nil, err
+	}
+	for _, pc := range providers {
+		if err := llm.ValidateProfile(pc); err != nil {
+			return nil, fmt.Errorf("provider %q: %w", pc.Name, err)
+		}
 	}
 	authSources, err := buildAuthSources(providers, opts.ConfigDir, getenv)
 	if err != nil {
@@ -519,7 +527,7 @@ func snapshotHasPrice(snapshot modeldiscovery.Snapshot) bool {
 
 func modelsDevContributesPrice(providers []llm.ProviderConfig, md *modelcatalog.Catalog, providerCatalogs map[string]modeldiscovery.State) bool {
 	for _, pc := range providers {
-		if !pc.Managed || pc.Name == modelcatalog.OpenAICodexProviderID {
+		if !pc.Managed || pc.CodexBackend() {
 			continue
 		}
 		_, discoverySupported, _ := modeldiscovery.Resolve(pc)
@@ -1710,6 +1718,7 @@ func (h *Handler) runtimeOptionsForTarget(ctx context.Context, target resolvedTa
 	return factory.Options{
 		Provider:                apiType,
 		ProviderName:            pc.Name,
+		Profile:                 pc.Profile,
 		Model:                   entry.Name,
 		BaseURL:                 pc.BaseURL,
 		APIKey:                  apiKey,
@@ -1766,13 +1775,7 @@ func codexResponsesUsesLocalTokenCount(pc llm.ProviderConfig) bool {
 	if apiType != "responses" {
 		return false
 	}
-	if strings.EqualFold(pc.Name, modelcatalog.OpenAICodexProviderID) {
-		return true
-	}
-	if pc.Auth != nil && strings.EqualFold(pc.Auth.Type, auth.TypeCodexOAuth) {
-		return true
-	}
-	return strings.Contains(strings.ToLower(pc.BaseURL), "chatgpt.com/backend-api/codex")
+	return pc.CodexBackend()
 }
 
 func resolveServerToolsForTarget(target resolvedTarget, requested []llm.ServerTool) []llm.ServerTool {
@@ -1982,14 +1985,14 @@ func providerOmitMaxOutputTokens(pc llm.ProviderConfig) bool {
 	if pc.OmitMaxOutputTokens {
 		return true
 	}
-	if pc.Auth == nil || !strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth) {
-		return false
-	}
 	apiType := pc.APIType
 	if apiType == "" {
 		apiType = pc.Name
 	}
-	return strings.EqualFold(strings.TrimSpace(apiType), "responses")
+	if !strings.EqualFold(strings.TrimSpace(apiType), "responses") {
+		return false
+	}
+	return pc.CodexBackend()
 }
 
 func buildAuthSources(providers []llm.ProviderConfig, configDir string, getenv func(string) string) (map[string]*auth.Source, error) {
@@ -2139,6 +2142,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				Aliases:               aliases,
 				DisplayName:           entry.Name,
 				ProviderLabel:         pc.Name,
+				Profile:               llm.NormalizeProfile(pc.Profile),
 				ModelLabel:            entry.Name,
 				ContextWindow:         entry.ContextWindow,
 				OutputLimit:           entry.OutputLimit,
@@ -2264,8 +2268,7 @@ func targetResponsesWebSocket(pc llm.ProviderConfig, entry llm.ModelEntry) bool 
 	if pc.ResponsesWebSocket != nil {
 		return *pc.ResponsesWebSocket
 	}
-	return targetReasoningUpdates(pc, entry) ||
-		(pc.Auth != nil && strings.EqualFold(strings.TrimSpace(pc.Auth.Type), auth.TypeCodexOAuth))
+	return targetReasoningUpdates(pc, entry) || pc.CodexBackend()
 }
 
 func providerResponsesCompaction(pc llm.ProviderConfig) bool {
@@ -2274,6 +2277,10 @@ func providerResponsesCompaction(pc llm.ProviderConfig) bool {
 	}
 	if pc.ResponsesCompaction != nil {
 		return *pc.ResponsesCompaction
+	}
+	// An explicit profile declares the backend regardless of managed status.
+	if profile := llm.NormalizeProfile(pc.Profile); profile != "" {
+		return profile == llm.ProfileCodex
 	}
 	if !pc.Managed {
 		return false

@@ -114,11 +114,11 @@ func limitsMethod(w http.ResponseWriter, r *http.Request, method string) bool {
 }
 
 func (h *Handler) limitsProvider(name string) (llm.ProviderConfig, error) {
-	if !subscription.Supported(name) {
-		return llm.ProviderConfig{}, &protocol.LimitsError{Code: "unsupported_provider", Message: "subscription quota provider is not supported"}
-	}
 	for _, pc := range h.providers {
 		if pc.Name == name {
+			if !subscription.SupportedProvider(pc) {
+				return llm.ProviderConfig{}, &protocol.LimitsError{Code: "unsupported_provider", Message: "subscription quota provider is not supported"}
+			}
 			return pc, nil
 		}
 	}
@@ -147,7 +147,7 @@ func (h *Handler) handleLimits(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) subscriptionProviders() []llm.ProviderConfig {
 	var providers []llm.ProviderConfig
 	for _, pc := range h.providers {
-		if subscription.Supported(pc.Name) {
+		if subscription.SupportedProvider(pc) {
 			providers = append(providers, pc)
 		}
 	}
@@ -204,13 +204,13 @@ func (h *Handler) handleResetCredits(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	name := r.URL.Query().Get("provider")
-	if name != "openai-codex" {
-		writeLimitsError(w, http.StatusBadRequest, &protocol.LimitsError{Code: "unsupported_provider", Message: "reset credits require provider openai-codex"})
-		return
-	}
 	pc, err := h.limitsProvider(name)
 	if err != nil {
 		writeLimitsError(w, http.StatusBadRequest, err)
+		return
+	}
+	if subscription.QuotaKind(pc) != subscription.QuotaCodex {
+		writeLimitsError(w, http.StatusBadRequest, &protocol.LimitsError{Code: "unsupported_provider", Message: "reset credits require a codex-profile provider"})
 		return
 	}
 	credits := protocol.ResetCredits{Provider: name, FetchedAt: h.now(), Credits: []protocol.ResetCredit{}}

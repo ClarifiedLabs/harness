@@ -671,7 +671,7 @@ func assistantWireMessage(t *testing.T, w wireRequest) wireMessage {
 }
 
 func TestBuildRequestReasoningContentReplayOptIn(t *testing.T) {
-	w := buildRequestWithOptions(reasoningReplayRequest(), 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-for-coding", reasoningReplay: true})
+	w := buildRequestWithOptions(reasoningReplayRequest(), 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-code-plan-cn", reasoningReplay: true})
 	msg := assistantWireMessage(t, w)
 	if msg.ReasoningContent != "first thought\nsecond thought" {
 		t.Fatalf("reasoning_content = %q, want concatenated thinking blocks", msg.ReasoningContent)
@@ -695,7 +695,7 @@ func TestBuildRequestReasoningContentReplayRequiresReasoningEnabled(t *testing.T
 	// replay payloads even when the provider opted in.
 	req := reasoningReplayRequest()
 	req.Reasoning = llm.ReasoningConfig{}
-	b, err := json.Marshal(buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-for-coding", reasoningReplay: true}))
+	b, err := json.Marshal(buildRequestWithOptions(req, 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-code-plan-cn", reasoningReplay: true}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -705,7 +705,7 @@ func TestBuildRequestReasoningContentReplayRequiresReasoningEnabled(t *testing.T
 }
 
 func TestBuildRequestReasoningContentOnlyOnAssistantMessages(t *testing.T) {
-	w := buildRequestWithOptions(reasoningReplayRequest(), 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-for-coding", reasoningReplay: true})
+	w := buildRequestWithOptions(reasoningReplayRequest(), 0, 0, buildOptions{reasoningMode: "openai", baseURL: defaultBaseURL, providerName: "kimi-code-plan-cn", reasoningReplay: true})
 	for _, m := range w.Messages {
 		if m.Role != "assistant" && m.ReasoningContent != "" {
 			t.Fatalf("%s message carries reasoning_content %q", m.Role, m.ReasoningContent)

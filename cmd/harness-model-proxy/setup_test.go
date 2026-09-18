@@ -324,6 +324,7 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	}
 	if provider.Name != modelcatalog.OpenAICodexProviderID ||
 		provider.APIType != "responses" ||
+		provider.Profile != llm.ProfileCodex ||
 		provider.BaseURL != modelcatalog.OpenAICodexProviderBaseURL ||
 		provider.APIKey != "" ||
 		len(provider.APIKeyEnv) != 0 ||
@@ -1202,6 +1203,7 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 	if provider.Name != modelcatalog.OpenAICodexProviderID ||
 		provider.APIType != "responses" ||
+		provider.Profile != llm.ProfileCodex ||
 		provider.BaseURL != modelcatalog.OpenAICodexProviderBaseURL ||
 		provider.Auth == nil ||
 		provider.Auth.Type != auth.TypeCodexOAuth ||
@@ -2127,15 +2129,15 @@ func readTestModelsDevCachePath(t *testing.T, path string) *modelcatalog.Catalog
 	return catalog
 }
 
-// testSetupCatalogWithKimiForCoding mirrors the models.dev shape for Kimi for
-// Coding: the Anthropic SDK package and the shared /coding/v1 base URL.
+// testSetupCatalogWithKimiForCoding mirrors the models.dev shape for Kimi
+// Code Plan (CN): the OpenAI-compatible SDK package and the /coding/v1 base URL.
 func testSetupCatalogWithKimiForCoding() *modelcatalog.Catalog {
 	return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{
-		"kimi-for-coding": {
-			ID:   "kimi-for-coding",
-			Name: "Kimi For Coding",
+		"kimi-code-plan-cn": {
+			ID:   "kimi-code-plan-cn",
+			Name: "Kimi For Coding (kimi.com)",
 			API:  "https://api.kimi.com/coding/v1",
-			NPM:  "@ai-sdk/anthropic",
+			NPM:  "@ai-sdk/openai-compatible",
 			Env:  []string{"KIMI_API_KEY"},
 			Models: map[string]modelcatalog.Model{
 				"kimi-k3": {
@@ -2152,13 +2154,13 @@ func testSetupCatalogWithKimiForCoding() *modelcatalog.Catalog {
 }
 
 // TestRunSetupWritesKimiForCodingOpenAIDialect verifies setup resolves
-// kimi-for-coding to the OpenAI chat-completions dialect with reasoning replay
-// enabled, despite models.dev listing the Anthropic SDK package.
+// kimi-code-plan-cn to the OpenAI chat-completions dialect with reasoning replay
+// enabled.
 func TestRunSetupWritesKimiForCodingOpenAIDialect(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
 	env := environment{
-		stdin:  strings.NewReader("kimi-for-coding\n\nall\nsave\n"),
+		stdin:  strings.NewReader("kimi-code-plan-cn\n\nall\nsave\n"),
 		stdout: &out,
 		stderr: &errw,
 		getenv: func(k string) string {
@@ -2177,7 +2179,7 @@ func TestRunSetupWritesKimiForCodingOpenAIDialect(t *testing.T) {
 		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
 	}
 
-	providerData, err := os.ReadFile(filepath.Join(home, ".config", "harness-model-proxy", "kimi-for-coding.json"))
+	providerData, err := os.ReadFile(filepath.Join(home, ".config", "harness-model-proxy", "kimi-code-plan-cn.json"))
 	if err != nil {
 		t.Fatalf("read provider config: %v", err)
 	}
@@ -2191,6 +2193,9 @@ func TestRunSetupWritesKimiForCodingOpenAIDialect(t *testing.T) {
 	if provider.APIType != "openai" {
 		t.Fatalf("api_type = %q, want openai (dual-protocol override)", provider.APIType)
 	}
+	if provider.Profile != llm.ProfileKimiCodePlan {
+		t.Fatalf("profile = %q, want kimi-code-plan-cn", provider.Profile)
+	}
 	if provider.ReasoningReplay != llm.ReasoningReplayFull {
 		t.Fatalf("reasoning_replay = %q, want full", provider.ReasoningReplay)
 	}
@@ -2200,16 +2205,16 @@ func TestRunSetupWritesKimiForCodingOpenAIDialect(t *testing.T) {
 }
 
 // TestRunRefreshModelsRewritesKimiForCodingToOpenAI verifies refresh-models
-// upgrades an existing Anthropic-dialect kimi-for-coding config to the OpenAI
+// upgrades an existing Anthropic-dialect kimi-code-plan-cn config to the OpenAI
 // dialect with reasoning replay while refreshing model metadata.
 func TestRunRefreshModelsRewritesKimiForCodingToOpenAI(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["kimi-for-coding.json"]}`), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["kimi-code-plan-cn.json"]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "kimi-for-coding.json"), []byte(`{
-  "name": "kimi-for-coding",
+	if err := os.WriteFile(filepath.Join(dir, "kimi-code-plan-cn.json"), []byte(`{
+  "name": "kimi-code-plan-cn",
   "api_type": "anthropic",
   "base_url": "https://api.kimi.com/coding/v1",
   "managed": true,
@@ -2229,7 +2234,7 @@ func TestRunRefreshModelsRewritesKimiForCodingToOpenAI(t *testing.T) {
 	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
 		t.Fatalf("runRefreshModels: %v", err)
 	}
-	data, err := os.ReadFile(filepath.Join(dir, "kimi-for-coding.json"))
+	data, err := os.ReadFile(filepath.Join(dir, "kimi-code-plan-cn.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2243,10 +2248,65 @@ func TestRunRefreshModelsRewritesKimiForCodingToOpenAI(t *testing.T) {
 	if provider.APIType != "openai" {
 		t.Fatalf("api_type after refresh = %q, want openai", provider.APIType)
 	}
+	if provider.Profile != llm.ProfileKimiCodePlan {
+		t.Fatalf("profile after refresh = %q, want kimi-code-plan-cn", provider.Profile)
+	}
 	if provider.ReasoningReplay != llm.ReasoningReplayFull {
 		t.Fatalf("reasoning_replay after refresh = %q, want full", provider.ReasoningReplay)
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "kimi-k3" || provider.Models[0].ContextWindow != 1000000 {
 		t.Fatalf("models after refresh = %+v, want kimi-k3 metadata refreshed", provider.Models)
+	}
+}
+
+// TestRunRefreshModelsBackfillsKimiProfileWithoutCatalog verifies refresh-models
+// backfills the subscription profile for a pre-profile kimi-code-plan-cn config
+// even when the provider is absent from the models.dev catalog (so no catalog
+// metadata exists to derive the profile from).
+func TestRunRefreshModelsBackfillsKimiProfileWithoutCatalog(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["kimi-code-plan-cn.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "kimi-code-plan-cn.json"), []byte(`{
+  "name": "kimi-code-plan-cn",
+  "api_type": "openai",
+  "base_url": "https://api.kimi.com/coding/v1",
+  "managed": true,
+  "models": [{"name":"kimi-code-plan-cn","context_window":1048576}]
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	timeout := time.Nanosecond
+	env := environment{
+		stdout: &bytes.Buffer{},
+		stderr: &bytes.Buffer{},
+		providerModelsClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			<-req.Context().Done()
+			return nil, req.Context().Err()
+		})},
+		providerModelsTimeout: &timeout,
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
+			return &modelcatalog.Catalog{Providers: map[string]modelcatalog.Provider{}}, nil
+		},
+	}
+
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatalf("runRefreshModels: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "kimi-code-plan-cn.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(data, &provider); err != nil {
+		t.Fatalf("decode provider config: %v", err)
+	}
+	if provider.Profile != llm.ProfileKimiCodePlan {
+		t.Fatalf("profile after refresh = %q, want kimi-code-plan-cn", provider.Profile)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "kimi-code-plan-cn" {
+		t.Fatalf("models after refresh = %+v, want configured models preserved", provider.Models)
 	}
 }

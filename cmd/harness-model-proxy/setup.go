@@ -41,6 +41,9 @@ type setupMainConfig struct {
 type setupProviderConfig struct {
 	Name    string `json:"name"`
 	APIType string `json:"api_type"`
+	// Profile names the backend behavior bundle (see llm.ProviderConfig.Profile);
+	// setup writes llm.ProfileCodex for the ChatGPT Codex subscription provider.
+	Profile string `json:"profile,omitempty"`
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key,omitempty"`
 	// Managed is always true for configs written by setup/refresh. For priced
@@ -715,6 +718,7 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 		return setupProviderConfig{
 			Name:                modelcatalog.OpenAICodexProviderID,
 			APIType:             setupProviderAPIType(provider),
+			Profile:             llm.ProfileCodex,
 			BaseURL:             setupProviderBaseURL(provider),
 			Managed:             true,
 			OmitMaxOutputTokens: true,
@@ -742,6 +746,14 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 		enabled := true
 		out.ResponsesCompaction = &enabled
 	}
+	// Subscription providers carry their profile so renamed configs and second
+	// accounts keep quota reporting (llm.ProviderConfig.Profile).
+	switch cfg.Name {
+	case llm.KimiCodePlanCNProviderName, llm.KimiCodePlanGlobalProviderName:
+		out.Profile = llm.ProfileKimiCodePlan
+	case llm.ProfileZAICodingPlan:
+		out.Profile = cfg.Name
+	}
 	return out
 }
 
@@ -763,6 +775,20 @@ func setupProviderFromCurrent(current llm.ProviderConfig, meta *modelcatalog.Pro
 	next.PriceSource = current.PriceSource
 	if current.Name == modelcatalog.OpenAICodexProviderID {
 		next.PriceSource = ""
+	}
+	if current.Profile != "" {
+		next.Profile = current.Profile
+	}
+	if next.Profile == "" {
+		// Backfill the profile for subscription providers absent from the
+		// models.dev catalog (no catalog metadata to derive it from) and for
+		// configs written before profiles existed.
+		switch current.Name {
+		case llm.KimiCodePlanCNProviderName, llm.KimiCodePlanGlobalProviderName:
+			next.Profile = llm.ProfileKimiCodePlan
+		case llm.ProfileZAICodingPlan:
+			next.Profile = current.Name
+		}
 	}
 	if current.OmitMaxOutputTokens {
 		next.OmitMaxOutputTokens = true
@@ -1177,6 +1203,15 @@ func isOpenAICodexProvider(provider modelcatalog.Provider) bool {
 	return provider.ID == modelcatalog.OpenAICodexProviderID
 }
 
+func isKimiCodePlanProvider(provider modelcatalog.Provider) bool {
+	switch strings.TrimSpace(provider.ID) {
+	case llm.KimiCodePlanCNProviderName, llm.KimiCodePlanGlobalProviderName:
+		return true
+	default:
+		return false
+	}
+}
+
 func isSakanaProvider(provider modelcatalog.Provider) bool {
 	return strings.EqualFold(strings.TrimSpace(provider.ID), "sakana") ||
 		strings.Contains(strings.ToLower(provider.BaseURL()), "api.sakana.ai")
@@ -1202,10 +1237,10 @@ func applySyntheticProviderDefaults(provider modelcatalog.Provider, cfg *setupPr
 		stateful := true
 		cfg.InteractionsStateful = &stateful
 	}
-	// Kimi for Coding's OpenAI endpoint requires preserved thinking in
+	// Kimi Code Plan's OpenAI endpoint requires preserved thinking in
 	// multi-turn tool loops (Kimi's own CLI replays reasoning on both
 	// protocols); harness replays it as compact reasoning_content.
-	if strings.EqualFold(strings.TrimSpace(provider.ID), "kimi-for-coding") && cfg.ReasoningReplay == "" {
+	if isKimiCodePlanProvider(provider) && cfg.ReasoningReplay == "" {
 		cfg.ReasoningReplay = llm.ReasoningReplayFull
 	}
 }

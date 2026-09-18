@@ -30,6 +30,11 @@ type ModelInfo struct {
 type ProviderConfig struct {
 	Name    string `json:"name"`
 	APIType string `json:"api_type"`
+	// Profile names a bundle of backend-specific behavior defaults for a known
+	// service (see ProfileCodex). It separates what the backend is from how the
+	// provider is named, so multiple accounts against the same service share one
+	// profile. Explicit config fields still override profile defaults.
+	Profile string `json:"profile,omitempty"`
 	BaseURL string `json:"base_url"`
 	APIKey  string `json:"api_key"`
 	// Managed marks a config written by `--setup`/`--refresh-models`. Managed

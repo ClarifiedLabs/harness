@@ -10,7 +10,7 @@ import (
 )
 
 func TestKimiFixture(t *testing.T) {
-	a := account(t, "kimi-for-coding", func(*http.Request) (*http.Response, error) { return response(200, fixture(t, "kimi")), nil })
+	a := account(t, "kimi-code-plan-cn", func(*http.Request) (*http.Response, error) { return response(200, fixture(t, "kimi")), nil })
 	got, err := a.Status(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +36,7 @@ func TestKimiFixture(t *testing.T) {
 func TestKimiPrefixedDurationUnits(t *testing.T) {
 	for unit, multiplier := range map[string]int64{"TIME_UNIT_SECOND": 1, "TIME_UNIT_MINUTE": 60, "TIME_UNIT_HOUR": 3600, "TIME_UNIT_DAY": 86400, "TIME_UNIT_WEEK": 604800} {
 		body := `{"limits":[{"window":{"duration":300,"timeUnit":"` + unit + `"},"detail":{"limit":100,"remaining":84}}]}`
-		a := account(t, "kimi-for-coding", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
+		a := account(t, "kimi-code-plan-cn", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
 		report, err := a.Status(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -51,7 +51,7 @@ func TestKimiPrefixedDurationUnits(t *testing.T) {
 func TestKimiAliasesAndInconsistency(t *testing.T) {
 	for _, alias := range []string{"reset_at", "resetAt", "reset_time", "resetTime"} {
 		body := `{"usage":{"limit":"10","used":"3","` + alias + `":"2026-09-17T01:02:03.123456789+01:00"}}`
-		a := account(t, "kimi-for-coding", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
+		a := account(t, "kimi-code-plan-cn", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
 		got, err := a.Status(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -63,7 +63,7 @@ func TestKimiAliasesAndInconsistency(t *testing.T) {
 	}
 	for _, alias := range []string{"reset_in", "resetIn", "ttl", "window"} {
 		body := `{"usage":{"used":0,"` + alias + `":"42"}}`
-		a := account(t, "kimi-for-coding", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
+		a := account(t, "kimi-code-plan-cn", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
 		got, err := a.Status(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -72,7 +72,7 @@ func TestKimiAliasesAndInconsistency(t *testing.T) {
 			t.Fatal("relative reset")
 		}
 	}
-	a := account(t, "kimi-for-coding", func(*http.Request) (*http.Response, error) {
+	a := account(t, "kimi-code-plan-cn", func(*http.Request) (*http.Response, error) {
 		return response(200, `{"limits":[{"limit":10,"used":2,"remaining":5,"duration":2,"timeUnit":"HOUR"}]}`), nil
 	})
 	got, err := a.Status(context.Background())
@@ -208,7 +208,7 @@ func TestResetCreditsFixture(t *testing.T) {
 
 func TestProviderShapeValidation(t *testing.T) {
 	cases := map[string][]string{
-		"kimi-for-coding": {`{}`, `{"usage":{}}`, `{"usage":[]}`, `{"usage":{"used":true}}`, `{"usage":{"used":"NaN"}}`, `{"usage":{"used":-1}}`, `{"usage":{"used":0,"resetTime":"bad"}}`, `{"limits":[1]}`, `{"limits":[{"used":0,"detail":[]}]}`, `{"limits":[{"used":0,"window":[]}]}`, `{"usage":{"used":0,"duration":1.5,"timeUnit":"HOUR"}}`},
+		"kimi-code-plan-cn": {`{}`, `{"usage":{}}`, `{"usage":[]}`, `{"usage":{"used":true}}`, `{"usage":{"used":"NaN"}}`, `{"usage":{"used":-1}}`, `{"usage":{"used":0,"resetTime":"bad"}}`, `{"limits":[1]}`, `{"limits":[{"used":0,"detail":[]}]}`, `{"limits":[{"used":0,"window":[]}]}`, `{"usage":{"used":0,"duration":1.5,"timeUnit":"HOUR"}}`},
 		"zai-coding-plan": {`{}`, `{"data":{"limits":[]}}`, `{"data":[]}`, `{"data":{"limits":[1]}}`, `{"data":{"limits":[{"type":"TOKENS_LIMIT"}]}}`, `{"data":{"limits":[{"type":"TOKENS_LIMIT","percentage":"0"}]}}`, `{"data":{"limits":[{"type":"TIME_LIMIT","percentage":0,"usageDetails":{}}]}}`, `{"data":{"limits":[{"type":"TIME_LIMIT","percentage":0,"nextResetTime":-1}]}}`},
 		"openai-codex":    {`{}`, `{"rate_limit":{}}`, `{"additional_rate_limits":[{"rate_limit":{}}]}`, `{"rate_limit":[]}`, `{"rate_limit":{"allowed":"true"}}`, `{"rate_limit":{"primary_window":[]}}`, `{"rate_limit":{"primary_window":{}}}`, `{"rate_limit":{"primary_window":{"used_percent":-1}}}`, `{"rate_limit":{"primary_window":{"reset_at":99999999999999}}}`, `{"additional_rate_limits":[{}]}`, `{"rate_limit_reset_credits":{"available_count":-1}}`},
 	}

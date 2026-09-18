@@ -438,12 +438,7 @@ func isAstraModel(model string) bool {
 }
 
 func canonicalCodexEndpoint(baseURL string) bool {
-	u, err := url.Parse(strings.TrimSpace(baseURL))
-	if err != nil {
-		return false
-	}
-	return strings.EqualFold(u.Hostname(), "chatgpt.com") &&
-		strings.TrimRight(u.Path, "/") == "/backend-api/codex"
+	return llm.CanonicalCodexBaseURL(baseURL)
 }
 
 func canonicalOpenAIEndpoint(baseURL string) bool {

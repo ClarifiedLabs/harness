@@ -1178,6 +1178,7 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
   {
     "name": "openai-codex",
     "api_type": "responses",
+    "profile": "codex",
     "base_url": "https://chatgpt.com/backend-api/codex",
 	"managed": true,
     "auth": {"type":"codex_oauth"},
@@ -1229,6 +1230,12 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
 	if target := targets["openai-codex:gpt-5.5"]; !target.NativeCompaction {
 		t.Fatalf("managed ChatGPT Codex target does not advertise native compaction: %+v", target)
 	}
+	if target := targets["openai-codex:gpt-5.5"]; target.Profile != "codex" {
+		t.Fatalf("ChatGPT Codex target does not advertise its profile: %+v", target)
+	}
+	if target := targets["openai:gpt-5.5"]; target.Profile != "" {
+		t.Fatalf("plain OpenAI target unexpectedly advertises a profile: %+v", target)
+	}
 	for _, id := range []string{"openai-codex:gpt-5.5", "codex-compatible:gpt-5.5"} {
 		if target := targets[id]; !target.Prewarm {
 			t.Fatalf("WebSocket target %q does not advertise safe prewarm: %+v", id, target)
@@ -1247,6 +1254,55 @@ func TestHandlerCatalogExposesTargetsOnly(t *testing.T) {
 	}
 }
 
+func TestProviderCodexProfileGates(t *testing.T) {
+	// A second ChatGPT subscription account under a non-canonical name and URL
+	// selects every Codex default through its profile alone.
+	codex2 := llm.ProviderConfig{Name: "openai-codex-2", APIType: "responses", BaseURL: "https://example.test/responses", Profile: llm.ProfileCodex}
+	if !providerOmitMaxOutputTokens(codex2) {
+		t.Fatal("providerOmitMaxOutputTokens: codex profile")
+	}
+	if !targetResponsesWebSocket(codex2, llm.ModelEntry{Name: "gpt-5.5"}) {
+		t.Fatal("targetResponsesWebSocket: codex profile")
+	}
+	if !codexResponsesUsesLocalTokenCount(codex2) {
+		t.Fatal("codexResponsesUsesLocalTokenCount: codex profile")
+	}
+
+	// Explicit transport and token settings still override the profile.
+	off := false
+	codex2.ResponsesWebSocket = &off
+	if targetResponsesWebSocket(codex2, llm.ModelEntry{Name: "gpt-5.5"}) {
+		t.Fatal("targetResponsesWebSocket: explicit responses_websocket must win over profile")
+	}
+
+	// Non-Responses dialects never select Codex responses behavior.
+	notResponses := llm.ProviderConfig{Name: "x", APIType: "openai", Profile: llm.ProfileCodex}
+	if providerOmitMaxOutputTokens(notResponses) || targetResponsesWebSocket(notResponses, llm.ModelEntry{Name: "m"}) || codexResponsesUsesLocalTokenCount(notResponses) {
+		t.Fatal("codex profile must not alter non-responses dialects")
+	}
+}
+
+func TestNewHandlerRejectsInvalidProfile(t *testing.T) {
+	dir := t.TempDir()
+	providerJSON := `{"name":"bad","api_type":"responses","profile":"unknown","base_url":"https://example.test/responses","models":[{"name":"m"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "providers.json"), []byte(providerJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := NewHandler(Options{ConfigDir: dir, Config: Config{ProviderConfigs: []string{"providers.json"}}})
+	if err == nil || !strings.Contains(err.Error(), "profile") {
+		t.Fatalf("NewHandler with unknown profile = %v, want profile error", err)
+	}
+
+	incompatible := `{"name":"bad","api_type":"anthropic","profile":"codex","base_url":"https://example.test","models":[{"name":"m"}]}`
+	if err := os.WriteFile(filepath.Join(dir, "providers.json"), []byte(incompatible), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err = NewHandler(Options{ConfigDir: dir, Config: Config{ProviderConfigs: []string{"providers.json"}}})
+	if err == nil || !strings.Contains(err.Error(), "api_type") {
+		t.Fatalf("NewHandler with codex profile on anthropic dialect = %v, want api_type error", err)
+	}
+}
+
 func TestProviderResponsesCompactionCapabilityResolution(t *testing.T) {
 	enabled, disabled := true, false
 	tests := []struct {
@@ -1259,6 +1315,8 @@ func TestProviderResponsesCompactionCapabilityResolution(t *testing.T) {
 		{name: "managed OpenAI", pc: llm.ProviderConfig{Name: "openai", APIType: "responses", BaseURL: "https://api.openai.com/v1/", Managed: true}, want: true},
 		{name: "managed ChatGPT Codex", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Managed: true}, want: true},
 		{name: "manual ChatGPT Codex", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL}},
+		{name: "profile codex second account", pc: llm.ProviderConfig{Name: "openai-codex-2", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Profile: llm.ProfileCodex}, want: true},
+		{name: "profile codex non-canonical URL", pc: llm.ProviderConfig{Name: "renamed", APIType: "responses", BaseURL: "https://example.test/responses", Profile: llm.ProfileCodex}, want: true},
 		{name: "managed renamed Codex", pc: llm.ProviderConfig{Name: "renamed", APIType: "responses", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Managed: true}},
 		{name: "managed custom URL", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: "https://example.test/v1", Managed: true}},
 		{name: "wrong dialect", pc: llm.ProviderConfig{Name: "openai-codex", APIType: "openai", BaseURL: modelcatalog.OpenAICodexProviderBaseURL, Managed: true, ResponsesCompaction: &enabled}},

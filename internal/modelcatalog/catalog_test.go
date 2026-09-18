@@ -271,11 +271,11 @@ func TestProviderFallbacksFromNPM(t *testing.T) {
 			wantAPIType: "",
 		},
 		{
-			// Kimi for Coding lists the Anthropic SDK package on models.dev but
-			// is deliberately driven over its OpenAI chat-completions endpoint
+			// Kimi Code Plan lists the OpenAI-compatible SDK package on
+			// models.dev and runs its OpenAI chat-completions endpoint
 			// (dual-protocol service; compact reasoning_content replay).
-			name:        "kimi-for-coding overrides anthropic sdk to openai",
-			provider:    Provider{ID: "kimi-for-coding", NPM: "@ai-sdk/anthropic", API: "https://api.kimi.com/coding/v1"},
+			name:        "kimi-code-plan-cn resolves openai-compatible",
+			provider:    Provider{ID: "kimi-code-plan-cn", NPM: "@ai-sdk/openai-compatible", API: "https://api.kimi.com/coding/v1"},
 			wantBaseURL: "https://api.kimi.com/coding/v1",
 			wantAPIType: "openai",
 		},

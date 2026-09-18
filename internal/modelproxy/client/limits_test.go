@@ -36,7 +36,7 @@ func TestLimitsRequests(t *testing.T) {
 	tracer, _ := tracing.NewTracer(true)
 	request := protocol.ResetRequest{Provider: "openai-codex", CreditID: "credit-1", RequestID: "request-1"}
 	for _, tc := range []struct{ name, method, path, query, body string }{
-		{"status", "GET", "/v1/limits", "provider=kimi-for-coding", `{"providers":[{"provider":"kimi-for-coding"}]}`},
+		{"status", "GET", "/v1/limits", "provider=kimi-code-plan-cn", `{"providers":[{"provider":"kimi-code-plan-cn"}]}`},
 		{"all", "GET", "/v1/limits", "", `{"providers":[]}`},
 		{"credits", "GET", "/v1/limits/reset-credits", "provider=openai-codex", `{"provider":"openai-codex","credits":[]}`},
 		{"reset", "POST", "/v1/limits/reset", "", `{"provider":"openai-codex","credit_id":"credit-1","request_id":"request-1","outcome":"reset"}`},
@@ -65,7 +65,7 @@ func TestLimitsRequests(t *testing.T) {
 			var err error
 			switch tc.name {
 			case "status":
-				_, err = c.Limits(context.Background(), "kimi-for-coding")
+				_, err = c.Limits(context.Background(), "kimi-code-plan-cn")
 			case "all":
 				_, err = c.Limits(context.Background(), "")
 			case "credits":
@@ -82,7 +82,7 @@ func TestLimitsRequests(t *testing.T) {
 
 func TestLimitsQueryErrorSummaryKeepsProviderDetails(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"providers":[{"provider":"kimi-for-coding","error":{"code":"transport_error","message":"subscription request failed"}},{"provider":"openai-codex","error":{"code":"transport_error","message":"subscription request failed"}},{"provider":"zai-coding-plan","error":{"code":"transport_error","message":"subscription request failed"}}]}`)
+		fmt.Fprint(w, `{"providers":[{"provider":"kimi-code-plan-cn","error":{"code":"transport_error","message":"subscription request failed"}},{"provider":"openai-codex","error":{"code":"transport_error","message":"subscription request failed"}},{"provider":"zai-coding-plan","error":{"code":"transport_error","message":"subscription request failed"}}]}`)
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL, srv.Client())
@@ -100,7 +100,7 @@ func TestLimitsPartialAndStructuredErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/limits":
-			fmt.Fprint(w, `{"providers":[{"provider":"kimi-for-coding"},{"provider":"openai-codex","error":{"code":"unauthorized","message":"unavailable"}}]}`)
+			fmt.Fprint(w, `{"providers":[{"provider":"kimi-code-plan-cn"},{"provider":"openai-codex","error":{"code":"unauthorized","message":"unavailable"}}]}`)
 		case "/v1/limits/reset-credits":
 			fmt.Fprint(w, `{"provider":"openai-codex","error":{"code":"unauthorized","message":"unavailable"}}`)
 		default:

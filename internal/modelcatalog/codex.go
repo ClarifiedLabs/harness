@@ -16,11 +16,11 @@ const (
 	codexRepositoryRawURL = "https://raw.githubusercontent.com/openai/codex"
 	codexModelsPath       = "codex-rs/models-manager/models.json"
 	// OpenAICodexProviderID identifies the synthetic ChatGPT subscription provider.
-	OpenAICodexProviderID = "openai-codex"
+	OpenAICodexProviderID = llm.CodexProviderName
 	// OpenAICodexProviderName is the synthetic provider's display name.
 	OpenAICodexProviderName = "OpenAI Codex (ChatGPT subscription)"
 	// OpenAICodexProviderBaseURL is the ChatGPT Codex backend endpoint.
-	OpenAICodexProviderBaseURL = "https://chatgpt.com/backend-api/codex"
+	OpenAICodexProviderBaseURL = llm.CodexCanonicalBaseURL
 )
 
 //go:embed codex_fallback.json

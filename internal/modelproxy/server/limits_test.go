@@ -35,7 +35,7 @@ func newLimitsHandler(t *testing.T, names []string, transport limitsTransport, r
 	t.Helper()
 	dir := t.TempDir()
 	var files []string
-	urls := map[string]string{"kimi-for-coding": "https://api.kimi.com/coding/v1", "zai-coding-plan": "https://api.z.ai/api/coding/paas/v4", "openai-codex": "https://chatgpt.com/backend-api/codex"}
+	urls := map[string]string{"kimi-code-plan-cn": "https://api.kimi.com/coding/v1", "zai-coding-plan": "https://api.z.ai/api/coding/paas/v4", "openai-codex": "https://chatgpt.com/backend-api/codex"}
 	for _, name := range names {
 		pc := llm.ProviderConfig{Name: name, APIType: "openai", APIKey: "provider-secret", BaseURL: urls[name], Models: []llm.ModelEntry{{Name: "test-model"}}}
 		data, err := json.Marshal(pc)
@@ -85,7 +85,7 @@ func decodeLimitsResult(t *testing.T, w *httptest.ResponseRecorder) protocol.Res
 func TestLimitsAllConcurrentIndependentAndAccountingUntouched(t *testing.T) {
 	entered := make(chan string, 3)
 	release := make(chan struct{})
-	h := newLimitsHandler(t, []string{"zai-coding-plan", "openai-codex", "kimi-for-coding"}, func(r *http.Request) (*http.Response, error) {
+	h := newLimitsHandler(t, []string{"zai-coding-plan", "openai-codex", "kimi-code-plan-cn"}, func(r *http.Request) (*http.Response, error) {
 		entered <- r.URL.Host
 		select {
 		case <-release:
@@ -132,7 +132,7 @@ func TestLimitsAllConcurrentIndependentAndAccountingUntouched(t *testing.T) {
 	for _, p := range report.Providers {
 		got = append(got, p.Provider)
 	}
-	if !reflect.DeepEqual(got, []string{"kimi-for-coding", "openai-codex", "zai-coding-plan"}) {
+	if !reflect.DeepEqual(got, []string{"kimi-code-plan-cn", "openai-codex", "zai-coding-plan"}) {
 		t.Fatal(got)
 	}
 	if report.Providers[0].Error != nil || report.Providers[1].Error != nil || report.Providers[2].Error == nil || report.Providers[2].Error.Code != "unauthorized" {
@@ -158,8 +158,8 @@ func TestLimitsRoutesMethodsValidationAndAuth(t *testing.T) {
 		status             int
 	}{
 		{"POST", "/v1/limits", "", 405}, {"POST", "/v1/limits/reset-credits", "", 405}, {"GET", "/v1/limits/reset", "", 405},
-		{"GET", "/v1/limits?provider=OpenAI-Codex", "", 400}, {"GET", "/v1/limits?provider=kimi-for-coding", "", 400},
-		{"GET", "/v1/limits/reset-credits", "", 400}, {"GET", "/v1/limits/reset-credits?provider=kimi-for-coding", "", 400},
+		{"GET", "/v1/limits?provider=OpenAI-Codex", "", 400}, {"GET", "/v1/limits?provider=kimi-code-plan-cn", "", 400},
+		{"GET", "/v1/limits/reset-credits", "", 400}, {"GET", "/v1/limits/reset-credits?provider=kimi-code-plan-cn", "", 400},
 		{"POST", "/v1/limits/reset", `{}`, 400}, {"POST", "/v1/limits/reset", `{"provider":"openai-codex","credit_id":"x","request_id":"x"} {}`, 400},
 		{"POST", "/v1/limits/reset", `{"provider":"openai-codex","credit_id":"x","request_id":"` + strings.Repeat("x", 5000) + `"}`, 400},
 	} {

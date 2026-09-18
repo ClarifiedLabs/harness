@@ -24,8 +24,11 @@ import (
 // (design §7). API keys are passed in (resolved from the environment by the
 // config layer), never read here.
 type Options struct {
-	Provider        string // api type: "openai" | "responses" | "anthropic" | "interactions"; empty = infer from Model
-	ProviderName    string // configured provider name, e.g. "openrouter"
+	Provider     string // api type: "openai" | "responses" | "anthropic" | "interactions"; empty = infer from Model
+	ProviderName string // configured provider name, e.g. "openrouter"
+	// Profile carries the provider config's profile (llm.ProviderConfig.Profile),
+	// e.g. llm.ProfileCodex; empty keeps dialect detection by name/base URL.
+	Profile         string
 	Model           string
 	BaseURL         string
 	APIKey          string
@@ -117,6 +120,7 @@ func New(opts Options) (llm.Provider, error) {
 			OmitMaxOutputTokens: opts.OmitMaxOutputTokens,
 			UseWebSocket:        opts.ResponsesWebSocket,
 			ProviderName:        opts.ProviderName,
+			Profile:             opts.Profile,
 			CodexClientVersion:  modelcatalog.CodexClientVersion(),
 			PromptCache:         opts.PromptCache,
 			ToolSearch:          opts.ResponsesToolSearch,

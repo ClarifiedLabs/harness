@@ -97,11 +97,9 @@ func runLimits(env environment, invocation cli.Invocation) int {
 	if len(invocation.Args) > 0 {
 		provider = invocation.Args[0]
 	}
+	// Any provider may be named for reset credits; the proxy validates that the
+	// provider resolves to the codex quota profile.
 	var request protocol.ResetRequest
-	if invocation.CommandID != "limits" && provider != "openai-codex" {
-		fmt.Fprintln(env.stderr, "harness: limits: reset credits require openai-codex")
-		return ui.ExitUsage
-	}
 	if invocation.CommandID == "limits.reset" {
 		request = protocol.ResetRequest{Provider: provider, CreditID: invocation.Args[1], RequestID: cliLast(invocation.Flags, "request_id", "")}
 		if !invocation.Flags.Has("request_id") {

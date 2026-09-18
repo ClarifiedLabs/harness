@@ -34,7 +34,7 @@ func TestKimiUnknownDurationUnitsWarnWithoutGuessing(t *testing.T) {
 		`{"limits":[{"window":{"duration":1,"timeUnit":"FUTURE"},"detail":{"limit":100}}]}`,
 		`{"limits":[{"detail":{"limit":100,"window":{"duration":1,"timeUnit":"FUTURE"}}}]}`,
 	} {
-		a := account(t, "kimi-for-coding", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
+		a := account(t, "kimi-code-plan-cn", func(*http.Request) (*http.Response, error) { return response(200, body), nil })
 		out, err := a.Status(context.Background())
 		if err != nil {
 			t.Fatal(err)

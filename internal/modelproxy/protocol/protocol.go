@@ -85,13 +85,16 @@ type ModelUsage struct {
 }
 
 type Target struct {
-	NativeSteering        bool      `json:"native_steering,omitempty"`
-	AsyncTools            bool      `json:"async_tools,omitempty"`
-	ReasoningUpdates      bool      `json:"reasoning_updates,omitempty"`
-	ID                    string    `json:"id"`
-	Aliases               []string  `json:"aliases,omitempty"`
-	DisplayName           string    `json:"display_name,omitempty"`
-	ProviderLabel         string    `json:"provider_label,omitempty"`
+	NativeSteering   bool     `json:"native_steering,omitempty"`
+	AsyncTools       bool     `json:"async_tools,omitempty"`
+	ReasoningUpdates bool     `json:"reasoning_updates,omitempty"`
+	ID               string   `json:"id"`
+	Aliases          []string `json:"aliases,omitempty"`
+	DisplayName      string   `json:"display_name,omitempty"`
+	ProviderLabel    string   `json:"provider_label,omitempty"`
+	// Profile carries the provider config's profile (llm.ProviderConfig.Profile)
+	// so clients can apply profile-level defaults without name matching.
+	Profile               string    `json:"profile,omitempty"`
 	ModelLabel            string    `json:"model_label,omitempty"`
 	ContextWindow         int       `json:"context_window,omitempty"`
 	OutputLimit           int       `json:"output_limit,omitempty"`

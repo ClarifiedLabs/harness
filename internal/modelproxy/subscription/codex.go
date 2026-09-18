@@ -118,8 +118,8 @@ type codexCredit struct {
 
 func (a *Account) ResetCredits(ctx context.Context) (protocol.ResetCredits, error) {
 	out := protocol.ResetCredits{Provider: a.provider, FetchedAt: a.client.now().UTC(), Credits: []protocol.ResetCredit{}}
-	if a.provider != "openai-codex" {
-		return out, safeError("unsupported_provider", "reset credits are supported only for openai-codex")
+	if a.kind != QuotaCodex {
+		return out, safeError("unsupported_provider", "reset credits are supported only for codex-profile providers")
 	}
 	var raw struct {
 		Available *int64         `json:"available_count"`

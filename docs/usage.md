@@ -1268,15 +1268,19 @@ After setup, run:
 harness-model-proxy auth login openai-codex
 ```
 
+Setup writes `profile:"codex"` into the provider config; additional ChatGPT
+subscription accounts reuse that profile under their own provider names (see
+the `profile` reference below).
+
 A successful OAuth login immediately refreshes that provider's configured
 allowlist and caches the authenticated catalog. Models absent from a complete
 response are removed; newly discovered models remain disabled until setup is
 run again. Failure to refresh the catalog is only a warning and does not undo a
 successful login.
 
-The `kimi-for-coding` provider is deliberately configured with
-`api_type:"openai"` even though models.dev lists the Anthropic SDK package.
-Kimi for Coding serves both protocols off one base URL (OpenAI at
+The `kimi-code-plan-cn` and `kimi-code-plan-global` providers are configured with
+`api_type:"openai"`, matching the OpenAI-compatible SDK models.dev lists for them.
+Kimi Code Plan serves both protocols off one base URL (OpenAI at
 `/coding/v1/chat/completions`, Anthropic at `/coding/v1/messages`; see Kimi's
 service-endpoint docs), and the OpenAI chat-completions shape replays preserved
 thinking as compact `reasoning_content` — the sanctioned mechanism, matching
@@ -1287,6 +1291,29 @@ blobs. Managed setup and `refresh-models` therefore also write
 round-trips (see the `reasoning_replay` provider quirk above). Do not disable
 reasoning replay for kimi-k3: Kimi's docs make preserved thinking mandatory in
 tool-call loops.
+
+Provider configs accept an optional `profile` naming a bundle of
+backend-specific behavior defaults for a known service. `"codex"` requires
+`api_type:"responses"` and selects the ChatGPT
+Codex subscription backend: Codex client identity headers, WebSocket transport
+with turn-state continuation, omitted `max_output_tokens`, local token-count
+estimates, native compaction, no dollar pricing, and the account quota and
+reset-credit endpoints. `"kimi-code-plan"` and `"zai-coding-plan"` carry no
+dialect behavior — the wire shape stays the configured `api_type` — but select
+their subscription quota integration, so renamed providers and second accounts
+keep `harness limits` reporting under their own names. Explicit config fields
+still win — for example
+`responses_websocket:false` overrides the codex profile's transport default. When
+`profile` is absent, Harness keeps its legacy detection by provider name,
+`codex_oauth` auth, and the canonical Codex base URL. Managed setup writes
+`profile` for all three subscription providers.
+
+The profile is what makes multiple ChatGPT subscription accounts possible: copy
+the provider under a distinct `name` (the name owns the OAuth token file and
+the `name:model` target prefix), keep `api_type:"responses"` and
+`profile:"codex"`, then run `harness-model-proxy auth login <name>` for each
+account. Both accounts get the full Codex behavior, including `harness limits`
+reporting under their own names.
 
 Provider configs accept an optional `auth` block in place of `api_key` /
 `api_key_env`; when `auth` is present, API-key fields are ignored and there is no
@@ -1592,8 +1619,10 @@ token charges remain included.
 ## Subscription Limits
 
 `harness limits` queries account-wide subscription quotas on demand through the
-model proxy. Supported configured provider names are `kimi-for-coding`,
-`zai-coding-plan`, and `openai-codex`; these are provider names, not model target
+model proxy. Supported configured providers are those with a subscription
+profile — `codex` (managed setup
+names it `openai-codex`), `kimi-code-plan`, or `zai-coding-plan` — or the
+canonical provider names, which detect the same profiles. These are provider names, not model target
 IDs. Without a provider argument, it queries all configured supported providers
 in name order and preserves each provider's result even when another fails.
 With none configured, it reports that fact rather than inventing quotas.
@@ -1616,8 +1645,8 @@ necessarily literal model tokens; reset credits are not purchased/spend credits.
 
 ```text
 harness limits [provider] [-format text|json]
-harness limits resets openai-codex [-format text|json]
-harness limits reset openai-codex <credit-id> [-request-id <id>] [-format text|json]
+harness limits resets <codex-profile-provider> [-format text|json]
+harness limits reset <codex-profile-provider> <credit-id> [-request-id <id>] [-format text|json]
 ```
 
 Flags may appear before or after the positional arguments within each command:
@@ -1650,8 +1679,9 @@ returns an unsupported-feature error; Harness does not synthesize quota data.
 
 ### Explicit Codex resets
 
-First inspect `harness limits resets openai-codex`. The singular `reset` verb,
-`openai-codex`, and a selected credit ID authorize one redemption, with no extra
+First inspect `harness limits resets openai-codex` (any codex-profile provider
+name works). The singular `reset` verb,
+the provider name, and a selected credit ID authorize one redemption, with no extra
 confirmation prompt. Listing credits or viewing an automatic reset time never
 redeems anything. Unknown future credit types/statuses are not marked redeemable;
 upstream remains authoritative about eligibility and the result.

@@ -1306,6 +1306,21 @@ The projection is deterministic, versioned in JSON, limited to user settings, an
 does not embed prompts or materialize built-in agents. `check` additionally performs local semantic checks
 for agents, hooks, and `@file` references.
 
+Provider configs separate identity from behavior: `name` owns the OAuth token
+file, the `name:model` target prefix, and quota attribution, while the optional
+`profile` (`llm.ProviderConfig.Profile`) names a bundle of backend-specific
+defaults for a known service. `llm.ProfileCodex`
+requires `api_type:"responses"` (an empty `api_type` resolves from the
+provider name, as the proxy does at runtime); it selects Codex identity headers, WebSocket
+transport with turn-state continuation, omitted `max_output_tokens`, local token
+counting, trigger-based compaction, price suppression, and the quota/reset-credit
+endpoints. `llm.ProfileKimiForCoding` and `llm.ProfileZAICodingPlan` select only
+their subscription quota integrations and leave the dialect alone. Defaults resolve as **explicit config field > profile default > legacy
+name/URL/auth detection > generic default**, so configs without a profile behave
+as before and multiple subscription accounts share one profile under distinct
+names. Validation rejects unknown profiles and profile/dialect mismatches when
+the proxy loads or serves its config.
+
 `trace_proxy` / `HARNESS_TRACE_PROXY` / `-trace-proxy` opts in to W3C Trace
 Context headers for harness-to-proxy requests. OTLP/HTTP JSON metrics export is
 controlled by `otel.enabled`/`otel.endpoint` (`HARNESS_OTEL_*` /
@@ -1343,9 +1358,9 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   available, with its baseline models from the vendored or cached Codex model
   catalog and its live choices from a usable account token; it
   writes the ChatGPT Codex backend URL and a `codex_oauth` auth block instead of
-  API-key fields, plus `omit_max_output_tokens:true`. The proxy defaults the
-  Responses WebSocket transport on for this `codex_oauth` provider at runtime,
-  unless the config explicitly sets `responses_websocket:false`. Providers
+  API-key fields, plus `omit_max_output_tokens:true` and `profile:"codex"`. The
+  proxy defaults the Responses WebSocket transport on for codex-profile providers
+  at runtime, unless the config explicitly sets `responses_websocket:false`. Providers
   such as Sakana are listed when models.dev includes them; their
   `provider.shape` drives `api_type` and any required `responses_stateful`
   default is applied from provider-specific rules (e.g. Sakana is stateless).
@@ -1462,7 +1477,7 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   the `openai-codex` limits and reset-credit endpoints and the authenticated
   `openai-codex` model-catalog discovery query. Codex OAuth login/refresh calls
   to the auth issuer deliberately do not, matching the CLI's raw auth client,
-  and the other subscription providers (`kimi-for-coding`, `zai-coding-plan`)
+  and the other subscription providers (`kimi-code-plan-cn`, `zai-coding-plan`)
   are untouched.
 - The model proxy logs a structured start and completion record per `/v1/stream`
   request with
@@ -1639,7 +1654,10 @@ Account-wide subscription quotas are a separate data path, not `llm.Usage`,
 `internal/modelproxy/subscription` owns provider-private decoding and upstream
 calls; `internal/modelproxy/server/limits.go` owns configured-provider selection,
 bounded all-provider fan-out, shared credential resolution, and best-effort
-post-reset refreshes. `internal/modelproxy/client/limits.go` uses the existing
+post-reset refreshes. Providers resolve to a quota integration through
+`subscription.QuotaKind`: an explicit profile wins for all three subscription
+services, so every account reports under its own provider name; absent a
+profile, legacy name/URL/auth detection applies. `internal/modelproxy/client/limits.go` uses the existing
 authenticated proxy transport without loading provider secrets. `cmd/harness/limits_command.go` runs without model/session/tool
 startup; `internal/ui/limits.go` provides shared text rendering and REPL callbacks.
 There is no new model-facing tool, dialect dependency in core `llm`, or

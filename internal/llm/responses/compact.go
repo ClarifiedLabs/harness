@@ -445,6 +445,11 @@ func (p *Provider) usesCompactionV2() bool {
 }
 
 func (p *Provider) isCodexBackend() bool {
-	return strings.EqualFold(p.providerName, "openai-codex") ||
-		strings.TrimRight(strings.ToLower(p.baseURL), "/") == "https://chatgpt.com/backend-api/codex"
+	// An explicit profile wins; absent one, fall back to the canonical provider
+	// name or base URL so configs without a profile keep working.
+	if profile := llm.NormalizeProfile(p.profile); profile != "" {
+		return profile == llm.ProfileCodex
+	}
+	return strings.EqualFold(p.providerName, llm.CodexProviderName) ||
+		canonicalCodexEndpoint(p.baseURL)
 }

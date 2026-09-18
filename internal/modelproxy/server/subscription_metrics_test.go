@@ -99,7 +99,7 @@ func TestSubscriptionMetricsSlowPollCannotOverwriteManualRefresh(t *testing.T) {
 		}
 		return quotaResponse(200, `{"rate_limit":{"allowed":true}}`), nil
 	})
-	h := newLimitsHandler(t, []string{"kimi-for-coding", "openai-codex"}, transport, r)
+	h := newLimitsHandler(t, []string{"kimi-code-plan-cn", "openai-codex"}, transport, r)
 	h.now = now
 	h.limits = subscription.New(subscription.Options{Client: &http.Client{Transport: transport}, Resolve: h.subscriptionCredentials, Now: func() time.Time {
 		fetched := now()
@@ -140,7 +140,7 @@ func TestSubscriptionMetricsSlowPollCannotOverwriteManualRefresh(t *testing.T) {
 func TestSubscriptionMetricsRetainStaleOnFailureReplaceOnSuccess(t *testing.T) {
 	r := metrics.New()
 	m := newSubscriptionMetrics(r)
-	for _, provider := range []string{"openai-codex", "kimi-for-coding"} {
+	for _, provider := range []string{"openai-codex", "kimi-code-plan-cn"} {
 		m.update(protocol.ProviderLimits{Provider: provider, FetchedAt: time.Unix(1000, 0), Pools: []protocol.LimitPool{{ID: "coding", Windows: []protocol.LimitWindow{{ID: "weekly", UsedPercent: quotaPtr(25.0)}}}}, ResetCredits: &protocol.ResetCreditSummary{AvailableCount: quotaPtr(int64(1))}}, time.Unix(1000, 0))
 	}
 	m.update(protocol.ProviderLimits{Provider: "openai-codex", Error: &protocol.LimitsError{Code: "timeout", Message: "do-not-export-error"}}, time.Unix(1100, 0))
@@ -152,7 +152,7 @@ func TestSubscriptionMetricsRetainStaleOnFailureReplaceOnSuccess(t *testing.T) {
 	// A successful response without the old optional window/credits removes them.
 	m.update(protocol.ProviderLimits{Provider: "openai-codex", FetchedAt: time.Unix(1200, 0), Pools: []protocol.LimitPool{{ID: "codex", Allowed: quotaPtr(false)}}}, time.Unix(1201, 0))
 	text = quotaText(r)
-	requireQuotaSeries(t, text, `model_proxy_subscription_allowed{pool="codex",provider="openai-codex"} 0`, `model_proxy_subscription_refresh_success{provider="openai-codex"} 1`, `model_proxy_subscription_last_success_timestamp_seconds{provider="openai-codex"} 1200`, `model_proxy_subscription_used_percent{pool="coding",provider="kimi-for-coding",window="weekly"} 25`)
+	requireQuotaSeries(t, text, `model_proxy_subscription_allowed{pool="codex",provider="openai-codex"} 0`, `model_proxy_subscription_refresh_success{provider="openai-codex"} 1`, `model_proxy_subscription_last_success_timestamp_seconds{provider="openai-codex"} 1200`, `model_proxy_subscription_used_percent{pool="coding",provider="kimi-code-plan-cn",window="weekly"} 25`)
 	for _, line := range strings.Split(text, "\n") {
 		if strings.Contains(line, `provider="openai-codex"`) && (strings.HasPrefix(line, "model_proxy_subscription_used_percent{") || strings.HasPrefix(line, "model_proxy_subscription_reset_credits_available{")) {
 			t.Fatal("stale series retained:", line)
@@ -170,7 +170,7 @@ func TestSubscriptionMetricsRetainStaleOnFailureReplaceOnSuccess(t *testing.T) {
 func TestSubscriptionMetricsPollingReadOnlyIndependentAndNoScrapeRequests(t *testing.T) {
 	r := metrics.New()
 	var calls atomic.Int32
-	h := newLimitsHandler(t, []string{"kimi-for-coding", "openai-codex", "zai-coding-plan"}, func(req *http.Request) (*http.Response, error) {
+	h := newLimitsHandler(t, []string{"kimi-code-plan-cn", "openai-codex", "zai-coding-plan"}, func(req *http.Request) (*http.Response, error) {
 		calls.Add(1)
 		if req.Method != "GET" {
 			t.Error("non-read-only poll", req.Method)
@@ -194,7 +194,7 @@ func TestSubscriptionMetricsPollingReadOnlyIndependentAndNoScrapeRequests(t *tes
 	if calls.Load() != 3 {
 		t.Fatalf("calls %d", calls.Load())
 	}
-	requireQuotaSeries(t, quotaText(r), `model_proxy_subscription_refresh_success{provider="kimi-for-coding"} 1`, `model_proxy_subscription_refresh_success{provider="openai-codex"} 1`, `model_proxy_subscription_refresh_success{provider="zai-coding-plan"} 0`)
+	requireQuotaSeries(t, quotaText(r), `model_proxy_subscription_refresh_success{provider="kimi-code-plan-cn"} 1`, `model_proxy_subscription_refresh_success{provider="openai-codex"} 1`, `model_proxy_subscription_refresh_success{provider="zai-coding-plan"} 0`)
 	for range 2 {
 		w := httptest.NewRecorder()
 		r.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
@@ -250,7 +250,7 @@ func TestSubscriptionMetricsConcurrentUpdatesAndScrapes(t *testing.T) {
 	r := metrics.New()
 	m := newSubscriptionMetrics(r)
 	var wg sync.WaitGroup
-	for _, provider := range []string{"openai-codex", "kimi-for-coding", "zai-coding-plan"} {
+	for _, provider := range []string{"openai-codex", "kimi-code-plan-cn", "zai-coding-plan"} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -261,7 +261,7 @@ func TestSubscriptionMetricsConcurrentUpdatesAndScrapes(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	for _, provider := range []string{"openai-codex", "kimi-for-coding", "zai-coding-plan"} {
+	for _, provider := range []string{"openai-codex", "kimi-code-plan-cn", "zai-coding-plan"} {
 		requireQuotaSeries(t, quotaText(r), `model_proxy_subscription_last_success_timestamp_seconds{provider="`+provider+`"} 1019`)
 	}
 }

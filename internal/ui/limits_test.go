@@ -112,7 +112,7 @@ func TestLimitsREPLDispatchAndSyntax(t *testing.T) {
 	status, credits, resets := 0, 0, 0
 	app := &App{Errw: &output, Limits: func(ctx context.Context, p string) (protocol.LimitsReport, error) {
 		status++
-		if p != "kimi-for-coding" {
+		if p != "kimi-code-plan-cn" {
 			t.Error(p)
 		}
 		return protocol.LimitsReport{Providers: []protocol.ProviderLimits{{Provider: p}}}, nil
@@ -123,7 +123,7 @@ func TestLimitsREPLDispatchAndSyntax(t *testing.T) {
 		resets++
 		return protocol.ResetResult{Outcome: "no_credit"}, nil
 	}}
-	for _, line := range []string{"/limits kimi-for-coding", "/limits resets openai-codex", "/limits reset openai-codex credit stable", "/limits reset", "/limits resets kimi-for-coding", "/limits reset openai-codex bad/id id", "/limits one two"} {
+	for _, line := range []string{"/limits kimi-code-plan-cn", "/limits resets openai-codex", "/limits reset openai-codex credit stable", "/limits reset", "/limits resets kimi-code-plan-cn", "/limits reset openai-codex bad/id id", "/limits one two"} {
 		app.command(line, nil)
 	}
 	if status != 1 || credits != 1 || resets != 1 {

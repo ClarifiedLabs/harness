@@ -203,7 +203,7 @@ func TestReasoningReplayJSON(t *testing.T) {
 		}
 	})
 	t.Run("round-trips through provider config", func(t *testing.T) {
-		cfg := ProviderConfig{Name: "kimi-for-coding", APIType: "openai", ReasoningReplay: ReasoningReplayFull}
+		cfg := ProviderConfig{Name: "kimi-code-plan-cn", APIType: "openai", ReasoningReplay: ReasoningReplayFull}
 		b, err := json.Marshal(cfg)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)

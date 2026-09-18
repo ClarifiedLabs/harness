@@ -36,7 +36,7 @@ func response(status int, body string) *http.Response {
 	return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}
 }
 func config(name string) llm.ProviderConfig {
-	return llm.ProviderConfig{Name: name, BaseURL: map[string]string{"kimi-for-coding": "https://api.kimi.com/coding/v1", "zai-coding-plan": "https://api.z.ai/api/coding/paas/v4", "openai-codex": "https://chatgpt.com/backend-api/codex"}[name], APIKey: "secret-static-key"}
+	return llm.ProviderConfig{Name: name, BaseURL: map[string]string{"kimi-code-plan-cn": "https://api.kimi.com/coding/v1", "kimi-code-plan-global": "https://api.kimi.ai/coding/v1", "zai-coding-plan": "https://api.z.ai/api/coding/paas/v4", "openai-codex": "https://chatgpt.com/backend-api/codex"}[name], APIKey: "secret-static-key"}
 }
 func account(t *testing.T, name string, transport roundTripFunc) *Account {
 	t.Helper()
@@ -91,7 +91,7 @@ func TestNonCodexAccountRequestsOmitClientIdentity(t *testing.T) {
 		return response(http.StatusOK, fixture(t, "kimi")), nil
 	})
 	c := New(Options{Client: &http.Client{Transport: transport}, Now: func() time.Time { return testNow }, CodexClientVersion: "0.99.0"})
-	a, err := c.Resolve(context.Background(), config("kimi-for-coding"))
+	a, err := c.Resolve(context.Background(), config("kimi-code-plan-cn"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,9 @@ func TestOfficialEndpointsBeforeCredentials(t *testing.T) {
 		name, url string
 		valid     bool
 	}{
-		{"kimi-for-coding", "https://api.kimi.com/coding/v1/", true},
+		{"kimi-code-plan-cn", "https://api.kimi.com/coding/v1/", true},
+		{"kimi-code-plan-global", "https://api.kimi.ai/coding/v1", true},
+		{"kimi-code-plan-global", "https://api.kimi.ai/custom", false},
 		{"zai-coding-plan", "https://api.z.ai/api/coding/paas/v4", true},
 		{"zai-coding-plan", "https://api.z.ai/api/paas/v4", true},
 		{"zai-coding-plan", "https://api.z.ai/api/anthropic", true},
@@ -122,7 +124,7 @@ func TestOfficialEndpointsBeforeCredentials(t *testing.T) {
 		{"openai-codex", "https://chatgpt.com/backend-api/codex#secret", false},
 		{"openai-codex", "https://chatgpt.com/backend-api/%63odex", false},
 		{"zai-coding-plan", "https://open.bigmodel.cn/api/coding/paas/v4", false},
-		{"kimi-for-coding", "https://api.kimi.com/custom", false},
+		{"kimi-code-plan-cn", "https://api.kimi.com/custom", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.url, func(t *testing.T) {
@@ -144,15 +146,25 @@ func TestOfficialEndpointsBeforeCredentials(t *testing.T) {
 			}
 		})
 	}
-	if Supported("openai") || !Supported("openai-codex") {
-		t.Fatal("Supported")
+	if SupportedProvider(llm.ProviderConfig{Name: "openai"}) || !SupportedProvider(llm.ProviderConfig{Name: "openai-codex"}) {
+		t.Fatal("SupportedProvider")
+	}
+	// A second ChatGPT subscription account under a different provider name
+	// resolves to the codex quota integration through its profile.
+	if !SupportedProvider(llm.ProviderConfig{Name: "openai-codex-2", Profile: llm.ProfileCodex}) {
+		t.Fatal("SupportedProvider: codex profile")
+	}
+	// Kimi and Z.AI second accounts likewise resolve through their profiles.
+	if !SupportedProvider(llm.ProviderConfig{Name: "kimi-work", Profile: llm.ProfileKimiCodePlan}) ||
+		!SupportedProvider(llm.ProviderConfig{Name: "zai-work", Profile: llm.ProfileZAICodingPlan}) {
+		t.Fatal("SupportedProvider: kimi/zai profiles")
 	}
 	_, err := New(Options{}).Resolve(context.Background(), llm.ProviderConfig{Name: "openai"})
 	limitsError(t, err, "unsupported_provider")
 }
 
 func TestCredentialSnapshotAndExactRoutes(t *testing.T) {
-	for _, name := range []string{"kimi-for-coding", "zai-coding-plan", "openai-codex"} {
+	for _, name := range []string{"kimi-code-plan-cn", "kimi-code-plan-global", "zai-coding-plan", "openai-codex"} {
 		t.Run(name, func(t *testing.T) {
 			auth := "Bearer dynamic-secret"
 			if name == "zai-coding-plan" {
@@ -162,7 +174,7 @@ func TestCredentialSnapshotAndExactRoutes(t *testing.T) {
 			calls, resolves := 0, 0
 			client := &http.Client{Timeout: time.Minute, Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 				calls++
-				if r.Method != "GET" || r.URL.String() != map[string]string{"kimi-for-coding": "https://api.kimi.com/coding/v1/usages", "zai-coding-plan": "https://api.z.ai/api/monitor/usage/quota/limit", "openai-codex": codexBase + "/usage"}[name] {
+				if r.Method != "GET" || r.URL.String() != map[string]string{"kimi-code-plan-cn": "https://api.kimi.com/coding/v1/usages", "kimi-code-plan-global": "https://api.kimi.ai/coding/v1/usages", "zai-coding-plan": "https://api.z.ai/api/monitor/usage/quota/limit", "openai-codex": codexBase + "/usage"}[name] {
 					t.Fatalf("route %s %s", r.Method, r.URL)
 				}
 				if r.Header.Get("Authorization") != auth || r.Header.Get("ChatGPT-Account-ID") != "account-snapshot" || r.Header.Get("X-OpenAI-Fedramp") != "true" || r.Header.Get("X-Codex-Luna-Reserve") != "" {
@@ -172,7 +184,7 @@ func TestCredentialSnapshotAndExactRoutes(t *testing.T) {
 				if !ok || time.Until(deadline) > 10*time.Second {
 					t.Fatal("missing bound")
 				}
-				return response(200, fixture(t, map[string]string{"kimi-for-coding": "kimi", "zai-coding-plan": "zai", "openai-codex": "codex"}[name])), nil
+				return response(200, fixture(t, map[string]string{"kimi-code-plan-cn": "kimi", "kimi-code-plan-global": "kimi", "zai-coding-plan": "zai", "openai-codex": "codex"}[name])), nil
 			})}
 			c := New(Options{Client: client, Now: func() time.Time { return testNow }, Resolve: func(context.Context, llm.ProviderConfig) (Credentials, error) {
 				resolves++
@@ -200,8 +212,63 @@ func TestCredentialSnapshotAndExactRoutes(t *testing.T) {
 	}
 }
 
+func TestResolveSecondCodexAccountViaProfile(t *testing.T) {
+	// A second ChatGPT subscription account under a different provider name
+	// resolves to the Codex quota endpoints via its profile, carries the Codex
+	// identity headers, and reports limits under its own provider name.
+	pc := llm.ProviderConfig{Name: "openai-codex-2", APIType: "responses", Profile: llm.ProfileCodex, BaseURL: "https://chatgpt.com/backend-api/codex", APIKey: "secret-static-key"}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != "GET" || r.URL.String() != codexBase+"/usage" {
+			t.Fatalf("route %s %s", r.Method, r.URL)
+		}
+		if r.Header.Get("originator") == "" {
+			t.Fatal("codex identity headers missing on quota request")
+		}
+		return response(200, fixture(t, "codex")), nil
+	})}
+	c := New(Options{Client: client, Now: func() time.Time { return testNow }})
+	a, err := c.Resolve(context.Background(), pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Provider != "openai-codex-2" {
+		t.Fatalf("limits reported under %q, want the provider's own name", out.Provider)
+	}
+}
+
+func TestResolveSecondZaiAccountViaProfile(t *testing.T) {
+	// A renamed Z.AI Coding Plan provider keeps the Z.AI quota route and the
+	// raw-token Authorization header (no Bearer prefix) through its profile.
+	pc := llm.ProviderConfig{Name: "zai-coding-plan-2", Profile: llm.ProfileZAICodingPlan, BaseURL: "https://api.z.ai/api/coding/paas/v4", APIKey: "secret-static-key"}
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.Method != "GET" || r.URL.String() != "https://api.z.ai/api/monitor/usage/quota/limit" {
+			t.Fatalf("route %s %s", r.Method, r.URL)
+		}
+		if got := r.Header.Get("Authorization"); got != "secret-static-key" {
+			t.Fatalf("Authorization = %q, want the raw token without Bearer for Z.AI", got)
+		}
+		return response(200, fixture(t, "zai")), nil
+	})}
+	c := New(Options{Client: client, Now: func() time.Time { return testNow }})
+	a, err := c.Resolve(context.Background(), pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := a.Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Provider != "zai-coding-plan-2" {
+		t.Fatalf("limits reported under %q, want the provider's own name", out.Provider)
+	}
+}
+
 func TestStaticAuthAndSafeFailures(t *testing.T) {
-	for _, name := range []string{"kimi-for-coding", "zai-coding-plan", "openai-codex"} {
+	for _, name := range []string{"kimi-code-plan-cn", "kimi-code-plan-global", "zai-coding-plan", "openai-codex"} {
 		t.Run(name, func(t *testing.T) {
 			a := account(t, name, func(r *http.Request) (*http.Response, error) {
 				want := "Bearer secret-static-key"

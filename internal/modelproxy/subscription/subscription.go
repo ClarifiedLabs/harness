@@ -53,7 +53,12 @@ type Client struct {
 type Account struct {
 	client   *Client
 	provider string
+	kind     string
 	headers  http.Header
+	// usagesURL is the quota endpoint for deployments whose host varies with
+	// the configured base URL (Kimi Code Plan CN vs global); empty uses the
+	// integration's default endpoint.
+	usagesURL string
 }
 
 func New(opts Options) *Client {
@@ -95,17 +100,52 @@ func New(opts Options) *Client {
 	return &Client{http: &h, now: opts.Now, resolve: opts.Resolve, codexClientVersion: opts.CodexClientVersion}
 }
 
-func Supported(name string) bool {
-	return name == "kimi-for-coding" || name == "zai-coding-plan" || name == "openai-codex"
+// QuotaCodex is the quota integration kind for ChatGPT Codex subscription
+// providers. The other kinds equal the kimi-code-plan and zai-coding-plan
+// profile names.
+const QuotaCodex = "codex"
+
+// QuotaKind returns the subscription quota integration for a provider config.
+// An explicit profile wins, so multiple subscription accounts (distinct
+// provider names sharing one profile) all resolve to the right quota endpoints
+// under their own names; absent a profile, legacy name/URL/auth detection
+// applies.
+func QuotaKind(pc llm.ProviderConfig) string {
+	if profile := llm.NormalizeProfile(pc.Profile); profile != "" {
+		switch profile {
+		case llm.ProfileCodex:
+			return QuotaCodex
+		case llm.ProfileKimiCodePlan, llm.ProfileZAICodingPlan:
+			return profile
+		}
+		return ""
+	}
+	if pc.CodexBackend() {
+		return QuotaCodex
+	}
+	switch pc.Name {
+	case llm.KimiCodePlanCNProviderName, llm.KimiCodePlanGlobalProviderName:
+		return llm.ProfileKimiCodePlan
+	case llm.ProfileZAICodingPlan:
+		return pc.Name
+	}
+	return ""
+}
+
+// SupportedProvider reports whether subscription quota reporting is available
+// for the provider config.
+func SupportedProvider(pc llm.ProviderConfig) bool {
+	return QuotaKind(pc) != ""
 }
 
 func (c *Client) Resolve(ctx context.Context, pc llm.ProviderConfig) (*Account, error) {
 	ctx, cancel := context.WithTimeout(ctx, upstreamTimeout)
 	defer cancel()
-	if !Supported(pc.Name) {
+	kind := QuotaKind(pc)
+	if kind == "" {
 		return nil, safeError("unsupported_provider", "subscription limits are not supported for this provider")
 	}
-	if !officialEndpoint(pc) {
+	if !officialEndpoint(pc, kind) {
 		return nil, safeError("unsupported_endpoint", "subscription limits require an official provider endpoint and known base path")
 	}
 	if err := ctx.Err(); err != nil {
@@ -125,7 +165,7 @@ func (c *Client) Resolve(ctx context.Context, pc llm.ProviderConfig) (*Account, 
 	h := make(http.Header)
 	if cred.APIKey != "" {
 		value := cred.APIKey
-		if pc.Name != "zai-coding-plan" {
+		if kind != llm.ProfileZAICodingPlan {
 			value = "Bearer " + value
 		}
 		h.Set("Authorization", value)
@@ -149,10 +189,16 @@ func (c *Client) Resolve(ctx context.Context, pc llm.ProviderConfig) (*Account, 
 	// The Codex account endpoints sit behind the same default client as
 	// inference, so they carry the CLI's identity headers too. Applied after
 	// credential headers so it cannot be shadowed by resolved auth values.
-	if pc.Name == "openai-codex" {
+	if kind == QuotaCodex {
 		codexclient.Apply(h, c.codexClientVersion)
 	}
-	return &Account{client: c, provider: pc.Name, headers: h}, nil
+	var usagesURL string
+	if kind == llm.ProfileKimiCodePlan {
+		// officialEndpoint has already validated scheme/host/path.
+		u, _ := url.Parse(pc.BaseURL)
+		usagesURL = "https://" + strings.ToLower(u.Hostname()) + "/coding/v1/usages"
+	}
+	return &Account{client: c, provider: pc.Name, kind: kind, headers: h, usagesURL: usagesURL}, nil
 }
 
 func validHeaderName(s string) bool {
@@ -167,18 +213,18 @@ func validHeaderName(s string) bool {
 	return true
 }
 
-func officialEndpoint(pc llm.ProviderConfig) bool {
+func officialEndpoint(pc llm.ProviderConfig, kind string) bool {
 	u, err := url.Parse(pc.BaseURL)
 	if err != nil || u.Scheme != "https" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.RawPath != "" || (u.Port() != "" && u.Port() != "443") {
 		return false
 	}
 	host, path := strings.ToLower(u.Hostname()), strings.TrimSuffix(u.Path, "/")
-	switch pc.Name {
-	case "kimi-for-coding":
-		return host == "api.kimi.com" && (path == "" || path == "/coding/v1")
+	switch kind {
+	case llm.ProfileKimiCodePlan:
+		return (host == "api.kimi.com" || host == "api.kimi.ai") && (path == "" || path == "/coding/v1")
 	case "zai-coding-plan":
 		return host == "api.z.ai" && (path == "" || path == "/api/coding/paas/v4" || path == "/api/paas/v4" || path == "/api/anthropic")
-	case "openai-codex":
+	case QuotaCodex:
 		return host == "chatgpt.com" && (path == "" || path == "/backend-api" || path == "/backend-api/codex")
 	}
 	return false
@@ -187,12 +233,12 @@ func officialEndpoint(pc llm.ProviderConfig) bool {
 func (a *Account) Status(ctx context.Context) (protocol.ProviderLimits, error) {
 	var out protocol.ProviderLimits
 	var err error
-	switch a.provider {
-	case "kimi-for-coding":
+	switch a.kind {
+	case llm.ProfileKimiCodePlan:
 		out, err = a.kimi(ctx)
 	case "zai-coding-plan":
 		out, err = a.zai(ctx)
-	case "openai-codex":
+	case QuotaCodex:
 		out, err = a.codex(ctx)
 	default:
 		err = safeError("unsupported_provider", "subscription limits are not supported for this provider")

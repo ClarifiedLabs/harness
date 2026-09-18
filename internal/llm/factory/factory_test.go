@@ -147,7 +147,7 @@ func TestReasoningReplayReachesOpenAIDialect(t *testing.T) {
 
 			p, err := New(Options{
 				Provider:        "openai",
-				ProviderName:    "kimi-for-coding",
+				ProviderName:    "kimi-code-plan-cn",
 				Model:           "kimi-k3",
 				BaseURL:         srv.URL,
 				APIKey:          "k",

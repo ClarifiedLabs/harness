@@ -2694,7 +2694,8 @@ func contextManagementForProvider(cfg config.Config, catalog protocol.Catalog, p
 		model = target.ModelLabel
 	}
 	model, _, _ = strings.Cut(model, ":")
-	return provider == "openai-codex" && (model == "gpt-6-astra" || strings.HasPrefix(model, "gpt-6-astra-"))
+	codexProfile := strings.EqualFold(target.Profile, llm.ProfileCodex)
+	return (codexProfile || provider == llm.CodexProviderName) && (model == "gpt-6-astra" || strings.HasPrefix(model, "gpt-6-astra-"))
 }
 
 func prewarmForProvider(catalog protocol.Catalog, providerID string) bool {

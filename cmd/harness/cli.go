@@ -54,8 +54,8 @@ func commandCatalog(env environment) cli.Catalog {
 				ID: "limits", Name: "limits", Summary: "Show account-wide subscription quotas, not session usage.", Runnable: true,
 				Args: cli.Args{Usage: "[provider]", Min: 0, Max: 1, Check: true}, Flags: limitsCLIFlags(false),
 				Commands: []cli.Command{
-					{ID: "limits.resets", Name: "resets", Summary: "List Codex reset credits.", Runnable: true, Args: exactArgs(1, "openai-codex"), Flags: limitsCLIFlags(false)},
-					{ID: "limits.reset", Name: "reset", Summary: "Redeem one selected Codex reset credit (no automatic retry).", Runnable: true, Args: exactArgs(2, "openai-codex <credit-id>"), Flags: limitsCLIFlags(true)},
+					{ID: "limits.resets", Name: "resets", Summary: "List Codex reset credits.", Runnable: true, Args: exactArgs(1, "provider"), Flags: limitsCLIFlags(false)},
+					{ID: "limits.reset", Name: "reset", Summary: "Redeem one selected Codex reset credit (no automatic retry).", Runnable: true, Args: exactArgs(2, "provider <credit-id>"), Flags: limitsCLIFlags(true)},
 				},
 			},
 			{
