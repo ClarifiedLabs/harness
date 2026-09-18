@@ -2801,7 +2801,8 @@ this subsection records the runner that surface points at.
 
 ### 9.14a `acp` and `agent_sessions`
 
-`acp` exposes only configured, approved ACP subprocess targets. Its schema is:
+`acp` exposes only configured, approved ACP subprocess targets. It is omitted
+from the tool set when no targets are configured. Its schema is:
 
 | param | type | notes |
 |---|---|---|

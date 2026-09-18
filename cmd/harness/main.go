@@ -771,23 +771,25 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		return contextPolicy(cfg, catalog, delegateState.Snapshot().ProviderName)
 	})
 	manager.Register(toolCatalog)
-	toolCatalog.Register(acptool.NewTool(agentSessionManager, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
-		argv := append([]string{target.Command}, target.Args...)
-		return acpclient.NewFactory(acpclient.Options{
-			Argv: argv,
-			Env:  acpTargetEnvironment(os.Environ(), target.Env),
-			CWD:  cwd,
-			ClientInfo: &acp.Implementation{
-				Name:    "harness",
-				Title:   "Harness",
-				Version: build.Version,
-			},
-			Logger: logger,
-			LogStderr: func(line string) {
-				logger.Warn("acp: child stderr: "+line, logging.Category("acp"))
-			},
-		})
-	}))
+	if len(cfg.ACP.Targets) > 0 {
+		toolCatalog.Register(acptool.NewTool(agentSessionManager, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
+			argv := append([]string{target.Command}, target.Args...)
+			return acpclient.NewFactory(acpclient.Options{
+				Argv: argv,
+				Env:  acpTargetEnvironment(os.Environ(), target.Env),
+				CWD:  cwd,
+				ClientInfo: &acp.Implementation{
+					Name:    "harness",
+					Title:   "Harness",
+					Version: build.Version,
+				},
+				Logger: logger,
+				LogStderr: func(line string) {
+					logger.Warn("acp: child stderr: "+line, logging.Category("acp"))
+				},
+			})
+		}))
+	}
 	toolCatalog.Register(agentsession.NewTool(agentSessionManager))
 	// Goals are managed exclusively by the interactive /goal command.
 	goalStore := goal.NewStore()
@@ -1789,6 +1791,17 @@ func resolveConfiguredAgents(cfg config.Config) (map[string]agentdef.Definition,
 			}
 		}
 		agents[name] = definition
+	}
+	// Without configured ACP targets the acp tool would advertise an empty
+	// target enum, which strict providers (e.g. Moonshot) reject. Omit it
+	// from every agent so Subset does not fail on a tool the catalog omits.
+	if len(cfg.ACP.Targets) == 0 {
+		for name, definition := range agents {
+			if slices.Contains(definition.AllowedTools, "acp") {
+				definition.AllowedTools = slices.DeleteFunc(definition.AllowedTools, func(tool string) bool { return tool == "acp" })
+				agents[name] = definition
+			}
+		}
 	}
 	if err := agentdef.Validate(agents); err != nil {
 		return nil, err

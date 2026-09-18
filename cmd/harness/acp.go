@@ -468,9 +468,11 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		return contextPolicy(cfg, catalog, state.Snapshot().ProviderName)
 	})
 	manager.Register(toolCatalog)
-	toolCatalog.Register(acptool.NewTool(agentSessions, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
-		return acpclient.NewFactory(acpclient.Options{Argv: append([]string{target.Command}, target.Args...), Env: acpTargetEnvironment(os.Environ(), target.Env), CWD: cwd, ClientInfo: &acp.Implementation{Name: "harness", Title: "Harness", Version: build.Version}, Logger: logger, LogStderr: func(line string) { logger.Warn("acp: child stderr: "+line, logging.Category("acp")) }})
-	}))
+	if len(cfg.ACP.Targets) > 0 {
+		toolCatalog.Register(acptool.NewTool(agentSessions, cfg.ACP, func(target config.ACPTargetConfig, cwd string) agentsession.Factory {
+			return acpclient.NewFactory(acpclient.Options{Argv: append([]string{target.Command}, target.Args...), Env: acpTargetEnvironment(os.Environ(), target.Env), CWD: cwd, ClientInfo: &acp.Implementation{Name: "harness", Title: "Harness", Version: build.Version}, Logger: logger, LogStderr: func(line string) { logger.Warn("acp: child stderr: "+line, logging.Category("acp")) }})
+		}))
+	}
 	toolCatalog.Register(agentsession.NewTool(agentSessions))
 	toolRegistry, err := subsetForAgentTools(toolCatalog, definition.AllowedTools, nil)
 	if err != nil {

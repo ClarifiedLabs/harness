@@ -4154,6 +4154,7 @@ func TestRunDefaultAgentTools(t *testing.T) {
 
 func TestRunCustomAgentResolvesAgentSessionTools(t *testing.T) {
 	configPath := writeMainConfig(t, `{
+		"acp": {"targets": {"agent": {"command": "agent", "workspace_access": "read_only"}}},
 		"agents": {
 			"custom": {
 				"description": "Custom outbound agent work.",
@@ -4170,6 +4171,51 @@ func TestRunCustomAgentResolvesAgentSessionTools(t *testing.T) {
 	if got, want := toolNames(fp.Requests[0]), []string{"acp", "agent_sessions"}; !slices.Equal(got, want) {
 		t.Fatalf("custom agent tools = %v, want %v", got, want)
 	}
+}
+
+// Without configured ACP targets the acp tool is omitted entirely: its
+// target enum would otherwise be empty, which strict providers reject
+// (Moonshot 400: enum array cannot be empty).
+func TestRunDefaultAgentOmitsACPWithoutTargets(t *testing.T) {
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	if got := toolNames(fp.Requests[0]); slices.Contains(got, "acp") {
+		t.Fatalf("default agent tools should omit acp without targets: %v", got)
+	}
+}
+
+func TestRunAdvertisesACPWithTargets(t *testing.T) {
+	configPath := writeMainConfig(t, `{
+		"acp": {"targets": {"agent": {"command": "agent", "workspace_access": "read_only"}}}
+	}`)
+	fp := llmtest.New("fake", okStepWithUsage(1, 1))
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-config", configPath, "-model", "claude-opus-4-8", "-p", "hi"}, fp, "")
+
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+	}
+	for _, spec := range fp.Requests[0].Tools {
+		if spec.Name != "acp" {
+			continue
+		}
+		var schema struct {
+			Properties map[string]struct {
+				Enum []string `json:"enum"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(spec.Parameters, &schema); err != nil {
+			t.Fatalf("acp schema JSON: %v", err)
+		}
+		if got := schema.Properties["target"].Enum; !slices.Equal(got, []string{"agent"}) {
+			t.Fatalf("acp target enum = %v, want [agent]", got)
+		}
+		return
+	}
+	t.Fatalf("request did not advertise acp: %v", toolNames(fp.Requests[0]))
 }
 
 func TestACPTargetEnvironmentOverridesAndDeduplicates(t *testing.T) {
@@ -5604,7 +5650,7 @@ func expectedPlanToolNames() []string {
 
 func expectedDefaultToolNames() []string {
 	names := tools.DefaultNames()
-	return append(names, "delegate", "background_jobs", "update_todos", "record_plan", "acp", "agent_sessions")
+	return append(names, "delegate", "background_jobs", "update_todos", "record_plan", "agent_sessions")
 }
 
 func TestAgentSummariesIncludeNonInteractiveAgentsWithoutAffectingDelegation(t *testing.T) {

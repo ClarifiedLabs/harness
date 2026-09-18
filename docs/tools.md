@@ -16,7 +16,7 @@ This page is the operational overview.
 | `web_fetch` | fetch bounded HTTP(S) text, removing common HTML chrome while preserving block structure and links |
 | `update_todos` | replace the current advisory TODO list for multi-step work |
 | `delegate` | run a configured child agent and return its final report, optionally as a reusable interactive lineage |
-| `acp` | list configured ACP targets or start one as a reusable detached agent session |
+| `acp` | list configured ACP targets or start one as a reusable detached agent session (omitted when no targets are configured) |
 | `agent_sessions` | list or control reusable process-local agent sessions |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
 | `tool_catalog` | conditionally list, describe, and activate optional MCP/LSP tools |
@@ -358,8 +358,9 @@ supply a command. `acp` has `action:"targets"` (the default) and
 plus optional descriptions. `start` requires `target` and nonblank `prompt`, and
 accepts optional `cwd` (default current directory). Its `target` schema enum is
 the configured name list. The result identifies a reusable `as_…` session and
-its first immutable `bg_…` operation. No targets means listing returns an inert
-`No ACP targets configured.` result and starting fails.
+its first immutable `bg_…` operation. With no configured targets the tool is
+omitted from the model-facing tool set entirely (an empty target enum would be
+rejected by strict providers).
 
 Targets run the configured `command` plus `args` directly as argv, never through
 a shell. Harness inherits its environment, applies the target's resolved `env`
