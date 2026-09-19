@@ -83824,9 +83824,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 2.1,
-          "output": 10.95,
-          "cache_read": 0.23
+          "input": 1.95,
+          "output": 10.92,
+          "cache_read": 0.2262
         }
       },
       "morph/morph-v3-fast": {
@@ -89716,12 +89716,12 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 131072
+          "output": 943718
         },
         "cost": {
-          "input": 0.14,
-          "output": 0.42,
-          "cache_read": 0.0042
+          "input": 0.135,
+          "output": 0.54,
+          "cache_read": 0.00405
         }
       },
       "~deepseek/deepseek-pro-latest": {
@@ -89783,9 +89783,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.055,
-          "output": 0.165,
-          "cache_read": 0.00175
+          "input": 0.05236,
+          "output": 0.15708,
+          "cache_read": 0.001666
         }
       },
       "~google/gemini-flash-latest": {
@@ -89891,9 +89891,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 2.1,
-          "output": 10.95,
-          "cache_read": 0.23
+          "input": 1.95,
+          "output": 10.92,
+          "cache_read": 0.2262
         }
       },
       "~openai/gpt-astra-latest": {
@@ -90168,12 +90168,12 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 943718
+          "output": 131072
         },
         "cost": {
-          "input": 0.8925,
-          "output": 2.805,
-          "cache_read": 0.146625
+          "input": 0.8918,
+          "output": 2.8028,
+          "cache_read": 0.16562
         }
       }
     }
@@ -127466,27 +127466,6 @@
           "cache_read": 0.2
         }
       },
-      "mistralai/mistral-large-3-675b-instruct-2512": {
-        "id": "mistralai/mistral-large-3-675b-instruct-2512",
-        "name": "Mistral Large 3 675B",
-        "release_date": "2025-12-25",
-        "last_updated": "2025-12-02",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "limit": {
-          "context": 262144,
-          "output": 256000
-        },
-        "cost": {
-          "input": 1,
-          "output": 3,
-          "cache_read": 0.5
-        }
-      },
       "mistralai/mistral-medium-3": {
         "id": "mistralai/mistral-medium-3",
         "name": "Mistral Medium 3",
@@ -130204,6 +130183,37 @@
           "input": 0.1,
           "output": 0.2,
           "cache_read": 0.01
+        }
+      },
+      "prism-ml/ternary-bonsai-2-27b": {
+        "id": "prism-ml/ternary-bonsai-2-27b",
+        "name": "Ternary Bonsai 2 27B",
+        "release_date": "2026-09-18",
+        "last_updated": "2026-09-18",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "medium",
+              "xhigh"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 32768
+        },
+        "cost": {
+          "input": 0.075,
+          "output": 0.5,
+          "cache_read": 0.0375
         }
       },
       "qvq-max": {
@@ -154431,9 +154441,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.049,
-          "output": 0.098,
-          "cache_read": 0.0098
+          "input": 0.04844,
+          "output": 0.09688,
+          "cache_read": 0.009688
         }
       },
       "deepseek/deepseek-v4-flash-0731": {
@@ -157162,9 +157172,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 2.1,
-          "output": 10.95,
-          "cache_read": 0.23
+          "input": 1.95,
+          "output": 10.92,
+          "cache_read": 0.2262
         }
       },
       "morph/morph-v3-fast": {
@@ -162853,12 +162863,12 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 131072
+          "output": 943718
         },
         "cost": {
-          "input": 0.14,
-          "output": 0.42,
-          "cache_read": 0.0042
+          "input": 0.135,
+          "output": 0.54,
+          "cache_read": 0.00405
         }
       },
       "~deepseek/deepseek-pro-latest": {
@@ -162924,9 +162934,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.055,
-          "output": 0.165,
-          "cache_read": 0.00175
+          "input": 0.05236,
+          "output": 0.15708,
+          "cache_read": 0.001666
         }
       },
       "~google/gemini-flash-latest": {
@@ -163042,9 +163052,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 2.1,
-          "output": 10.95,
-          "cache_read": 0.23
+          "input": 1.95,
+          "output": 10.92,
+          "cache_read": 0.2262
         }
       },
       "~openai/gpt-astra-latest": {
@@ -163363,12 +163373,12 @@
         ],
         "limit": {
           "context": 1310720,
-          "output": 943718
+          "output": 131072
         },
         "cost": {
-          "input": 0.8925,
-          "output": 2.805,
-          "cache_read": 0.146625
+          "input": 0.8918,
+          "output": 2.8028,
+          "cache_read": 0.16562
         }
       }
     }
@@ -202768,31 +202778,9 @@
           ]
         }
       },
-      "fish-audio/s1-free": {
-        "id": "fish-audio/s1-free",
-        "name": "S1 (Free)",
-        "release_date": "2025-10-20",
-        "last_updated": "2025-10-20",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
       "fish-audio/s2-pro": {
         "id": "fish-audio/s2-pro",
         "name": "S2 Pro",
-        "release_date": "2026-03-09",
-        "last_updated": "2026-03-09",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
-      "fish-audio/s2-pro-free": {
-        "id": "fish-audio/s2-pro-free",
-        "name": "S2 Pro (Free)",
         "release_date": "2026-03-09",
         "last_updated": "2026-03-09",
         "modalities": {
@@ -202812,31 +202800,9 @@
           ]
         }
       },
-      "fish-audio/s2.1-pro-free": {
-        "id": "fish-audio/s2.1-pro-free",
-        "name": "S2.1 Pro (Free)",
-        "release_date": "2026-07-28",
-        "last_updated": "2026-07-28",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        }
-      },
       "fish-audio/transcribe-1": {
         "id": "fish-audio/transcribe-1",
         "name": "Transcribe-1",
-        "release_date": "2026-03-01",
-        "last_updated": "2026-03-01",
-        "modalities": {
-          "input": [
-            "audio"
-          ]
-        }
-      },
-      "fish-audio/transcribe-1-free": {
-        "id": "fish-audio/transcribe-1-free",
-        "name": "Transcribe-1 (Free)",
         "release_date": "2026-03-01",
         "last_updated": "2026-03-01",
         "modalities": {
