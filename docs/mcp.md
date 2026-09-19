@@ -347,7 +347,9 @@ and are correlated only by proxy logs.
 
 On SIGINT/SIGTERM the daemon shuts down gracefully: HTTP sessions close with
 the server, and each stdio child is reaped (close stdin → SIGTERM → SIGKILL on
-the process group, bounded by per-stage timeouts).
+the process group, bounded by per-stage timeouts). HTTP mode also closes the
+metrics listener before returning, including when the main listener fails to
+start, allowing up to five seconds for active scrapes to finish.
 
 ## Proxy API-key authentication
 

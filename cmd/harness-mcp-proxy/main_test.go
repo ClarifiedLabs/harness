@@ -442,6 +442,37 @@ func TestServeSigintCleanShutdown(t *testing.T) {
 	}
 }
 
+func TestServeAddressInUseClosesMetrics(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	metricsAddr := freeAddr(t)
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"mcpServers": {}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, _, errw := testEnv(t, nil)
+	args := []string{"-config", cfgPath, "-listen", ln.Addr().String(), "-metrics-listen", metricsAddr}
+	if code := runServe(env, args); code != exitRuntime {
+		t.Fatalf("serve with occupied address: exit = %d, want %d; stderr=%q", code, exitRuntime, errw.String())
+	}
+	if !strings.Contains(errw.String(), ln.Addr().String()) {
+		t.Fatalf("address-in-use error should name %s; stderr=%q", ln.Addr(), errw.String())
+	}
+
+	// Returning from serve must release the metrics listener even when the main
+	// listener could not start. Rebinding checks ownership without polling for
+	// asynchronous cleanup after the command has already returned.
+	metricsListener, err := net.Listen("tcp", metricsAddr)
+	if err != nil {
+		t.Fatalf("metrics listener %s still bound after startup failure: %v", metricsAddr, err)
+	}
+	metricsListener.Close()
+}
+
 func TestServeAddressInUseExit1(t *testing.T) {
 	dir := t.TempDir()
 	addr := freeAddr(t)

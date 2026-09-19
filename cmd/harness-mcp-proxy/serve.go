@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"harness/internal/apikey"
 	"harness/internal/buildinfo"
 	"harness/internal/cli"
+	"harness/internal/httpserve"
 	"harness/internal/logging"
 	"harness/internal/mcpproxy"
 	"harness/internal/metrics"
@@ -111,11 +113,17 @@ func handleServe(env environment, invocation cli.Invocation) int {
 		metricsSettings := serveMetricsSettings(result)
 		reg := newMCPMetricsRegistry(metricsSettings.Enabled)
 		d := mcpproxy.NewDaemonWithOptions(cfg, logger, mcpproxy.DaemonOptions{APIKeys: authStore, Metrics: reg})
-		if _, err := metrics.StartEndpoint(ctx, logger.With(logging.Category(serveCategory)), reg, metricsSettings); err != nil {
-			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", err)
+		metricsEndpoint, startErr := metrics.StartEndpoint(context.Background(), logger.With(logging.Category(serveCategory)), reg, metricsSettings)
+		if startErr != nil {
+			fmt.Fprintf(env.stderr, "harness-mcp-proxy: %v\n", startErr)
 			return exitRuntime
 		}
 		err = d.Run(ctx)
+		// Join metrics shutdown before returning or closing the log sink, even
+		// when the daemon failed to start its main listener.
+		metricsCtx, cancelMetrics := context.WithTimeout(context.Background(), httpserve.DefaultShutdownTimeout)
+		err = errors.Join(err, metricsEndpoint.Shutdown(metricsCtx))
+		cancelMetrics()
 	}
 	if err != nil {
 		logger.Error("proxy exited", logging.Category(serveCategory), "err", err)
