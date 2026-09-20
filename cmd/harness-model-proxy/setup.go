@@ -115,11 +115,18 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 		return err
 	}
 
-	providerMeta, err := promptProviderSelection(reader, env.stdout, catalog, &codexProvider, existingProviders, setupPageSize(env))
+	selected, err := promptProviderSelection(reader, env.stdout, catalog, &codexProvider, existingProviders, setupPageSize(env))
 	if err != nil {
 		return err
 	}
-	providerName := providerMeta.ID
+	providerMeta := selected.Provider
+	// The catalog id and the config name are the same for catalog providers;
+	// a renamed subscription config (a second ChatGPT account) keeps its own
+	// name, file, and OAuth token while borrowing the profile's catalog metadata.
+	providerName := selected.ConfigName
+	if providerName == "" {
+		providerName = providerMeta.ID
+	}
 	providerFile := providerConfigFilename(providerName)
 	existingProvider, updatingProvider := existingProviders[providerName]
 	if updatingProvider {
@@ -140,7 +147,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 		return fmt.Errorf("provider %q is not supported by harness", providerName)
 	}
 	authCfg := setupProviderAuth(providerMeta, existingProvider.Config.Auth)
-	apiKey := ""
+	apiKey := existingProvider.Config.APIKey
 	if authCfg == nil {
 		apiKeyLabel := "API key (optional)"
 		if len(providerMeta.Env) > 0 {
@@ -155,7 +162,7 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 		}
 	}
 	discoveryConfig := providerMeta.ProviderConfig(apiKey)
-	discoveryConfig.Name = providerMeta.ID
+	discoveryConfig.Name = providerName
 	discoveryConfig.APIType = setupProviderAPIType(providerMeta)
 	discoveryConfig.BaseURL = setupProviderBaseURL(providerMeta)
 	discoveryConfig.Auth = authCfg
@@ -183,7 +190,11 @@ func runSetup(ctx context.Context, env environment, force bool) error {
 		return err
 	}
 
-	provider := setupProviderFromCatalog(providerMeta, apiKey, authCfg, models)
+	provider := setupProviderFromCatalog(providerMeta, providerName, apiKey, authCfg, models)
+	if isOpenAICodexProvider(providerMeta) {
+		// OAuth takes precedence, but updating models must not erase configured keys.
+		provider.APIKeyEnv = slices.Clone(existingProvider.Config.APIKeyEnv)
+	}
 	provider.ModelDiscovery = existingProvider.Config.ModelDiscovery
 	preserveReasoningReplayDomains(existingProvider.Config.Models, provider.Models)
 	if existingProvider.Config.OmitMaxOutputTokens {
@@ -338,7 +349,8 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			if current.Name == "" {
 				return fmt.Errorf("%s has provider without name", loaded[i].path)
 			}
-			if current.Name == modelcatalog.OpenAICodexProviderID && codexProvider == nil {
+			catalogID := setupConfigCatalogID(current)
+			if catalogID == modelcatalog.OpenAICodexProviderID && codexProvider == nil {
 				cached, err := setupCodexProvider(env, dir)
 				if err != nil {
 					return err
@@ -347,7 +359,7 @@ func runRefreshModels(ctx context.Context, env environment, cfgPath string) erro
 			}
 
 			baseline := modeldiscovery.ProviderFromConfig(current)
-			meta, inCatalog := setupCatalogProvider(catalog, codexProvider, current.Name)
+			meta, inCatalog := setupCatalogProvider(catalog, codexProvider, catalogID)
 			if inCatalog {
 				baseline = modeldiscovery.OverlayProvider(baseline, meta)
 			}
@@ -477,7 +489,8 @@ func refreshProviderAfterLogin(ctx context.Context, env environment, cfgPath str
 		catalog = fallback
 	}
 	var codexProvider *modelcatalog.Provider
-	if current.Name == modelcatalog.OpenAICodexProviderID {
+	catalogID := setupConfigCatalogID(current)
+	if catalogID == modelcatalog.OpenAICodexProviderID {
 		provider, err := setupCodexProvider(env, dir)
 		if err != nil {
 			return err
@@ -485,7 +498,7 @@ func refreshProviderAfterLogin(ctx context.Context, env environment, cfgPath str
 		codexProvider = &provider
 	}
 	baseline := modeldiscovery.ProviderFromConfig(current)
-	meta, inCatalog := setupCatalogProvider(catalog, codexProvider, current.Name)
+	meta, inCatalog := setupCatalogProvider(catalog, codexProvider, catalogID)
 	if inCatalog {
 		baseline = modeldiscovery.OverlayProvider(baseline, meta)
 	}
@@ -708,18 +721,22 @@ func setupProviderConfigs(raw json.RawMessage) ([]string, error) {
 	return configs, nil
 }
 
-func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, authCfg *auth.Config, models []modelcatalog.Model) setupProviderConfig {
+func setupProviderFromCatalog(provider modelcatalog.Provider, configName, apiKey string, authCfg *auth.Config, models []modelcatalog.Model) setupProviderConfig {
 	entries := make([]setupModelConfig, 0, len(models))
 	for _, model := range models {
 		entries = append(entries, setupModelFromCatalog(model))
 	}
+	if configName == "" {
+		configName = provider.ID
+	}
 	if isOpenAICodexProvider(provider) {
 		enabled := true
 		return setupProviderConfig{
-			Name:                modelcatalog.OpenAICodexProviderID,
+			Name:                configName,
 			APIType:             setupProviderAPIType(provider),
 			Profile:             llm.ProfileCodex,
 			BaseURL:             setupProviderBaseURL(provider),
+			APIKey:              apiKey,
 			Managed:             true,
 			OmitMaxOutputTokens: true,
 			ResponsesCompaction: &enabled,
@@ -732,7 +749,7 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 	apiType := setupProviderAPIType(provider)
 	baseURL := setupProviderBaseURL(provider)
 	out := setupProviderConfig{
-		Name:        cfg.Name,
+		Name:        configName,
 		APIType:     apiType,
 		BaseURL:     baseURL,
 		APIKey:      cfg.APIKey,
@@ -760,7 +777,7 @@ func setupProviderFromCatalog(provider modelcatalog.Provider, apiKey string, aut
 func setupProviderFromCurrent(current llm.ProviderConfig, meta *modelcatalog.Provider, models []modelcatalog.Model) setupProviderConfig {
 	var next setupProviderConfig
 	if meta != nil {
-		next = setupProviderFromCatalog(*meta, current.APIKey, current.Auth, models)
+		next = setupProviderFromCatalog(*meta, current.Name, current.APIKey, current.Auth, models)
 	} else {
 		entries := make([]setupModelConfig, 0, len(models))
 		for _, model := range models {
@@ -773,8 +790,9 @@ func setupProviderFromCurrent(current llm.ProviderConfig, meta *modelcatalog.Pro
 		}
 	}
 	next.PriceSource = current.PriceSource
-	if current.Name == modelcatalog.OpenAICodexProviderID {
+	if setupConfigCatalogID(current) == modelcatalog.OpenAICodexProviderID {
 		next.PriceSource = ""
+		next.APIKeyEnv = slices.Clone(current.APIKeyEnv)
 	}
 	if current.Profile != "" {
 		next.Profile = current.Profile
@@ -874,15 +892,10 @@ func setupProviderAuth(provider modelcatalog.Provider, existing *auth.Config) *a
 	return &auth.Config{Type: auth.TypeCodexOAuth}
 }
 
-func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelcatalog.Catalog, codexProvider *modelcatalog.Provider, existing map[string]setupExistingProvider, pageSize int) (modelcatalog.Provider, error) {
-	providers := supportedSetupProviders(catalog, codexProvider)
-	if len(providers) == 0 {
-		return modelcatalog.Provider{}, fmt.Errorf("models.dev catalog has no harness-supported providers")
-	}
-	entries := make([]setupProviderPick, 0, len(providers))
-	for _, provider := range providers {
-		_, configured := existing[provider.ID]
-		entries = append(entries, setupProviderPick{Provider: provider, Configured: configured})
+func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelcatalog.Catalog, codexProvider *modelcatalog.Provider, existing map[string]setupExistingProvider, pageSize int) (setupProviderPick, error) {
+	entries, err := setupProviderPickerEntries(catalog, codexProvider, existing)
+	if err != nil {
+		return setupProviderPick{}, err
 	}
 	selected, err := ui.Pick(func(label string) (string, error) {
 		return promptLine(r, w, label)
@@ -895,9 +908,51 @@ func promptProviderSelection(r *bufio.Reader, w io.Writer, catalog *modelcatalog
 		PrintPage:   printSetupProviderSelectionPage,
 	})
 	if err != nil {
-		return modelcatalog.Provider{}, err
+		return setupProviderPick{}, err
 	}
-	return selected.Provider, nil
+	return selected, nil
+}
+
+// setupProviderPickerEntries builds the setup provider picker list: supported
+// catalog providers plus renamed subscription configs (a second ChatGPT
+// account under its own name), which have no catalog entry of their own and
+// are listed against the catalog provider their profile designates. The
+// combined list is display-name sorted.
+func setupProviderPickerEntries(catalog *modelcatalog.Catalog, codexProvider *modelcatalog.Provider, existing map[string]setupExistingProvider) ([]setupProviderPick, error) {
+	providers := supportedSetupProviders(catalog, codexProvider)
+	if len(providers) == 0 {
+		return nil, fmt.Errorf("models.dev catalog has no harness-supported providers")
+	}
+	entries := make([]setupProviderPick, 0, len(providers))
+	catalogIDs := make(map[string]bool, len(providers))
+	byID := make(map[string]modelcatalog.Provider, len(providers))
+	for _, provider := range providers {
+		catalogIDs[provider.ID] = true
+		byID[provider.ID] = provider
+		_, configured := existing[provider.ID]
+		entries = append(entries, setupProviderPick{Provider: provider, Configured: configured})
+	}
+	var renamed []setupProviderPick
+	for name, existingProvider := range existing {
+		if catalogIDs[name] {
+			continue
+		}
+		meta, ok := byID[setupProfileCatalogID(existingProvider.Config.Profile)]
+		if !ok || len(meta.Models) == 0 {
+			continue
+		}
+		renamed = append(renamed, setupProviderPick{Provider: meta, ConfigName: name, Configured: true})
+	}
+	sort.Slice(renamed, func(i, j int) bool {
+		return strings.ToLower(renamed[i].ConfigName) < strings.ToLower(renamed[j].ConfigName)
+	})
+	entries = append(entries, renamed...)
+	// The catalog list arrives name-sorted; merge renamed configs into their
+	// display-name position so the combined picker stays alphabetical.
+	sort.SliceStable(entries, func(i, j int) bool {
+		return strings.ToLower(entries[i].PickerName()) < strings.ToLower(entries[j].PickerName())
+	})
+	return entries, nil
 }
 
 func promptModelSelection(r *bufio.Reader, w io.Writer, provider modelcatalog.Provider, enabled map[string]bool, pageSize int) ([]modelcatalog.Model, error) {
@@ -923,10 +978,18 @@ func promptModelSelection(r *bufio.Reader, w io.Writer, provider modelcatalog.Pr
 
 type setupProviderPick struct {
 	modelcatalog.Provider
+	// ConfigName is the provider config name for renamed subscription configs
+	// (e.g. a second ChatGPT account); empty means the catalog ID is the name.
+	ConfigName string
 	Configured bool
 }
 
-func (p setupProviderPick) PickerID() string      { return p.ID }
+func (p setupProviderPick) PickerID() string {
+	if p.ConfigName != "" {
+		return p.ConfigName
+	}
+	return p.ID
+}
 func (p setupProviderPick) PickerName() string    { return p.Name }
 func (p setupProviderPick) PickerModelCount() int { return len(p.Models) }
 
@@ -1170,6 +1233,28 @@ func setupProviderListContains(providers []modelcatalog.Provider, id string) boo
 		}
 	}
 	return false
+}
+
+// setupProfileCatalogID maps a subscription profile to the catalog provider id
+// whose metadata backs configs carrying that profile. It lets renamed configs
+// (a second ChatGPT account under its own name) resolve catalog metadata under
+// their own names.
+func setupProfileCatalogID(profile string) string {
+	switch llm.NormalizeProfile(profile) {
+	case llm.ProfileCodex:
+		return modelcatalog.OpenAICodexProviderID
+	}
+	return ""
+}
+
+// setupConfigCatalogID reports the catalog provider id backing a configured
+// provider: its own name, unless a subscription profile designates a synthetic
+// catalog provider (a renamed codex config).
+func setupConfigCatalogID(current llm.ProviderConfig) string {
+	if id := setupProfileCatalogID(current.Profile); id != "" {
+		return id
+	}
+	return current.Name
 }
 
 func setupCatalogProvider(catalog *modelcatalog.Catalog, codexProvider *modelcatalog.Provider, id string) (modelcatalog.Provider, bool) {

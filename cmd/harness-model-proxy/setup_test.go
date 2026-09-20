@@ -370,6 +370,259 @@ func TestRunSetupWritesOpenAICodexProvider(t *testing.T) {
 	}
 }
 
+// TestRunSetupManagesRenamedCodexProvider verifies that a second ChatGPT
+// account configured under its own name (profile "codex", distinct config
+// name) is listed in the setup provider picker and updates its own file,
+// while the original openai-codex config and any profile-less rename are left
+// alone.
+func TestRunSetupManagesRenamedCodexProvider(t *testing.T) {
+	home := t.TempDir()
+	dir := filepath.Join(home, ".config", "harness-model-proxy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatalf("mkdir config dir: %v", err)
+	}
+	mainConfig := `{
+  "provider_configs": ["openai-codex.json", "openai-codex-2.json", "openai-codex-3.json"],
+  "default_context_window": 256000
+}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(mainConfig), 0o600); err != nil {
+		t.Fatalf("write proxy config: %v", err)
+	}
+	codexBody := `{
+  "name": "openai-codex",
+  "api_type": "responses",
+  "base_url": "` + modelcatalog.OpenAICodexProviderBaseURL + `",
+  "profile": "codex",
+  "managed": true,
+  "auth": {"type": "codex_oauth"},
+  "models": [{"name": "gpt-5.5", "context_window": 272000}]
+}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "openai-codex.json"), []byte(codexBody), 0o600); err != nil {
+		t.Fatalf("write openai-codex config: %v", err)
+	}
+	renamedBody := `{
+  "name": "openai-codex-2",
+  "api_type": "responses",
+  "base_url": "https://codex.example.invalid",
+  "profile": " CoDeX ",
+  "managed": true,
+  "api_key": "sk-preserved",
+  "api_key_env": ["WORK_CODEX_TOKEN", "OTHER_CODEX_TOKEN"],
+  "auth": {"type": "codex_oauth"},
+  "models": [{"name": "gpt-5.5", "context_window": 272000}]
+}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "openai-codex-2.json"), []byte(renamedBody), 0o600); err != nil {
+		t.Fatalf("write renamed codex config: %v", err)
+	}
+	// Profile-less rename: setup must not invent catalog metadata for it.
+	decoyBody := `{
+  "name": "openai-codex-3",
+  "api_type": "responses",
+  "base_url": "` + modelcatalog.OpenAICodexProviderBaseURL + `",
+  "managed": true,
+  "auth": {"type": "codex_oauth"},
+  "models": [{"name": "gpt-5.5", "context_window": 272000}]
+}` + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "openai-codex-3.json"), []byte(decoyBody), 0o600); err != nil {
+		t.Fatalf("write decoy config: %v", err)
+	}
+
+	var out, errw bytes.Buffer
+	env := environment{
+		stdin:  strings.NewReader("openai-codex-2\nsave\n"),
+		stdout: &out,
+		stderr: &errw,
+		getenv: func(k string) string {
+			if k == "HOME" {
+				return home
+			}
+			return ""
+		},
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
+			return testSetupCatalogWithOpenAI(), nil
+		},
+		terminalRows: func() int { return 12 },
+	}
+
+	if err := runSetup(context.Background(), env, false); err != nil {
+		t.Fatalf("runSetup: %v; stderr=%q", err, errw.String())
+	}
+	if !strings.Contains(out.String(), "openai-codex-2") {
+		t.Fatalf("provider picker should list the renamed config, output=%q", out.String())
+	}
+	if strings.Contains(out.String(), "openai-codex-3") {
+		t.Fatalf("provider picker should not list a profile-less rename, output=%q", out.String())
+	}
+	if strings.Contains(out.String(), "API key") {
+		t.Fatalf("renamed codex setup should not prompt for an API key, output=%q", out.String())
+	}
+
+	providerData, err := os.ReadFile(filepath.Join(dir, "openai-codex-2.json"))
+	if err != nil {
+		t.Fatalf("read renamed provider config: %v", err)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(providerData, &provider); err != nil {
+		t.Fatalf("decode renamed provider config: %v", err)
+	}
+	if provider.Name != "openai-codex-2" {
+		t.Fatalf("renamed provider name = %q, want openai-codex-2", provider.Name)
+	}
+	if provider.Profile != llm.ProfileCodex || provider.APIType != "responses" || provider.BaseURL != modelcatalog.OpenAICodexProviderBaseURL {
+		t.Fatalf("renamed provider config = %+v, want codex profile preserved", provider)
+	}
+	if provider.Auth == nil || provider.Auth.Type != auth.TypeCodexOAuth {
+		t.Fatalf("renamed provider auth = %+v, want codex_oauth preserved", provider.Auth)
+	}
+	if provider.APIKey != "sk-preserved" || !slices.Equal(provider.APIKeyEnv, []string{"WORK_CODEX_TOKEN", "OTHER_CODEX_TOKEN"}) {
+		t.Fatalf("renamed provider API-key fields were not preserved: key=%q env=%v", provider.APIKey, provider.APIKeyEnv)
+	}
+	if !provider.Managed || !provider.OmitMaxOutputTokens || provider.PriceSource != "" {
+		t.Fatalf("renamed provider config = %+v, want managed codex defaults", provider)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-5.5" || provider.Models[0].ContextWindow != 272000 {
+		t.Fatalf("renamed provider models = %+v, want Codex gpt-5.5 with 272000 context", provider.Models)
+	}
+
+	originalData, err := os.ReadFile(filepath.Join(dir, "openai-codex.json"))
+	if err != nil {
+		t.Fatalf("read original codex config: %v", err)
+	}
+	if !bytes.Equal(originalData, []byte(codexBody)) {
+		t.Fatalf("original openai-codex.json changed: %s", originalData)
+	}
+	decoyData, err := os.ReadFile(filepath.Join(dir, "openai-codex-3.json"))
+	if err != nil {
+		t.Fatalf("read decoy config: %v", err)
+	}
+	if !bytes.Equal(decoyData, []byte(decoyBody)) {
+		t.Fatalf("profile-less rename openai-codex-3.json changed: %s", decoyData)
+	}
+
+	configData, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	if err != nil {
+		t.Fatalf("read proxy config: %v", err)
+	}
+	var mainCfg setupMainConfig
+	if err := json.Unmarshal(configData, &mainCfg); err != nil {
+		t.Fatalf("decode proxy config: %v", err)
+	}
+	if !slices.Equal(mainCfg.ProviderConfigs, []string{"openai-codex.json", "openai-codex-2.json", "openai-codex-3.json"}) {
+		t.Fatalf("provider_configs = %+v, want the original three files", mainCfg.ProviderConfigs)
+	}
+}
+
+// TestPromptProviderSelectionMergesRenamedEntries verifies that renamed codex
+// configs interleave with catalog providers in display-name order, list under
+// their own config names, and skip profile-less renames.
+func TestPromptProviderSelectionMergesRenamedEntries(t *testing.T) {
+	catalog := testSetupCatalogWithOpenAI()
+	codex, err := modelcatalog.CodexModelsFallback()
+	if err != nil {
+		t.Fatalf("codex fallback: %v", err)
+	}
+	if codex.ID != modelcatalog.OpenAICodexProviderID || len(codex.Models) == 0 {
+		t.Fatalf("codex fallback provider = %+v, want openai-codex models", codex)
+	}
+	existing := map[string]setupExistingProvider{
+		// Config name sorts before every catalog provider; the merged picker
+		// must still interleave it by display name rather than append it last.
+		"a-work-codex": {Config: llm.ProviderConfig{Name: "a-work-codex", Profile: llm.ProfileCodex}},
+		// Profile-less rename: never offered catalog metadata.
+		"work-plain": {Config: llm.ProviderConfig{Name: "work-plain"}},
+	}
+	entries, err := setupProviderPickerEntries(catalog, &codex, existing)
+	if err != nil {
+		t.Fatalf("setupProviderPickerEntries: %v", err)
+	}
+	ids := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		ids = append(ids, entry.PickerID())
+	}
+	// Display-name order; the renamed entry borrows the codex display name and
+	// ties with the catalog entry, which stable sorting keeps first. Without
+	// the merged sort it would land after "testai" because config names do not
+	// participate in the ordering.
+	want := []string{"openai", modelcatalog.OpenAICodexProviderID, "a-work-codex", "testai"}
+	if !slices.Equal(ids, want) {
+		t.Fatalf("picker order = %q, want %q", ids, want)
+	}
+	if entries[0].ConfigName != "" {
+		t.Fatalf("catalog openai entry = %+v, want canonical without a config name", entries[0])
+	}
+	if entries[2].ConfigName != "a-work-codex" || !entries[2].Configured {
+		t.Fatalf("renamed entry = %+v, want configured with its own config name", entries[2])
+	}
+}
+
+func TestSetupConfigCatalogID(t *testing.T) {
+	cases := []struct {
+		name string
+		pc   llm.ProviderConfig
+		want string
+	}{
+		{name: "renamed codex resolves to codex catalog", pc: llm.ProviderConfig{Name: "openai-codex-2", Profile: llm.ProfileCodex}, want: modelcatalog.OpenAICodexProviderID},
+		{name: "mixed-case codex", pc: llm.ProviderConfig{Name: "openai-codex-2", Profile: "Codex"}, want: modelcatalog.OpenAICodexProviderID},
+		{name: "uppercase codex with whitespace", pc: llm.ProviderConfig{Name: "openai-codex-2", Profile: " \tCODEX\n"}, want: modelcatalog.OpenAICodexProviderID},
+		{name: "canonical codex name", pc: llm.ProviderConfig{Name: modelcatalog.OpenAICodexProviderID, Profile: llm.ProfileCodex}, want: modelcatalog.OpenAICodexProviderID},
+		{name: "catalog provider passes through", pc: llm.ProviderConfig{Name: "openai"}, want: "openai"},
+		{name: "rename without profile passes through", pc: llm.ProviderConfig{Name: "openai-codex-3"}, want: "openai-codex-3"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := setupConfigCatalogID(tc.pc); got != tc.want {
+				t.Fatalf("setupConfigCatalogID(%+v) = %q, want %q", tc.pc, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSetupProviderFromCurrentRenamedCodex(t *testing.T) {
+	enabled := true
+	current := llm.ProviderConfig{
+		Name:                "openai-codex-2",
+		APIType:             "responses",
+		APIKey:              "sk-preserved",
+		APIKeyEnv:           []string{"WORK_CODEX_TOKEN", "OTHER_CODEX_TOKEN"},
+		BaseURL:             modelcatalog.OpenAICodexProviderBaseURL,
+		Profile:             llm.ProfileCodex,
+		Managed:             true,
+		OmitMaxOutputTokens: true,
+		ResponsesCompaction: &enabled,
+		PriceSource:         "openai",
+		Auth:                &auth.Config{Type: auth.TypeCodexOAuth},
+		Models:              []llm.ModelEntry{{Name: "gpt-5.5", ContextWindow: 272000}},
+	}
+	meta := modelcatalog.Provider{
+		ID:  modelcatalog.OpenAICodexProviderID,
+		API: modelcatalog.OpenAICodexProviderBaseURL,
+	}
+	next := setupProviderFromCurrent(current, &meta, []modelcatalog.Model{
+		{ID: "gpt-5.5", Name: "GPT 5.5", Limit: modelcatalog.Limit{Context: 272000}},
+	})
+	if next.Name != "openai-codex-2" {
+		t.Fatalf("renamed provider name = %q, want openai-codex-2", next.Name)
+	}
+	if next.Profile != llm.ProfileCodex {
+		t.Fatalf("renamed provider profile = %q, want codex", next.Profile)
+	}
+	if next.PriceSource != "" {
+		t.Fatalf("renamed codex price_source = %q, want omitted", next.PriceSource)
+	}
+	if next.Auth == nil || next.Auth.Type != auth.TypeCodexOAuth {
+		t.Fatalf("renamed provider auth = %+v, want codex_oauth preserved", next.Auth)
+	}
+	if next.APIKey != current.APIKey || !slices.Equal(next.APIKeyEnv, current.APIKeyEnv) {
+		t.Fatalf("renamed provider API-key fields were not preserved: key=%q env=%v", next.APIKey, next.APIKeyEnv)
+	}
+	if !next.OmitMaxOutputTokens || next.ResponsesCompaction == nil || !*next.ResponsesCompaction {
+		t.Fatalf("renamed provider config = %+v, want codex defaults preserved", next)
+	}
+	if len(next.Models) != 1 || next.Models[0].Name != "gpt-5.5" || next.Models[0].ContextWindow != 272000 {
+		t.Fatalf("renamed provider models = %+v, want gpt-5.5 with 272000 context", next.Models)
+	}
+}
+
 func TestRunSetupWritesSakanaProvider(t *testing.T) {
 	home := t.TempDir()
 	var out, errw bytes.Buffer
@@ -1239,6 +1492,57 @@ func TestRunRefreshModelsHandlesOpenAICodexProvider(t *testing.T) {
 	}
 }
 
+func TestRunRefreshModelsPreservesRenamedCodexAPIKeys(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	providerPath := filepath.Join(dir, "work-codex.json")
+	if err := os.WriteFile(cfgPath, []byte(`{"provider_configs":["work-codex.json"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(providerPath, []byte(`{
+  "name": "work-codex",
+  "api_type": "responses",
+  "profile": " CoDeX ",
+  "base_url": "https://codex.example.invalid",
+  "api_key": "sk-preserved",
+  "api_key_env": ["WORK_CODEX_TOKEN", "OTHER_CODEX_TOKEN"],
+  "auth": {"type":"codex_oauth","token_file":"tokens/work.json"},
+  "models": [{"name":"gpt-5.5","context_window":1000}]
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env := environment{
+		stdout: &bytes.Buffer{}, stderr: &bytes.Buffer{},
+		getenv: func(string) string { return "" },
+		modelsDevCatalog: func(context.Context) (*modelcatalog.Catalog, error) {
+			return testSetupCatalogWithOpenAI(), nil
+		},
+	}
+	if err := runRefreshModels(context.Background(), env, cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(providerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var provider setupProviderConfig
+	if err := json.Unmarshal(data, &provider); err != nil {
+		t.Fatal(err)
+	}
+	if provider.APIKey != "sk-preserved" || !slices.Equal(provider.APIKeyEnv, []string{"WORK_CODEX_TOKEN", "OTHER_CODEX_TOKEN"}) {
+		t.Errorf("API-key fields were not preserved: key=%q env=%v", provider.APIKey, provider.APIKeyEnv)
+	}
+	if provider.Name != "work-codex" || llm.NormalizeProfile(provider.Profile) != llm.ProfileCodex || provider.BaseURL != modelcatalog.OpenAICodexProviderBaseURL {
+		t.Errorf("refreshed provider = %+v, want renamed Codex with canonical endpoint", provider)
+	}
+	if provider.Auth == nil || provider.Auth.Type != auth.TypeCodexOAuth || provider.Auth.TokenFile != "tokens/work.json" {
+		t.Errorf("refreshed auth = %+v, want codex_oauth with existing token file", provider.Auth)
+	}
+	if len(provider.Models) != 1 || provider.Models[0].Name != "gpt-5.5" || provider.Models[0].ContextWindow != 272000 {
+		t.Errorf("models = %+v, want Codex catalog metadata", provider.Models)
+	}
+}
+
 func TestRunRefreshModelsHandlesSakanaProvider(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.json")
@@ -1961,7 +2265,7 @@ func testSetupCatalogWithOpenAI() *modelcatalog.Catalog {
 
 func TestSetupProviderEnablesCompactionForFirstPartyOpenAIResponses(t *testing.T) {
 	openAI := testSetupCatalogWithOpenAI().Providers["openai"]
-	openAICfg := setupProviderFromCatalog(openAI, "sk-test", nil, []modelcatalog.Model{openAI.Models["gpt-test"]})
+	openAICfg := setupProviderFromCatalog(openAI, "", "sk-test", nil, []modelcatalog.Model{openAI.Models["gpt-test"]})
 	if openAICfg.APIType != "responses" || openAICfg.ResponsesCompaction == nil || !*openAICfg.ResponsesCompaction {
 		t.Fatalf("OpenAI setup config = %+v, want Responses compaction enabled", openAICfg)
 	}
@@ -1969,9 +2273,28 @@ func TestSetupProviderEnablesCompactionForFirstPartyOpenAIResponses(t *testing.T
 	codex := openAI
 	codex.ID = modelcatalog.OpenAICodexProviderID
 	codex.API = modelcatalog.OpenAICodexProviderBaseURL
-	codexCfg := setupProviderFromCatalog(codex, "", &auth.Config{Type: auth.TypeCodexOAuth}, []modelcatalog.Model{openAI.Models["gpt-test"]})
+	codexCfg := setupProviderFromCatalog(codex, "", "", &auth.Config{Type: auth.TypeCodexOAuth}, []modelcatalog.Model{openAI.Models["gpt-test"]})
 	if codexCfg.ResponsesCompaction == nil || !*codexCfg.ResponsesCompaction {
 		t.Fatalf("Codex setup config responses_compaction = %v, want enabled", codexCfg.ResponsesCompaction)
+	}
+}
+
+func TestSetupProviderFromCatalogPreservesRenamedConfigName(t *testing.T) {
+	openAI := testSetupCatalogWithOpenAI().Providers["openai"]
+	models := []modelcatalog.Model{openAI.Models["gpt-test"]}
+	cfg := setupProviderFromCatalog(openAI, "work-openai", "sk-test", nil, models)
+	if cfg.Name != "work-openai" {
+		t.Fatalf("renamed provider name = %q, want work-openai", cfg.Name)
+	}
+	if cfg.APIKey != "sk-test" {
+		t.Fatalf("renamed provider api_key = %q, want sk-test", cfg.APIKey)
+	}
+	if cfg.APIType != "responses" || cfg.ResponsesCompaction == nil || !*cfg.ResponsesCompaction {
+		t.Fatalf("renamed provider config = %+v, want catalog Responses behavior", cfg)
+	}
+	canonical := setupProviderFromCatalog(openAI, "", "sk-test", nil, models)
+	if !slices.Equal(cfg.ServerTools, canonical.ServerTools) {
+		t.Fatalf("renamed server_tools = %v, want catalog-derived %v", cfg.ServerTools, canonical.ServerTools)
 	}
 }
 

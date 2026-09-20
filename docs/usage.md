@@ -1293,7 +1293,8 @@ reasoning replay for kimi-k3: Kimi's docs make preserved thinking mandatory in
 tool-call loops.
 
 Provider configs accept an optional `profile` naming a bundle of
-backend-specific behavior defaults for a known service. `"codex"` requires
+backend-specific behavior defaults for a known service. Profile names are
+case-insensitive and ignore surrounding whitespace. `"codex"` requires
 `api_type:"responses"` and selects the ChatGPT
 Codex subscription backend: Codex client identity headers, WebSocket transport
 with turn-state continuation, omitted `max_output_tokens`, local token-count
@@ -1313,7 +1314,13 @@ the provider under a distinct `name` (the name owns the OAuth token file and
 the `name:model` target prefix), keep `api_type:"responses"` and
 `profile:"codex"`, then run `harness-model-proxy auth login <name>` for each
 account. Both accounts get the full Codex behavior, including `harness limits`
-reporting under their own names.
+reporting under their own names. Setup honors the profile too: the provider
+picker lists a renamed `profile:"codex"` config under its own name (for
+example `openai-codex-2`) so `harness-model-proxy setup` can edit its enabled
+models in place; a rename without the profile is left to manual editing and
+`refresh-models`. Setup and model refresh use the canonical Codex endpoint and
+OAuth authentication, but retain explicitly configured `api_key` and
+`api_key_env` fields; those fields remain inactive while `auth` is present.
 
 Provider configs accept an optional `auth` block in place of `api_key` /
 `api_key_env`; when `auth` is present, API-key fields are ignored and there is no
