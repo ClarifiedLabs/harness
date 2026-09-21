@@ -1351,8 +1351,12 @@ userinfo or a fragment. Set `enabled:false` to use catalog-only availability.
 Generic OpenAI-compatible ID-only responses validate configured/models.dev models
 but do not introduce unknown models. Rich capability fields can establish that a
 new model is generative; Sakana and the provider-specific adapters trust their
-generative-only results. `include_unknown_models` explicitly overrides that
-policy. For Meta, `include_unknown_models:true` also opts image-generation and
+generative-only results. Xiaomi MiMo (`name` containing `mimo`/`xiaomi`, or the
+`api.xiaomimimo.com` / `mimo.mi.com` hosts) discovers its OpenAI-compatible
+`GET {base}/models` catalog with bearer authentication and trusts every listed
+ID except its audio-only `-tts`/`-asr` families, which are never advertised as
+chat targets regardless of `include_unknown_models`. `include_unknown_models`
+explicitly overrides the trust policy for other providers. For Meta, `include_unknown_models:true` also opts image-generation and
 transcription IDs into the local target list; only use it when another layer can
 serve those IDs through the configured dialect.
 

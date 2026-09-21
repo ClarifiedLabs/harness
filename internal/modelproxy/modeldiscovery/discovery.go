@@ -87,6 +87,10 @@ type Spec struct {
 	IncludeUnknownModels bool
 	TrustedGenerative    bool
 	AutoEndpoint         bool
+	// ExcludeIDMarkers drops listed model IDs from discovery results: IDs
+	// containing any marker are audio-only or otherwise non-generative
+	// catalog entries that must not be advertised as chat targets.
+	ExcludeIDMarkers []string
 }
 
 type Fetcher struct {
@@ -113,6 +117,7 @@ func Resolve(pc llm.ProviderConfig) (Spec, bool, error) {
 	name := strings.ToLower(strings.TrimSpace(pc.Name))
 	apiType := strings.ToLower(strings.TrimSpace(pc.APIType))
 
+	mimo := name == "mimo" || strings.Contains(name, "xiaomi") || host == "api.xiaomimimo.com" || strings.Contains(host, "mimo.mi.com")
 	format := Format("")
 	trusted := false
 	switch {
@@ -127,6 +132,12 @@ func Resolve(pc llm.ProviderConfig) (Spec, bool, error) {
 		format, trusted = FormatGemini, true
 	case name == "anthropic" || apiType == "anthropic" || strings.Contains(host, "api.anthropic.com"):
 		format, trusted = FormatAnthropic, true
+	case mimo:
+		// Xiaomi MiMo serves an OpenAI-compatible catalog at {base}/models,
+		// but its entries carry no capability fields and the list mixes in
+		// audio-only TTS/ASR models, so trust the chat families and exclude
+		// the audio IDs explicitly.
+		format, trusted = FormatOpenAI, true
 	case apiType == "openai" || apiType == "responses":
 		format = FormatOpenAI
 		trusted = name == "sakana" || strings.Contains(host, "api.sakana.ai")
@@ -161,8 +172,17 @@ func Resolve(pc llm.ProviderConfig) (Spec, bool, error) {
 	if pc.ModelDiscovery != nil && pc.ModelDiscovery.IncludeUnknownModels != nil {
 		includeUnknown = *pc.ModelDiscovery.IncludeUnknownModels
 	}
-	return Spec{Endpoint: parsed.String(), Format: format, IncludeUnknownModels: includeUnknown, TrustedGenerative: trusted, AutoEndpoint: autoEndpoint}, true, nil
+	spec := Spec{Endpoint: parsed.String(), Format: format, IncludeUnknownModels: includeUnknown, TrustedGenerative: trusted, AutoEndpoint: autoEndpoint}
+	if mimo && format == FormatOpenAI && trusted {
+		spec.ExcludeIDMarkers = append([]string(nil), mimoAudioIDMarkers...)
+	}
+	return spec, true, nil
 }
+
+// mimoAudioIDMarkers are Xiaomi MiMo audio-model family markers. MiMo's
+// OpenAI-compatible catalog lists TTS/ASR models alongside its chat models;
+// those IDs are not generative chat targets and must not be advertised.
+var mimoAudioIDMarkers = []string{"-tts", "-asr"}
 
 func validFormat(format Format) bool {
 	switch format {

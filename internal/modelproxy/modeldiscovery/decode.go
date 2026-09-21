@@ -182,9 +182,10 @@ func decodeOpenAI(data []byte, spec Spec) (map[string]Model, string, error) {
 		if err != nil {
 			return nil, "", err
 		}
-		if ok {
-			out[model.ID] = model
+		if !ok || excludedByIDMarkers(model.ID, spec.ExcludeIDMarkers) {
+			continue
 		}
+		out[model.ID] = model
 	}
 	next := ""
 	if envelope.HasMore {
@@ -242,6 +243,17 @@ func decodeOpenAIModel(raw json.RawMessage, spec Spec) (Model, bool, error) {
 	}
 	model.Eligible = spec.IncludeUnknownModels || spec.TrustedGenerative || generative
 	return model, true, nil
+}
+
+// excludedByIDMarkers reports whether id contains any of the spec's excluded
+// ID markers (for example MiMo's audio-only -tts/-asr families).
+func excludedByIDMarkers(id string, markers []string) bool {
+	for _, marker := range markers {
+		if marker != "" && strings.Contains(id, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeMeta accepts Meta's OpenAI-compatible list envelope while, under the

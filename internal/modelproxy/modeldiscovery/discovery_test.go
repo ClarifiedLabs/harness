@@ -86,6 +86,81 @@ func TestMetaDiscoveryTrustsOnlyResponsesModelIDs(t *testing.T) {
 	}
 }
 
+func TestMimoDiscoveryTrustsChatModelsAndDropsAudioIDs(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer secret" {
+			t.Errorf("Authorization = %q", got)
+		}
+		if r.URL.Path != "/v1/models" {
+			t.Errorf("path = %q", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"object":"list","data":[
+			{"id":"mimo-v2.5","object":"model","owned_by":"xiaomi"},
+			{"id":"mimo-v2.5-asr","object":"model","owned_by":"xiaomi"},
+			{"id":"mimo-v2.5-pro","object":"model","owned_by":"xiaomi"},
+			{"id":"mimo-v2.5-tts","object":"model","owned_by":"xiaomi"},
+			{"id":"mimo-v2.5-tts-voiceclone","object":"model","owned_by":"xiaomi"},
+			{"id":"mimo-v2.6-flash","object":"model","owned_by":"xiaomi"}
+		]}`))
+	}))
+	defer server.Close()
+
+	pc := llm.ProviderConfig{Name: "xiaomi-mimo", APIType: "openai", BaseURL: server.URL + "/v1", APIKey: "secret", Managed: true}
+	snapshot, err := (Fetcher{Client: server.Client(), Now: func() time.Time { return time.Unix(100, 0) }}).Fetch(context.Background(), pc, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"mimo-v2.5", "mimo-v2.5-pro", "mimo-v2.6-flash"} {
+		model, ok := snapshot.Models[id]
+		if !ok || !model.Eligible {
+			t.Errorf("chat model %s = %+v, present %v; want eligible", id, model, ok)
+		}
+	}
+	for _, id := range []string{"mimo-v2.5-asr", "mimo-v2.5-tts", "mimo-v2.5-tts-voiceclone"} {
+		if _, ok := snapshot.Models[id]; ok {
+			t.Errorf("audio-only model %s must not be advertised", id)
+		}
+	}
+
+	merged := MergeProvider(modelcatalog.Provider{ID: "xiaomi-mimo"}, snapshot)
+	if len(merged.Models) != 3 {
+		t.Fatalf("merged models = %v; want 3 chat models", merged.Models)
+	}
+	if _, ok := merged.Models["mimo-v2.6-flash"]; !ok {
+		t.Fatal("new chat model missing from merged catalog")
+	}
+}
+
+func TestResolveMimoDiscoverySpec(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		pc   llm.ProviderConfig
+	}{
+		{"by name", llm.ProviderConfig{Name: "mimo", APIType: "openai", BaseURL: "https://example.test/v1"}},
+		{"by xiaomi name", llm.ProviderConfig{Name: "Xiaomi", APIType: "openai", BaseURL: "https://example.test/v1"}},
+		{"by host", llm.ProviderConfig{Name: "custom", APIType: "openai", BaseURL: "https://api.xiaomimimo.com/v1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			spec, ok, err := Resolve(tc.pc)
+			if err != nil || !ok {
+				t.Fatalf("Resolve = %+v, %v, %v", spec, ok, err)
+			}
+			if spec.Format != FormatOpenAI || !spec.TrustedGenerative || !spec.IncludeUnknownModels {
+				t.Errorf("spec = %+v; want trusted openai discovery", spec)
+			}
+			if spec.Endpoint != "https://example.test/v1/models" && spec.Endpoint != "https://api.xiaomimimo.com/v1/models" {
+				t.Errorf("endpoint = %q; want {base}/models", spec.Endpoint)
+			}
+			if len(spec.ExcludeIDMarkers) == 0 {
+				t.Error("ExcludeIDMarkers empty; want audio family markers")
+			}
+		})
+	}
+}
+
 func TestResolveDiscoveryOverride(t *testing.T) {
 	t.Parallel()
 	enabled := true
