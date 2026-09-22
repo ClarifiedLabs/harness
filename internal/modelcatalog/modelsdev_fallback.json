@@ -25977,6 +25977,98 @@
           ]
         }
       },
+      "gpt-6-luna": {
+        "id": "gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25
+            }
+          ]
+        }
+      },
+      "gpt-6-sol": {
+        "id": "gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 4,
+              "output": 15,
+              "cache_read": 0.4,
+              "cache_write": 5
+            }
+          ]
+        }
+      },
       "gpt-chat-latest": {
         "id": "gpt-chat-latest",
         "name": "GPT Chat Latest",
@@ -32981,6 +33073,48 @@
               "low",
               "medium",
               "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 500000,
+          "output": 500000
+        },
+        "cost": {
+          "input": 2,
+          "output": 6,
+          "cache_read": 0.5,
+          "tiers": [
+            {
+              "threshold": 200000,
+              "input": 4,
+              "output": 12,
+              "cache_read": 1
+            }
+          ]
+        }
+      },
+      "xai/grok-4.7": {
+        "id": "xai/grok-4.7",
+        "name": "Grok 4.7",
+        "release_date": "2026-09-21",
+        "last_updated": "2026-09-21",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
             ]
           }
         ],
@@ -81002,7 +81136,7 @@
           }
         ],
         "limit": {
-          "context": 1048576,
+          "context": 131072,
           "output": 32768
         },
         "cost": {
@@ -81031,7 +81165,7 @@
           }
         ],
         "limit": {
-          "context": 1048576,
+          "context": 131072,
           "output": 32768
         },
         "cost": {
@@ -81060,7 +81194,7 @@
           }
         ],
         "limit": {
-          "context": 1048576,
+          "context": 131072,
           "output": 32768
         },
         "cost": {
@@ -82556,7 +82690,7 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 384000
+          "output": 943718
         },
         "cost": {
           "input": 0.3,
@@ -87071,6 +87205,154 @@
           "cache_write": 12.5
         }
       },
+      "openai/gpt-6-luna": {
+        "id": "openai/gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125
+        }
+      },
+      "openai/gpt-6-luna-pro": {
+        "id": "openai/gpt-6-luna-pro",
+        "name": "OpenAI: GPT-6 Luna Pro",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "pdf",
+            "image",
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125
+        }
+      },
+      "openai/gpt-6-sol": {
+        "id": "openai/gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5
+        }
+      },
+      "openai/gpt-6-sol-pro": {
+        "id": "openai/gpt-6-sol-pro",
+        "name": "OpenAI: GPT-6 Sol Pro",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "pdf",
+            "image",
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5
+        }
+      },
       "openai/gpt-audio": {
         "id": "openai/gpt-audio",
         "name": "OpenAI: GPT Audio",
@@ -89230,6 +89512,39 @@
           "cache_write": 2.5
         }
       },
+      "qwen/qwen3.8-omni-flash": {
+        "id": "qwen/qwen3.8-omni-flash",
+        "name": "Qwen3.8 Omni Flash",
+        "release_date": "2026-09-17",
+        "last_updated": "2026-09-17",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 131072
+        },
+        "cost": {
+          "input": 0.15,
+          "output": 0.47,
+          "cache_read": 0.016
+        }
+      },
       "rekaai/reka-edge": {
         "id": "rekaai/reka-edge",
         "name": "Reka Edge",
@@ -91311,9 +91626,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.12,
-          "output": 0.48,
-          "cache_read": 0.0036
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01
         }
       },
       "~deepseek/deepseek-pro-latest": {
@@ -91339,13 +91654,13 @@
           }
         ],
         "limit": {
-          "context": 1024000,
-          "output": 384000
+          "context": 1048576,
+          "output": 393216
         },
         "cost": {
-          "input": 0.55572,
-          "output": 1.66716,
-          "cache_read": 0.018524
+          "input": 0.39996,
+          "output": 1.19988,
+          "cache_read": 0.012726
         }
       },
       "~deepseek/deepseek-v4-flash-latest": {
@@ -91376,7 +91691,7 @@
         },
         "cost": {
           "input": 0.03,
-          "output": 1,
+          "output": 0.8,
           "cache_read": 0.008
         }
       },
@@ -91555,10 +91870,10 @@
           "output": 128000
         },
         "cost": {
-          "input": 0.2,
-          "output": 1.2,
-          "cache_read": 0.02,
-          "cache_write": 0.25
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125
         }
       },
       "~openai/gpt-mini-latest": {
@@ -91763,9 +92078,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 0.6538,
-          "output": 2.0548,
-          "cache_read": 0.12142
+          "input": 0.5625,
+          "output": 2.5,
+          "cache_read": 0.125
         }
       }
     }
@@ -92848,6 +93163,42 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
+        }
+      },
+      "claude-opus-5-5": {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 5
         }
       },
       "claude-sonnet-4-5": {
@@ -95299,6 +95650,80 @@
           "output": 50,
           "cache_read": 1,
           "cache_write": 12.5
+        }
+      },
+      "gpt-6-luna": {
+        "id": "gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125
+        }
+      },
+      "gpt-6-sol": {
+        "id": "gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5
         }
       },
       "gpt-oss-120b": {
@@ -99669,6 +100094,42 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
+        }
+      },
+      "anthropic/claude-opus-5-5": {
+        "id": "anthropic/claude-opus-5-5",
+        "name": "Claude Opus 5.5 (Anthropic)",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 5
         }
       },
       "anthropic/claude-sonnet-4-5": {
@@ -108212,6 +108673,80 @@
           "output": 50,
           "cache_read": 1,
           "cache_write": 12.5
+        }
+      },
+      "openai/gpt-6-luna": {
+        "id": "openai/gpt-6-luna",
+        "name": "GPT-6 Luna (OpenAI)",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125
+        }
+      },
+      "openai/gpt-6-sol": {
+        "id": "openai/gpt-6-sol",
+        "name": "GPT-6 Sol (OpenAI)",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5
         }
       },
       "openai/o1": {
@@ -117145,7 +117680,86 @@
         "cost": {
           "input": 10,
           "output": 50,
-          "cache_read": 1
+          "cache_read": 1,
+          "cache_write": 12.5
+        }
+      },
+      "openai/gpt-6-luna": {
+        "id": "openai/gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125
+        }
+      },
+      "openai/gpt-6-sol": {
+        "id": "openai/gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5
         }
       },
       "openai/gpt-oss-120b": {
@@ -124929,6 +125543,42 @@
           "cache_write": 6.25
         }
       },
+      "anthropic/claude-opus-5.5": {
+        "id": "anthropic/claude-opus-5.5",
+        "name": "Claude Opus 5.5",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 5
+        }
+      },
       "anthropic/claude-opus-latest": {
         "id": "anthropic/claude-opus-latest",
         "name": "Claude Opus Latest",
@@ -130729,6 +131379,27 @@
           "output": 512
         }
       },
+      "nano/lumen-stealth": {
+        "id": "nano/lumen-stealth",
+        "name": "Lumen Stealth",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "limit": {
+          "context": 200000,
+          "output": 16000
+        },
+        "cost": {
+          "input": 0.05,
+          "output": 0
+        }
+      },
       "nanogpt/coding-router": {
         "id": "nanogpt/coding-router",
         "name": "Coding Router",
@@ -132103,6 +132774,154 @@
           "output": 50,
           "cache_read": 1,
           "cache_write": 12.5
+        }
+      },
+      "openai/gpt-6-luna": {
+        "id": "openai/gpt-6-luna",
+        "name": "GPT 6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.05,
+          "output": 0.25,
+          "cache_read": 0.005,
+          "cache_write": 0.0625
+        }
+      },
+      "openai/gpt-6-luna-pro": {
+        "id": "openai/gpt-6-luna-pro",
+        "name": "GPT 6 Luna Pro",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.05,
+          "output": 0.25,
+          "cache_read": 0.005,
+          "cache_write": 0.0625
+        }
+      },
+      "openai/gpt-6-sol": {
+        "id": "openai/gpt-6-sol",
+        "name": "GPT 6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5
+        }
+      },
+      "openai/gpt-6-sol-pro": {
+        "id": "openai/gpt-6-sol-pro",
+        "name": "GPT 6 Sol Pro",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5
         }
       },
       "openai/gpt-astra-latest": {
@@ -145767,6 +146586,42 @@
           "cache_write": 6.25
         }
       },
+      "anthropic/claude-opus-5.5": {
+        "id": "anthropic/claude-opus-5.5",
+        "name": "Claude Opus 5.5",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 5
+        }
+      },
       "anthropic/claude-sonnet-4.5": {
         "id": "anthropic/claude-sonnet-4.5",
         "name": "Claude Sonnet 4.5 (latest)",
@@ -151666,6 +152521,128 @@
           }
         ]
       },
+      "gpt-6-luna": {
+        "id": "gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25
+            }
+          ]
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "fast"
+            },
+            "price": {
+              "input": 0.2,
+              "output": 1,
+              "cache_read": 0.02,
+              "cache_write": 0.25
+            }
+          }
+        ]
+      },
+      "gpt-6-sol": {
+        "id": "gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 4,
+              "output": 15,
+              "cache_read": 0.4,
+              "cache_write": 5
+            }
+          ]
+        },
+        "service_tiers": [
+          {
+            "id": "fast",
+            "name": "Fast",
+            "request": {
+              "service_tier": "fast"
+            },
+            "price": {
+              "input": 4,
+              "output": 20,
+              "cache_read": 0.4,
+              "cache_write": 5
+            }
+          }
+        ]
+      },
       "gpt-image-1": {
         "id": "gpt-image-1",
         "name": "gpt-image-1",
@@ -152369,6 +153346,42 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
+        }
+      },
+      "claude-opus-5-5": {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 5
         }
       },
       "claude-sonnet-4": {
@@ -153996,6 +155009,98 @@
           ]
         }
       },
+      "gpt-6-luna": {
+        "id": "gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25
+            }
+          ]
+        }
+      },
+      "gpt-6-sol": {
+        "id": "gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 4,
+              "output": 15,
+              "cache_read": 0.4,
+              "cache_write": 5
+            }
+          ]
+        }
+      },
       "grok-4.5": {
         "id": "grok-4.5",
         "name": "Grok 4.5",
@@ -154073,6 +155178,48 @@
               "input": 4,
               "output": 12,
               "cache_read": 1
+            }
+          ]
+        }
+      },
+      "grok-4.7": {
+        "id": "grok-4.7",
+        "name": "Grok 4.7 (30% Off)",
+        "release_date": "2026-09-21",
+        "last_updated": "2026-09-21",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 500000,
+          "output": 500000
+        },
+        "cost": {
+          "input": 1.4,
+          "output": 4.2,
+          "cache_read": 0.35,
+          "tiers": [
+            {
+              "threshold": 200000,
+              "input": 2.8,
+              "output": 8.4,
+              "cache_read": 0.7
             }
           ]
         }
@@ -156459,7 +157606,7 @@
         },
         "reasoning": true,
         "limit": {
-          "context": 1048576,
+          "context": 131072,
           "output": 32768
         },
         "cost": {
@@ -156480,7 +157627,7 @@
         },
         "reasoning": true,
         "limit": {
-          "context": 1048576,
+          "context": 131072,
           "output": 32768
         },
         "cost": {
@@ -156501,7 +157648,7 @@
         },
         "reasoning": true,
         "limit": {
-          "context": 1048576,
+          "context": 131072,
           "output": 32768
         },
         "cost": {
@@ -157955,9 +159102,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.915936,
-          "output": 1.831872,
-          "cache_read": 0.076328
+          "input": 0.865302,
+          "output": 1.730604,
+          "cache_read": 0.072109
         }
       },
       "deepseek/deepseek-v4-pro-0813": {
@@ -158021,12 +159168,12 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 384000
+          "output": 943718
         },
         "cost": {
-          "input": 0.15,
-          "output": 0.6,
-          "cache_read": 0.003
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01
         }
       },
       "dots-studio/dots-3-note-preview:free": {
@@ -162456,6 +163603,190 @@
           ]
         }
       },
+      "openai/gpt-6-luna": {
+        "id": "openai/gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25
+            }
+          ]
+        }
+      },
+      "openai/gpt-6-luna-pro": {
+        "id": "openai/gpt-6-luna-pro",
+        "name": "GPT-6 Luna Pro",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "pdf",
+            "image",
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25
+            }
+          ]
+        }
+      },
+      "openai/gpt-6-sol": {
+        "id": "openai/gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 4,
+              "output": 15,
+              "cache_read": 0.4,
+              "cache_write": 5
+            }
+          ]
+        }
+      },
+      "openai/gpt-6-sol-pro": {
+        "id": "openai/gpt-6-sol-pro",
+        "name": "GPT-6 Sol Pro",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "pdf",
+            "image",
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 4,
+              "output": 15,
+              "cache_read": 0.4,
+              "cache_write": 5
+            }
+          ]
+        }
+      },
       "openai/gpt-audio": {
         "id": "openai/gpt-audio",
         "name": "GPT Audio",
@@ -164587,6 +165918,38 @@
           "cache_write": 2.5
         }
       },
+      "qwen/qwen3.8-omni-flash": {
+        "id": "qwen/qwen3.8-omni-flash",
+        "name": "Qwen3.8 Omni Flash",
+        "release_date": "2026-09-17",
+        "last_updated": "2026-09-17",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio",
+            "video"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          },
+          {
+            "type": "budget_tokens"
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 131072
+        },
+        "cost": {
+          "input": 0.15,
+          "output": 0.47,
+          "cache_read": 0.016
+        }
+      },
       "rekaai/reka-edge": {
         "id": "rekaai/reka-edge",
         "name": "Reka Edge",
@@ -166453,9 +167816,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.12,
-          "output": 0.48,
-          "cache_read": 0.0036
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01
         }
       },
       "~deepseek/deepseek-pro-latest": {
@@ -166487,9 +167850,9 @@
           "output": 393216
         },
         "cost": {
-          "input": 0.5544,
-          "output": 1.6632,
-          "cache_read": 0.01764
+          "input": 0.39996,
+          "output": 1.19988,
+          "cache_read": 0.012726
         }
       },
       "~deepseek/deepseek-v4-flash-latest": {
@@ -166522,7 +167885,7 @@
         },
         "cost": {
           "input": 0.03,
-          "output": 1,
+          "output": 0.8,
           "cache_read": 0.008
         }
       },
@@ -166720,17 +168083,17 @@
           "output": 128000
         },
         "cost": {
-          "input": 0.2,
-          "output": 1.2,
-          "cache_read": 0.02,
-          "cache_write": 0.25,
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
           "tiers": [
             {
               "threshold": 272000,
-              "input": 0.4,
-              "output": 1.8,
-              "cache_read": 0.04,
-              "cache_write": 0.5
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25
             }
           ]
         }
@@ -166963,9 +168326,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 0.6538,
-          "output": 2.0548,
-          "cache_read": 0.12142
+          "input": 0.5625,
+          "output": 2.5,
+          "cache_read": 0.125
         }
       }
     }
@@ -183575,6 +184938,84 @@
           "output": 25,
           "cache_read": 0.5,
           "cache_write": 6.25
+        }
+      },
+      "claude-opus-5-5": {
+        "id": "claude-opus-5-5",
+        "name": "Claude Opus 5.5",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "max"
+            ]
+          },
+          {
+            "type": "budget_tokens"
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 5,
+          "output": 25,
+          "cache_read": 0.5,
+          "cache_write": 6.25
+        }
+      },
+      "claude-opus-5-5@eu": {
+        "id": "claude-opus-5-5@eu",
+        "name": "Claude Opus 5.5 (EU)",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "max"
+            ]
+          },
+          {
+            "type": "budget_tokens"
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 5.5,
+          "output": 27.5,
+          "cache_read": 0.55,
+          "cache_write": 6.875
         }
       },
       "claude-opus-5@eu": {
@@ -204555,6 +205996,96 @@
           ]
         }
       },
+      "openai-gpt-6-luna": {
+        "id": "openai-gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.125,
+          "output": 0.625,
+          "cache_read": 0.0125,
+          "cache_write": 0.15625,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 0.25,
+              "output": 0.9375,
+              "cache_read": 0.025,
+              "cache_write": 0.3125
+            }
+          ]
+        }
+      },
+      "openai-gpt-6-sol": {
+        "id": "openai-gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2.5,
+          "output": 12.5,
+          "cache_read": 0.25,
+          "cache_write": 3.125,
+          "tiers": [
+            {
+              "threshold": 272000,
+              "input": 5,
+              "output": 18.75,
+              "cache_read": 0.5,
+              "cache_write": 6.25
+            }
+          ]
+        }
+      },
       "openai-gpt-oss-120b": {
         "id": "openai-gpt-oss-120b",
         "name": "OpenAI GPT OSS 120B",
@@ -207134,6 +208665,78 @@
           "output": 50,
           "cache_read": 1,
           "cache_write": 12.5
+        }
+      },
+      "anthropic/claude-opus-5.5": {
+        "id": "anthropic/claude-opus-5.5",
+        "name": "Claude Opus 5.5",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 5
+        }
+      },
+      "anthropic/claude-opus-5.5-fast": {
+        "id": "anthropic/claude-opus-5.5-fast",
+        "name": "Claude Opus 5.5 (Fast)",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 8,
+          "output": 40,
+          "cache_read": 0.4,
+          "cache_write": 10
         }
       },
       "anthropic/claude-sonnet-4": {
@@ -211930,6 +213533,190 @@
               "output": 150,
               "cache_read": 4,
               "cache_write": 50
+            }
+          ]
+        }
+      },
+      "openai/gpt-6-luna": {
+        "id": "openai/gpt-6-luna",
+        "name": "GPT-6 Luna",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.01,
+          "cache_write": 0.125,
+          "tiers": [
+            {
+              "threshold": 272001,
+              "input": 0.2,
+              "output": 0.75,
+              "cache_read": 0.02,
+              "cache_write": 0.25
+            }
+          ]
+        }
+      },
+      "openai/gpt-6-luna-fast": {
+        "id": "openai/gpt-6-luna-fast",
+        "name": "GPT-6 Luna (Fast)",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 0.2,
+          "output": 1,
+          "cache_read": 0.02,
+          "cache_write": 0.25,
+          "tiers": [
+            {
+              "threshold": 272001,
+              "input": 0.4,
+              "output": 1.5,
+              "cache_read": 0.04,
+              "cache_write": 0.5
+            }
+          ]
+        }
+      },
+      "openai/gpt-6-sol": {
+        "id": "openai/gpt-6-sol",
+        "name": "GPT-6 Sol",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.2,
+          "cache_write": 2.5,
+          "tiers": [
+            {
+              "threshold": 272001,
+              "input": 4,
+              "output": 15,
+              "cache_read": 0.4,
+              "cache_write": 5
+            }
+          ]
+        }
+      },
+      "openai/gpt-6-sol-fast": {
+        "id": "openai/gpt-6-sol-fast",
+        "name": "GPT-6 Sol (Fast)",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1050000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.4,
+          "cache_write": 5,
+          "tiers": [
+            {
+              "threshold": 272001,
+              "input": 8,
+              "output": 30,
+              "cache_read": 0.8,
+              "cache_write": 10
             }
           ]
         }
@@ -217506,6 +219293,33 @@
           "input": 0.2,
           "output": 0.65,
           "cache_read": 0.03
+        }
+      },
+      "google/gemma-4-26B-A4B-it": {
+        "id": "google/gemma-4-26B-A4B-it",
+        "name": "Gemma 4 26B A4B",
+        "release_date": "2026-04-02",
+        "last_updated": "2026-04-02",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 262144
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.3,
+          "cache_read": 0.05
         }
       },
       "google/gemma-4-31B-it": {
