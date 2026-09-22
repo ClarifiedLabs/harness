@@ -3271,11 +3271,12 @@ Callers retain partial-override, response-state reset/retention, and prewarm pol
   explicitly enabled summaries to stderr.
 - Turn progress renders as plain stderr lines, e.g. `[turn: 1 waiting]`. A
   completed conversational turn renders
-  `[turn: 1 · 6s · $0.032 · ctx 74% 148.0k/200.0k │ prompt 18s]`, including the
+  `[turn: 1 · 6s · $0.032 · ctx 74% 148.0k/200.0k │ prompt 18s · $0.045]`, including the
   turn's dollar cost once the model stream has closed and the final
   input/output/cache totals are known (proxy-priced when the proxy supplies
   `CostUSD`, otherwise priced against the model registry; omitted when the
-  model has no configured price). The enclosing prompt emits one
+  model has no configured price). The trailing figure after the prompt elapsed
+  time is the running prompt total over completed turns so far. The enclosing prompt emits one
   aggregate `[prompt: 3 turns …]` usage/cost line. Attempt start/usage events are
   always recorded in `raw.ndjson` for timing and accounting diagnostics but do
   not produce separate visible cost checkpoints. Retried attempts record a

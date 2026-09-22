@@ -1624,7 +1624,7 @@ func TestCompletedTurnCounterIncludesContextUsage(t *testing.T) {
 	got := turnUsageLine(agent.TurnUsage{
 		Turn:    19,
 		Context: agent.ContextEstimate{Total: 100_000, Window: 200_000},
-	}, 10_500*time.Millisecond, 224_100*time.Millisecond)
+	}, 10_500*time.Millisecond, 224_100*time.Millisecond, 0, false)
 	want := "[turn: 19 · 10.5s · ctx 50% 100.0k/200.0k │ prompt 224.1s]"
 	if got != want {
 		t.Fatalf("completed turn counter = %q, want %q", got, want)
@@ -1636,8 +1636,8 @@ func TestCompletedTurnCounterShowsCostWhenKnown(t *testing.T) {
 		Turn:    2,
 		Usage:   llm.Usage{InputTokens: 12_000, OutputTokens: 800, CostUSD: 0.032, CostKnown: true},
 		Context: agent.ContextEstimate{Total: 100_000, Window: 200_000},
-	}, 6_000*time.Millisecond, 18_000*time.Millisecond)
-	want := "[turn: 2 · 6.0s · $0.032 · ctx 50% 100.0k/200.0k │ prompt 18.0s]"
+	}, 6_000*time.Millisecond, 18_000*time.Millisecond, 0.032, true)
+	want := "[turn: 2 · 6.0s · $0.032 · ctx 50% 100.0k/200.0k │ prompt 18.0s · $0.032]"
 	if got != want {
 		t.Fatalf("completed turn counter = %q, want %q", got, want)
 	}
@@ -1647,13 +1647,36 @@ func TestCompletedTurnCounterOmitsCostWhenUnknown(t *testing.T) {
 	got := turnUsageLine(agent.TurnUsage{
 		Turn:  2,
 		Usage: llm.Usage{InputTokens: 12_000, OutputTokens: 800},
-	}, 6_000*time.Millisecond, 18_000*time.Millisecond)
+	}, 6_000*time.Millisecond, 18_000*time.Millisecond, 0, false)
 	if strings.Contains(got, "$") {
 		t.Fatalf("unknown cost must not print a dollar figure, got %q", got)
 	}
 	want := "[turn: 2 · 6.0s │ prompt 18.0s]"
 	if got != want {
 		t.Fatalf("completed turn counter = %q, want %q", got, want)
+	}
+}
+
+func TestRendererTurnCompleteShowsRunningPromptTotal(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := NewRenderer(&out, &errw, RenderOptions{Now: func() time.Time { return now }})
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	first := r.TurnComplete(agent.TurnUsage{Turn: 1, Usage: llm.Usage{CostUSD: 0.100, CostKnown: true}})
+	if !strings.Contains(first, "· $0.100") || !strings.HasSuffix(first, "· $0.100]") {
+		t.Fatalf("first turn line = %q, want turn cost and prompt total $0.100", first)
+	}
+	r.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+	second := r.TurnComplete(agent.TurnUsage{Turn: 2, Usage: llm.Usage{CostUSD: 0.200, CostKnown: true}})
+	if !strings.Contains(second, "· $0.200") || !strings.HasSuffix(second, "· $0.300]") {
+		t.Fatalf("second turn line = %q, want turn cost $0.200 and prompt total $0.300", second)
+	}
+	r.StartPromptRun()
+	r.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	third := r.TurnComplete(agent.TurnUsage{Turn: 1, Usage: llm.Usage{CostUSD: 0.050, CostKnown: true}})
+	if !strings.HasSuffix(third, "· $0.050]") {
+		t.Fatalf("new prompt turn line = %q, want reset prompt total $0.050", third)
 	}
 }
 

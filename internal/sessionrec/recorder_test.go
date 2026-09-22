@@ -793,3 +793,29 @@ func TestRecorderAssistantPhaseGate(t *testing.T) {
 		t.Fatalf("phase events = %+v", events)
 	}
 }
+
+func TestRecorderTurnCompleteAccumulatesPromptTotal(t *testing.T) {
+	dir := t.TempDir()
+	rec := New(Config{Dir: dir, Prompt: 1})
+	rec.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	rec.TurnComplete(agent.TurnUsage{Turn: 1, Usage: llm.Usage{CostUSD: 0.100, CostKnown: true}})
+	rec.TurnAttemptStart(2, 1, agent.ContextEstimate{})
+	rec.TurnComplete(agent.TurnUsage{Turn: 2, Usage: llm.Usage{CostUSD: 0.200, CostKnown: true}})
+
+	events := readEvents(t, dir)
+	var displays []string
+	for _, ev := range events {
+		if ev.Type == session.EventTurnComplete {
+			displays = append(displays, ev.Display)
+		}
+	}
+	if len(displays) != 2 {
+		t.Fatalf("turn displays = %q, want 2 turn lines", displays)
+	}
+	if !strings.HasSuffix(displays[0], "· $0.100]") {
+		t.Fatalf("first turn display = %q, want prompt total $0.100", displays[0])
+	}
+	if !strings.Contains(displays[1], "· $0.200") || !strings.HasSuffix(displays[1], "· $0.300]") {
+		t.Fatalf("second turn display = %q, want turn cost $0.200 and prompt total $0.300", displays[1])
+	}
+}

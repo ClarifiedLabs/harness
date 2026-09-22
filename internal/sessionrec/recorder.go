@@ -90,8 +90,12 @@ type Recorder struct {
 	attempt     int
 	promptStart time.Time
 	turnStart   time.Time
-	pending     map[string]pendingCall
-	model       modelIdentity
+	// promptCost accumulates the priced cost of completed turns in this
+	// prompt so the turn summary can close with the running prompt total.
+	promptCost      float64
+	promptCostKnown bool
+	pending         map[string]pendingCall
+	model           modelIdentity
 }
 
 type modelIdentity struct {
@@ -207,6 +211,8 @@ func (r *Recorder) User(text string) {
 		return
 	}
 	r.promptStart = r.now()
+	r.promptCost = 0
+	r.promptCostKnown = false
 	r.Append(session.Event{Type: session.EventUser, Prompt: r.cfg.Prompt, Text: text})
 }
 
@@ -525,11 +531,15 @@ func (r *Recorder) TurnComplete(u agent.TurnUsage) {
 		promptElapsed = r.now().Sub(r.promptStart)
 	}
 	usage := u.Usage
+	if usage.CostKnown {
+		r.promptCost += usage.CostUSD
+		r.promptCostKnown = true
+	}
 	r.Append(session.Event{
 		Type:    session.EventTurnComplete,
 		Prompt:  r.cfg.Prompt,
 		Turn:    u.Turn,
-		Display: TurnUsageLine(u, elapsed, promptElapsed),
+		Display: TurnUsageLine(u, elapsed, promptElapsed, r.promptCost, r.promptCostKnown),
 		Usage:   &usage,
 	})
 }

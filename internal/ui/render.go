@@ -140,6 +140,10 @@ type Renderer struct {
 	promptCost      float64
 	promptCostKnown bool
 	promptCostSet   bool
+	// promptTurnCost accumulates the priced cost of completed turns in the
+	// active prompt so each turn summary can close with the running total.
+	promptTurnCost      float64
+	promptTurnCostKnown bool
 
 	// warnedNoPrice tracks models for which the one-time "no price" notice has
 	// already been emitted (r16).
@@ -255,6 +259,8 @@ func (r *Renderer) StartPromptRun() {
 	r.promptCost = 0
 	r.promptCostKnown = false
 	r.promptCostSet = false
+	r.promptTurnCost = 0
+	r.promptTurnCostKnown = false
 	r.renderMu.Lock()
 	r.assistantMarkdown = nil
 	r.assistantLineOpen = false
@@ -503,7 +509,11 @@ func (r *Renderer) TurnComplete(usage agent.TurnUsage) string {
 	r.endWait()
 	r.flushToolUseStarts()
 	r.finishAssistantLine()
-	line := turnUsageLine(usage, r.now().Sub(r.currentTurnStart), r.now().Sub(r.promptStart))
+	if usage.Usage.CostKnown {
+		r.promptTurnCost += usage.Usage.CostUSD
+		r.promptTurnCostKnown = true
+	}
+	line := turnUsageLine(usage, r.now().Sub(r.currentTurnStart), r.now().Sub(r.promptStart), r.promptTurnCost, r.promptTurnCostKnown)
 	r.dimLine(line)
 	return line
 }
@@ -1978,8 +1988,8 @@ func usageLine(u agent.PromptUsage, elapsed time.Duration, cost float64, costKno
 	return sessionrec.UsageLine(u, elapsed, cost, costKnown, cumIn, cumOut, cumCost, cumCompactions)
 }
 
-func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {
-	return sessionrec.TurnUsageLine(u, elapsed, promptElapsed)
+func turnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration, promptCost float64, promptCostKnown bool) string {
+	return sessionrec.TurnUsageLine(u, elapsed, promptElapsed, promptCost, promptCostKnown)
 }
 
 // snippet returns the first snippetLines lines of s for the verbose preview.

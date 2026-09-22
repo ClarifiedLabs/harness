@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"harness/internal/agent"
@@ -228,5 +229,30 @@ func TestToolResultLineRelativizesPath(t *testing.T) {
 	}
 	if strings.Contains(got, absUnder) {
 		t.Fatalf("ToolResultLine() = %q, must not contain the absolute path %q", got, absUnder)
+	}
+}
+
+func TestTurnUsageLineShowsPromptTotal(t *testing.T) {
+	u := agent.TurnUsage{
+		Turn:    2,
+		Usage:   llm.Usage{InputTokens: 12_000, OutputTokens: 800, CostUSD: 0.032, CostKnown: true},
+		Context: agent.ContextEstimate{Total: 100_000, Window: 200_000},
+	}
+	got := TurnUsageLine(u, 6_000*time.Millisecond, 18_000*time.Millisecond, 0.096, true)
+	want := "[turn: 2 · 6.0s · $0.032 · ctx 50% 100.0k/200.0k │ prompt 18.0s · $0.096]"
+	if got != want {
+		t.Fatalf("TurnUsageLine() = %q, want %q", got, want)
+	}
+}
+
+func TestTurnUsageLineOmitsPromptTotalWhenUnknown(t *testing.T) {
+	u := agent.TurnUsage{
+		Turn:  2,
+		Usage: llm.Usage{InputTokens: 12_000, OutputTokens: 800},
+	}
+	got := TurnUsageLine(u, 6_000*time.Millisecond, 18_000*time.Millisecond, 0, false)
+	want := "[turn: 2 · 6.0s │ prompt 18.0s]"
+	if got != want {
+		t.Fatalf("TurnUsageLine() = %q, want %q", got, want)
 	}
 }

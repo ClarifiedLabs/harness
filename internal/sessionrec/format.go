@@ -349,8 +349,11 @@ func writePromptCompactions(b *strings.Builder, prompt, total int) {
 
 // TurnUsageLine renders the per-turn summary:
 //
-//	[turn: 1 · 1.0s · $0.003 · ctx 12% 15.0k/128.0k │ prompt 4.3s]
-func TurnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) string {
+//	[turn: 1 · 1.0s · $0.003 · ctx 12% 15.0k/128.0k │ prompt 4.3s · $0.005]
+//
+// The trailing prompt cost is the running prompt total over completed turns so
+// far (including this turn); it is omitted when no turn cost is known yet.
+func TurnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration, promptCost float64, promptCostKnown bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[turn: %d · %s", u.Turn, HumanDuration(elapsed))
 	// Turn cost is known once the model stream closes: TurnComplete fires after
@@ -365,6 +368,9 @@ func TurnUsageLine(u agent.TurnUsage, elapsed, promptElapsed time.Duration) stri
 	}
 	if promptElapsed >= 0 {
 		fmt.Fprintf(&b, " │ prompt %s", HumanDuration(promptElapsed))
+		if promptCostKnown {
+			fmt.Fprintf(&b, " · $%.3f", promptCost)
+		}
 	}
 	b.WriteByte(']')
 	return b.String()
