@@ -46,6 +46,9 @@ func TestWebFetchBackgroundStartsJob(t *testing.T) {
 	if starter.req.Description != srv.URL {
 		t.Fatalf("job description = %q, want %q", starter.req.Description, srv.URL)
 	}
+	if starter.req.Limit != webFetchDefaultTimeout*webFetchTimeoutUnit {
+		t.Fatalf("job limit = %v, want default %v", starter.req.Limit, webFetchDefaultTimeout*webFetchTimeoutUnit)
+	}
 	if starter.req.Run == nil {
 		t.Fatal("background job runner missing")
 	}

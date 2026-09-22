@@ -33,6 +33,87 @@ func TestJobsToolOnlyCancelRequiresSequentialDispatch(t *testing.T) {
 	}
 }
 
+func TestManagerJobDoneWaitsForCanceledWorker(t *testing.T) {
+	m := NewManager(Options{})
+	if ch, ok := m.JobDone("missing"); ok || ch != nil {
+		t.Fatalf("unknown job returned %v, %v", ch, ok)
+	}
+	release := make(chan struct{})
+	var once sync.Once
+	finish := func() { once.Do(func() { close(release) }) }
+	defer finish()
+	job, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(ctx context.Context, _ string) (tools.BackgroundJobResult, error) {
+			<-ctx.Done()
+			<-release
+			return tools.BackgroundJobResult{Text: "cleanup complete"}, ctx.Err()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done, ok := m.JobDone(job.ID)
+	if !ok || done == nil {
+		t.Fatal("missing completion channel")
+	}
+	m.Cancel(job.ID)
+	select {
+	case <-done:
+		t.Fatal("cancellation reported completion before worker cleanup")
+	default:
+	}
+	finish()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("worker completion did not close channel")
+	}
+	snap, _ := m.Get(job.ID)
+	if snap.Status != StatusCanceled || snap.Result.Text != "cleanup complete" {
+		t.Fatalf("completion did not publish final result: %+v", snap)
+	}
+}
+
+func TestManagerSnapshotCarriesInspectMetadata(t *testing.T) {
+	m := NewManager(Options{})
+	release := make(chan struct{})
+	job, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind:       "delegate",
+		Agent:      "explore",
+		Model:      "anthropic/claude-sonnet-4-6",
+		Limit:      30 * time.Minute,
+		OutputPath: "/tmp/harness-bg-output-test",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			<-release
+			return tools.BackgroundJobResult{Text: "done"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	snap, ok := m.Get(job.ID)
+	if !ok {
+		t.Fatalf("Get(%q) not found", job.ID)
+	}
+	if snap.Agent != "explore" || snap.Model != "anthropic/claude-sonnet-4-6" {
+		t.Fatalf("snapshot agent/model = %q/%q", snap.Agent, snap.Model)
+	}
+	if snap.Limit != 30*time.Minute {
+		t.Fatalf("snapshot limit = %v, want 30m", snap.Limit)
+	}
+	if snap.OutputPath != "/tmp/harness-bg-output-test" {
+		t.Fatalf("snapshot output path = %q", snap.OutputPath)
+	}
+	if snap.Created.IsZero() || snap.Updated.IsZero() {
+		t.Fatalf("snapshot times not set: %+v", snap)
+	}
+	close(release)
+	if done := waitJob(t, m, job.ID); done.Status != StatusCompleted {
+		t.Fatalf("job status = %q, want completed", done.Status)
+	}
+}
+
 func TestManagerChangedSignalsStartAndCompletion(t *testing.T) {
 	m := NewManager(Options{})
 	beforeStart := m.Changed()

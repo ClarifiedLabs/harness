@@ -113,10 +113,18 @@ type BackgroundJobRequest struct {
 	Kind             string
 	Description      string
 	Agent            string
+	Model            string
 	SessionID        string
 	Operation        int
 	ResourceKey      string
 	Access           string
+	// Limit is the job's maximum intended duration (shell/web_fetch timeouts).
+	// Zero means the job carries no duration constraint.
+	Limit time.Duration
+	// OutputPath, when set, names a file the job writes its live combined output
+	// to so a running job can be inspected (REPL /background tail). The
+	// launching tool owns creating and cleaning up the file.
+	OutputPath string
 	// WaitForPrompt marks work whose result must be incorporated before the parent
 	// agent may finish its current prompt. Ordinary background commands leave this
 	// false; background delegates set it so the parent joins and synthesizes them.

@@ -471,6 +471,7 @@ func (t *Tool) RunMetered(ctx context.Context, input json.RawMessage) (tools.Met
 			Execution:        prepared.runtime.Execution,
 			Description:      req.Task,
 			Agent:            jobAgent,
+			Model:            prepared.launch.Model,
 			ResourceKey:      req.ResourceKey,
 			Access:           req.Access,
 			WaitForPrompt:    true,

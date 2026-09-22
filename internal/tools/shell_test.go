@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -630,11 +631,54 @@ func TestShellTopLevelDispatchArchivesReceiptOriginal(t *testing.T) {
 
 type fakeBackgroundStarter struct {
 	req BackgroundJobRequest
+	err error
 }
 
 func (f *fakeBackgroundStarter) StartBackgroundJob(req BackgroundJobRequest) (BackgroundJobInfo, error) {
 	f.req = req
+	if f.err != nil {
+		return BackgroundJobInfo{}, f.err
+	}
 	return BackgroundJobInfo{ID: "bg_test", Status: "running"}, nil
+}
+
+func TestShellBackgroundRejectedLaunchRemovesOutput(t *testing.T) {
+	for _, invalidLease := range []bool{false, true} {
+		name := "admission"
+		if invalidLease {
+			name = "invalid lease"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv("TMPDIR", dir)
+			rejected := errors.New("admission rejected")
+			starter := &fakeBackgroundStarter{err: rejected}
+			input := map[string]any{"argv": []string{"echo", "unused"}, "background": true}
+			if invalidLease {
+				input["background_lease"] = map[string]any{"access": "invalid"}
+			}
+			data, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = (shell{background: starter}).RunResult(context.Background(), data)
+			if err == nil {
+				t.Fatal("expected launch rejection")
+			}
+			if !invalidLease {
+				if !errors.Is(err, rejected) || starter.req.OutputPath == "" {
+					t.Fatalf("launch did not reach admission: %v, %+v", err, starter.req)
+				}
+				if _, statErr := os.Stat(starter.req.OutputPath); !errors.Is(statErr, os.ErrNotExist) {
+					t.Fatalf("rejected launch retained output: %v", statErr)
+				}
+			}
+			files, err := filepath.Glob(filepath.Join(dir, "harness-bg-output-*"))
+			if err != nil || len(files) != 0 {
+				t.Fatalf("leaked output files: %v, err %v", files, err)
+			}
+		})
+	}
 }
 
 func TestShellBackgroundStartsJob(t *testing.T) {
@@ -673,6 +717,12 @@ func TestShellBackgroundStartsJob(t *testing.T) {
 	if starter.req.Description != "echo background" {
 		t.Fatalf("job description = %q", starter.req.Description)
 	}
+	if starter.req.Limit != shellBackgroundDefaultTimeout*time.Second {
+		t.Fatalf("job limit = %v, want default %v", starter.req.Limit, shellBackgroundDefaultTimeout*time.Second)
+	}
+	if starter.req.OutputPath == "" {
+		t.Fatal("job output path missing for single-command background job")
+	}
 	if starter.req.Run == nil {
 		t.Fatal("background job runner missing")
 	}
@@ -683,6 +733,76 @@ func TestShellBackgroundStartsJob(t *testing.T) {
 	}
 	if !strings.Contains(result.Text, "background") || !strings.Contains(result.Text, "[exit code: 0]") {
 		t.Fatalf("background result = %q", result.Text)
+	}
+	if _, err := os.Stat(starter.req.OutputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retained output file should be removed after completion, stat err = %v", err)
+	}
+}
+
+// TestShellBackgroundRetainedOutputReadableWhileRunning guards the live-inspection
+// contract behind REPL /background tail: the retained file receives combined
+// output during the run and disappears once the job completes.
+func TestShellBackgroundRetainedOutputReadableWhileRunning(t *testing.T) {
+	starter := &fakeBackgroundStarter{}
+	dir := t.TempDir()
+	stop := filepath.Join(dir, "stop")
+	input, err := json.Marshal(map[string]any{
+		"argv":       []string{"sh", "-c", `echo ready-line; while [ ! -f "$1" ]; do sleep 0.02; done`, "sh", stop},
+		"background": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (shell{background: starter}).RunResult(context.Background(), input); err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := starter.req.Run(context.Background(), "bg_test")
+		done <- err
+	}()
+	// On any failure path, release the child and wait for the run to return so
+	// the test never leaks a wedged process.
+	finished := false
+	defer func() {
+		if finished {
+			return
+		}
+		_ = os.WriteFile(stop, []byte("go"), 0o644)
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			t.Error("background run did not finish after stop file appeared")
+		}
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		data, err := os.ReadFile(starter.req.OutputPath)
+		if err == nil && strings.Contains(string(data), "ready-line") {
+			break
+		}
+		if time.Now().After(deadline) {
+			data, _ := os.ReadFile(starter.req.OutputPath)
+			t.Fatalf("retained output never contained ready-line; last read %q, err %v", data, err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := os.WriteFile(stop, []byte("go"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("background run: %v", err)
+		}
+		finished = true
+	case <-time.After(10 * time.Second):
+		t.Fatal("background run did not finish after stop file appeared")
+	}
+	if _, err := os.Stat(starter.req.OutputPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("retained output file should be removed after completion, stat err = %v", err)
 	}
 }
 
@@ -732,8 +852,16 @@ func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
 	if !strings.HasPrefix(out, "background job bg_test started") {
 		t.Fatalf("start output = %q", out)
 	}
-	if starter.req.Description != "3 shell steps" {
-		t.Fatalf("job description = %q, want positional step count", starter.req.Description)
+	if !strings.HasPrefix(starter.req.Description, "3 shell steps: ") ||
+		!strings.Contains(starter.req.Description, "cat; pwd") ||
+		!strings.Contains(starter.req.Description, "printf 'bad step output'; exit 7") {
+		t.Fatalf("job description = %q, want step commands", starter.req.Description)
+	}
+	if starter.req.OutputPath != "" {
+		t.Fatalf("job output path = %q, want none for step workflows", starter.req.OutputPath)
+	}
+	if starter.req.Limit != 3*7*time.Second {
+		t.Fatalf("job limit = %v, want sum of resolved step timeouts 21s", starter.req.Limit)
 	}
 
 	result, err := starter.req.Run(context.Background(), "bg_test")

@@ -218,6 +218,11 @@ type shellArgs struct {
 	// command-safety restriction rather than background scheduling metadata.
 	ResourceKey string `json:"resource_key"`
 	Access      string `json:"access"`
+
+	// outputPath retains combined process output for live user inspection of a
+	// running background job (REPL /background tail). Set only on the
+	// background launch path; empty for foreground runs and step workflows.
+	outputPath string
 }
 
 type shellLease struct {
@@ -277,6 +282,28 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 				args.TimeoutSeconds = shellBackgroundDefaultTimeout
 			}
 		}
+		// A single top-level background command retains its combined output so
+		// the user can tail a running job. Step workflows keep per-step temp
+		// capture and expose no live output path.
+		var outputPath string
+		admitted := false
+		defer func() {
+			if !admitted && outputPath != "" {
+				os.Remove(outputPath)
+			}
+		}()
+		if len(args.Steps) == 0 {
+			outFile, err := os.CreateTemp("", "harness-bg-output-*")
+			if err != nil {
+				return RunResult{}, err
+			}
+			outputPath = outFile.Name()
+			if err := outFile.Close(); err != nil {
+				os.Remove(outputPath)
+				return RunResult{}, err
+			}
+			args.outputPath = outputPath
+		}
 		defaultResource, err := DefaultBackgroundResource(args.Cwd)
 		if err != nil {
 			return RunResult{}, err
@@ -297,7 +324,14 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 			Description:      shellDescription(args),
 			ResourceKey:      resourceKey,
 			Access:           access,
+			Limit:            shellBackgroundLimit(args),
+			OutputPath:       outputPath,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
+				if outputPath != "" {
+					// The retained-output file lives only while the job runs; the
+					// completed result carries the full output.
+					defer os.Remove(outputPath)
+				}
 				var result RunResult
 				var err error
 				if len(args.Steps) > 0 {
@@ -315,6 +349,7 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 		if err != nil {
 			return RunResult{}, err
 		}
+		admitted = true // The runner now owns output-file cleanup.
 		return RunResult{
 			Text: fmt.Sprintf(
 				"background job %s started (resource: %s, access: %s)",
@@ -484,9 +519,36 @@ func validateShellArgs(args shellArgs) error {
 	return nil
 }
 
+// shellBackgroundLimit reports the maximum intended duration of a background
+// job for display: the resolved top-level timeout, or the sum of resolved step
+// timeouts. It mirrors shellSteps' per-step resolution so the shown limit
+// matches what runProcessDetailed enforces.
+func shellBackgroundLimit(args shellArgs) time.Duration {
+	if len(args.Steps) == 0 {
+		return time.Duration(resolveProcessTimeoutSeconds(args.TimeoutSeconds)) * processTimeoutUnit
+	}
+	var total time.Duration
+	for _, step := range args.Steps {
+		seconds := step.TimeoutSeconds
+		if seconds == 0 {
+			seconds = args.TimeoutSeconds
+		}
+		total += time.Duration(resolveProcessTimeoutSeconds(seconds)) * processTimeoutUnit
+	}
+	return total
+}
+
 func shellDescription(args shellArgs) string {
 	if len(args.Steps) > 0 {
-		return fmt.Sprintf("%d shell steps", len(args.Steps))
+		commands := make([]string, 0, len(args.Steps))
+		for _, step := range args.Steps {
+			if len(step.Argv) > 0 {
+				commands = append(commands, strings.Join(step.Argv, " "))
+			} else {
+				commands = append(commands, step.Command)
+			}
+		}
+		return fmt.Sprintf("%d shell steps: %s", len(args.Steps), strings.Join(commands, "; "))
 	}
 	if len(args.Argv) > 0 {
 		return strings.Join(args.Argv, " ")
@@ -701,7 +763,7 @@ func shellArgsProcess(ctx context.Context, args shellArgs) (result processResult
 		if args.Stdin != "" {
 			cmd.Stdin = strings.NewReader(args.Stdin)
 		}
-		result, err = runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
+		result, err = runProcessDetailed(ctx, cmd, args.TimeoutSeconds, args.outputPath)
 		if err != nil {
 			return processResult{}, fmt.Errorf("failed to start shell: %w", err)
 		}
@@ -712,7 +774,7 @@ func shellArgsProcess(ctx context.Context, args shellArgs) (result processResult
 	if args.Stdin != "" {
 		cmd.Stdin = strings.NewReader(args.Stdin)
 	}
-	result, err = runProcessDetailed(ctx, cmd, args.TimeoutSeconds)
+	result, err = runProcessDetailed(ctx, cmd, args.TimeoutSeconds, args.outputPath)
 	if err != nil {
 		return processResult{}, fmt.Errorf("%s: %w", args.Argv[0], err)
 	}
@@ -906,14 +968,18 @@ func (r processResult) receiptStatus() string {
 }
 
 func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string, error) {
-	result, err := runProcessDetailed(ctx, cmd, timeoutSeconds)
+	result, err := runProcessDetailed(ctx, cmd, timeoutSeconds, "")
 	if err != nil {
 		return "", err
 	}
 	return formatProcessResult(result), nil
 }
 
-func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (processResult, error) {
+// runProcessDetailed captures combined output to a temp file that is removed
+// on return. When outputPath is non-empty (background jobs retaining output
+// for /background tail), the caller-owned file is used instead and survives
+// for the job's lifetime; the caller removes it.
+func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, outputPath string) (processResult, error) {
 	timeout := resolveProcessTimeoutSeconds(timeoutSeconds)
 	if ctx.Err() != nil {
 		return processResult{ExitCode: -1, Status: processCancelled, TimeoutSeconds: timeout, WaitComplete: true}, nil
@@ -924,11 +990,19 @@ func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) 
 
 	configureProcessGroup(cmd)
 
-	outFile, err := os.CreateTemp("", "harness-tool-output-*")
+	var outFile *os.File
+	var err error
+	if outputPath != "" {
+		outFile, err = os.Create(outputPath)
+	} else {
+		outFile, err = os.CreateTemp("", "harness-tool-output-*")
+	}
 	if err != nil {
 		return processResult{}, err
 	}
-	defer os.Remove(outFile.Name())
+	if outputPath == "" {
+		defer os.Remove(outFile.Name())
+	}
 	defer outFile.Close()
 	cmd.Stdout = outFile
 	cmd.Stderr = outFile

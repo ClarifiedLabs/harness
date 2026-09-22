@@ -115,10 +115,13 @@ type Job struct {
 	Kind        string
 	Task        string
 	Agent       string
+	Model       string
 	SessionID   string
 	Operation   int
 	ResourceKey string
 	Access      string
+	Limit       time.Duration
+	OutputPath  string
 	Status      string
 	Created     time.Time
 	Updated     time.Time
@@ -147,10 +150,13 @@ type Snapshot struct {
 	Kind        string
 	Task        string
 	Agent       string
+	Model       string
 	SessionID   string
 	Operation   int
 	ResourceKey string
 	Access      string
+	Limit       time.Duration
+	OutputPath  string
 	Status      string
 	Created     time.Time
 	Updated     time.Time
@@ -229,20 +235,7 @@ func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.Back
 	if err != nil {
 		return tools.BackgroundJobInfo{}, err
 	}
-	snap, err := m.start(
-		req.Kind,
-		req.Description,
-		req.Agent,
-		req.SessionID,
-		req.Operation,
-		resourceKey,
-		access,
-		req.WaitForPrompt,
-		req.Progress,
-		req.Execution,
-		req.AdmissionContext,
-		req.Run,
-	)
+	snap, err := m.start(req, resourceKey, access)
 	if err != nil {
 		return tools.BackgroundJobInfo{}, err
 	}
@@ -257,38 +250,38 @@ func (m *Manager) StartBackgroundJob(req tools.BackgroundJobRequest) (tools.Back
 }
 
 func (m *Manager) start(
-	kind, task, agent, sessionID string, operation int, resourceKey, access string,
-	waitForPrompt bool,
-	progress tools.BackgroundProgress,
-	scope execution.Scope,
-	admission context.Context,
-	run func(context.Context, string) (tools.BackgroundJobResult, error),
+	req tools.BackgroundJobRequest,
+	resourceKey, access string,
 ) (Snapshot, error) {
 	if m == nil {
 		return Snapshot{}, fmt.Errorf("background manager is not initialized")
 	}
-	if run == nil {
+	if req.Run == nil {
 		return Snapshot{}, fmt.Errorf("background job runner is not initialized")
 	}
+	scope := req.Execution
 	ctx, cancel := context.WithCancel(execution.WithScope(context.Background(), scope))
 	started := m.now()
 	job := &Job{
 		execution:     scope,
 		ID:            backgroundID(started),
-		Kind:          strings.TrimSpace(kind),
-		Task:          strings.TrimSpace(task),
-		Agent:         strings.TrimSpace(agent),
-		SessionID:     strings.TrimSpace(sessionID),
-		Operation:     operation,
+		Kind:          strings.TrimSpace(req.Kind),
+		Task:          strings.TrimSpace(req.Description),
+		Agent:         strings.TrimSpace(req.Agent),
+		Model:         strings.TrimSpace(req.Model),
+		SessionID:     strings.TrimSpace(req.SessionID),
+		Operation:     req.Operation,
 		ResourceKey:   resourceKey,
 		Access:        access,
+		Limit:         req.Limit,
+		OutputPath:    strings.TrimSpace(req.OutputPath),
 		Status:        StatusRunning,
 		Created:       started,
 		Updated:       started,
-		progress:      progress,
+		progress:      req.Progress,
 		cancel:        cancel,
 		done:          make(chan struct{}),
-		waitForPrompt: waitForPrompt,
+		waitForPrompt: req.WaitForPrompt,
 	}
 	job.observation = &jobObservation{events: []execution.WorkEvent{{Kind: execution.WorkBackground, Phase: execution.WorkStart,
 		Tool: backgroundExecutionKind(job.Kind), Mode: "background", Count: 1}}}
@@ -298,13 +291,13 @@ func (m *Manager) start(
 		cancel()
 		return Snapshot{}, ErrClosed
 	}
-	if admission != nil && admission.Err() != nil {
+	if admission := req.AdmissionContext; admission != nil && admission.Err() != nil {
 		err := admission.Err()
 		m.mu.Unlock()
 		cancel()
 		return Snapshot{}, err
 	}
-	job.ancestors = m.ancestorsLocked(admission)
+	job.ancestors = m.ancestorsLocked(req.AdmissionContext)
 	if conflict := m.leaseConflictLocked(resourceKey, access, job.ancestors); conflict != nil {
 		m.mu.Unlock()
 		cancel()
@@ -370,7 +363,7 @@ func (m *Manager) start(
 			m.mu.Unlock()
 			job.observe(&event)
 		}()
-		result, err = run(ctx, job.ID)
+		result, err = req.Run(ctx, job.ID)
 	}()
 
 	return snap, nil
@@ -416,6 +409,20 @@ func (m *Manager) Get(id string) (Snapshot, bool) {
 		return Snapshot{}, false
 	}
 	return snapshotJob(job), true
+}
+
+// JobDone returns a channel closed after the job runner returns and its final
+// result is published. Unlike StatusCanceled or StatusAbandoned, this signals
+// actual worker completion, not just a cancellation request or shutdown grace
+// expiry. The channel is read-only and remains valid after lookup.
+func (m *Manager) JobDone(id string) (<-chan struct{}, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	job, ok := m.jobs[id]
+	if !ok {
+		return nil, false
+	}
+	return job.done, true
 }
 
 // SetDiagnosticIdentity associates a detached job with its launch execution.
@@ -1129,10 +1136,13 @@ func snapshotJob(job *Job) Snapshot {
 		Kind:           job.Kind,
 		Task:           job.Task,
 		Agent:          job.Agent,
+		Model:          job.Model,
 		SessionID:      job.SessionID,
 		Operation:      job.Operation,
 		ResourceKey:    job.ResourceKey,
 		Access:         job.Access,
+		Limit:          job.Limit,
+		OutputPath:     job.OutputPath,
 		Status:         job.Status,
 		Created:        job.Created,
 		Updated:        job.Updated,

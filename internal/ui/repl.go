@@ -443,7 +443,8 @@ const helpText = `commands:
   /auto            alias for /agent auto
   /handoff [-a agent] [-m model] [message]
                     hand off the recorded plan with optional implementation guidance
-  /background [id] list background jobs, inspect one, or cancel with "cancel <id>"
+  /background [id|tail [-f] [-n N|-N] <id> [n]|cancel <id>]
+                    list, inspect, tail or follow live output, or cancel background jobs
   /goal [text]     set, view, clear, pause, or resume the active autonomous goal
   /skills          list available skills
   /vi on|off       enable or disable vi-style prompt editing
@@ -5566,7 +5567,8 @@ func (app *App) backgroundCommand(arg string) {
 		fmt.Fprintln(app.Errw, app.backgroundList())
 		return
 	}
-	if fields[0] == "cancel" {
+	switch fields[0] {
+	case "cancel":
 		if len(fields) < 2 {
 			fmt.Fprintln(app.Errw, "[background: cancel requires a job id]")
 			return
@@ -5577,14 +5579,71 @@ func (app *App) backgroundCommand(arg string) {
 			return
 		}
 		fmt.Fprintf(app.Errw, "[background: %s %s]\n", snap.ID, snap.Status)
-		return
+	case "tail":
+		opts, err := parseBackgroundTailArgs(fields[1:])
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[background: %v]\n", err)
+			return
+		}
+		snap, ok := app.Background.Get(opts.id)
+		if !ok {
+			fmt.Fprintf(app.Errw, "[background: unknown job %q]\n", opts.id)
+			return
+		}
+		if opts.follow {
+			app.followBackgroundOutput(snap, opts.lines)
+			return
+		}
+		out, err := backgroundTail(snap, opts.lines)
+		if err != nil {
+			fmt.Fprintf(app.Errw, "[background: %v]\n", err)
+			return
+		}
+		fmt.Fprintln(app.Errw, out)
+	default:
+		snap, ok := app.Background.Get(fields[0])
+		if !ok {
+			fmt.Fprintf(app.Errw, "[background: unknown job %q]\n", fields[0])
+			return
+		}
+		fmt.Fprintln(app.Errw, formatBackgroundSnapshot(snap, time.Now()))
 	}
-	snap, ok := app.Background.Get(fields[0])
-	if !ok {
-		fmt.Fprintf(app.Errw, "[background: unknown job %q]\n", fields[0])
-		return
+}
+
+const (
+	backgroundTailDefaultLines   = 10
+	backgroundTailMaxBytes       = 64 << 10
+	backgroundInspectPromptRunes = 300
+)
+
+// backgroundTail returns the last n lines of a running job's retained live
+// output. Child-process output may carry terminal escapes; those never belong
+// in user-facing renderings here, so they are stripped.
+func backgroundTail(job background.Snapshot, n int) (string, error) {
+	f, err := openBackgroundOutput(job)
+	if err != nil {
+		return "", err
 	}
-	fmt.Fprintln(app.Errw, formatBackgroundSnapshot(snap))
+	defer f.Close()
+	data, _, truncated, err := readBackgroundTail(f, n)
+	if err != nil {
+		return "", fmt.Errorf("job %s output unavailable: %w", job.ID, err)
+	}
+	if len(data) == 0 {
+		return "(no output yet)", nil
+	}
+	out := stripBackgroundEscapes(strings.TrimSuffix(string(data), "\n"))
+	if truncated {
+		out = "[output truncated to last 64 KiB]\n" + out
+	}
+	return out, nil
+}
+
+// stripBackgroundEscapes removes terminal escape sequences and control
+// characters (except tab/newline) from tailed child output.
+func stripBackgroundEscapes(s string) string {
+	var filter backgroundOutputFilter
+	return filter.text([]byte(s)) + filter.finish()
 }
 
 func (app *App) backgroundList() string {
@@ -5602,21 +5661,86 @@ func (app *App) backgroundList() string {
 		if job.Agent != "" {
 			fmt.Fprintf(&b, "  %s", job.Agent)
 		}
+		if task := strings.TrimSpace(stripBackgroundEscapes(job.Task)); task != "" {
+			fmt.Fprintf(&b, "  %s", truncateRunes(task, 60))
+		}
 		if job.Result.TranscriptPath != "" {
 			fmt.Fprintf(&b, "  %s", job.Result.TranscriptPath)
 		}
 	}
-	return b.String()
+	return stripBackgroundEscapes(b.String())
 }
 
-func formatBackgroundSnapshot(job background.Snapshot) string {
+// backgroundTaskLabel renders the job's task with a per-kind label: what a
+// shell job runs, what a fetch retrieves, or what a delegate was asked to do.
+func backgroundTaskLabel(job background.Snapshot) string {
+	task := strings.TrimSpace(stripBackgroundEscapes(job.Task))
+	if task == "" {
+		return ""
+	}
+	switch job.Kind {
+	case "shell":
+		return "command: " + task
+	case "web_fetch":
+		return "url: " + task
+	default:
+		return "prompt: " + truncateRunes(task, backgroundInspectPromptRunes)
+	}
+}
+
+func truncateRunes(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max]) + "…"
+}
+
+func backgroundDuration(d time.Duration) string {
+	if d < time.Second {
+		return d.Round(time.Millisecond).String()
+	}
+	return d.Round(time.Second).String()
+}
+
+func formatBackgroundSnapshot(job background.Snapshot, now time.Time) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "[background: %s %s]", job.ID, job.Status)
 	if job.Kind != "" {
 		fmt.Fprintf(&b, "\nkind: %s", job.Kind)
 	}
+	if task := backgroundTaskLabel(job); task != "" {
+		fmt.Fprintf(&b, "\n%s", task)
+	}
 	if job.Agent != "" {
 		fmt.Fprintf(&b, "\nagent: %s", job.Agent)
+	}
+	if job.Model != "" {
+		fmt.Fprintf(&b, "\nmodel: %s", job.Model)
+	}
+	fmt.Fprintf(&b, "\nstarted: %s", job.Created.Format("2006-01-02 15:04:05"))
+	if job.Status == background.StatusRunning {
+		fmt.Fprintf(&b, "\nelapsed: %s", backgroundDuration(now.Sub(job.Created)))
+	} else if !job.Updated.IsZero() {
+		fmt.Fprintf(&b, "\nfinished: %s", job.Updated.Format("2006-01-02 15:04:05"))
+		if d := job.Updated.Sub(job.Created); d > 0 {
+			fmt.Fprintf(&b, "\nduration: %s", backgroundDuration(d))
+		}
+	}
+	if job.Limit > 0 {
+		if job.Status == background.StatusRunning {
+			switch remaining := job.Limit - now.Sub(job.Created); {
+			case remaining <= 0:
+				fmt.Fprintf(&b, "\nlimit: %s (overdue)", backgroundDuration(job.Limit))
+			default:
+				fmt.Fprintf(&b, "\nlimit: %s (~%s remaining)", backgroundDuration(job.Limit), backgroundDuration(remaining))
+			}
+		} else {
+			fmt.Fprintf(&b, "\nlimit: %s", backgroundDuration(job.Limit))
+		}
+	}
+	if job.OutputPath != "" && job.Status == background.StatusRunning {
+		fmt.Fprintf(&b, "\noutput: tail live output with /background tail %s", job.ID)
 	}
 	if job.Result.TranscriptPath != "" {
 		fmt.Fprintf(&b, "\ntranscript: %s", job.Result.TranscriptPath)
@@ -5627,7 +5751,7 @@ func formatBackgroundSnapshot(job background.Snapshot) string {
 	if strings.TrimSpace(job.Result.Text) != "" {
 		fmt.Fprintf(&b, "\nresult:\n%s", strings.TrimSpace(job.Result.Text))
 	}
-	return b.String()
+	return stripBackgroundEscapes(b.String())
 }
 
 // mcpServerLabel extracts a display-friendly server label from an MCP tool

@@ -4157,6 +4157,284 @@ func TestREPLBackgroundCommandListsNoJobs(t *testing.T) {
 	}
 }
 
+func TestFormatBackgroundSnapshotRunningShell(t *testing.T) {
+	created := time.Date(2026, 9, 22, 21, 1, 0, 0, time.UTC)
+	now := created.Add(2*time.Minute + 3*time.Second)
+	job := background.Snapshot{
+		ID:         "bg_1",
+		Kind:       "shell",
+		Task:       "make test",
+		Status:     background.StatusRunning,
+		Created:    created,
+		Updated:    created,
+		Limit:      20 * time.Minute,
+		OutputPath: "/tmp/harness-bg-output-test",
+	}
+	out := formatBackgroundSnapshot(job, now)
+	for _, want := range []string{
+		"[background: bg_1 running]",
+		"kind: shell",
+		"command: make test",
+		"started: 2026-09-22 21:01:00",
+		"elapsed: 2m3s",
+		"limit: 20m0s (~17m57s remaining)",
+		"output: tail live output with /background tail bg_1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("snapshot missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatBackgroundSnapshotCompletedDelegate(t *testing.T) {
+	created := time.Date(2026, 9, 22, 21, 1, 0, 0, time.UTC)
+	updated := created.Add(3*time.Minute + 12*time.Second)
+	prompt := strings.Repeat("x", 400)
+	job := background.Snapshot{
+		ID:      "bg_2",
+		Kind:    "delegate",
+		Task:    prompt,
+		Agent:   "explore",
+		Model:   "anthropic/claude-sonnet-4-6",
+		Status:  background.StatusCompleted,
+		Created: created,
+		Updated: updated,
+		Result:  tools.BackgroundJobResult{Text: "child report", TranscriptPath: "/tmp/child-raw.ndjson"},
+	}
+	out := formatBackgroundSnapshot(job, updated)
+	if strings.Contains(out, prompt) {
+		t.Errorf("prompt should be truncated:\n%s", out)
+	}
+	for _, want := range []string{
+		"[background: bg_2 completed]",
+		"agent: explore",
+		"model: anthropic/claude-sonnet-4-6",
+		"prompt: " + strings.Repeat("x", 300) + "…",
+		"finished: 2026-09-22 21:04:12",
+		"duration: 3m12s",
+		"transcript: /tmp/child-raw.ndjson",
+		"result:\nchild report",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("snapshot missing %q:\n%s", want, out)
+		}
+	}
+	for _, unwanted := range []string{"elapsed:", "limit:", "output:"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("completed delegate should not show %q:\n%s", unwanted, out)
+		}
+	}
+}
+
+func TestBackgroundTail(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "out")
+	content := "l1\n" + "l2\x1b[31mred\x1b[0m\n" + "l3\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	job := background.Snapshot{ID: "bg_3", Kind: "shell", Status: background.StatusRunning, OutputPath: path}
+	out, err := backgroundTail(job, 2)
+	if err != nil {
+		t.Fatalf("backgroundTail: %v", err)
+	}
+	if want := "l2red\nl3"; out != want {
+		t.Fatalf("tail = %q, want %q", out, want)
+	}
+
+	if _, err := backgroundTail(background.Snapshot{ID: "bg_4"}, 10); err == nil {
+		t.Fatal("tail without an output path must fail")
+	}
+
+	empty := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(empty, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err = backgroundTail(background.Snapshot{ID: "bg_5", OutputPath: empty}, 10)
+	if err != nil {
+		t.Fatalf("backgroundTail empty: %v", err)
+	}
+	if out != "(no output yet)" {
+		t.Fatalf("empty tail = %q", out)
+	}
+}
+
+func TestBackgroundTailBoundedOutput(t *testing.T) {
+	for _, tc := range []struct {
+		name, content, want string
+		lines               int
+	}{
+		{"many lines", strings.Repeat("old line\n", backgroundTailMaxBytes) + "last\n", "last", 1},
+		{"huge line", strings.Repeat("x", 2*backgroundTailMaxBytes) + "\n", "[output truncated to last 64 KiB]\n" + strings.Repeat("x", backgroundTailMaxBytes-1), 1},
+		{"trailing blank line", "first\n\n", "", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "output")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			out, err := backgroundTail(background.Snapshot{ID: "bg_test", OutputPath: path}, tc.lines)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if out != tc.want {
+				t.Fatalf("tail mismatch: got %d bytes, want %d", len(out), len(tc.want))
+			}
+		})
+	}
+}
+
+func TestBackgroundMetadataStripsTerminalControls(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	mgr := background.NewManager(background.Options{})
+	app.Background = mgr
+	// Escape payload longer than the preview limit checks sanitization happens
+	// before truncation, rather than leaving an unterminated OSC in the preview.
+	payload := "\x1b]52;c;" + strings.Repeat("A", 400) + "\x07\x1b[31mvisible\x1b[0m\u009b\r"
+	release := make(chan struct{})
+	done := make(chan struct{})
+	defer func() { close(release); <-done }()
+	job, err := mgr.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell", Description: payload, Agent: payload, Model: payload,
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			defer close(done)
+			<-release
+			return tools.BackgroundJobResult{}, nil
+		},
+	})
+	if err != nil {
+		// No runner was started, so unblock deferred cleanup.
+		close(done)
+		t.Fatal(err)
+	}
+	snap, ok := mgr.Get(job.ID)
+	if !ok {
+		t.Fatal("job missing")
+	}
+	for _, kind := range []string{"shell", "web_fetch", "delegate"} {
+		snap.Kind = kind
+		if label := backgroundTaskLabel(snap); !strings.HasSuffix(label, "visible") || strings.Contains(label, "A") {
+			t.Errorf("unsafe or prematurely truncated label: %q", label)
+		}
+	}
+	for _, text := range []string{app.backgroundList(), formatBackgroundSnapshot(snap, time.Now())} {
+		if !strings.Contains(text, "visible") || strings.Contains(text, "AAAA") {
+			t.Errorf("metadata not sanitized: %q", text)
+		}
+		for _, r := range text {
+			if (r < 0x20 && r != '\n' && r != '\t') || (r >= 0x7f && r <= 0x9f) {
+				t.Errorf("terminal control %U in %q", r, text)
+			}
+		}
+	}
+}
+
+func TestREPLBackgroundTailFollowCompletion(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	mgr := background.NewManager(background.Options{})
+	app.Background = mgr
+	path := filepath.Join(t.TempDir(), "output")
+	if err := os.WriteFile(path, []byte("initial line\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	job, err := mgr.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell", OutputPath: path,
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			<-release
+			f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+			if err != nil {
+				return tools.BackgroundJobResult{}, err
+			}
+			_, err = f.WriteString("final line\n")
+			f.Close()
+			os.Remove(path)
+			return tools.BackgroundJobResult{Text: "done"}, err
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	following := make(chan struct{})
+	app.BeforeEditor = func() { close(following) }
+	codeCh := make(chan int, 1)
+	go func() {
+		script := "/background tail -f -1 " + job.ID + "\n/background " + job.ID + "\n/exit\n"
+		codeCh <- Run(strings.NewReader(script), app, nil)
+	}()
+	select {
+	case <-following:
+	case <-time.After(5 * time.Second):
+		t.Fatal("follow did not start")
+	}
+	releaseOnce.Do(func() { close(release) })
+	if code := waitRun(t, codeCh); code != 0 {
+		t.Fatalf("Run returned %d", code)
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("follow invoked the model %d times", fp.RequestCount())
+	}
+	if got := errw.String(); strings.Count(got, "final line") != 1 || !strings.Contains(got, "[background: "+job.ID+" completed]") {
+		t.Fatalf("missing or duplicated completion output: %q", got)
+	}
+}
+
+func TestREPLBackgroundInspectAndTailCommands(t *testing.T) {
+	var out, errw bytes.Buffer
+	fp := llmtest.New("fake")
+	app := newTestApp(t, &out, &errw, fp)
+	mgr := background.NewManager(background.Options{})
+	app.Background = mgr
+
+	outputPath := filepath.Join(t.TempDir(), "live-output")
+	release := make(chan struct{})
+	job, err := mgr.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind:        "shell",
+		Description: "make test",
+		Limit:       time.Hour,
+		OutputPath:  outputPath,
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			<-release
+			return tools.BackgroundJobResult{Text: "build ok\n[exit code: 0]"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	if err := os.WriteFile(outputPath, []byte("compile line\ntest line\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	script := "/background " + job.ID + "\n/background tail " + job.ID + "\n/exit\n"
+	if code := Run(strings.NewReader(script), app, nil); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("/background should not invoke the model, got %d requests", fp.RequestCount())
+	}
+	got := errw.String()
+	for _, want := range []string{
+		"[background: " + job.ID + " running]",
+		"kind: shell",
+		"command: make test",
+		"started: ",
+		"elapsed: ",
+		"limit: 1h0m0s (~",
+		"output: tail live output with /background tail " + job.ID,
+		"compile line",
+		"test line",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("errw missing %q:\n%s", want, got)
+		}
+	}
+	close(release)
+}
+
 func TestREPLEOFSavesAndExitsZero(t *testing.T) {
 	var out, errw bytes.Buffer
 	fp := llmtest.New("fake", llmtest.Step{

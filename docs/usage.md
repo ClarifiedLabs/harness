@@ -1839,8 +1839,9 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/plan` | alias for `/agent plan` |
 | `/auto` | alias for `/agent auto` |
 | `/handoff [-a agent] [-m model] [message]` | review the latest recorded plan and supplementary context, then after approval switch to an implementation agent, apply optional agent/model overrides and user guidance, and start the implementation turn |
-| `/background` | list background jobs |
-| `/background <id>` | show a background job's status, result, and transcript path |
+| `/background` | list background jobs (id, status, kind, agent, task preview) |
+| `/background <id>` | show a background job: status, kind-specific task (shell command, fetch URL, or delegate prompt), agent and model for delegates, start/finish times, elapsed or total duration, timeout limit, live-output hint, transcript path, error, and result |
+| `/background tail [-f] [-n N\|-N] <id> [n]` | print the last 10 lines by default, or select a count with `-100`, `-n 100`, or the legacy `<id> 100` form; the initial tail reads at most the final 64 KiB and marks byte-limit truncation. Add `-f` (or `--follow`) to stream new output until the job ends or Ctrl-C stops following without canceling the job. Only single-command shell jobs retain live output; terminal controls are stripped |
 | `/background cancel <id>` | cancel a running background job |
 | `/goal` | show the current goal and status |
 | `/goal <text>` | set or replace the goal and immediately start working on it; only exact `clear`, `pause`, and `resume` arguments are subcommands |

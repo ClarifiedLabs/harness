@@ -1134,6 +1134,9 @@ func TestDelegateBackgroundStartsJob(t *testing.T) {
 	if starter.req.Kind != "delegate" || starter.req.Description != "inspect asynchronously" || starter.req.Agent != "explore" || !starter.req.WaitForPrompt {
 		t.Fatalf("background request = %+v", starter.req)
 	}
+	if starter.req.Model != "claude-opus-4-8" {
+		t.Fatalf("background request model = %q, want claude-opus-4-8", starter.req.Model)
+	}
 	wantResource, err := tools.CanonicalBackgroundResource(resource)
 	if err != nil {
 		t.Fatalf("canonical resource: %v", err)

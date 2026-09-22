@@ -105,6 +105,7 @@ func (t webFetch) Run(ctx context.Context, input json.RawMessage) (string, error
 			Execution:        execution.FromContext(ctx),
 			AdmissionContext: ctx,
 			Description:      url,
+			Limit:            time.Duration(resolveWebFetchTimeoutSeconds(timeoutSeconds)) * webFetchTimeoutUnit,
 			Run: func(ctx context.Context, id string) (BackgroundJobResult, error) {
 				out, err := doWebFetch(ctx, url, maxBytes, timeoutSeconds)
 				return BackgroundJobResult{Text: out}, err
