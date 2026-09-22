@@ -912,6 +912,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		app.stopBackgroundJobs()
 		app.drainMaintenanceUsage()
 		app.saveOrWarn(app.SessionPath)
+		if loop.promptPrinted {
+			fmt.Fprintln(app.Errw)
+			loop.promptPrinted = false
+		}
 		app.printExitUsageSummary()
 		return code
 	}
@@ -1578,6 +1582,10 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			continue
 		}
 		if loop.inputEnded {
+			if loop.promptPrinted {
+				fmt.Fprintln(app.Errw)
+				loop.promptPrinted = false
+			}
 			warnInputErr()
 			return finish(ExitOK)
 		}
@@ -4553,6 +4561,14 @@ func (app *App) usageKey() string {
 // cumulative accounting and to feed the renderer's per-prompt line so a
 // mid-prompt model switch is not mispriced against a stale model (r63).
 func (app *App) promptCost(u llm.Usage) (float64, bool) {
+	if u.CostKnown {
+		return u.CostUSD, true
+	}
+	if app.Registry != nil {
+		if cost, known := app.Registry.Cost(app.usageKey(), u); known {
+			return cost, true
+		}
+	}
 	return u.CostUSD, u.CostKnown
 }
 
@@ -4561,7 +4577,12 @@ func (app *App) addUsage(u agent.PromptUsage) {
 }
 
 func (app *App) addUsageForModel(u agent.PromptUsage, modelKey string) {
-	cost, _ := app.promptCost(u.Usage)
+	cost := u.Usage.CostUSD
+	if !u.Usage.CostKnown && app.Registry != nil {
+		if rcost, known := app.Registry.Cost(modelKey, u.Usage); known {
+			cost = rcost
+		}
+	}
 	addTotals(&app.usage, u.Usage, cost)
 	app.usage.Compactions += u.Compactions
 	if app.usageByModel == nil {
@@ -5215,7 +5236,8 @@ func (app *App) usageSummary() string {
 
 // usageReport renders cumulative session usage under the given label. With at
 // most one model it is a single aggregate line; with several it breaks
-// down per model target and always ends with the session-total cost.
+// down per model target and ends with the session total, including cost
+// when non-zero.
 func (app *App) usageReport(label string) string {
 	var b strings.Builder
 	if len(app.usageByModel) <= 1 {
@@ -5227,7 +5249,11 @@ func (app *App) usageReport(label string) string {
 	for _, key := range slices.Sorted(maps.Keys(app.usageByModel)) {
 		writeUsageTotals(&b, "\n  "+key+": ", app.usageByModel[key], "")
 	}
-	fmt.Fprintf(&b, "\n  total · %s · $%.4f]", compactionPhrase(app.usage.Compactions), app.usage.CostUSD)
+	fmt.Fprintf(&b, "\n  total · %s", compactionPhrase(app.usage.Compactions))
+	if app.usage.CostUSD > 0 {
+		fmt.Fprintf(&b, " · $%.4f", app.usage.CostUSD)
+	}
+	b.WriteByte(']')
 	return b.String()
 }
 
