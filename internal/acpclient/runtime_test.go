@@ -884,6 +884,75 @@ func TestSessionMetadataBeforeCreationAdmissionIsRejected(t *testing.T) {
 	}
 }
 
+func TestFinishAfterTerminalPrefersAnsweredPrompt(t *testing.T) {
+	late := errors.New("acp client: rejected late session/update")
+	newTerminalRuntime := func() (*Runtime, *promptState) {
+		t.Helper()
+		runtime := &Runtime{done: make(chan struct{}), closeFinished: make(chan struct{})}
+		runtime.signalTerminal(late)
+		state := &promptState{sent: make(chan struct{})}
+		runtime.mu.Lock()
+		runtime.active = state
+		runtime.mu.Unlock()
+		return runtime, state
+	}
+	body, err := json.Marshal(acp.PromptResponse{StopReason: acp.StopReasonEndTurn})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Run("answered prompt stays reusable", func(t *testing.T) {
+		runtime, state := newTerminalRuntime()
+		response := make(chan callResult)
+		result := make(chan struct {
+			out agentsession.Outcome
+			err error
+		}, 1)
+		// An unbuffered send forces the terminal path to wait for the forwarding
+		// hop rather than merely checking for an already-buffered response.
+		go func() {
+			out, err := runtime.finishAfterTerminal(state, response, nil, runtime.terminalError)
+			result <- struct {
+				out agentsession.Outcome
+				err error
+			}{out, err}
+		}()
+		select {
+		case response <- callResult{body: body}:
+		case got := <-result:
+			t.Fatalf("returned before response delivery: %+v", got)
+		case <-testContext(t).Done():
+			t.Fatal("timed out forwarding response")
+		}
+		got := waitResult(t, result)
+		outcome, err := got.out, got.err
+		if err != nil || !outcome.Reusable || outcome.StopReason != string(acp.StopReasonEndTurn) {
+			t.Fatalf("finishAfterTerminal = %+v, %v, want reusable answered prompt", outcome, err)
+		}
+		if !errors.Is(runtime.Err(), late) {
+			t.Fatalf("runtime Err = %v, want late terminal cause preserved", runtime.Err())
+		}
+	})
+	t.Run("protocol error is preserved", func(t *testing.T) {
+		runtime, state := newTerminalRuntime()
+		rpcErr := jsonrpc.NewError(jsonrpc.CodeInternal, "prompt failed")
+		response := make(chan callResult, 1)
+		response <- callResult{err: rpcErr}
+		outcome, err := runtime.finishAfterTerminal(state, response, context.Canceled, runtime.terminalError)
+		if outcome.Reusable || !errors.Is(err, rpcErr) || !errors.Is(err, context.Canceled) {
+			t.Fatalf("finishAfterTerminal = %+v, %v, want protocol error and cancellation", outcome, err)
+		}
+	})
+	t.Run("transport failure reports terminal cause", func(t *testing.T) {
+		runtime, state := newTerminalRuntime()
+		response := make(chan callResult, 1)
+		response <- callResult{err: jsonrpc.ErrPeerClosed}
+		_, err := runtime.finishAfterTerminal(state, response, nil, runtime.terminalError)
+		if !errors.Is(err, late) {
+			t.Fatalf("finishAfterTerminal err = %v, want late terminal cause", err)
+		}
+	})
+}
+
 func TestCancelPromptBeforeSendTearsDownRuntime(t *testing.T) {
 	// The prompt Call outlives the prompt context, so when a cancellation
 	// arrives before the writer managed to send the request, the abandoned Call

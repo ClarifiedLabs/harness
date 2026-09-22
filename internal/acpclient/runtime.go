@@ -291,12 +291,7 @@ func (r *Runtime) Prompt(ctx context.Context, prompt agentsession.Prompt, sink a
 	case <-ctx.Done():
 		return r.cancelPrompt(ctx, state, response)
 	case <-r.done:
-		select {
-		case got := <-response:
-			return r.finishPrompt(state, got, nil)
-		default:
-		}
-		return r.failPrompt(state, r.terminalError())
+		return r.finishAfterTerminal(state, response, nil, r.terminalError)
 	}
 }
 
@@ -389,12 +384,7 @@ func (r *Runtime) cancelPrompt(ctx context.Context, state *promptState, response
 	case got := <-response:
 		return r.finishPrompt(state, got, ctx.Err())
 	case <-r.done:
-		select {
-		case got := <-response:
-			return r.finishPrompt(state, got, ctx.Err())
-		default:
-		}
-		return r.failPrompt(state, errors.Join(ctx.Err(), r.Err()))
+		return r.finishAfterTerminal(state, response, ctx.Err(), r.Err)
 	case <-after(r.opts.cancelGrace):
 		return r.failPrompt(state, fmt.Errorf("acp client: cancellation was not confirmed within %s: %w", r.opts.cancelGrace, ctx.Err()))
 	}
@@ -424,6 +414,21 @@ func (r *Runtime) finishPrompt(state *promptState, got callResult, cancellation 
 func (r *Runtime) failPrompt(state *promptState, err error) (agentsession.Outcome, error) {
 	text, stateErr := r.detachPrompt(state)
 	return agentsession.Outcome{Result: tools.BackgroundJobResult{Text: text}}, errors.Join(err, stateErr)
+}
+
+// finishAfterTerminal resolves an in-flight prompt after the runtime turned
+// terminal. The read loop delivers the prompt response to the peer waiter
+// before it observes a subsequent late update, but forwarding
+// that response to the prompt channel needs one more scheduling hop. Waiting
+// for it (rather than racing a non-blocking check) keeps an already-answered
+// prompt reusable; only a transport failure falls back to the terminal cause.
+// Terminal paths tear down the peer, which unblocks Call even without a reply.
+func (r *Runtime) finishAfterTerminal(state *promptState, response <-chan callResult, cancellation error, terminal func() error) (agentsession.Outcome, error) {
+	got := <-response
+	if !errors.Is(got.err, jsonrpc.ErrPeerClosed) {
+		return r.finishPrompt(state, got, cancellation)
+	}
+	return r.failPrompt(state, errors.Join(cancellation, terminal()))
 }
 
 func (r *Runtime) detachPrompt(state *promptState) (string, error) {
