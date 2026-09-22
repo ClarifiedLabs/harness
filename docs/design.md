@@ -3294,7 +3294,8 @@ Callers retain partial-override, response-state reset/retention, and prewarm pol
   line painted with `\r\x1b[2K` and repainted ~once a second by a `time.Ticker`
   goroutine (with a stop-and-drain handshake): `[turn: 1 · 12s · ctx 30% 60.0k/200.0k │ prompt 18s]`,
   `[tool: shell argv=["rg","x","."] · 3s]`, `[context: compacting · 3s]`, or
-  `[background: waiting for delegates · 12s │ prompt 30s]`, with the same compact key
+  `[background: waiting for delegates · 12s │ prompt 30s]`, with durations rounded to whole seconds
+  (`105s`; over 999s as `16m 40s`, over an hour as `13h 42m 54s`), with the same compact key
   arguments as the completed tool summary and the running context-window percentage
   and compact used/window token counts appended for model waits
   (`· ctx 30% 60.0k/200.0k`). Active delegate registry state is appended to the
@@ -3384,7 +3385,7 @@ Callers retain partial-override, response-state reset/retention, and prewarm pol
 - Large estimated contexts, payloads, or tool schemas print one warning per
   prompt because they can materially slow first response latency.
 - Per-prompt usage line:
-  `[prompt: 3 turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · ctx 18.0k/128.0k · compactions 1 (2 total) · 4.3s]`
+  `[prompt: 3 turns · 12.4k (18.0k) in / 1.8k (2.6k) out · $0.071 ($0.101) · ctx 18.0k/128.0k · compactions 1 (2 total) · 4s]`
   (cost omitted for usage without known cost). The compaction segment follows
   context usage. It includes the prompt count only at 1 or more and the cumulative
   total only at 2 or more, and is omitted when neither qualifies. Counts include

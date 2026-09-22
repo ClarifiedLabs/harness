@@ -239,7 +239,7 @@ func TestTurnUsageLineShowsPromptTotal(t *testing.T) {
 		Context: agent.ContextEstimate{Total: 100_000, Window: 200_000},
 	}
 	got := TurnUsageLine(u, 6_000*time.Millisecond, 18_000*time.Millisecond, 0.096, true)
-	want := "[turn: 2 · 6.0s · $0.032 · ctx 50% 100.0k/200.0k │ prompt 18.0s · $0.096]"
+	want := "[turn: 2 · 6s · $0.032 · ctx 50% 100.0k/200.0k │ prompt 18s · $0.096]"
 	if got != want {
 		t.Fatalf("TurnUsageLine() = %q, want %q", got, want)
 	}
@@ -251,7 +251,42 @@ func TestTurnUsageLineOmitsPromptTotalWhenUnknown(t *testing.T) {
 		Usage: llm.Usage{InputTokens: 12_000, OutputTokens: 800},
 	}
 	got := TurnUsageLine(u, 6_000*time.Millisecond, 18_000*time.Millisecond, 0, false)
-	want := "[turn: 2 · 6.0s │ prompt 18.0s]"
+	want := "[turn: 2 · 6s │ prompt 18s]"
+	if got != want {
+		t.Fatalf("TurnUsageLine() = %q, want %q", got, want)
+	}
+}
+
+func TestHumanDurationFriendly(t *testing.T) {
+	tests := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{name: "zero", d: 0, want: "0s"},
+		{name: "subsecond rounds down", d: 400 * time.Millisecond, want: "0s"},
+		{name: "subsecond rounds up", d: 850 * time.Millisecond, want: "1s"},
+		{name: "negative clamps", d: -5 * time.Second, want: "0s"},
+		{name: "plain seconds", d: 105400 * time.Millisecond, want: "105s"},
+		{name: "rounds half up", d: 10500 * time.Millisecond, want: "11s"},
+		{name: "max plain seconds", d: 999 * time.Second, want: "999s"},
+		{name: "minutes seconds", d: 1000 * time.Second, want: "16m 40s"},
+		{name: "prompt example rounds", d: 49373700 * time.Millisecond, want: "13h 42m 54s"},
+		{name: "exact hour", d: 3600 * time.Second, want: "1h 0m 0s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HumanDuration(tt.d); got != tt.want {
+				t.Fatalf("HumanDuration(%v) = %q, want %q", tt.d, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestTurnUsageLineFormatsLargePromptFriendly(t *testing.T) {
+	u := agent.TurnUsage{Turn: 582}
+	got := TurnUsageLine(u, 105400*time.Millisecond, 49373700*time.Millisecond, 0, false)
+	want := "[turn: 582 · 105s │ prompt 13h 42m 54s]"
 	if got != want {
 		t.Fatalf("TurnUsageLine() = %q, want %q", got, want)
 	}

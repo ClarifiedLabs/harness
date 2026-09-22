@@ -1291,9 +1291,9 @@ func (r *Renderer) statusTextLocked(activity delegate.ActivitySnapshot) (text st
 	var compactBase strings.Builder
 	var suffix strings.Builder
 	if r.statusActive && r.statusLabel != "" {
-		elapsedSecs := nonNegativeSeconds(now.Sub(r.statusStart))
-		fmt.Fprintf(&base, "[%s · %ds", r.statusLabel, elapsedSecs)
-		fmt.Fprintf(&compactBase, "[%s · %ds", compactWaitLabel(r.statusLabel), elapsedSecs)
+		elapsed := sessionrec.HumanDuration(now.Sub(r.statusStart))
+		fmt.Fprintf(&base, "[%s · %s", r.statusLabel, elapsed)
+		fmt.Fprintf(&compactBase, "[%s · %s", compactWaitLabel(r.statusLabel), elapsed)
 		if used := contextUsed(r.statusCtx); r.statusCtx.Window > 0 && used > 0 {
 			fmt.Fprintf(&base, " · ctx %d%% %s/%s", contextPercent(r.statusCtx), humanTokens(used), humanTokens(r.statusCtx.Window))
 		}
@@ -1309,7 +1309,7 @@ func (r *Renderer) statusTextLocked(activity delegate.ActivitySnapshot) (text st
 	// "│" divider and placed last so the turn's own elapsed time and the running
 	// prompt total are easy to tell apart at a glance.
 	if r.statusActive && !r.promptStart.IsZero() {
-		fmt.Fprintf(&suffix, " │ prompt %ds", nonNegativeSeconds(now.Sub(r.promptStart)))
+		fmt.Fprintf(&suffix, " │ prompt %s", sessionrec.HumanDuration(now.Sub(r.promptStart)))
 	}
 
 	maxW := r.outputWidth() - 1
@@ -1574,13 +1574,6 @@ func formatRetryDelay(milliseconds int64) string { return sessionrec.FormatRetry
 // cursor stays visible (a trailing "…" marks the hidden tail) when the cursor
 // moves ahead of that window. The window is always clamped to a single row so the
 // \r\x1b[2K redraw and the cursor park stay correct.
-func nonNegativeSeconds(d time.Duration) int {
-	secs := int(d.Seconds())
-	if secs < 0 {
-		return 0
-	}
-	return secs
-}
 
 func clipStatusLine(prefix, input string, cursor int, maxW int) (text string, cursorCol int) {
 	if maxW <= 0 {
@@ -1979,7 +1972,7 @@ func ToolResultLine(call llm.ToolCall, result llm.ToolResult, cwd string) string
 
 // usageLine renders the per-prompt summary with cumulative totals (design §10):
 //
-//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · ctx 15.0k/128.0k · compactions 1 (2 total) · 4.3s]
+//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · ctx 15.0k/128.0k · compactions 1 (2 total) · 4s]
 //
 // Per-prompt values are shown first; parenthesised values are cumulative across
 // the session. Cumulative cost is omitted for models with no price entry;

@@ -288,7 +288,7 @@ func decodedBase64Size(data string) int {
 
 // UsageLine renders the per-prompt summary with cumulative totals (design §10):
 //
-//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · ctx 15.0k/128.0k · compactions 1 (2 total) · 4.3s]
+//	[prompt: 3 turns · 12.4k (15.0k) in / 1.8k (2.0k) out · $0.071 ($0.102) · ctx 15.0k/128.0k · compactions 1 (2 total) · 4s]
 //
 // Per-prompt values are shown first; parenthesised values are cumulative across
 // the session. Cumulative cost is omitted for models with no price entry;
@@ -349,7 +349,7 @@ func writePromptCompactions(b *strings.Builder, prompt, total int) {
 
 // TurnUsageLine renders the per-turn summary:
 //
-//	[turn: 1 · 1.0s · $0.003 · ctx 12% 15.0k/128.0k │ prompt 4.3s · $0.005]
+//	[turn: 1 · 1s · $0.003 · ctx 12% 15.0k/128.0k │ prompt 4s · $0.005]
 //
 // The trailing prompt cost is the running prompt total over completed turns so
 // far (including this turn); it is omitted when no turn cost is known yet.
@@ -420,12 +420,25 @@ func HumanTokens(n int) string {
 	return fmt.Sprintf("%.1fk", float64(n)/1000)
 }
 
-// HumanDuration renders an elapsed turn duration: "4.3s" or "850ms".
+// HumanDuration renders an elapsed duration for human viewing (turn and
+// prompt summaries, live counters, non-JSON replay). Values round to the
+// nearest second: 0-999s render as plain seconds ("105s"), larger values
+// break down into minutes/seconds ("16m 40s") or hours/minutes/seconds
+// ("13h 42m 54s", hour omitted when zero). Sub-second and negative
+// durations render as "0s". Structured session logs and machine-readable
+// JSON keep raw numeric durations; only display strings use this form.
 func HumanDuration(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
+	secs := int64(d.Round(time.Second).Seconds())
+	if secs < 0 {
+		return "0s"
 	}
-	return fmt.Sprintf("%.1fs", d.Seconds())
+	if secs <= 999 {
+		return fmt.Sprintf("%ds", secs)
+	}
+	if secs < 3600 {
+		return fmt.Sprintf("%dm %ds", secs/60, secs%60)
+	}
+	return fmt.Sprintf("%dh %dm %ds", secs/3600, (secs%3600)/60, secs%60)
 }
 
 // ModelRequestIssueLine renders the durable one-line model API diagnostic

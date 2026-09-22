@@ -537,7 +537,7 @@ func TestUsageLineKnownModelShowsCost(t *testing.T) {
 	if !strings.Contains(got, "($") {
 		t.Errorf("usage line should show cumulative cost in parens, got %q", got)
 	}
-	if !strings.Contains(got, "4.3s") {
+	if !strings.Contains(got, "4s") {
 		t.Errorf("usage line should show elapsed duration, got %q", got)
 	}
 }
@@ -1625,7 +1625,7 @@ func TestCompletedTurnCounterIncludesContextUsage(t *testing.T) {
 		Turn:    19,
 		Context: agent.ContextEstimate{Total: 100_000, Window: 200_000},
 	}, 10_500*time.Millisecond, 224_100*time.Millisecond, 0, false)
-	want := "[turn: 19 · 10.5s · ctx 50% 100.0k/200.0k │ prompt 224.1s]"
+	want := "[turn: 19 · 11s · ctx 50% 100.0k/200.0k │ prompt 224s]"
 	if got != want {
 		t.Fatalf("completed turn counter = %q, want %q", got, want)
 	}
@@ -1637,7 +1637,7 @@ func TestCompletedTurnCounterShowsCostWhenKnown(t *testing.T) {
 		Usage:   llm.Usage{InputTokens: 12_000, OutputTokens: 800, CostUSD: 0.032, CostKnown: true},
 		Context: agent.ContextEstimate{Total: 100_000, Window: 200_000},
 	}, 6_000*time.Millisecond, 18_000*time.Millisecond, 0.032, true)
-	want := "[turn: 2 · 6.0s · $0.032 · ctx 50% 100.0k/200.0k │ prompt 18.0s · $0.032]"
+	want := "[turn: 2 · 6s · $0.032 · ctx 50% 100.0k/200.0k │ prompt 18s · $0.032]"
 	if got != want {
 		t.Fatalf("completed turn counter = %q, want %q", got, want)
 	}
@@ -1651,7 +1651,7 @@ func TestCompletedTurnCounterOmitsCostWhenUnknown(t *testing.T) {
 	if strings.Contains(got, "$") {
 		t.Fatalf("unknown cost must not print a dollar figure, got %q", got)
 	}
-	want := "[turn: 2 · 6.0s │ prompt 18.0s]"
+	want := "[turn: 2 · 6s │ prompt 18s]"
 	if got != want {
 		t.Fatalf("completed turn counter = %q, want %q", got, want)
 	}
@@ -1693,6 +1693,24 @@ func TestLiveCounterTickAdvancesElapsed(t *testing.T) {
 
 	if got := errw.String(); !strings.Contains(got, "[turn: 1 · 12s │ prompt 12s]") {
 		t.Fatalf("tick should repaint with the elapsed seconds, got %q", got)
+	}
+}
+
+func TestLiveCounterFormatsLargeDurationsFriendly(t *testing.T) {
+	var out, errw bytes.Buffer
+	now := time.Date(2026, 6, 13, 16, 0, 0, 0, time.Local)
+	r := liveRenderer(&out, &errw, func() time.Time { return now })
+
+	r.StartPrompt()
+	now = now.Add(49373 * time.Second)
+	r.StartPromptRun()
+	r.TurnAttemptStart(582, 1, agent.ContextEstimate{})
+	now = now.Add(105 * time.Second)
+	r.tick()
+	defer r.StopProgress()
+
+	if got := errw.String(); !strings.Contains(got, "[turn: 582 · 105s │ prompt 13h 44m 38s]") {
+		t.Fatalf("tick should format large durations friendly, got %q", got)
 	}
 }
 
@@ -1962,7 +1980,7 @@ func TestUsageLineConditionallyShowsCompactionsAfterContext(t *testing.T) {
 				}
 				return
 			}
-			wantSuffix := " · ctx 100/1.0k" + tt.want + " · 1.0s]"
+			wantSuffix := " · ctx 100/1.0k" + tt.want + " · 1s]"
 			if !strings.HasSuffix(line, wantSuffix) {
 				t.Fatalf("usage line = %q, want suffix %q", line, wantSuffix)
 			}

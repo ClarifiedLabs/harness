@@ -450,7 +450,7 @@ While a prompt runs, status uses `[turn: N … │ prompt …]`; completion plac
 optional compaction segment immediately after `ctx …` and before elapsed time.
 The prompt count appears only when it is at least 1, the cumulative total appears
 only when it is at least 2, and the whole segment is omitted when neither value
-qualifies. For example: `ctx … · compactions 1 (3 total) · 4.3s`. On an
+qualifies. For example: `ctx … · compactions 1 (3 total) · 4s`. On an
 interactive TTY, active delegates are included in
 that same transient row as `delegate d1 <agent>: <activity>`. Concurrent runs
 show the count and most recently active child, for example
@@ -1888,7 +1888,10 @@ dollar cost (e.g. `[turn: 1 · 12s · $0.032 · ctx 30% 60.0k/200.0k │ prompt 
 once the model stream has closed and the final token totals are known; the
 trailing figure after the prompt elapsed time is the running prompt total over
 completed turns so far (including this turn). Both costs are omitted for
-models with no configured price.
+models with no configured price. Durations round to the nearest second with no
+decimals (`105s`); values over 999s break down into minutes and seconds
+(`16m 40s`), or hours, minutes, and seconds when over an hour
+(`13h 42m 54s`).
 It is erased the instant real output or a tool line appears, and is shown only at a
 TTY when not quiet.
 
