@@ -346,6 +346,7 @@ func TestReleaseWorkflowPublishesPackageRepos(t *testing.T) {
 		"PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}",
 		"repository: ClarifiedLabs/linux-packages",
 		"RPM_GPG_SIGN: '1'",
+		"rpm --dbpath \"$rpmdb\" --import",
 		"packages-publish-dry-run:",
 	} {
 		if !strings.Contains(text, want) {
@@ -378,6 +379,8 @@ func TestReleaseWorkflowPublishesPackageRepos(t *testing.T) {
 		"RPM_GPG_SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}",
 		"gpg --batch --gen-key",
 		"packages-dry-run@example.invalid",
+		// Non-root rpm -K cannot see keys imported via sudo (per-user rpmdb).
+		"sudo rpm --import",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("release workflow should not contain %q", forbidden)

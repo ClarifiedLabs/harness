@@ -722,7 +722,11 @@ jobs:
 
       - name: Verify signed RPMs
         run: |
-          sudo rpm --import linux-packages/harness-archive-keyring.asc
+          # Non-root rpm uses a per-user rpmdb on Ubuntu's rpm 4.18, so check
+          # against an explicit throwaway dbpath instead of sudo --import.
+          rpmdb="${RUNNER_TEMP}/rpmdb"
+          mkdir -p "$rpmdb"
+          rpm --dbpath "$rpmdb" --import linux-packages/harness-archive-keyring.asc
           shopt -s nullglob
           rpms=(dist/*.rpm)
           if [[ ${#rpms[@]} -ne 6 ]]; then
@@ -730,7 +734,11 @@ jobs:
             exit 1
           fi
           for rpm_file in "${rpms[@]}"; do
-            check="$(rpm -K "$rpm_file")"
+            if ! check="$(rpm --dbpath "$rpmdb" -K "$rpm_file" 2>&1)"; then
+              echo "$check"
+              echo "rpm -K failed for ${rpm_file}" >&2
+              exit 1
+            fi
             echo "$check"
             if ! grep -qF "digests signatures OK" <<<"$check"; then
               echo "${rpm_file} is not signed with the packages key" >&2
@@ -793,8 +801,12 @@ jobs:
 
       - name: Verify signed RPMs against the published keyring
         run: |
+          # Non-root rpm uses a per-user rpmdb on Ubuntu's rpm 4.18, so check
+          # against an explicit throwaway dbpath instead of sudo --import.
           curl -fsSL -o "${RUNNER_TEMP}/harness-archive-keyring.asc" https://raw.githubusercontent.com/ClarifiedLabs/linux-packages/main/harness-archive-keyring.asc
-          sudo rpm --import "${RUNNER_TEMP}/harness-archive-keyring.asc"
+          rpmdb="${RUNNER_TEMP}/rpmdb"
+          mkdir -p "$rpmdb"
+          rpm --dbpath "$rpmdb" --import "${RUNNER_TEMP}/harness-archive-keyring.asc"
           shopt -s nullglob
           rpms=(dist/*.rpm)
           if [[ ${#rpms[@]} -ne 6 ]]; then
@@ -802,7 +814,11 @@ jobs:
             exit 1
           fi
           for rpm_file in "${rpms[@]}"; do
-            check="$(rpm -K "$rpm_file")"
+            if ! check="$(rpm --dbpath "$rpmdb" -K "$rpm_file" 2>&1)"; then
+              echo "$check"
+              echo "rpm -K failed for ${rpm_file}" >&2
+              exit 1
+            fi
             echo "$check"
             if ! grep -qF "digests signatures OK" <<<"$check"; then
               echo "${rpm_file} is not signed with the packages key" >&2
