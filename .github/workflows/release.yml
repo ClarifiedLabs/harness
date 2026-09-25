@@ -29,6 +29,11 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Install package repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro createrepo-c rpm
+
       - name: Test
         run: go test ./...
 
@@ -70,11 +75,18 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         run: DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" scripts/release/build-binaries.sh
 
+      - name: Import package signing key
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}
+        run: printf '%s' "$PACKAGES_GPG_PRIVATE_KEY" | gpg --batch --import
+
       - name: Package archives
         env:
           VERSION: ${{ env.RELEASE_VERSION }}
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
+          RPM_GPG_SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
         run: |
           scripts/release/package-tarball.sh
           scripts/release/package-deb.sh
@@ -663,3 +675,176 @@ jobs:
             git commit -m "chore: update harness ${TAG}"
             git push
           fi
+
+  packages-publish:
+    name: publish package repositories
+    runs-on: ubuntu-24.04
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+    needs: publish
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Create packages token
+        id: packages-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.PACKAGES_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PACKAGES_APP_PRIVATE_KEY }}
+          owner: ClarifiedLabs
+          repositories: linux-packages
+          permission-contents: write
+
+      - name: Checkout linux-packages
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ClarifiedLabs/linux-packages
+          token: ${{ steps.packages-token.outputs.token }}
+          path: linux-packages
+
+      - name: Install package repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro createrepo-c rpm
+
+      - name: Import package signing key
+        env:
+          PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}
+        run: printf '%s' "$PACKAGES_GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify signed RPMs
+        run: |
+          sudo rpm --import linux-packages/harness-archive-keyring.asc
+          shopt -s nullglob
+          rpms=(dist/*.rpm)
+          if [[ ${#rpms[@]} -ne 6 ]]; then
+            echo "expected 6 rpms in dist, found ${#rpms[@]}" >&2
+            exit 1
+          fi
+          for rpm_file in "${rpms[@]}"; do
+            check="$(rpm -K "$rpm_file")"
+            echo "$check"
+            if ! grep -qF "digests signatures OK" <<<"$check"; then
+              echo "${rpm_file} is not signed with the packages key" >&2
+              exit 1
+            fi
+          done
+
+      - name: Update APT repository
+        env:
+          REPO_DIR: ${{ github.workspace }}/linux-packages/deb
+        run: scripts/release/apt-repo-update.sh
+
+      - name: Update RPM repository
+        env:
+          REPO_DIR: ${{ github.workspace }}/linux-packages
+        run: scripts/release/rpm-repo-update.sh
+
+      - name: Commit package repository update
+        env:
+          TAG: ${{ env.RELEASE_VERSION }}
+        run: |
+          cd linux-packages
+          git config user.name "${{ steps.packages-token.outputs.app-slug }}[bot]"
+          git config user.email "${{ steps.packages-token.outputs.app-slug }}[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No package repo changes for ${TAG}"
+          else
+            git commit -m "chore: add harness ${TAG} to package repositories"
+            git push
+          fi
+
+  packages-publish-dry-run:
+    name: publish package repositories dry run
+    runs-on: ubuntu-24.04
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    needs: build-linux
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Install package repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y reprepro createrepo-c rpm
+
+      - name: Download Linux packages
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-linux-*
+          path: dist
+          merge-multiple: true
+
+      - name: Exercise package repository scripts
+        env:
+          VERSION: ${{ env.RELEASE_VERSION }}
+        run: |
+          export GNUPGHOME="${RUNNER_TEMP}/gnupg"
+          mkdir -p "$GNUPGHOME"
+          chmod 700 "$GNUPGHOME"
+          gpg --batch --gen-key <<KEYPARAMS
+          Key-Type: RSA
+          Key-Length: 2048
+          Name-Real: Harness Dry Run Packages
+          Name-Email: packages-dry-run@example.invalid
+          Expire-Date: 0
+          %no-protection
+          %commit
+          KEYPARAMS
+
+          repo_root="${RUNNER_TEMP}/linux-packages"
+          mkdir -p "${repo_root}/deb/conf"
+          cat >"${repo_root}/deb/conf/distributions" <<DISTRIBUTIONS
+          Origin: Clarified Labs, Inc.
+          Label: harness
+          Suite: stable
+          Codename: stable
+          Components: main
+          Architectures: amd64 arm64
+          SignWith: yes
+          DISTRIBUTIONS
+          touch "${repo_root}/.nojekyll"
+
+          REPO_DIR="${repo_root}/deb" scripts/release/apt-repo-update.sh
+          REPO_DIR="${repo_root}" scripts/release/rpm-repo-update.sh
+
+          pkg_version="${VERSION#v}"
+          repo_list="$(reprepro -b "${repo_root}/deb" list stable)"
+          echo "$repo_list"
+          for pkg in harness harness-model-proxy harness-mcp-proxy; do
+            for arch in amd64 arm64; do
+              if ! grep -qF "|${arch}: ${pkg} ${pkg_version}" <<<"$repo_list"; then
+                echo "missing apt repo entry: ${pkg} ${pkg_version} ${arch}" >&2
+                exit 1
+              fi
+            done
+            for rpm_arch in x86_64 aarch64; do
+              rpm_file="${repo_root}/rpm/${rpm_arch}/${pkg}-${pkg_version}-1.${rpm_arch}.rpm"
+              if [[ ! -f "$rpm_file" ]]; then
+                echo "missing rpm in repo: ${rpm_file}" >&2
+                exit 1
+              fi
+            done
+          done
+
+          gpg --batch --verify "${repo_root}/deb/dists/stable/InRelease"
+          for rpm_arch in x86_64 aarch64; do
+            gpg --batch --verify \
+              "${repo_root}/rpm/${rpm_arch}/repodata/repomd.xml.asc" \
+              "${repo_root}/rpm/${rpm_arch}/repodata/repomd.xml"
+          done
+
+          find "$repo_root" -type f | sort
+          echo "Dry run only: package repositories built for ${VERSION}; nothing pushed"

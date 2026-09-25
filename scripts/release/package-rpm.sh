@@ -29,6 +29,26 @@ license_path="$(abs_path LICENSE)"
 rm -rf "$work_dir"
 mkdir -p "$dist_dir"
 
+sign_rpm() {
+	local rpm_path="$1"
+	local key_name="${GPG_KEY_NAME:-}"
+	if [[ -z "$key_name" ]]; then
+		key_name="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "uid" { print $10; exit }')"
+	fi
+	if [[ -z "$key_name" ]]; then
+		echo "RPM_GPG_SIGN=1 but no GPG secret key is imported; import one or set GPG_KEY_NAME" >&2
+		exit 1
+	fi
+	rpm --addsign --define "_gpg_name ${key_name}" "$rpm_path"
+	local signature
+	signature="$(rpm -qpi "$rpm_path" | grep '^Signature' || true)"
+	if [[ -z "$signature" || "$signature" == *"(none)"* ]]; then
+		echo "rpm signing failed for ${rpm_path}: ${signature:-no Signature line}" >&2
+		exit 1
+	fi
+	echo "signed ${rpm_path##*/}: ${signature}"
+}
+
 package_one() {
 	local name="$1"
 	local binary="$2"
@@ -75,6 +95,9 @@ SPEC
 	if [[ -z "$rpm_path" ]]; then
 		echo "rpmbuild did not produce an rpm for ${name}" >&2
 		exit 1
+	fi
+	if [[ "${RPM_GPG_SIGN:-0}" == "1" ]]; then
+		sign_rpm "$rpm_path"
 	fi
 	cp "$rpm_path" "${dist_dir}/${name}-${version}-1.${rpm_arch}.rpm"
 }
