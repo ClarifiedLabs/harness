@@ -345,7 +345,7 @@ func TestReleaseWorkflowPublishesPackageRepos(t *testing.T) {
 		"private-key: ${{ secrets.PACKAGES_APP_PRIVATE_KEY }}",
 		"PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}",
 		"repository: ClarifiedLabs/linux-packages",
-		"RPM_GPG_SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}",
+		"RPM_GPG_SIGN: '1'",
 		"packages-publish-dry-run:",
 	} {
 		if !strings.Contains(text, want) {
@@ -374,9 +374,47 @@ func TestReleaseWorkflowPublishesPackageRepos(t *testing.T) {
 	for _, forbidden := range []string{
 		"vars.PACKAGES_APP_CLIENT_ID",
 		"app-id: ${{ secrets.PACKAGES_APP_CLIENT_ID }}",
+		// Dry runs sign with the production key, like tag builds.
+		"RPM_GPG_SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}",
+		"gpg --batch --gen-key",
+		"packages-dry-run@example.invalid",
 	} {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("release workflow should not contain %q", forbidden)
 		}
+	}
+
+	// build-linux imports the signing key and signs RPMs on every run so
+	// release-ci exercises the production signing path.
+	buildLinuxStart := strings.Index(text, "\n  build-linux:\n")
+	if buildLinuxStart < 0 {
+		t.Fatal("release workflow should define a build-linux job")
+	}
+	buildLinuxEnd := len(text)
+	if loc := jobBoundary.FindStringIndex(text[buildLinuxStart+1:]); loc != nil {
+		buildLinuxEnd = buildLinuxStart + 1 + loc[0]
+	}
+	buildLinux := text[buildLinuxStart:buildLinuxEnd]
+	importIdx := strings.Index(buildLinux, "- name: Import package signing key")
+	packageIdx := strings.Index(buildLinux, "- name: Package archives")
+	if importIdx < 0 || packageIdx < 0 || importIdx > packageIdx {
+		t.Fatal("build-linux should import the package signing key before packaging")
+	}
+	importStep := buildLinux[importIdx:packageIdx]
+	if strings.Contains(importStep, "refs/tags/v") {
+		t.Fatal("build-linux signing key import should not be gated on tags; dry runs sign too")
+	}
+
+	// The dry-run publish job uses the production key (no throwaway key).
+	dryRunStart := strings.Index(text, "\n  packages-publish-dry-run:\n")
+	if dryRunStart < 0 {
+		t.Fatal("release workflow should define a packages-publish-dry-run job")
+	}
+	dryRun := text[dryRunStart:]
+	if !strings.Contains(dryRun, "PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}") {
+		t.Fatal("packages-publish-dry-run should import the production signing key")
+	}
+	if strings.Contains(dryRun, "export GNUPGHOME") {
+		t.Fatal("packages-publish-dry-run should use the default keyring with the production key")
 	}
 }

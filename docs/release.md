@@ -33,8 +33,11 @@ macOS arm64, macOS Intel, Linux amd64, and Linux arm64, SHA-256 checksums, and
 GitHub artifact attestations. On `v*` tag builds the `.rpm` packages are
 GPG-signed in `build-linux` before attestation and upload, so the GitHub
 release assets, `checksums.txt`, attestations, and the package repositories
-below all serve identical signed files. Dry-run RPMs stay unsigned, matching
-the unsigned macOS `.pkg` dry-run precedent. Homebrew formulae are split into
+below all serve identical signed files. RPMs are signed with the packages key
+on every run, including dry runs, so `release-ci` exercises the real signing
+path; only the macOS `.pkg` stays unsigned in dry runs, keeping Apple
+Developer ID and notarization secrets exclusive to tag builds. Homebrew
+formulae are split into
 `harness`, `harness-model-proxy`, `harness-mcp-proxy`, and the `harness-full`
 meta formula. The workflow then updates `ClarifiedLabs/homebrew-tap` through a
 GitHub App installation token. After publishing the release assets and
@@ -141,11 +144,12 @@ render the README release-artifact block with `v0.0.0` and show its diff
 without committing it.
 
 The `packages-publish-dry-run` job exercises the package repository pipeline
-end to end without secrets: it generates a throwaway GPG key, builds scratch
-APT and RPM repositories from the dry-run `.deb` and (unsigned) `.rpm`
-packages with the same update scripts the real publish uses, and verifies the
-`InRelease` and `repomd.xml` signatures and the expected six-package set per
-format. Nothing is pushed.
+end to end with the production key: `build-linux` signs the dry-run RPMs with
+`PACKAGES_GPG_PRIVATE_KEY`, the job verifies them with `rpm -K` against the
+published `harness-archive-keyring.asc`, then builds scratch APT and RPM
+repositories with the same update scripts the real publish uses and verifies
+the `InRelease` and `repomd.xml` signatures and the expected six-package set
+per format. Nothing is pushed.
 
 ## Tagging
 

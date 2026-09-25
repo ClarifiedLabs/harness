@@ -76,7 +76,6 @@ jobs:
         run: DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ')" scripts/release/build-binaries.sh
 
       - name: Import package signing key
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         env:
           PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}
         run: printf '%s' "$PACKAGES_GPG_PRIVATE_KEY" | gpg --batch --import
@@ -86,7 +85,7 @@ jobs:
           VERSION: ${{ env.RELEASE_VERSION }}
           GOOS: linux
           GOARCH: ${{ matrix.goarch }}
-          RPM_GPG_SIGN: ${{ startsWith(github.ref, 'refs/tags/v') && '1' || '0' }}
+          RPM_GPG_SIGN: '1'
         run: |
           scripts/release/package-tarball.sh
           scripts/release/package-deb.sh
@@ -787,23 +786,34 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Import package signing key
+        env:
+          PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}
+        run: printf '%s' "$PACKAGES_GPG_PRIVATE_KEY" | gpg --batch --import
+
+      - name: Verify signed RPMs against the published keyring
+        run: |
+          curl -fsSL -o "${RUNNER_TEMP}/harness-archive-keyring.asc" https://raw.githubusercontent.com/ClarifiedLabs/linux-packages/main/harness-archive-keyring.asc
+          sudo rpm --import "${RUNNER_TEMP}/harness-archive-keyring.asc"
+          shopt -s nullglob
+          rpms=(dist/*.rpm)
+          if [[ ${#rpms[@]} -ne 6 ]]; then
+            echo "expected 6 rpms in dist, found ${#rpms[@]}" >&2
+            exit 1
+          fi
+          for rpm_file in "${rpms[@]}"; do
+            check="$(rpm -K "$rpm_file")"
+            echo "$check"
+            if ! grep -qF "digests signatures OK" <<<"$check"; then
+              echo "${rpm_file} is not signed with the packages key" >&2
+              exit 1
+            fi
+          done
+
       - name: Exercise package repository scripts
         env:
           VERSION: ${{ env.RELEASE_VERSION }}
         run: |
-          export GNUPGHOME="${RUNNER_TEMP}/gnupg"
-          mkdir -p "$GNUPGHOME"
-          chmod 700 "$GNUPGHOME"
-          gpg --batch --gen-key <<KEYPARAMS
-          Key-Type: RSA
-          Key-Length: 2048
-          Name-Real: Harness Dry Run Packages
-          Name-Email: packages-dry-run@example.invalid
-          Expire-Date: 0
-          %no-protection
-          %commit
-          KEYPARAMS
-
           repo_root="${RUNNER_TEMP}/linux-packages"
           mkdir -p "${repo_root}/deb/conf"
           cat >"${repo_root}/deb/conf/distributions" <<DISTRIBUTIONS
