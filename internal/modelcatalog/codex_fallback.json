@@ -46,6 +46,93 @@
       ]
     },
     {
+      "slug": "gpt-6-sol",
+      "display_name": "GPT-6-Sol",
+      "context_window": 272000,
+      "max_context_window": 872000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low"
+        },
+        {
+          "effort": "medium"
+        },
+        {
+          "effort": "high"
+        },
+        {
+          "effort": "xhigh"
+        },
+        {
+          "effort": "max"
+        },
+        {
+          "effort": "ultra"
+        }
+      ],
+      "supports_reasoning_summary_parameter": true,
+      "supports_reasoning_summaries": true,
+      "visibility": "list",
+      "supported_in_api": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed"
+        }
+      ],
+      "default_service_tier": "priority",
+      "additional_speed_tiers": [
+        "fast"
+      ]
+    },
+    {
+      "slug": "gpt-6-luna",
+      "display_name": "GPT-6-Luna",
+      "context_window": 272000,
+      "max_context_window": 872000,
+      "input_modalities": [
+        "text",
+        "image"
+      ],
+      "supported_reasoning_levels": [
+        {
+          "effort": "low"
+        },
+        {
+          "effort": "medium"
+        },
+        {
+          "effort": "high"
+        },
+        {
+          "effort": "xhigh"
+        },
+        {
+          "effort": "max"
+        }
+      ],
+      "supports_reasoning_summary_parameter": true,
+      "supports_reasoning_summaries": true,
+      "visibility": "list",
+      "supported_in_api": true,
+      "service_tiers": [
+        {
+          "id": "priority",
+          "name": "Fast",
+          "description": "1.5x speed"
+        }
+      ],
+      "default_service_tier": "priority",
+      "additional_speed_tiers": [
+        "fast"
+      ]
+    },
+    {
       "slug": "gpt-5.6-sol",
       "display_name": "GPT-5.6-Sol",
       "context_window": 272000,
@@ -83,11 +170,6 @@
           "id": "priority",
           "name": "Fast",
           "description": "1.5x speed, increased usage"
-        },
-        {
-          "id": "ultrafast",
-          "name": "Ultrafast",
-          "description": "The fastest available responses for latency-sensitive work."
         }
       ],
       "default_service_tier": null,
