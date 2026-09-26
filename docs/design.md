@@ -2600,6 +2600,10 @@ assertion at dispatch:
   accepted, but mixing them with `background_lease` is rejected. Completion is
   delivered once as request-only context; when later work depends on it, use
   one `background_jobs` `wait` call rather than polling `get`/`list`.
+  Both single commands and step batches retain a combined live-output file for
+  user inspection via `/background tail`; steps append without truncation while
+  result capture reads only the current step's output. The runner removes the
+  file on completion.
   Completion metrics are persisted once in a diagnostics-only
   `background_job_result` event that retains the launch agent/model identity,
   drained exactly once at request, prompt/idle, rotation, or shutdown

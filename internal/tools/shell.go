@@ -221,7 +221,7 @@ type shellArgs struct {
 
 	// outputPath retains combined process output for live user inspection of a
 	// running background job (REPL /background tail). Set only on the
-	// background launch path; empty for foreground runs and step workflows.
+	// background launch path; shared by all steps, empty for foreground runs.
 	outputPath string
 }
 
@@ -282,9 +282,8 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 				args.TimeoutSeconds = shellBackgroundDefaultTimeout
 			}
 		}
-		// A single top-level background command retains its combined output so
-		// the user can tail a running job. Step workflows keep per-step temp
-		// capture and expose no live output path.
+		// Every background shell job retains combined output so the user can
+		// tail it, including across step boundaries.
 		var outputPath string
 		admitted := false
 		defer func() {
@@ -292,18 +291,15 @@ func (t shell) RunResult(ctx context.Context, input json.RawMessage) (RunResult,
 				os.Remove(outputPath)
 			}
 		}()
-		if len(args.Steps) == 0 {
-			outFile, err := os.CreateTemp("", "harness-bg-output-*")
-			if err != nil {
-				return RunResult{}, err
-			}
-			outputPath = outFile.Name()
-			if err := outFile.Close(); err != nil {
-				os.Remove(outputPath)
-				return RunResult{}, err
-			}
-			args.outputPath = outputPath
+		outFile, err := os.CreateTemp("", "harness-bg-output-*")
+		if err != nil {
+			return RunResult{}, err
 		}
+		outputPath = outFile.Name()
+		if err := outFile.Close(); err != nil {
+			return RunResult{}, err
+		}
+		args.outputPath = outputPath
 		defaultResource, err := DefaultBackgroundResource(args.Cwd)
 		if err != nil {
 			return RunResult{}, err
@@ -795,6 +791,7 @@ func shellSteps(ctx context.Context, args shellArgs) (RunResult, error) {
 		name := fmt.Sprintf("step %d", i+1)
 		resolved := shellArgs{
 			Background:     args.Background,
+			outputPath:     args.outputPath,
 			executionStep:  true,
 			Command:        step.Command,
 			Argv:           append([]string(nil), step.Argv...),
@@ -978,7 +975,8 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string,
 // runProcessDetailed captures combined output to a temp file that is removed
 // on return. When outputPath is non-empty (background jobs retaining output
 // for /background tail), the caller-owned file is used instead and survives
-// for the job's lifetime; the caller removes it.
+// for the job's lifetime; the caller removes it. Each process appends to that
+// file, but only its own output is returned, keeping step receipts independent.
 func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, outputPath string) (processResult, error) {
 	timeout := resolveProcessTimeoutSeconds(timeoutSeconds)
 	if ctx.Err() != nil {
@@ -993,7 +991,7 @@ func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, 
 	var outFile *os.File
 	var err error
 	if outputPath != "" {
-		outFile, err = os.Create(outputPath)
+		outFile, err = os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	} else {
 		outFile, err = os.CreateTemp("", "harness-tool-output-*")
 	}
@@ -1004,6 +1002,10 @@ func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, 
 		defer os.Remove(outFile.Name())
 	}
 	defer outFile.Close()
+	outputStart, err := outFile.Seek(0, io.SeekEnd)
+	if err != nil {
+		return processResult{}, err
+	}
 	cmd.Stdout = outFile
 	cmd.Stderr = outFile
 
@@ -1033,7 +1035,7 @@ func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, 
 	}
 	killGroup(cmd.Process.Pid)
 
-	out, err := readProcessOutput(outFile.Name())
+	out, err := readProcessOutput(outFile.Name(), outputStart)
 	if err != nil {
 		return processResult{}, err
 	}
@@ -1058,12 +1060,15 @@ func formatProcessResult(result processResult) string {
 	}
 }
 
-func readProcessOutput(path string) (string, error) {
+func readProcessOutput(path string, offset int64) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return "", err
+	}
 	data, err := io.ReadAll(f)
 	if err != nil {
 		return "", err

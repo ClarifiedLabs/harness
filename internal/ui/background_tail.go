@@ -72,7 +72,7 @@ func parseBackgroundTailArgs(args []string) (backgroundTailOptions, error) {
 
 func openBackgroundOutput(job background.Snapshot) (*os.File, error) {
 	if job.OutputPath == "" {
-		return nil, fmt.Errorf("job %s has no live output (only running single-command shell jobs retain output)", job.ID)
+		return nil, fmt.Errorf("job %s has no live output (only running shell jobs retain output)", job.ID)
 	}
 	f, err := os.Open(job.OutputPath)
 	if err != nil {

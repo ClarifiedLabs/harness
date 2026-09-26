@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"harness/internal/execution"
 	"harness/internal/llm"
 )
 
@@ -831,6 +833,94 @@ func TestShellBackgroundArgvStartsJob(t *testing.T) {
 	}
 }
 
+type shellOutputObserver struct {
+	workRecorder
+	onFinish func()
+}
+
+func (o *shellOutputObserver) ObserveWork(e execution.WorkEvent) {
+	if e.Kind == execution.WorkCommand && e.Phase == execution.WorkFinish {
+		o.onFinish()
+	}
+}
+
+func TestShellBackgroundStepsRetainedOutput(t *testing.T) {
+	for _, mode := range []string{"full", "receipt"} {
+		for _, stopOnFailure := range []bool{true, false} {
+			name := mode + "/continue"
+			if stopOnFailure {
+				name = mode + "/stop"
+			}
+			t.Run(name, func(t *testing.T) {
+				starter := &fakeBackgroundStarter{}
+				_, err := runTool(t, shell{background: starter}, map[string]any{
+					"background": true, "output_mode": mode, "stop_on_failure": stopOnFailure,
+					"steps": []map[string]any{
+						{"argv": []string{"printf", "first-step-output"}},
+						{"command": "printf 'second-step-stderr\\n' >&2; exit 7"},
+						{"argv": []string{"true"}},
+					},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				// Keep one descriptor open just like tail -f, checking that later
+				// steps neither replace the file nor reset the reader's offset.
+				f, err := os.Open(starter.req.OutputPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer f.Close()
+				defer os.Remove(starter.req.OutputPath)
+				outputs := []string{"first-step-output", "second-step-stderr\n", ""}
+				finished := 0
+				combined := ""
+				observer := &shellOutputObserver{onFinish: func() {
+					// WorkFinish runs synchronously before the batch returns, so
+					// inspect live output without sleeps or polling.
+					data, err := io.ReadAll(f)
+					if err != nil || string(data) != outputs[finished] {
+						t.Errorf("step %d follow output = %q, err %v", finished+1, data, err)
+					}
+					combined += outputs[finished]
+					data, err = os.ReadFile(starter.req.OutputPath)
+					if err != nil || string(data) != combined {
+						t.Errorf("step %d tail output = %q, want %q, err %v", finished+1, data, combined, err)
+					}
+					finished++
+				}}
+				ctx := execution.WithScope(context.Background(), execution.Scope{Observer: observer})
+				result, err := starter.req.Run(ctx, "bg_test")
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantFinished := 3
+				if stopOnFailure {
+					wantFinished = 2
+				}
+				if finished != wantFinished {
+					t.Fatalf("executed %d steps, want %d", finished, wantFinished)
+				}
+				full := result.Text
+				if mode == "receipt" {
+					full = result.OriginalText
+					if strings.Contains(result.Text, "first-step-output") || !strings.Contains(result.Text, "second-step-stderr") {
+						t.Errorf("failure receipt contains output from wrong step: %s", result.Text)
+					}
+				}
+				for _, output := range outputs[:2] {
+					if strings.Count(full, "\n"+strings.TrimSpace(output)+"\n") != 1 {
+						t.Errorf("step output %q should appear exactly once in transcript: %s", output, full)
+					}
+				}
+				if _, err := os.Stat(starter.req.OutputPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("retained output not removed after completion: %v", err)
+				}
+			})
+		}
+	}
+}
+
 func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	dir := t.TempDir()
@@ -857,8 +947,8 @@ func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
 		!strings.Contains(starter.req.Description, "printf 'bad step output'; exit 7") {
 		t.Fatalf("job description = %q, want step commands", starter.req.Description)
 	}
-	if starter.req.OutputPath != "" {
-		t.Fatalf("job output path = %q, want none for step workflows", starter.req.OutputPath)
+	if starter.req.OutputPath == "" {
+		t.Fatal("job output path missing for step workflow")
 	}
 	if starter.req.Limit != 3*7*time.Second {
 		t.Fatalf("job limit = %v, want sum of resolved step timeouts 21s", starter.req.Limit)

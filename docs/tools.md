@@ -188,6 +188,11 @@ step timeouts default to 1200 seconds in background mode instead of 120 seconds.
 `stop_on_failure:false` can continue after an ordinary failure or timeout, but
 cancellation always stops the batch before any later step starts. An incomplete
 process-group reap always retains the full transcript for artifact recovery.
+Running background shell jobs, including ordered steps, expose combined stdout
+and stderr through `/background tail [-f] <id>`. Steps append to one live-output
+file in execution order without resetting the tail at step boundaries; per-step
+receipts and archived transcripts remain separate from this raw stream. The live
+file is removed when the job finishes.
 
 `shell` commands or ordered step batches and `web_fetch` can set
 `background:true` to return a job id immediately. `delegate` can also run as a
