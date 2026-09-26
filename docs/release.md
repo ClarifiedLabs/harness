@@ -62,8 +62,8 @@ branch", `main` root) with this layout:
 linux-packages/
   .nojekyll
   README.md
-  harness-archive-keyring.asc      # public signing key
-  harness.repo                     # static dnf/yum repo definition
+  clarifiedlabs-archive-keyring.asc   # public signing key
+  clarifiedlabs.repo                 # static dnf/yum repo definition
   deb/                             # reprepro base: conf/, db/, dists/, pool/
   rpm/x86_64/                      # *.rpm + repodata/
   rpm/aarch64/                     # *.rpm + repodata/
@@ -79,11 +79,19 @@ linux-packages/
   (`repomd.xml.asc`).
 - One passphrase-less RSA-4096 GPG key, `Clarified Labs, Inc. Packages
   <hello@clarified.io>`, signs the APT metadata, the RPM packages, and
-  `repomd.xml`. The public half is served as `harness-archive-keyring.asc` and
-  referenced by `gpgkey=` in `harness.repo`.
+  `repomd.xml`. The public half is served as `clarifiedlabs-archive-keyring.asc`
+  and referenced by `gpgkey=` in `clarifiedlabs.repo`.
 
-Both update scripts (`scripts/release/apt-repo-update.sh`,
-`scripts/release/rpm-repo-update.sh`) are idempotent: re-running the publish
+The repository is org-wide: the same key, App, and scripts serve `harness` and
+`mdcli` (`md`) packages, and product versions are independent. The update
+scripts live in `ClarifiedLabs/linux-packages` (`scripts/apt-repo-update.sh`
+and `scripts/rpm-repo-update.sh`); the release workflow checks that repository
+out and runs them from there, so every product publishes through the same code
+path. RPM payload signing stays in `build-linux` here so the release assets,
+`checksums.txt`, attestations, and the repositories serve byte-identical signed
+files.
+
+Both update scripts are idempotent: re-running the publish
 job for the same tag skips already-present packages and produces no new commit.
 A rebuilt tag with the same version but different content fails loudly
 (reprepro rejects the deb; the RPM script refuses to replace a differing file)
@@ -146,7 +154,7 @@ without committing it.
 The `packages-publish-dry-run` job exercises the package repository pipeline
 end to end with the production key: `build-linux` signs the dry-run RPMs with
 `PACKAGES_GPG_PRIVATE_KEY`, the job verifies them with `rpm -K` against the
-published `harness-archive-keyring.asc`, then builds scratch APT and RPM
+published `clarifiedlabs-archive-keyring.asc`, then builds scratch APT and RPM
 repositories with the same update scripts the real publish uses and verifies
 the `InRelease` and `repomd.xml` signatures and the expected six-package set
 per format. Nothing is pushed.
@@ -215,24 +223,24 @@ used for this Developer ID CLI/pkg distribution flow.
    - `deb/conf/distributions`:
      ```
      Origin: Clarified Labs, Inc.
-     Label: harness
+     Label: clarifiedlabs
      Suite: stable
      Codename: stable
      Components: main
      Architectures: amd64 arm64
      SignWith: yes
      ```
-   - `harness.repo` (note the literal `$basearch`):
+   - `clarifiedlabs.repo` (note the literal `$basearch`):
      ```ini
-     [harness]
-     name=Clarified Labs, Inc. harness
+     [clarifiedlabs]
+     name=Clarified Labs, Inc. packages
      baseurl=https://clarifiedlabs.github.io/linux-packages/rpm/$basearch
      enabled=1
      gpgcheck=1
      repo_gpgcheck=1
-     gpgkey=https://clarifiedlabs.github.io/linux-packages/harness-archive-keyring.asc
+     gpgkey=https://clarifiedlabs.github.io/linux-packages/clarifiedlabs-archive-keyring.asc
      ```
-   - `harness-archive-keyring.asc` (public key from step 2)
+   - `clarifiedlabs-archive-keyring.asc` (public key from step 2)
 2. Generate the signing key:
    ```sh
    gpg --batch --gen-key <<'EOF'
@@ -246,11 +254,13 @@ used for this Developer ID CLI/pkg distribution flow.
    EOF
    ```
    Export the public half with `gpg --armor --export hello@clarified.io >
-   harness-archive-keyring.asc` and commit it to `linux-packages`; store the
+   clarifiedlabs-archive-keyring.asc` and commit it to `linux-packages`; store the
    secret half (`gpg --armor --export-secret-keys hello@clarified.io`) as the
    `PACKAGES_GPG_PRIVATE_KEY` secret on `ClarifiedLabs/harness`.
 3. Create a GitHub App with Contents read/write permission, install it on
    `ClarifiedLabs/linux-packages` only, and add the `PACKAGES_APP_CLIENT_ID`
-   and `PACKAGES_APP_PRIVATE_KEY` secrets to `ClarifiedLabs/harness`.
+   and `PACKAGES_APP_PRIVATE_KEY` secrets to `ClarifiedLabs/harness` (and the
+   same secrets to any other product repository that publishes packages, for
+   example `ClarifiedLabs/mdcli`).
 4. In `linux-packages` → Settings → Pages, choose "Deploy from a branch",
    branch `main`, `/ (root)`.

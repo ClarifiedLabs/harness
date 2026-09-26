@@ -60,8 +60,8 @@ Or download the latest signed package containing all three binaries:
 On Debian/Ubuntu, install from the APT repository (amd64 and arm64):
 
 ```sh
-curl -fsSL https://clarifiedlabs.github.io/linux-packages/harness-archive-keyring.asc | sudo gpg --dearmor -o /usr/share/keyrings/harness-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/harness-archive-keyring.gpg] https://clarifiedlabs.github.io/linux-packages/deb stable main" | sudo tee /etc/apt/sources.list.d/harness.list
+curl -fsSL https://clarifiedlabs.github.io/linux-packages/clarifiedlabs-archive-keyring.asc | sudo gpg --dearmor -o /usr/share/keyrings/clarifiedlabs-archive-keyring.gpg
+echo "deb [signed-by=/usr/share/keyrings/clarifiedlabs-archive-keyring.gpg] https://clarifiedlabs.github.io/linux-packages/deb stable main" | sudo tee /etc/apt/sources.list.d/clarifiedlabs.list
 sudo apt-get update
 sudo apt-get install harness harness-model-proxy harness-mcp-proxy
 ```
@@ -69,7 +69,7 @@ sudo apt-get install harness harness-model-proxy harness-mcp-proxy
 On Fedora/RHEL, install from the RPM repository:
 
 ```sh
-sudo curl -fsSL -o /etc/yum.repos.d/harness.repo https://clarifiedlabs.github.io/linux-packages/harness.repo
+sudo curl -fsSL -o /etc/yum.repos.d/clarifiedlabs.repo https://clarifiedlabs.github.io/linux-packages/clarifiedlabs.repo
 sudo dnf install harness harness-model-proxy harness-mcp-proxy
 ```
 

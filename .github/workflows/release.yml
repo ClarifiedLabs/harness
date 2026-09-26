@@ -712,7 +712,6 @@ jobs:
         env:
           PACKAGES_GPG_PRIVATE_KEY: ${{ secrets.PACKAGES_GPG_PRIVATE_KEY }}
         run: printf '%s' "$PACKAGES_GPG_PRIVATE_KEY" | gpg --batch --import
-
       - name: Download Linux packages
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -726,7 +725,7 @@ jobs:
           # against an explicit throwaway dbpath instead of sudo --import.
           rpmdb="${RUNNER_TEMP}/rpmdb"
           mkdir -p "$rpmdb"
-          rpm --dbpath "$rpmdb" --import linux-packages/harness-archive-keyring.asc
+          rpm --dbpath "$rpmdb" --import linux-packages/clarifiedlabs-archive-keyring.asc
           shopt -s nullglob
           rpms=(dist/*.rpm)
           if [[ ${#rpms[@]} -ne 6 ]]; then
@@ -749,12 +748,12 @@ jobs:
       - name: Update APT repository
         env:
           REPO_DIR: ${{ github.workspace }}/linux-packages/deb
-        run: scripts/release/apt-repo-update.sh
+        run: linux-packages/scripts/apt-repo-update.sh
 
       - name: Update RPM repository
         env:
           REPO_DIR: ${{ github.workspace }}/linux-packages
-        run: scripts/release/rpm-repo-update.sh
+        run: linux-packages/scripts/rpm-repo-update.sh
 
       - name: Commit package repository update
         env:
@@ -782,6 +781,12 @@ jobs:
       - name: Checkout source
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
+      - name: Checkout linux-packages
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ClarifiedLabs/linux-packages
+          path: linux-packages
+
       - name: Install package repository tools
         run: |
           sudo apt-get update
@@ -803,10 +808,10 @@ jobs:
         run: |
           # Non-root rpm uses a per-user rpmdb on Ubuntu's rpm 4.18, so check
           # against an explicit throwaway dbpath instead of sudo --import.
-          curl -fsSL -o "${RUNNER_TEMP}/harness-archive-keyring.asc" https://raw.githubusercontent.com/ClarifiedLabs/linux-packages/main/harness-archive-keyring.asc
+          curl -fsSL -o "${RUNNER_TEMP}/clarifiedlabs-archive-keyring.asc" https://raw.githubusercontent.com/ClarifiedLabs/linux-packages/main/clarifiedlabs-archive-keyring.asc
           rpmdb="${RUNNER_TEMP}/rpmdb"
           mkdir -p "$rpmdb"
-          rpm --dbpath "$rpmdb" --import "${RUNNER_TEMP}/harness-archive-keyring.asc"
+          rpm --dbpath "$rpmdb" --import "${RUNNER_TEMP}/clarifiedlabs-archive-keyring.asc"
           shopt -s nullglob
           rpms=(dist/*.rpm)
           if [[ ${#rpms[@]} -ne 6 ]]; then
@@ -834,7 +839,7 @@ jobs:
           mkdir -p "${repo_root}/deb/conf"
           cat >"${repo_root}/deb/conf/distributions" <<DISTRIBUTIONS
           Origin: Clarified Labs, Inc.
-          Label: harness
+          Label: clarifiedlabs
           Suite: stable
           Codename: stable
           Components: main
@@ -843,8 +848,8 @@ jobs:
           DISTRIBUTIONS
           touch "${repo_root}/.nojekyll"
 
-          REPO_DIR="${repo_root}/deb" scripts/release/apt-repo-update.sh
-          REPO_DIR="${repo_root}" scripts/release/rpm-repo-update.sh
+          REPO_DIR="${repo_root}/deb" linux-packages/scripts/apt-repo-update.sh
+          REPO_DIR="${repo_root}" linux-packages/scripts/rpm-repo-update.sh
 
           pkg_version="${VERSION#v}"
           repo_list="$(reprepro -b "${repo_root}/deb" list stable)"
