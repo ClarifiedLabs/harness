@@ -608,7 +608,9 @@ explicit flag, env, or config setting — including `false` — overrides it)
 inside a tmux session, each
 delegate child also opens a display-only tmux view running
 `harness session replay --follow` on the child session directory — the
-full-fidelity live view, without the feed's curation bounds.
+full-fidelity live view, without the feed's curation bounds. A one-line header
+identifies the resolved agent config, `provider:model` ID, effective turn limit (when present),
+and job ID before the session output; it is display-only, not a recorded event.
 `delegate_tmux_layout` selects `pane` (default) or `window`: pane splits a
 right-hand stack from the harness pane, while window keeps the historical
 behavior of one detached window per child. Every child closes its view when it

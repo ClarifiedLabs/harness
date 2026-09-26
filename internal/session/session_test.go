@@ -1505,6 +1505,75 @@ func TestReplayFiltersAbandonedAttemptOutput(t *testing.T) {
 	}
 }
 
+const testFollowHeader = "[delegate: agent=\"default\" · model=\"unknown\" · job=\"child-1\"]\n"
+
+func TestFollowDelegateHeader(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		quiet bool
+		ansi  bool
+		kind  string
+		limit int
+	}{
+		{name: "effective budget", kind: "delegate", limit: 7},
+		{name: "no budget", kind: "delegate"},
+		{name: "color", kind: "delegate", limit: 7, ansi: true},
+		{name: "quiet", kind: "delegate", limit: 7, quiet: true},
+		{name: "other child", kind: "other", limit: 7},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requested := 99
+			meta := ChildMeta{ID: "job-123", Kind: tc.kind, Status: ChildStatusCompleted,
+				Agent: "explore\n\x1b[31m", RequestedAgent: "auto", Provider: "my-provider", Model: "test-model",
+				RequestedMaxTurns: &requested, EffectiveMaxTurns: tc.limit}
+			dir, err := SaveChildMeta(t.TempDir(), meta)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := AppendEvent(dir, Event{Type: EventAssistantDelta, Text: "answer"}); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(dir, eventLog))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out strings.Builder
+			if err := Follow(context.Background(), dir, &out, ReplayOptions{Quiet: tc.quiet, ANSI: tc.ansi}); err != nil {
+				t.Fatal(err)
+			}
+			want := "answer\n"
+			if !tc.quiet && tc.kind == "delegate" {
+				header := `[delegate: agent="explore\n\x1b[31m" · model="my-provider:test-model"`
+				if tc.limit > 0 {
+					header += " · turn limit=7"
+				}
+				header += ` · job="job-123"]`
+				if tc.ansi {
+					header = ansiDim + header + ansiReset
+				}
+				want = header + "\n" + want
+			}
+			if out.String() != want {
+				t.Fatalf("output = %q, want %q", out.String(), want)
+			}
+			after, err := os.ReadFile(filepath.Join(dir, eventLog))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("follow modified raw log")
+			}
+			out.Reset()
+			if err := Replay(dir, &out, ReplayOptions{}); err != nil {
+				t.Fatal(err)
+			}
+			if out.String() != "answer\n" {
+				t.Fatalf("ordinary replay gained header: %q", out.String())
+			}
+		})
+	}
+}
+
 func writeFollowMeta(t *testing.T, dir, status string) {
 	t.Helper()
 	data, err := json.Marshal(ChildMeta{ID: "child-1", Kind: "delegate", Status: status})
@@ -1571,7 +1640,7 @@ func TestFollowInitialAndAppendedEventsMatchReplayExactlyOnce(t *testing.T) {
 	if err := Replay(dir, &replayed, ReplayOptions{Markdown: true}); err != nil {
 		t.Fatalf("Replay: %v", err)
 	}
-	if got, want := followed.String(), replayed.String(); got != want {
+	if got, want := followed.String(), testFollowHeader+replayed.String(); got != want {
 		t.Fatalf("follow output differs from replay:\nwant %q\n got %q", want, got)
 	}
 	got := followed.String()
@@ -1610,7 +1679,7 @@ func TestFollowRetainsLightThemeAndMarkdownStateAcrossRecords(t *testing.T) {
 	if !strings.Contains(got, "\x1b[38;2;0;0;255mfunc") || strings.Contains(got, "\x1b[38;2;101;169;224mfunc") {
 		t.Fatalf("follow lost light theme or streaming Markdown state: %q", got)
 	}
-	if stripped, want := stripSessionTestANSI(got), "  ```go\n  func main() {}\n  ```\n"; stripped != want {
+	if stripped, want := stripSessionTestANSI(got), testFollowHeader+"  ```go\n  func main() {}\n  ```\n"; stripped != want {
 		t.Fatalf("follow source = %q, want %q", stripped, want)
 	}
 }
@@ -1644,7 +1713,7 @@ func TestFollowRetainsSplitRecordUntilNewline(t *testing.T) {
 	if err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait); err != nil {
 		t.Fatalf("Follow: %v", err)
 	}
-	if got, want := out.String(), "split output\n"; got != want {
+	if got, want := out.String(), testFollowHeader+"split output\n"; got != want {
 		t.Fatalf("split record output = %q, want %q", got, want)
 	}
 }
@@ -1681,7 +1750,7 @@ func TestFollowAllowsMissingRawLogForTerminalChildren(t *testing.T) {
 			if err := Follow(context.Background(), dir, &out, ReplayOptions{}); err != nil {
 				t.Fatalf("Follow terminal child: %v", err)
 			}
-			if out.Len() != 0 {
+			if out.String() != testFollowHeader {
 				t.Fatalf("output with missing raw log = %q", out.String())
 			}
 		})

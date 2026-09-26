@@ -1265,6 +1265,7 @@ type followWaiter func(context.Context) error
 // Follow prints the current replay and then renders newline-complete records as
 // they are appended. Root sessions run until ctx is canceled. Child sessions
 // also stop after terminal metadata or a prompt_usage completion fallback.
+// Delegate children begin with a display-only metadata header unless quiet.
 func Follow(ctx context.Context, dir string, w io.Writer, opts ReplayOptions) error {
 	return followWithWaiter(ctx, dir, w, opts, waitForFollowPoll)
 }
@@ -1283,6 +1284,31 @@ func waitForFollowPoll(ctx context.Context) error {
 type followTarget struct {
 	child  bool
 	status string
+	meta   ChildMeta
+}
+
+func (t followTarget) header() string {
+	if t.meta.Kind != "delegate" {
+		return ""
+	}
+	agent := t.meta.Agent
+	if agent == "" {
+		agent = "default"
+	}
+	model := t.meta.Model
+	if model == "" {
+		model = "unknown"
+	}
+	if t.meta.Provider != "" {
+		model = t.meta.Provider + ":" + model
+	}
+	// Quote metadata so control characters cannot create extra lines or terminal
+	// escapes. Use the resolved agent and effective budget, not request hints.
+	line := fmt.Sprintf("[delegate: agent=%q · model=%q", agent, model)
+	if t.meta.EffectiveMaxTurns > 0 {
+		line += fmt.Sprintf(" · turn limit=%d", t.meta.EffectiveMaxTurns)
+	}
+	return line + fmt.Sprintf(" · job=%q]", t.meta.ID)
 }
 
 func (t followTarget) terminal() bool {
@@ -1312,7 +1338,7 @@ func readFollowTarget(dir string) (followTarget, error) {
 	}
 	switch meta.Status {
 	case ChildStatusRunning, ChildStatusCompleted, ChildStatusFailed, ChildStatusCanceled, ChildStatusAbandoned:
-		return followTarget{child: true, status: meta.Status}, nil
+		return followTarget{child: true, status: meta.Status, meta: meta}, nil
 	default:
 		return followTarget{}, fmt.Errorf("session: invalid child metadata %s: unknown status %q", path, meta.Status)
 	}
@@ -1436,6 +1462,11 @@ func followWithWaiter(ctx context.Context, dir string, w io.Writer, opts ReplayO
 	initial, err := follower.Read()
 	if err != nil {
 		return err
+	}
+	if header := target.header(); header != "" && !opts.Quiet {
+		if _, err := fmt.Fprintln(w, renderer.dimStatus(header)); err != nil {
+			return fmt.Errorf("session: write follow header: %w", err)
+		}
 	}
 	for _, ev := range filterAbandonedAttemptOutput(initial) {
 		renderer.Render(ev)

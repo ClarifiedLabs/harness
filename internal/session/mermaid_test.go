@@ -53,7 +53,7 @@ func TestMermaidReplayFollowSplitFence(t *testing.T) {
 			)
 
 			var followed strings.Builder
-			prefix := "> show diagram\n" + markdown.HorizontalRule + "\n"
+			prefix := testFollowHeader + "> show diagram\n" + markdown.HorizontalRule + "\n"
 			next := 1
 			wait := func(context.Context) error {
 				if next < len(chunks) {
@@ -96,7 +96,7 @@ func TestMermaidReplayFollowSplitFence(t *testing.T) {
 			if err := Replay(dir, &replayed, opts); err != nil {
 				t.Fatalf("Replay: %v", err)
 			}
-			if got := replayed.String(); got != followed.String() {
+			if got := testFollowHeader + replayed.String(); got != followed.String() {
 				t.Fatalf("Replay = %q, want Follow %q", got, followed.String())
 			}
 			latest, err := LatestTurnOutput(dir)
@@ -132,7 +132,7 @@ func TestMermaidReplayFollowUnclosedEOF(t *testing.T) {
 				var followed strings.Builder
 				waitCalls := 0
 				wait := func(context.Context) error {
-					if got := followed.String(); got != "" {
+					if got := followed.String(); got != testFollowHeader {
 						t.Fatalf("open diagram emitted at temporary EOF: %q", got)
 					}
 					switch waitCalls {
@@ -155,14 +155,14 @@ func TestMermaidReplayFollowUnclosedEOF(t *testing.T) {
 				if waitCalls != 2 {
 					t.Fatalf("wait calls = %d, want 2", waitCalls)
 				}
-				if got := followed.String(); got != tt.want {
+				if got := followed.String(); got != testFollowHeader+tt.want {
 					t.Fatalf("Follow at EOF = %q, want %q", got, tt.want)
 				}
 				var replayed strings.Builder
 				if err := Replay(dir, &replayed, opts); err != nil {
 					t.Fatalf("Replay: %v", err)
 				}
-				if got := replayed.String(); got != followed.String() {
+				if got := testFollowHeader + replayed.String(); got != followed.String() {
 					t.Fatalf("Replay at EOF = %q, want Follow %q", got, followed.String())
 				}
 			})
@@ -189,7 +189,7 @@ func TestResponsiveMermaidReplayFollowWidth(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
-		if replayed.String() != want || followed.String() != want {
+		if replayed.String() != want || followed.String() != testFollowHeader+want {
 			t.Fatalf("width %d: replay=%q follow=%q want=%q", width, replayed.String(), followed.String(), want)
 		}
 	}
@@ -256,7 +256,8 @@ func TestMermaidRawReplayAndStoredRecordsUnchanged(t *testing.T) {
 			}); err != nil {
 				t.Fatalf("Follow: %v", err)
 			}
-			if followed.String() != rendered.String() {
+			header := ansiDim + strings.TrimSuffix(testFollowHeader, "\n") + ansiReset + "\n"
+			if followed.String() != header+rendered.String() {
 				t.Fatalf("Follow = %q, want Replay %q", followed.String(), rendered.String())
 			}
 			latest, err := LatestTurnOutput(dir)

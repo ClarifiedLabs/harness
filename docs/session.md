@@ -356,7 +356,12 @@ file plus rename and tree appends are synced before `state.json` replacement.
   > config-file > dark-default precedence, through a focused loader that does
   not require model/provider configuration. Theme and ANSI choices are never
   recorded in `raw.ndjson`, so the same session may be replayed under either
-  palette. `session replay --follow` keeps one stateful renderer with that
+  palette. When following a delegate child, a one-line header from `meta.json`
+  shows the resolved agent config (or `default`), `provider:model` ID, effective
+  turn limit when positive, and job/child ID before the recorded output. If older
+  metadata lacks a provider, only the model is shown; a missing model is `unknown`.
+  `--quiet` hides the header; ordinary replay and stored events are unchanged.
+  `session replay --follow` keeps one stateful renderer with that
   palette (including across split appended tokens) and consumes only
   newline-complete append-only records with the ordinary 16 MiB record limit.
   It filters discarded attempts in the initial batch; a later live discard

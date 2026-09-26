@@ -2232,8 +2232,10 @@ are documented in
 
 `session replay --follow` first renders the existing complete `raw.ndjson`
 records, then renders complete records as they are appended, using the same
-user-facing view as ordinary replay; `-q`/`--quiet` suppresses status lines but
-keeps prompts and assistant text. Replay resolves `--color-theme`,
+user-facing view as ordinary replay. For delegate children (including automatic
+tmux views), it prefixes a one-line header with the resolved agent config, `provider:model` ID,
+effective turn limit when present, and job ID. `-q`/`--quiet` suppresses the header
+and status lines but keeps prompts and assistant text. Replay resolves `--color-theme`,
 `HARNESS_COLOR_THEME`, and `color_theme` with the normal flag > environment >
 file > dark-default precedence and requires no model/provider configuration; no
 theme or ANSI metadata is persisted in the event log. A followed child exits
