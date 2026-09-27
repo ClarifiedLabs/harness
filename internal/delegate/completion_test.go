@@ -78,6 +78,46 @@ func TestParseCompletionReportAndFallbacks(t *testing.T) {
 	}
 }
 
+func TestParseCompletionReportCitationSources(t *testing.T) {
+	sources := llm.FormatCitationSources([]llm.URLCitation{{URL: "https://example.com/report", Title: "Report"}})
+	for _, outcome := range []string{"complete", "blocked"} {
+		t.Run(outcome, func(t *testing.T) {
+			footer := completionBlock(`{"outcome":"` + outcome + `","blockers":["remaining work"]}`)
+			for _, separator := range []string{"", "\n"} {
+				text := "Useful findings.\n\n" + footer + separator + sources
+				report, prose := parseCompletionReport(text, session.ChildCompletionContractGeneral)
+				if report.Outcome != outcome || report.ValidationStatus != session.ChildCompletionValidationValid || report.Source != session.ChildCompletionSourceDeclared {
+					t.Fatalf("report = %+v", report)
+				}
+				if prose != "Useful findings."+sources {
+					t.Fatalf("prose = %q", prose)
+				}
+			}
+		})
+	}
+	for name, suffix := range map[string]string{
+		"trailing prose":       sources + "untrusted prose",
+		"prose before sources": "\nnot a footer anymore" + sources,
+		"unsafe title":         strings.Replace(sources, "Report", "**Report**", 1),
+		"incorrect numbering":  strings.Replace(sources, "[1]", "[2]", 1),
+		"extra newline":        sources + "\n",
+		"arbitrary text":       "\njust prose",
+	} {
+		t.Run(name, func(t *testing.T) {
+			text := "Findings.\n\n" + completionBlock(`{"outcome":"complete"}`) + suffix
+			report, prose := parseCompletionReport(text, session.ChildCompletionContractGeneral)
+			if report.ValidationStatus != session.ChildCompletionValidationMalformed || prose != text {
+				t.Fatalf("report = %+v, prose = %q", report, prose)
+			}
+		})
+	}
+	text := "Findings.\n\n" + completionBlock(`{"outcome":"blocked"}`) + sources
+	report, prose := parseCompletionReport(text, session.ChildCompletionContractGeneral)
+	if report.ValidationStatus != session.ChildCompletionValidationInvalid || prose != text {
+		t.Fatalf("invalid footer with sources: report = %+v, prose = %q", report, prose)
+	}
+}
+
 func TestCompletionSystemPromptIsMarkdownFirstAndFooterOptional(t *testing.T) {
 	prompt := completionSystemPrompt("base")
 	for _, want := range []string{"useful Markdown report", "may optionally end", "harness-completion", `{"outcome":"complete"}`, `{"outcome":"blocked","blockers":`, "Omit the footer rather than guessing"} {
@@ -152,6 +192,45 @@ func TestDelegateCompletionPersistsAndDoesNotInferFromTermination(t *testing.T) 
 	resultJSON, resultErr := json.Marshal(result.Completion)
 	if meta.Status != session.ChildStatusCompleted || meta.Completion == nil || persistedErr != nil || resultErr != nil || !bytes.Equal(persistedJSON, resultJSON) {
 		t.Fatalf("persisted metadata = %+v; persisted JSON=%s (%v), result JSON=%s (%v)", meta, persistedJSON, persistedErr, resultJSON, resultErr)
+	}
+}
+
+func TestDelegateCompletionWithCitationAppendix(t *testing.T) {
+	sources := llm.FormatCitationSources([]llm.URLCitation{{URL: "https://example.com/report", Title: "Report"}})
+	final := "Sourced findings.\n\n" + completionBlock(`{"outcome":"complete"}`)
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{
+		Events:    []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: final}},
+		Stop:      llm.StopEndTurn,
+		Citations: []llm.URLCitation{{URL: "https://example.com/report", Title: "Report"}},
+	})
+	result, err := fixture.runner.Run(context.Background(), RunRequest{Task: "research", ChildID: "cited"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Completion.Outcome != session.ChildCompletionOutcomeComplete || result.Completion.ValidationStatus != session.ChildCompletionValidationValid {
+		t.Fatalf("completion = %+v", result.Completion)
+	}
+	if strings.Contains(result.Report, completionFence) || !strings.Contains(result.Report, "Sourced findings."+strings.TrimSuffix(sources, "\n")) {
+		t.Fatalf("parent report lost sources or retained footer: %q", result.Report)
+	}
+	meta := readDelegateChildMeta(t, session.ChildSessionDir(fixture.sessionPath, "cited"))
+	if meta.Completion == nil || meta.Completion.Outcome != session.ChildCompletionOutcomeComplete {
+		t.Fatalf("metadata = %+v", meta)
+	}
+}
+
+func TestDelegateCompletionOnlyFooterWithLeadingWhitespaceAndSources(t *testing.T) {
+	sources := llm.FormatCitationSources([]llm.URLCitation{{URL: "https://example.com/report"}})
+	fixture := newContinuationFixture(t, 100_000, false, llmtest.Step{
+		Events: []llm.StreamEvent{{Kind: llm.EventTextDelta, Text: " \n\t" + completionBlock(`{"outcome":"complete"}`) + sources}},
+		Stop:   llm.StopEndTurn,
+	})
+	result, err := fixture.runner.Run(context.Background(), RunRequest{Task: "research", ChildID: "cited-footer"}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Completion.ValidationStatus != session.ChildCompletionValidationValid || strings.Contains(result.Report, completionFence) || !strings.Contains(result.Report, "https://example.com/report") {
+		t.Fatalf("completion = %+v, report = %q", result.Completion, result.Report)
 	}
 }
 

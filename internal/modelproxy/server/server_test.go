@@ -481,6 +481,50 @@ func TestGoogleInteractionsAdvertisesAndResolvesSearch(t *testing.T) {
 	}
 }
 
+func TestMetaResponsesAdvertisesAndResolvesSearch(t *testing.T) {
+	for _, tc := range []struct {
+		name, api, base string
+		want            bool
+	}{
+		{"meta", "responses", "https://proxy.test/v1", true},
+		{"alias", "responses", "https://api.meta.ai/v1", true},
+		{" META ", "responses", "https://proxy.test/v1", true},
+		{"alias", "responses", "https://API.META.AI/v1", true},
+		{"meta", "openai", "https://api.meta.ai/v1", false},
+		{"alias", "responses", "https://api.meta.ai.example/v1", false},
+		{"alias", "responses", "https://example.test/api.meta.ai", false},
+	} {
+		target := resolvedTarget{pc: llm.ProviderConfig{Name: tc.name, APIType: tc.api, BaseURL: tc.base}, entry: llm.ModelEntry{Name: "muse-spark-1.3"}}
+		advertised := targetServerTools(target.pc, target.entry)
+		resolved := resolveServerToolsForTarget(target, []llm.ServerTool{{Name: llm.ServerToolWebSearch}})
+		if tc.want {
+			if !slices.Equal(advertised, []string{llm.ServerToolWebSearch}) || len(resolved) != 1 || resolved[0].Kind != llm.ServerToolKindOpenAIWebSearch {
+				t.Fatalf("%+v: advertised=%v resolved=%+v", tc, advertised, resolved)
+			}
+			if providerContinuationStateful(target.pc) {
+				t.Fatalf("%+v: Meta Responses must use full-history continuation", tc)
+			}
+		} else if len(advertised) != 0 || len(resolved) != 0 {
+			t.Fatalf("%+v unexpectedly enabled search: %v %+v", tc, advertised, resolved)
+		}
+		if got := resolveServerToolsForTarget(target, nil); len(got) != 0 {
+			t.Fatalf("search enabled without request: %+v", got)
+		}
+	}
+}
+
+func TestMetaResponsesRejectsStatefulOverride(t *testing.T) {
+	enabled := true
+	for _, pc := range []llm.ProviderConfig{
+		{Name: "meta", APIType: "responses", BaseURL: "https://proxy.test/v1", ResponsesStateful: &enabled},
+		{Name: "alias", APIType: "responses", BaseURL: "https://api.meta.ai/v1", ResponsesStateful: &enabled},
+	} {
+		if providerContinuationStateful(pc) {
+			t.Fatalf("Meta stateful override was accepted: %+v", pc)
+		}
+	}
+}
+
 func TestInteractionsStatefulDefaultAndOverride(t *testing.T) {
 	pc := llm.ProviderConfig{APIType: "interactions"}
 	if !providerContinuationStateful(pc) {

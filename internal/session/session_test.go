@@ -1832,6 +1832,31 @@ func TestFollowPromptUsageCompletesChildButNotRoot(t *testing.T) {
 		if waitCalls != 1 {
 			t.Fatalf("wait calls = %d, want 1", waitCalls)
 		}
+		if got, want := out.String(), "[prompt done]\n"+testFollowHeader; got != want {
+			t.Fatalf("late child identity output = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("child identity appears during canceled wait", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := AppendEvent(dir, Event{Type: EventPromptUsage, Prompt: 1, Display: "[prompt done]"}); err != nil {
+			t.Fatalf("AppendEvent: %v", err)
+		}
+		wait := func(context.Context) error {
+			writeFollowMeta(t, dir, ChildStatusRunning)
+			if err := AppendEvent(dir, Event{Type: EventAssistantDelta, Prompt: 2, Turn: 1, Text: "late output"}); err != nil {
+				t.Fatalf("AppendEvent: %v", err)
+			}
+			return context.Canceled
+		}
+		var out strings.Builder
+		err := followWithWaiter(context.Background(), dir, &out, ReplayOptions{}, wait)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Follow error = %v, want context cancellation", err)
+		}
+		if got, want := out.String(), "[prompt done]\n"+testFollowHeader+"late output\n"; got != want {
+			t.Fatalf("final-drain child identity output = %q, want %q", got, want)
+		}
 	})
 
 	t.Run("root cancellation", func(t *testing.T) {

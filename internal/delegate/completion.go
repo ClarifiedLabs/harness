@@ -6,6 +6,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"harness/internal/llm"
 	"harness/internal/session"
 )
 
@@ -47,7 +48,8 @@ func unknownCompletion(contract, source, validation string) CompletionReport {
 
 // parseCompletionReport inspects only one final tagged fenced block. A usable
 // status footer is stripped from parent-facing Markdown; an absent or unusable
-// footer preserves the complete response because the footer is optional.
+// footer preserves the complete response because the footer is optional. A
+// canonical citation appendix may follow the footer and remains in the prose.
 func parseCompletionReport(text, contract string) (CompletionReport, string) {
 	if !strings.Contains(text, completionFence) {
 		return unknownCompletion(contract, session.ChildCompletionSourceCompatibility, session.ChildCompletionValidationMissing), text
@@ -74,7 +76,8 @@ func parseCompletionReport(text, contract string) (CompletionReport, string) {
 	}
 	end := bodyStart + endRel
 	blockEnd := end + len("\n```")
-	if strings.TrimSpace(text[blockEnd:]) != "" {
+	trailing, sources := llm.SplitCitationSources(text[blockEnd:])
+	if strings.TrimSpace(trailing) != "" {
 		return unknownCompletion(contract, session.ChildCompletionSourceCompatibility, session.ChildCompletionValidationMalformed), text
 	}
 	body := []byte(text[bodyStart:end])
@@ -106,7 +109,7 @@ func parseCompletionReport(text, contract string) (CompletionReport, string) {
 		ValidationStatus: session.ChildCompletionValidationValid,
 	}
 	prose := strings.TrimSpace(text[:start])
-	return report, prose
+	return report, prose + sources
 }
 
 func validateDeclaredCompletion(report declaredCompletionReport) string {

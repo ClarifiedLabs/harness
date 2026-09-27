@@ -129,6 +129,21 @@ func (p *Provider) CanContinueResponse(responseID string) bool {
 func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
 		ctx := llm.WithAttemptMetadata(ctx, llm.AttemptMetadata{Purpose: req.Purpose, Provider: p.providerName, API: "responses", Model: req.Model, Transport: "http"})
+		if metaProvider(p.providerName, p.baseURL) && (req.StoreResponse || req.PreviousResponseID != "") {
+			code := "store_not_supported"
+			if req.PreviousResponseID != "" {
+				code = "previous_response_not_supported"
+			}
+			yield(llm.StreamEvent{}, &llm.APIError{
+				StatusCode: http.StatusBadRequest,
+				Code:       code,
+				// Meta itself accepts store and previous_response_id. Harness keeps Meta
+				// stateless because it rejects the encrypted-reasoning include on
+				// continuations, leaving an unavailable chain unrecoverable locally.
+				Message: "harness uses stateless full-history requests for Meta Responses (store=false, no previous_response_id) so encrypted reasoning can be replayed locally; disable responses_stateful for this provider",
+			})
+			return
+		}
 		req = p.withToolSearchDowngrade(req)
 		if p.useWebSocket {
 			if p.streamWebSocket(ctx, req, yield) {
@@ -356,6 +371,7 @@ type streamDecoder struct {
 	reasoning  *reasoningAssembler
 	toolSearch *toolSearchAssembler
 	phase      *phaseAssembler
+	citations  citationAssembler
 	usage      llm.Usage
 	completed  bool
 }
@@ -381,6 +397,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 		u.ServiceTier = event.Response.ServiceTier
 		d.source.Usage(u)
 	}
+	d.citations.collect(event)
 	switch event.Type {
 	case "response.output_text.delta":
 		return !d.text.textDelta(event, yield), nil
@@ -486,7 +503,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 			responseID = event.Response.ID
 		}
 		reported := event.Response != nil && event.Response.Usage != nil
-		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, UsageReported: &reported, StopReason: stop, ResponseID: responseID}, nil)
+		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, UsageReported: &reported, StopReason: stop, ResponseID: responseID, Citations: d.citations.take()}, nil)
 		return true, nil
 
 	case "response.incomplete":
@@ -523,7 +540,7 @@ func (d *streamDecoder) handle(data string, yield func(llm.StreamEvent, error) b
 			responseID = event.Response.ID
 		}
 		reported := event.Response != nil && event.Response.Usage != nil
-		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, UsageReported: &reported, StopReason: stop, ResponseID: responseID}, nil)
+		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, UsageReported: &reported, StopReason: stop, ResponseID: responseID, Citations: d.citations.take()}, nil)
 		return true, nil
 
 	case "response.failed":

@@ -101,7 +101,17 @@ type wireContentPart struct {
 	Refusal               string                     `json:"refusal,omitempty"`
 	ImageURL              string                     `json:"image_url,omitempty"`
 	Detail                string                     `json:"detail,omitempty"`
+	Annotations           []wireURLCitation          `json:"annotations,omitempty"`
 	PromptCacheBreakpoint *wirePromptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
+}
+
+// Only URL citations are projected into source links; other annotation kinds
+// remain ignorable. Offsets are provider-local and are not used as text offsets
+// after Harness combines multiple streamed output items.
+type wireURLCitation struct {
+	Type  string `json:"type"`
+	URL   string `json:"url"`
+	Title string `json:"title"`
 }
 
 type wirePromptCacheBreakpoint struct {
@@ -154,6 +164,9 @@ type wireEvent struct {
 
 	// response.content_part.done / response.reasoning_summary_part.done
 	Part *wireContentPart `json:"part"`
+
+	// response.output_text.annotation.added / .done
+	Annotation *wireURLCitation `json:"annotation"`
 
 	// response.completed / response.failed / response.incomplete
 	Response *wireResponse `json:"response"`
@@ -258,7 +271,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 	explicitReasoning := req.Reasoning.Effort != "" || req.Reasoning.Summary != ""
 	replayReasoning := explicitReasoning || req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn
 	updates := canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model) && (req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn || req.Purpose == llm.RequestPurposeCompaction)
-	input, messageEnds := buildInputWithMessageEnds(req.Messages, replayReasoning, updates, canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model))
+	input, messageEnds := buildInputWithMessageEndsOrdered(req.Messages, replayReasoning, updates, canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model), metaProvider(opts.providerName, opts.baseURL))
 	if updates {
 		for _, m := range req.Messages {
 			if state := m.ReasoningState; state != nil && state.Baseline.Effort != "" {
@@ -318,6 +331,17 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 				w.Include = []string{reasoningInclude}
 				break
 			}
+		}
+	}
+
+	// Meta requires an explicit include even for provider-default reasoning, but
+	// rejects that include alongside previous_response_id. Keep the two context
+	// modes exclusive without changing the requested effort or summary.
+	if metaProvider(opts.providerName, opts.baseURL) {
+		if req.PreviousResponseID != "" {
+			w.Include = nil
+		} else if replayReasoning {
+			w.Include = []string{reasoningInclude}
 		}
 	}
 
@@ -441,6 +465,10 @@ func canonicalCodexEndpoint(baseURL string) bool {
 	return llm.CanonicalCodexBaseURL(baseURL)
 }
 
+func metaProvider(name, baseURL string) bool {
+	return llm.IsMetaResponsesProvider(name, "responses", baseURL)
+}
+
 func canonicalOpenAIEndpoint(baseURL string) bool {
 	u, err := url.Parse(strings.TrimSpace(baseURL))
 	return err == nil && strings.EqualFold(u.Hostname(), "api.openai.com")
@@ -521,8 +549,52 @@ func buildInput(messages []llm.Message, replayReasoning bool) []wireInputItem {
 }
 
 func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates, async bool) ([]wireInputItem, []int) {
+	return buildInputWithMessageEndsOrdered(messages, replayReasoning, updates, async, false)
+}
+
+// reasoningFollowerText is the minimal visible assistant text inserted after a
+// replayed reasoning-only turn for backends that require every reasoning item
+// to be followed by an assistant message or function_call.
+const reasoningFollowerText = "(no visible output)"
+
+// buildInputWithMessageEndsOrdered is buildInputWithMessageEnds with an option
+// for Meta's documented ordering rule: a replayed reasoning item must be
+// followed by an assistant message or function_call before the next user,
+// system, or developer message. A reasoning-only turn (for example one cut off
+// by the output limit) gets a minimal wire-only assistant message, preserving
+// its encrypted reasoning without changing the transcript.
+func buildInputWithMessageEndsOrdered(messages []llm.Message, replayReasoning, updates, async, reasoningNeedsFollower bool) ([]wireInputItem, []int) {
 	var out []wireInputItem
 	ends := make([]int, 0, len(messages))
+	pendingReasoning := false
+	followReasoning := func() {
+		if !pendingReasoning {
+			return
+		}
+		pendingReasoning = false
+		out = append(out, wireInputItem{
+			Type:    "message",
+			Role:    string(llm.RoleAssistant),
+			Content: []wireContentPart{{Type: textPartType(llm.RoleAssistant), Text: reasoningFollowerText}},
+		})
+	}
+	add := func(item wireInputItem) {
+		if reasoningNeedsFollower {
+			role := item.Role
+			if item.Raw != nil {
+				role = rawInputItemRole(item.Raw)
+			}
+			switch {
+			case item.Type == "reasoning":
+				pendingReasoning = true
+			case item.Type == "function_call" || (item.Type == "message" && role == string(llm.RoleAssistant)):
+				pendingReasoning = false
+			case item.Type == "message":
+				followReasoning()
+			}
+		}
+		out = append(out, item)
+	}
 	for _, m := range messages {
 		update := func() {
 			if state := m.ReasoningState; updates && state != nil && state.Active.Effort != "" {
@@ -554,7 +626,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 			if len(parts) == 0 {
 				return
 			}
-			out = append(out, wireInputItem{
+			add(wireInputItem{
 				Type:               "message",
 				Role:               string(m.Role),
 				Phase:              inputMessagePhase(m),
@@ -569,7 +641,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 			case llm.BlockProviderCompaction:
 				flushMessage()
 				for _, raw := range b.ProviderCompaction {
-					out = append(out, wireInputItem{
+					add(wireInputItem{
 						Type:               rawInputItemType(raw),
 						Raw:                raw,
 						RetainOnCompaction: rawInputItemRole(raw) == string(llm.RoleUser),
@@ -578,7 +650,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 			case llm.BlockResponsesToolSearch:
 				flushMessage()
 				if rawResponsesToolSearchItemType(b.ResponsesToolSearch) != "" {
-					out = append(out, wireInputItem{
+					add(wireInputItem{
 						Type: rawResponsesToolSearchItemType(b.ResponsesToolSearch),
 						Raw:  append(json.RawMessage(nil), b.ResponsesToolSearch...),
 					})
@@ -592,7 +664,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 					continue
 				}
 				flushMessage()
-				out = append(out, wireInputItem{
+				add(wireInputItem{
 					Type:             "reasoning",
 					ID:               b.ReasoningID,
 					EncryptedContent: b.ReasoningEncrypted,
@@ -613,7 +685,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 				if args == "" {
 					args = llm.EmptyArgs
 				}
-				out = append(out, wireInputItem{
+				add(wireInputItem{
 					Type:      "function_call",
 					CallID:    b.ToolUseID,
 					Name:      b.ToolName,
@@ -627,7 +699,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 				if b.ResultError {
 					output = llm.ErrorResultPrefix + output
 				}
-				out = append(out, wireInputItem{
+				add(wireInputItem{
 					Type:   "function_call_output",
 					CallID: b.ResultForID,
 					Output: &output,
@@ -643,7 +715,7 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 		}
 		flushMessage()
 		if len(resultImages) > 0 {
-			out = append(out, wireInputItem{
+			add(wireInputItem{
 				Type:    "message",
 				Role:    string(llm.RoleUser),
 				Content: resultImages,
@@ -653,6 +725,12 @@ func buildInputWithMessageEnds(messages []llm.Message, replayReasoning, updates,
 			update()
 		}
 		ends = append(ends, len(out))
+	}
+	// Request context may be appended after the final item, so a trailing
+	// reasoning item also needs its follower.
+	followReasoning()
+	if len(ends) > 0 {
+		ends[len(ends)-1] = len(out)
 	}
 	return out, ends
 }

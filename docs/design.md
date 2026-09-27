@@ -542,9 +542,26 @@ func Read(ctx context.Context, r io.Reader) iter.Seq2[Event, error]
     `response.function_call_arguments.delta`, `response.function_call_arguments.done`,
     `response.completed`, `response.incomplete`, `response.failed`, and a bare
     terminal `error` frame. Assistant message `phase` metadata from output items is
-    preserved on transcript messages. Lifecycle, annotation, hosted web-search
-    status, and raw-reasoning events are recognized without exposing an agent
-    event. Known unsupported output-bearing events fail explicitly; unknown
+    preserved on transcript messages. URL citations from annotation events and
+    completed content/output snapshots are collected independently of text
+    deduplication and delivered on the terminal provider event. The agent appends
+    one deduplicated Markdown Sources list as ordinary assistant text only after
+    deciding whether an output-limited response needs its bounded automatic
+    continuation; citations from both parts are merged at that final boundary.
+    Only safe HTTP(S) links and sanitized titles are retained, not provider-local
+    character offsets. Failed, truncated, or cancelled streams do not contribute
+    citations. If an automatic continuation fails, citations already delivered by
+    its successfully terminated output-limited predecessor are kept, and the
+    transcript places them where they were displayed: after retained partial
+    continuation text when a cancellation keeps it, otherwise on the predecessor.
+    The predecessor is tracked by index and verified by text, so a compaction or
+    retention rewrite cannot move them onto an unrelated assistant message; if the
+    predecessor was summarized away they become a separate assistant text message.
+    Any deferred list is flushed before the prompt is reported complete. A literal
+    `%` that is not a valid escape is encoded as `%25` rather than dropping the
+    URL. Lifecycle,
+    other annotation, hosted web-search status, and raw-reasoning events are
+    recognized without exposing an agent event. Known unsupported output-bearing events fail explicitly; unknown
     future event envelope types are ignored.
   - **Anthropic:** typed frames — `message_start`, `content_block_start`,
     `content_block_delta`, `content_block_stop`, `message_delta`, `message_stop`,
@@ -641,7 +658,7 @@ unsupported.
 | Operations | streaming `POST /responses`; `POST /responses/input_tokens`; opt-in `POST /responses/compact` | retrieve/delete/cancel, conversations, background work |
 | Request controls | model/input/instructions, functions, hosted web search, native deferred namespace tool search, output cap, temperature, reasoning summaries/encrypted replay, prompt cache key, service tier, stored continuation | arbitrary output formats, moderation, metadata, tool choice, sampling/logprob controls, safety/user identifiers |
 | Content/items | text and image input; message text/refusal, reasoning summary, function calls/results, hosted web-search status, hosted tool-search call/output replay | file/audio input; generated media, computer/code/shell/patch/custom tools |
-| Stream/usage | text/refusal/reasoning-summary/function deltas, terminal/error events, cached input, non-reasoning output, and reasoning tokens | raw reasoning disclosure, annotations, and unused total-token fields |
+| Stream/usage | text/refusal/reasoning-summary/function deltas, URL-citation Sources appendices, terminal/error events, cached input, non-reasoning output, and reasoning tokens | raw reasoning disclosure, inline citation offsets, non-URL annotations, raw search results, and unused total-token fields |
 
 `function_call_output.output` is always present, including for an empty or
 image-only result. Status-only and lifecycle events are recognized and ignored;
@@ -862,6 +879,21 @@ replayed reasoning are present, preserving compatible older backends. Replay
 does not force an effort or enable visible summaries. Textual compaction,
 branch-summary, and prewarm requests omit reasoning unless explicitly requested;
 native compaction always includes it to canonicalize provider state.
+Meta Responses (provider name `meta` or exact host `api.meta.ai`) instead needs
+an explicit include to return encrypted reasoning, but rejects that include on a
+`previous_response_id` continuation. Harness therefore always uses stateless
+full-history Meta requests with `store:false`, explicitly requests encrypted
+reasoning even with provider-default controls, and replays the retained encrypted
+input on later turns. Setup writes `responses_stateful:false`, the proxy ignores
+an unsafe true override, and the direct dialect rejects stateful Meta requests
+before transport; Meta itself accepts either context mode, so this is Harness
+policy. Meta also requires every replayed reasoning item to be followed by an
+assistant message or `function_call` before the next user, system, or developer
+message. For a reasoning-only turn (for example one cut off by the output limit)
+the Meta request adds a minimal wire-only assistant message,
+`(no visible output)`, after the reasoning item; the transcript is unchanged.
+Effort and summary controls are otherwise unchanged, and this does not change
+other Responses backends.
 
 Astra effort updates are advertised through proxy target and core model
 metadata. Each user boundary may carry transcript-only `ReasoningState` with
@@ -1153,8 +1185,8 @@ Provider and model entries may set `server_tools:["web_search"]`. The proxy
 serves the normalized list in `GET /v1/models`, and harness only declares hosted
 web search when the selected target advertises it and the harness config sets
 `web_search:"auto"` / `HARNESS_WEB_SEARCH=auto` / `-web-search auto`. The proxy
-also infers `web_search` for known endpoints: OpenAI Responses, Anthropic,
-Sakana, OpenRouter, MiMo, Kimi, Z.AI, and native Google Interactions. If a provider rejects a server-tool
+also infers `web_search` for known endpoints: OpenAI Responses, Meta Responses,
+Anthropic, Sakana, OpenRouter, MiMo, Kimi, Z.AI, and native Google Interactions. If a provider rejects a server-tool
 field before streaming any events, the proxy retries the request once without
 server tools so stale metadata does not fail the turn.
 
@@ -2603,7 +2635,9 @@ assertion at dispatch:
   Both single commands and step batches retain a combined live-output file for
   user inspection via `/background tail`; steps append without truncation while
   result capture reads only the current step's output. The runner removes the
-  file on completion.
+  file on completion. The live copy is best-effort: if it cannot be created or
+  appended (for example on a full disk), the tail stops updating but the
+  command's own result is unaffected.
   Completion metrics are persisted once in a diagnostics-only
   `background_job_result` event that retains the launch agent/model identity,
   drained exactly once at request, prompt/idle, rotation, or shutdown

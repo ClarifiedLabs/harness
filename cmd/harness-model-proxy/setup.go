@@ -1311,10 +1311,10 @@ func applySyntheticProviderDefaults(provider modelcatalog.Provider, cfg *setupPr
 	if isOpenAICodexProvider(provider) && strings.TrimSpace(cfg.PromptCache.KeyField) == "" {
 		cfg.PromptCache.KeyField = llm.PromptCacheKeyFieldPromptCacheKey
 	}
-	// Sakana's Responses implementation does not accept previous_response_id and
-	// requires the full conversation each request, so stateful continuation must
-	// stay off.
-	if isSakanaProvider(provider) {
+	// Sakana does not accept previous_response_id. Meta cannot return the encrypted
+	// reasoning needed for safe full-history recovery while continuing one. Both
+	// therefore require full-history requests on every turn.
+	if isSakanaProvider(provider) || llm.IsMetaResponsesProvider(provider.ID, setupProviderAPIType(provider), setupProviderBaseURL(provider)) {
 		stateful := false
 		cfg.ResponsesStateful = &stateful
 	}

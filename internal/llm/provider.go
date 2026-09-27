@@ -382,7 +382,8 @@ type StreamEvent struct {
 	// object so the transcript can feed an error result back to the model.
 	InvalidInputError string `json:"invalid_input_error,omitempty"`
 
-	Usage *Usage `json:"usage,omitempty"` // EventUsage / EventDone
+	Usage     *Usage        `json:"usage,omitempty"`     // EventUsage / EventDone
+	Citations []URLCitation `json:"citations,omitempty"` // EventDone; safe formatting is deferred to the agent
 	// UsageReported distinguishes an authoritative provider usage snapshot from
 	// a decoder's synthetic placeholder or replay. Explicit false leaves Usage
 	// available for legacy logical accounting, but telemetry must ignore it: it

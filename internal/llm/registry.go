@@ -3,6 +3,7 @@ package llm
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -461,16 +462,33 @@ func NormalizeServerTools(tools []string) []string {
 	return out
 }
 
+// IsMetaResponsesProvider reports whether the provider is Meta's Responses
+// implementation. Name recognition supports managed/proxied configs; exact host
+// matching supports aliases without accepting lookalike domains.
+func IsMetaResponsesProvider(name, apiType, baseURL string) bool {
+	if !strings.EqualFold(strings.TrimSpace(apiType), "responses") {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(name), "meta") {
+		return true
+	}
+	endpoint, err := url.Parse(strings.TrimSpace(baseURL))
+	return err == nil && strings.EqualFold(endpoint.Hostname(), "api.meta.ai")
+}
+
 // WebSearchServerToolKind reports the provider-specific server-tool kind to use
 // for hosted web search given a provider's name, API dialect, and base URL, or
 // "" when the provider is not known to offer hosted web search. It is the single
 // source of truth shared by the model proxy (catalog advertising and request-time
 // resolution) and harness-model-proxy setup so the two never drift.
 func WebSearchServerToolKind(name, apiType, baseURL string) string {
+	metaResponses := IsMetaResponsesProvider(name, apiType, baseURL)
 	name = strings.ToLower(strings.TrimSpace(name))
 	apiType = strings.ToLower(strings.TrimSpace(apiType))
 	base := strings.ToLower(strings.TrimSpace(baseURL))
 	switch {
+	case metaResponses:
+		return ServerToolKindOpenAIWebSearch
 	case apiType == "interactions" && (name == "google" || strings.Contains(base, "generativelanguage.googleapis.com")):
 		return ServerToolKindGoogleSearch
 	case name == "openrouter" || strings.Contains(base, "openrouter.ai"):

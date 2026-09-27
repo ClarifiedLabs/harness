@@ -89,8 +89,9 @@ const (
 )
 
 var (
-	processTimeoutUnit = time.Second
-	processReapGrace   = 500 * time.Millisecond
+	processTimeoutUnit          = time.Second
+	processReapGrace            = 500 * time.Millisecond
+	processOutputMirrorInterval = 25 * time.Millisecond
 )
 
 const shellSchemaFmt = `{
@@ -972,11 +973,110 @@ func runProcess(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int) (string,
 	return formatProcessResult(result), nil
 }
 
-// runProcessDetailed captures combined output to a temp file that is removed
-// on return. When outputPath is non-empty (background jobs retaining output
-// for /background tail), the caller-owned file is used instead and survives
-// for the job's lifetime; the caller removes it. Each process appends to that
-// file, but only its own output is returned, keeping step receipts independent.
+// processOutputMirror appends snapshots of one process's isolated capture to the
+// stable background-job output file. Its final snapshot is a hard ownership
+// boundary: descendants that outlive the direct process can keep writing their
+// inherited capture descriptor without contaminating a later step.
+type processOutputMirror struct {
+	stop chan struct{}
+	done chan processOutputMirrorResult
+}
+
+type processOutputMirrorResult struct {
+	size int64
+	err  error
+}
+
+func startProcessOutputMirror(sourcePath, outputPath string) (*processOutputMirror, error) {
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		return nil, err
+	}
+	destination, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		source.Close()
+		return nil, err
+	}
+	mirror := &processOutputMirror{
+		stop: make(chan struct{}),
+		done: make(chan processOutputMirrorResult, 1),
+	}
+	go mirrorProcessOutput(source, destination, mirror.stop, mirror.done)
+	return mirror, nil
+}
+
+func mirrorProcessOutput(source, destination *os.File, stop <-chan struct{}, done chan<- processOutputMirrorResult) {
+	ticker := time.NewTicker(processOutputMirrorInterval)
+	defer ticker.Stop()
+
+	var offset, snapshotSize int64
+	var firstErr error
+	copySnapshot := func() {
+		// The live tail is best-effort. After a failed append (for example a full
+		// disk), stop mirroring instead of leaving gaps in the stream; the caller
+		// then measures the isolated capture itself.
+		if firstErr != nil {
+			return
+		}
+		size, err := copyProcessOutputSnapshot(source, destination, &offset)
+		snapshotSize = size
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	finish := func() {
+		copySnapshot()
+		firstErr = errors.Join(firstErr, source.Close(), destination.Close())
+		done <- processOutputMirrorResult{size: snapshotSize, err: firstErr}
+	}
+
+	for {
+		// Give a requested final snapshot priority over another periodic pass.
+		select {
+		case <-stop:
+			finish()
+			return
+		default:
+		}
+		select {
+		case <-stop:
+			finish()
+			return
+		case <-ticker.C:
+			copySnapshot()
+		}
+	}
+}
+
+func copyProcessOutputSnapshot(source, destination *os.File, offset *int64) (int64, error) {
+	info, err := source.Stat()
+	if err != nil {
+		return *offset, err
+	}
+	end := info.Size()
+	if end <= *offset {
+		return end, nil
+	}
+	n, err := io.Copy(destination, io.NewSectionReader(source, *offset, end-*offset))
+	*offset += n
+	if err != nil {
+		return end, err
+	}
+	if *offset != end {
+		return end, io.ErrUnexpectedEOF
+	}
+	return end, nil
+}
+
+func (m *processOutputMirror) finish() processOutputMirrorResult {
+	close(m.stop)
+	return <-m.done
+}
+
+// runProcessDetailed captures every process into its own regular temp file so
+// cmd.Wait retains its non-pipe semantics. Background jobs additionally mirror
+// bounded snapshots into their caller-owned live-output file. The caller removes
+// that combined file; this function always removes the isolated capture.
 func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, outputPath string) (processResult, error) {
 	timeout := resolveProcessTimeoutSeconds(timeoutSeconds)
 	if ctx.Err() != nil {
@@ -988,28 +1088,28 @@ func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, 
 
 	configureProcessGroup(cmd)
 
-	var outFile *os.File
-	var err error
-	if outputPath != "" {
-		outFile, err = os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	} else {
-		outFile, err = os.CreateTemp("", "harness-tool-output-*")
-	}
+	outFile, err := os.CreateTemp("", "harness-tool-output-*")
 	if err != nil {
 		return processResult{}, err
 	}
-	if outputPath == "" {
-		defer os.Remove(outFile.Name())
-	}
+	defer os.Remove(outFile.Name())
 	defer outFile.Close()
-	outputStart, err := outFile.Seek(0, io.SeekEnd)
-	if err != nil {
-		return processResult{}, err
+
+	// The combined live-output file serves only /background tail. If it cannot
+	// be mirrored, run the command without a live tail rather than failing it.
+	var mirror *processOutputMirror
+	if outputPath != "" {
+		if started, err := startProcessOutputMirror(outFile.Name(), outputPath); err == nil {
+			mirror = started
+		}
 	}
 	cmd.Stdout = outFile
 	cmd.Stderr = outFile
 
 	if err := cmd.Start(); err != nil {
+		if mirror != nil {
+			mirror.finish()
+		}
 		return processResult{}, err
 	}
 
@@ -1035,7 +1135,23 @@ func runProcessDetailed(ctx context.Context, cmd *exec.Cmd, timeoutSeconds int, 
 	}
 	killGroup(cmd.Process.Pid)
 
-	out, err := readProcessOutput(outFile.Name(), outputStart)
+	// A successful final mirror snapshot defines the ownership boundary shared by
+	// the result and the live tail. A mirror failure must not discard the
+	// command's own result, so fall back to measuring the isolated capture.
+	captureSize := int64(-1)
+	if mirror != nil {
+		if mirrored := mirror.finish(); mirrored.err == nil {
+			captureSize = mirrored.size
+		}
+	}
+	if captureSize < 0 {
+		info, err := outFile.Stat()
+		if err != nil {
+			return processResult{}, err
+		}
+		captureSize = info.Size()
+	}
+	out, err := readProcessOutput(outFile.Name(), 0, captureSize)
 	if err != nil {
 		return processResult{}, err
 	}
@@ -1060,16 +1176,16 @@ func formatProcessResult(result processResult) string {
 	}
 }
 
-func readProcessOutput(path string, offset int64) (string, error) {
+func readProcessOutput(path string, offset, end int64) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
-	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return "", err
+	if offset < 0 || end < offset {
+		return "", fmt.Errorf("invalid process output range [%d,%d)", offset, end)
 	}
-	data, err := io.ReadAll(f)
+	data, err := io.ReadAll(io.NewSectionReader(f, offset, end-offset))
 	if err != nil {
 		return "", err
 	}

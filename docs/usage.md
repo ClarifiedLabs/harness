@@ -367,10 +367,22 @@ images from `@` references.
 Provider configs can advertise hosted model tools with `server_tools`.
 Currently `web_search` is recognized. It can be set at the provider level or on
 individual model entries; the proxy also infers it for known web-search-capable
-providers such as OpenAI Responses, Anthropic, Sakana, OpenRouter, MiMo, Kimi,
-Z.AI, and native Google Interactions. Harness only declares it when
+providers such as OpenAI Responses, Meta Responses, Anthropic, Sakana, OpenRouter,
+MiMo, Kimi, Z.AI, and native Google Interactions. Harness only declares it when
 `-web-search auto` (or
 `web_search:"auto"`) is enabled and the selected target advertises support.
+Responses URL citations are shown as one deduplicated **Sources** list after a
+completed or output-limited response. When Harness performs its bounded automatic
+continuation after an output limit, citations from both response parts are merged
+and the list is appended only after the continuation finishes. Source links and
+sanitized titles remain in assistant text for saved transcripts and full-history
+replay; inline citation offsets and raw search results are not preserved.
+Interrupted or failed streams do not contribute sources. If an automatic
+continuation fails, sources already returned by its successfully terminated
+output-limited predecessor are kept where they were displayed: after any partial
+continuation text retained on cancellation, otherwise on the predecessor. A cited
+URL containing a literal `%` that is not a valid escape is kept with that sign
+encoded as `%25`.
 
 Provider and model entries can advertise request-level scheduling tiers with
 typed `service_tiers` objects. Each object has a target-suffix `id`, optional
@@ -1227,7 +1239,17 @@ the native Gemini Interactions endpoint. Managed Google configs use
 `api_type:"interactions"`, explicitly default `interactions_stateful:true`, and
 advertise `web_search`; Vertex Google package variants are not auto-configured.
 Managed Meta configs default to `api_type:"responses"`, following Meta's
-recommended protocol. Setup and refresh query Meta's authenticated
+recommended protocol, automatically advertise hosted `web_search` (enable it
+with `-web-search auto`), and explicitly set `responses_stateful:false`. Meta
+rejects the encrypted-reasoning include on a `previous_response_id` request, so
+Harness always sends full history with `store:false` and explicitly requests
+and replays encrypted reasoning even when effort and summary use provider
+defaults. The proxy does not honor a stateful override for recognized Meta
+Responses providers. Requested effort and summary settings are still sent. Meta
+rejects a replayed reasoning item that is not followed by assistant output, so a
+reasoning-only turn (for example one cut off by the output limit) is replayed
+with a minimal `(no visible output)` assistant message on the wire only.
+Setup and refresh query Meta's authenticated
 `GET /v1/models` endpoint directly; its ID-only catalog spans multiple API
 families, so direct-only `muse-spark-*` models are accepted as Responses models
 while image-generation and transcription IDs are not advertised as text targets

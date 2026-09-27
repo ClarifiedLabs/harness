@@ -8,6 +8,25 @@ import (
 	"testing"
 )
 
+func TestIsMetaResponsesProvider(t *testing.T) {
+	for _, tc := range []struct {
+		name, api, base string
+		want            bool
+	}{
+		{name: "meta", api: "responses", base: "https://proxy.test/v1", want: true},
+		{name: " META ", api: " RESPONSES ", base: "https://proxy.test/v1", want: true},
+		{name: "alias", api: "responses", base: "https://api.meta.ai/v1", want: true},
+		{name: "alias", api: "responses", base: "https://API.META.AI/v1", want: true},
+		{name: "meta", api: "openai", base: "https://api.meta.ai/v1"},
+		{name: "alias", api: "responses", base: "https://api.meta.ai.example/v1"},
+		{name: "alias", api: "responses", base: "https://example.test/api.meta.ai"},
+	} {
+		if got := IsMetaResponsesProvider(tc.name, tc.api, tc.base); got != tc.want {
+			t.Errorf("IsMetaResponsesProvider(%q, %q, %q) = %v, want %v", tc.name, tc.api, tc.base, got, tc.want)
+		}
+	}
+}
+
 func TestLoadProviderConfigsWarnsAndSkipsMissingFile(t *testing.T) {
 	var warnings []string
 	r, providers, err := LoadProviderConfigs(t.TempDir(), []string{"missing.json"}, func(msg string) {

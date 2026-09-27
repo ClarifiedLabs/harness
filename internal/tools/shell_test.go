@@ -921,6 +921,75 @@ func TestShellBackgroundStepsRetainedOutput(t *testing.T) {
 	}
 }
 
+// Regression: the combined live-output file only serves /background tail, so a
+// failure to create or append to it must not discard the command's own result.
+func TestRunProcessKeepsResultWhenLiveOutputFails(t *testing.T) {
+	cases := map[string]string{"unopenable": t.TempDir()}
+	if f, err := os.OpenFile("/dev/full", os.O_WRONLY|os.O_APPEND, 0); err == nil {
+		f.Close()
+		cases["write fails"] = "/dev/full"
+	}
+	for name, outputPath := range cases {
+		t.Run(name, func(t *testing.T) {
+			cmd := exec.Command("sh", "-c", "printf 'kept-output'; exit 3")
+			result, err := runProcessDetailed(context.Background(), cmd, 5, outputPath)
+			if err != nil {
+				t.Fatalf("runProcessDetailed error = %v, want result despite live-output failure", err)
+			}
+			if strings.TrimSpace(result.Output) != "kept-output" || result.ExitCode != 3 || result.Status != processExited {
+				t.Fatalf("result = %+v", result)
+			}
+		})
+	}
+}
+
+func TestShellBackgroundStepsIsolateEscapedDescendantOutput(t *testing.T) {
+	if _, err := exec.LookPath("setsid"); err != nil {
+		t.Skip("setsid is required to create an escaped descendant")
+	}
+	starter := &fakeBackgroundStarter{}
+	dir := t.TempDir()
+	ready := filepath.Join(dir, "ready")
+	release := filepath.Join(dir, "release")
+	done := filepath.Join(dir, "done")
+	stepOne := `setsid sh -c 'printf %s "$$" > "$1"; while [ ! -e "$2" ]; do sleep 0.01; done; printf delayed-first; touch "$3"' child "$1" "$2" "$3" & while [ ! -s "$1" ]; do sleep 0.01; done; printf first`
+	stepTwo := `touch "$1"; while [ ! -e "$2" ]; do sleep 0.01; done; printf second`
+	_, err := runTool(t, shell{background: starter}, map[string]any{
+		"background":  true,
+		"output_mode": "full",
+		"steps": []map[string]any{
+			{"argv": []string{"sh", "-c", stepOne, "sh", ready, release, done}, "timeout_seconds": 5},
+			{"argv": []string{"sh", "-c", stepTwo, "sh", release, done}, "timeout_seconds": 5},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Hold the combined-output inode open because the background runner removes its
+	// pathname at completion, just as an active /background tail reader would.
+	f, err := os.Open(starter.req.OutputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	result, err := starter.req.Run(context.Background(), "bg_test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined, err := io.ReadAll(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The command rendering itself contains the marker once; a second occurrence
+	// would be leaked process output from the escaped descendant.
+	if strings.Count(result.Text, "delayed-first") != 1 || strings.Contains(string(combined), "delayed-first") {
+		t.Fatalf("escaped step-one output leaked across its ownership boundary: result=%q combined=%q", result.Text, combined)
+	}
+	if !strings.Contains(result.Text, "first") || !strings.Contains(result.Text, "second") || string(combined) != "firstsecond" {
+		t.Fatalf("direct step output missing or reordered: result=%q combined=%q", result.Text, combined)
+	}
+}
+
 func TestShellBackgroundStepsPreserveBehaviorAndMetrics(t *testing.T) {
 	starter := &fakeBackgroundStarter{}
 	dir := t.TempDir()

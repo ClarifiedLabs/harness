@@ -192,7 +192,9 @@ Running background shell jobs, including ordered steps, expose combined stdout
 and stderr through `/background tail [-f] <id>`. Steps append to one live-output
 file in execution order without resetting the tail at step boundaries; per-step
 receipts and archived transcripts remain separate from this raw stream. The live
-file is removed when the job finishes.
+file is removed when the job finishes. The live copy is best-effort: if it cannot
+be created or appended (for example on a full disk), the tail stops updating but
+the command still runs and returns its normal result.
 
 `shell` commands or ordered step batches and `web_fetch` can set
 `background:true` to return a job id immediately. `delegate` can also run as a
@@ -582,8 +584,11 @@ JSON footer in one of these forms:
 ````
 
 Harness strips a valid footer before returning the Markdown report to the
-parent. Substantive details—findings, changed files, verification, evidence,
-unreviewed scope, and remaining work—belong in Markdown, not status metadata.
+parent. A canonical Sources appendix added by the Responses adapter may follow
+the footer; those source links remain in the parent-facing report. Other
+trailing prose still makes the footer invalid. Substantive details—findings,
+changed files, verification, evidence, unreviewed scope, and remaining
+work—belong in Markdown, not status metadata.
 New child metadata persists only outcome, optional bounded blockers,
 source/contract provenance, and validation status. Missing, malformed,
 duplicate, invalid, or oversized footers do not discard useful prose. A missing

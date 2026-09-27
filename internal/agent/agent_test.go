@@ -1578,12 +1578,17 @@ func TestPrewarmFuncSkipsInvalidRichTranscript(t *testing.T) {
 func TestMaxTokensStopEmitsNotice(t *testing.T) {
 	fp := llmtest.New("fake",
 		llmtest.Step{
-			Events: []llm.StreamEvent{textDelta("partial final")},
-			Stop:   llm.StopMaxTokens,
+			Events:    []llm.StreamEvent{textDelta("partial final")},
+			Stop:      llm.StopMaxTokens,
+			Citations: []llm.URLCitation{{URL: "https://example.com/first", Title: "First"}},
 		},
 		llmtest.Step{
 			Events: []llm.StreamEvent{textDelta("continued but still truncated")},
 			Stop:   llm.StopMaxTokens,
+			Citations: []llm.URLCitation{
+				{URL: "https://example.com/first", Title: "Duplicate"},
+				{URL: "https://example.com/second", Title: "Second"},
+			},
 		},
 	)
 	a := newAgent(fp, tools.Default(), Options{})
@@ -1607,12 +1612,26 @@ func TestMaxTokensStopEmitsNotice(t *testing.T) {
 		!strings.Contains(transcript[2].Content[0].Text, "Continue from the exact point") {
 		t.Fatalf("continuation transcript = %+v", transcript)
 	}
+	firstText := transcript[1].Content[0].Text
+	lastText := transcript[3].Content[0].Text
+	if strings.Contains(firstText, "Sources:") || strings.Count(lastText, "Sources:") != 1 ||
+		strings.Count(lastText, "https://example.com/first") != 1 || strings.Count(lastText, "https://example.com/second") != 1 {
+		t.Fatalf("citations were not deferred and merged: first=%q last=%q", firstText, lastText)
+	}
+	requestData, err := json.Marshal(fp.Requests[1].Messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(requestData), "Sources:") || strings.Count(sink.text.String(), "Sources:") != 1 {
+		t.Fatalf("citation leaked into continuation context or duplicated in display: request=%s display=%q", requestData, sink.text.String())
+	}
 }
 
 func TestMaxTokensContinuationHonorsTurnBudget(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{
-		Events: []llm.StreamEvent{textDelta("partial final")},
-		Stop:   llm.StopMaxTokens,
+		Events:    []llm.StreamEvent{textDelta("partial final")},
+		Stop:      llm.StopMaxTokens,
+		Citations: []llm.URLCitation{{URL: "https://example.com/limited", Title: "Limited"}},
 	})
 	a := newAgent(fp, tools.Default(), Options{MaxTurns: 1})
 	sink := &recordSink{}
@@ -1626,6 +1645,224 @@ func TestMaxTokensContinuationHonorsTurnBudget(t *testing.T) {
 	if slices.Contains(sink.notices, NoticeContinuingMaxTokens) || !slices.Contains(sink.notices, NoticeStoppedMaxTokens) {
 		t.Fatalf("notices = %v", sink.notices)
 	}
+	transcript := a.Transcript()
+	if len(transcript) != 2 || !strings.Contains(transcript[1].Content[0].Text, "Sources:") || !strings.Contains(sink.text.String(), "https://example.com/limited") {
+		t.Fatalf("terminal output-limited citations missing: transcript=%+v display=%q", transcript, sink.text.String())
+	}
+}
+
+func TestMaxTokensContinuationFailureFlushesPredecessorCitations(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		events []llm.StreamEvent
+	}{
+		{name: "before output"},
+		{name: "after partial output", events: []llm.StreamEvent{textDelta("partial continuation")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fp := llmtest.New("fake",
+				llmtest.Step{
+					Events:    []llm.StreamEvent{textDelta("truncated answer")},
+					Stop:      llm.StopMaxTokens,
+					Citations: []llm.URLCitation{{URL: "https://example.com/predecessor", Title: "Predecessor"}},
+				},
+				llmtest.Step{Events: tc.events, Err: context.Canceled},
+			)
+			a := newAgent(fp, tools.Default(), Options{})
+			sink := &recordSink{}
+			err := a.RunPrompt(context.Background(), "hi", sink)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("RunPrompt error = %v, want cancellation", err)
+			}
+			transcript := a.Transcript()
+			// Regression: the transcript must place the list where the display did —
+			// after retained partial continuation text, else on the predecessor.
+			owner := 1
+			if len(tc.events) > 0 {
+				owner = len(transcript) - 1
+			}
+			if strings.Count(assistantTextFingerprint(transcript[owner]), "https://example.com/predecessor") != 1 {
+				t.Fatalf("citations not on message %d: %+v", owner, transcript)
+			}
+			if got, want := sink.text.String(), displayedAssistantText(transcript); got != want {
+				t.Fatalf("display %q differs from transcript order %q", got, want)
+			}
+			requestData, marshalErr := json.Marshal(fp.Requests[1].Messages)
+			if marshalErr != nil {
+				t.Fatal(marshalErr)
+			}
+			if strings.Contains(string(requestData), "Sources:") {
+				t.Fatalf("citation leaked into failed continuation request: %s", requestData)
+			}
+			mustValid(t, transcript)
+		})
+	}
+}
+
+// displayedAssistantText is the assistant text a display would have streamed.
+func displayedAssistantText(transcript []llm.Message) string {
+	var text strings.Builder
+	for _, m := range transcript {
+		if m.Role == llm.RoleAssistant {
+			text.WriteString(assistantTextFingerprint(m))
+		}
+	}
+	return text.String()
+}
+
+type citationOrderSink struct {
+	recordSink
+	order    []string
+	onNotice func(string)
+}
+
+func (s *citationOrderSink) TextDelta(t string) {
+	s.recordSink.TextDelta(t)
+	s.order = append(s.order, "text:"+t)
+}
+
+func (s *citationOrderSink) PromptComplete(u PromptUsage) {
+	s.recordSink.PromptComplete(u)
+	s.order = append(s.order, "prompt-complete")
+}
+
+func (s *citationOrderSink) Notice(msg string) {
+	s.recordSink.Notice(msg)
+	if s.onNotice != nil {
+		s.onNotice(msg)
+	}
+}
+
+// Regression: an early return after citations are deferred for a continuation
+// must flush them before PromptComplete, not after the prompt was reported.
+func TestDeferredCitationsFlushBeforePromptComplete(t *testing.T) {
+	fp := llmtest.New("fake", llmtest.Step{
+		Events:    []llm.StreamEvent{textDelta("truncated answer")},
+		Stop:      llm.StopMaxTokens,
+		Citations: []llm.URLCitation{{URL: "https://example.com/early", Title: "Early"}},
+	})
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &citationOrderSink{}
+	sink.onNotice = func(msg string) {
+		if msg == NoticeContinuingMaxTokens {
+			// Force the post-continuation validation to fail and return early.
+			a.transcript = append(a.transcript, llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockToolResult, ResultForID: "missing", ResultText: "x"}}})
+		}
+	}
+	if err := a.RunPrompt(context.Background(), "hi", sink); err == nil {
+		t.Fatal("RunPrompt succeeded, want forced validation failure")
+	}
+	sources, complete := -1, -1
+	for i, entry := range sink.order {
+		if strings.Contains(entry, "https://example.com/early") {
+			sources = i
+		}
+		if entry == "prompt-complete" {
+			complete = i
+		}
+	}
+	if sources < 0 || complete < 0 || sources > complete {
+		t.Fatalf("sources must precede PromptComplete: %q", sink.order)
+	}
+	if !strings.Contains(assistantTextFingerprint(a.transcript[1]), "https://example.com/early") {
+		t.Fatalf("sources not attached to predecessor: %+v", a.transcript[1])
+	}
+}
+
+// Regression: if maintenance rewrites the transcript while a continuation is in
+// flight, deferred citations must not land on an unrelated assistant message.
+func TestDeferredCitationsSurviveTranscriptRewrite(t *testing.T) {
+	textMessage := func(role llm.Role, text string) llm.Message {
+		return llm.Message{Role: role, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: text}}}
+	}
+	for _, tc := range []struct {
+		name    string
+		rewrite func([]llm.Message) []llm.Message
+		check   func(*testing.T, []llm.Message)
+	}{
+		{
+			name: "predecessor index shifted",
+			rewrite: func(m []llm.Message) []llm.Message {
+				return append([]llm.Message{textMessage(llm.RoleUser, "summary"), textMessage(llm.RoleAssistant, "ack")}, m...)
+			},
+			check: func(t *testing.T, m []llm.Message) {
+				if strings.Contains(assistantTextFingerprint(m[1]), "Sources:") || !strings.Contains(assistantTextFingerprint(m[3]), "https://example.com/moved") {
+					t.Fatalf("citations not on shifted predecessor: %+v", m)
+				}
+			},
+		},
+		{
+			name: "predecessor summarized away",
+			rewrite: func(m []llm.Message) []llm.Message {
+				return []llm.Message{textMessage(llm.RoleUser, "summary"), textMessage(llm.RoleAssistant, "ack"), m[len(m)-1]}
+			},
+			check: func(t *testing.T, m []llm.Message) {
+				last := m[len(m)-1]
+				if strings.Contains(assistantTextFingerprint(m[1]), "Sources:") || last.Role != llm.RoleAssistant ||
+					strings.Count(assistantTextFingerprint(last), "https://example.com/moved") != 1 {
+					t.Fatalf("citations attached to unrelated message: %+v", m)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var a *Agent
+			fp := llmtest.New("fake",
+				llmtest.Step{
+					Events:    []llm.StreamEvent{textDelta("truncated answer")},
+					Stop:      llm.StopMaxTokens,
+					Citations: []llm.URLCitation{{URL: "https://example.com/moved", Title: "Moved"}},
+				},
+				// Simulate a compaction rewrite before the continuation fails.
+				llmtest.Step{Block: func(context.Context) { a.transcript = tc.rewrite(a.transcript) }, Err: context.Canceled},
+			)
+			a = newAgent(fp, tools.Default(), Options{})
+			sink := &recordSink{}
+			if err := a.RunPrompt(context.Background(), "hi", sink); !errors.Is(err, context.Canceled) {
+				t.Fatalf("RunPrompt error = %v, want cancellation", err)
+			}
+			transcript := a.Transcript()
+			tc.check(t, transcript)
+			if strings.Count(sink.text.String(), "https://example.com/moved") != 1 {
+				t.Fatalf("display citations = %q", sink.text.String())
+			}
+			mustValid(t, transcript)
+		})
+	}
+}
+
+func TestMaxTokensPendingWorkKeepsCitationsOnOriginalResponse(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events:    []llm.StreamEvent{textDelta("truncated before join")},
+			Stop:      llm.StopMaxTokens,
+			Citations: []llm.URLCitation{{URL: "https://example.com/original", Title: "Original"}},
+		},
+		llmtest.Step{
+			Events:    []llm.StreamEvent{textDelta("synthesized report")},
+			Stop:      llm.StopEndTurn,
+			Citations: []llm.URLCitation{{URL: "https://example.com/synthesis", Title: "Synthesis"}},
+		},
+	)
+	a := newAgent(fp, tools.Default(), Options{})
+	sink := &promptWorkSink{pending: true}
+	if err := a.RunPrompt(context.Background(), "hi", sink); err != nil {
+		t.Fatal(err)
+	}
+	transcript := a.Transcript()
+	if len(fp.Requests) != 2 || sink.waits != 1 || len(transcript) != 4 {
+		t.Fatalf("requests=%d waits=%d transcript=%+v", len(fp.Requests), sink.waits, transcript)
+	}
+	firstText := transcript[1].Content[0].Text
+	lastText := transcript[3].Content[0].Text
+	if !strings.Contains(firstText, "https://example.com/original") || strings.Contains(firstText, "https://example.com/synthesis") ||
+		!strings.Contains(lastText, "https://example.com/synthesis") || strings.Contains(lastText, "https://example.com/original") {
+		t.Fatalf("citations crossed response boundaries: first=%q last=%q", firstText, lastText)
+	}
+	if slices.Contains(sink.notices, NoticeContinuingMaxTokens) {
+		t.Fatalf("exact-point continuation should yield to pending-work synthesis: %v", sink.notices)
+	}
+	mustValid(t, transcript)
 }
 
 func TestPreToolUseHookBlocksToolAndPreservesTranscript(t *testing.T) {

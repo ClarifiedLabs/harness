@@ -23,6 +23,7 @@ type Step struct {
 	Stop       llm.StopReason
 	Usage      llm.Usage
 	ResponseID string
+	Citations  []llm.URLCitation
 	Err        error
 	Block      func(ctx context.Context)
 }
@@ -100,6 +101,6 @@ func (p *FakeProvider) Stream(ctx context.Context, req llm.Request) iter.Seq2[ll
 		}
 
 		u := step.Usage
-		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: step.Stop, ResponseID: step.ResponseID}, nil)
+		yield(llm.StreamEvent{Kind: llm.EventDone, Usage: &u, StopReason: step.Stop, ResponseID: step.ResponseID, Citations: append([]llm.URLCitation(nil), step.Citations...)}, nil)
 	}
 }

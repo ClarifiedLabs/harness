@@ -2238,6 +2238,11 @@ func providerResponsesStateful(pc llm.ProviderConfig) bool {
 	if !strings.EqualFold(strings.TrimSpace(pc.APIType), "responses") {
 		return false
 	}
+	// Meta cannot return encrypted reasoning while continuing a previous response,
+	// so an unavailable continuation could not be rebuilt from local history.
+	if llm.IsMetaResponsesProvider(pc.Name, pc.APIType, pc.BaseURL) {
+		return false
+	}
 	if pc.ResponsesStateful != nil {
 		return *pc.ResponsesStateful
 	}

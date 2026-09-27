@@ -1388,6 +1388,7 @@ type turnResult struct {
 	contextInput    *int
 	asyncResults    map[string]asyncReadResult
 	text            string
+	citations       []llm.URLCitation
 	reasoning       []llm.ContentBlock // provider-owned replay state, in arrival order
 	content         []llm.ContentBlock // exact provider block order when hosted search interleaves content
 	toolCalls       []llm.ToolCall
@@ -1993,6 +1994,48 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	var steerContext []string
 	forcePromptWorkSynthesis := false
 	outputContinuations := 0
+	// Citations from an output-limited response are deferred while its bounded
+	// continuation runs, so the continuation request does not see a Sources list
+	// in the middle of the answer. pendingCitationTarget/Text identify that
+	// truncated predecessor; maintenance may rewrite the transcript meanwhile.
+	var pendingCitations []llm.URLCitation
+	pendingCitationTarget := -1
+	var pendingCitationText string
+	takePendingSources := func() string {
+		sources := llm.FormatCitationSources(pendingCitations)
+		pendingCitations, pendingCitationTarget, pendingCitationText = nil, -1, ""
+		return sources
+	}
+	// flushPendingCitations attaches deferred citations to their truncated
+	// predecessor when the continuation cannot reach its own terminal boundary.
+	flushPendingCitations := func() {
+		target, text := pendingCitationTarget, pendingCitationText
+		sources := takePendingSources()
+		if sources == "" {
+			return
+		}
+		if target >= len(a.transcript) || target < 0 || !isCitationTarget(a.transcript[target], text, true) {
+			// Compaction or retention may have shifted or replaced the predecessor.
+			target = -1
+			for i := len(a.transcript) - 1; i >= 0; i-- {
+				if isCitationTarget(a.transcript[i], text, false) {
+					target = i
+					break
+				}
+			}
+		}
+		switch {
+		case target >= 0:
+			appendAssistantText(&a.transcript[target], sources)
+		case len(a.transcript) > 0 && a.transcript[len(a.transcript)-1].Role == llm.RoleAssistant:
+			appendAssistantText(&a.transcript[len(a.transcript)-1], sources)
+		default:
+			// The predecessor was summarized away. Keep the sources as their own
+			// assistant text so the saved transcript matches what was displayed.
+			a.transcript = append(a.transcript, a.textMessage(llm.RoleAssistant, strings.TrimLeft(sources, "\n")))
+		}
+		sink.TextDelta(sources)
+	}
 	var terminationReason TerminationReason
 	var closureTrigger ClosureTrigger
 	var closureTurn int
@@ -2103,6 +2146,10 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		})
 		trackEvaluatorResults(hookResult)
 	}()
+	// Registered after the PromptComplete and terminal Stop-hook defers so it runs
+	// before them: deferred citations must reach the display and transcript before
+	// the prompt is reported complete and persisted.
+	defer flushPendingCitations()
 
 	for unlimited || turns < a.maxTurns || forcePromptWorkSynthesis {
 		if !unlimited && !guard.turnBudgetClosureSteered && shouldEnterTurnBudgetClosure(a.maxTurns, turns) {
@@ -2349,13 +2396,25 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 
 		if err != nil {
-			emitModelErrorDiagnostic(sink, err, promptID, turns+1, res.attempts)
-			a.transcript = append(a.transcript, res.contextPrefix...)
-			a.resetResponseState()
 			// Cancellation repair: keep streamed partial text as a text-only
 			// assistant message; drop the message entirely if nothing streamed.
 			// Un-executed tool calls are never appended.
 			cancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+			// A failed continuation has no safe terminal event of its own, but the
+			// citations from its successful truncated predecessor remain valid. When
+			// partial continuation text is retained, the list follows that text in
+			// both the display and the transcript; otherwise it joins the predecessor.
+			if cancelled && res.text != "" {
+				if sources := takePendingSources(); sources != "" {
+					res.text += sources
+					sink.TextDelta(sources)
+				}
+			} else {
+				flushPendingCitations()
+			}
+			emitModelErrorDiagnostic(sink, err, promptID, turns+1, res.attempts)
+			a.transcript = append(a.transcript, res.contextPrefix...)
+			a.resetResponseState()
 			// Retained cancellation text and completed native prefixes remain
 			// useful. Only the wholly rejected terminal response is waste.
 			if !cancelled || res.text == "" {
@@ -2380,6 +2439,26 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			return err
 		}
 
+		// Background-work synthesis takes precedence over exact-point continuation.
+		// Decide that before deferring citations so they cannot migrate to an
+		// unrelated synthesis response. completeTurn below consumes the current turn,
+		// so evaluate the remaining budget against that projected count.
+		hasPendingPromptWork := res.stopReason != llm.StopToolUse && pendingPromptWork(sink)
+		continueMaxTokens := !hasPendingPromptWork && res.stopReason == llm.StopMaxTokens && outputContinuations == 0 &&
+			(unlimited || turns+1 < a.maxTurns) &&
+			(a.maxPromptTokens <= 0 || totalTokens(total) < a.maxPromptTokens) &&
+			(a.maxPromptCostUSD <= 0 || !total.CostKnown || total.CostUSD < a.maxPromptCostUSD)
+		if continueMaxTokens {
+			pendingCitations = append(pendingCitations, res.citations...)
+		} else {
+			pendingCitations = append(pendingCitations, res.citations...)
+			if sources := llm.FormatCitationSources(pendingCitations); sources != "" {
+				res.text += sources
+				sink.TextDelta(sources)
+			}
+			pendingCitations = nil
+		}
+
 		completeTurn()
 		a.transcript = append(a.transcript, res.contextPrefix...)
 		appendBoundary += len(res.contextPrefix)
@@ -2390,6 +2469,10 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			deliverNativeSteers(res.deliveredSteers, sink)
 		}
 		a.transcript = append(a.transcript, a.assistantMessage(res))
+		if continueMaxTokens && len(pendingCitations) > 0 {
+			pendingCitationTarget = len(a.transcript) - 1
+			pendingCitationText = assistantTextFingerprint(a.transcript[pendingCitationTarget])
+		}
 		a.updateResponseState(res)
 		if modelReq.usedPrevious {
 			// Only a turn that actually continued the anchor clears the
@@ -2405,7 +2488,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			// A model may try to finalize while background delegates are still
 			// running. Join them, then issue another model request with their reports
 			// injected as request context so the parent actually synthesizes them.
-			if pendingPromptWork(sink) {
+			if hasPendingPromptWork {
 				usage, waitErr := waitForPromptWork(ctx, sink)
 				total = llm.AddUsage(total, usage)
 				if waitErr != nil {
@@ -2425,10 +2508,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			// one continuation, provided the prompt's explicit turn/token/cost budgets
 			// still allow another paid request. The loop's ordinary proactive trigger
 			// compacts first when this extra request would approach the context window.
-			if res.stopReason == llm.StopMaxTokens && outputContinuations == 0 &&
-				(unlimited || turns < a.maxTurns) &&
-				(a.maxPromptTokens <= 0 || totalTokens(total) < a.maxPromptTokens) &&
-				(a.maxPromptCostUSD <= 0 || !total.CostKnown || total.CostUSD < a.maxPromptCostUSD) {
+			if continueMaxTokens {
 				outputContinuations++
 				sink.Notice(NoticeContinuingMaxTokens)
 				message := a.textMessage(llm.RoleUser, "[The previous response was truncated by the output-token limit. Continue from the exact point it stopped without repeating completed content.]")
@@ -4396,6 +4476,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 			if ev.Usage != nil {
 				res.usage = mergeUsage(res.usage, *ev.Usage)
 			}
+			res.citations = append(res.citations, ev.Citations...)
 			res.stopReason = ev.StopReason
 			res.responseID = ev.ResponseID
 		case llm.EventModelRequest:
@@ -4527,6 +4608,36 @@ func (a *Agent) drainSteerInputs() []SteerInput {
 			return out
 		}
 	}
+}
+
+// assistantTextFingerprint concatenates an assistant message's visible text; it
+// identifies a deferred-citation target across transcript rewrites.
+func assistantTextFingerprint(m llm.Message) string {
+	var text strings.Builder
+	for _, block := range m.Content {
+		if block.Kind == llm.BlockText {
+			text.WriteString(block.Text)
+		}
+	}
+	return text.String()
+}
+
+// isCitationTarget reports whether m still is the recorded predecessor. A
+// text-less (reasoning-only) predecessor is recognized only at its exact index.
+func isCitationTarget(m llm.Message, fingerprint string, exactIndex bool) bool {
+	return m.Role == llm.RoleAssistant && (fingerprint != "" || exactIndex) && assistantTextFingerprint(m) == fingerprint
+}
+
+// appendAssistantText appends text to the message's final text block, or adds a
+// text block when it has none (for example a reasoning-only response).
+func appendAssistantText(m *llm.Message, text string) {
+	for i := len(m.Content) - 1; i >= 0; i-- {
+		if m.Content[i].Kind == llm.BlockText {
+			m.Content[i].Text += text
+			return
+		}
+	}
+	m.Content = append(m.Content, llm.ContentBlock{Kind: llm.BlockText, Text: text})
 }
 
 func (a *Agent) partialAssistantMessage(res turnResult) llm.Message {

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"harness/internal/agent"
@@ -1051,7 +1052,9 @@ func (r *Runner) runPrepared(ctx context.Context, prepared preparedRun, progress
 	}
 
 	runErr := child.RunPrompt(ctx, prompt, sink)
-	rawReport := strings.TrimSpace(lastAssistantText(child.Transcript()))
+	// Preserve the canonical citation appendix until completion parsing; the
+	// parent-facing report is trimmed below after its footer is removed.
+	rawReport := strings.TrimLeftFunc(lastAssistantText(child.Transcript()), unicode.IsSpace)
 	if runErr == nil {
 		terminalCompletion, rawReport = parseCompletionReport(rawReport, contract)
 	}

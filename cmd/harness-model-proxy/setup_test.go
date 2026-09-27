@@ -802,6 +802,9 @@ func TestRunSetupWritesMetaResponsesProviderFromDirectCatalog(t *testing.T) {
 	if len(providers) != 1 || providers[0].APIType != "responses" || len(providers[0].Models) != 1 || providers[0].Models[0].Name != "muse-spark-1.3" {
 		t.Fatalf("Meta provider = %+v; config=%s", providers, data)
 	}
+	if providers[0].ResponsesStateful == nil || *providers[0].ResponsesStateful {
+		t.Fatalf("Meta responses_stateful = %v, want explicit false; config=%s", providers[0].ResponsesStateful, data)
+	}
 }
 
 func TestRunSetupWritesSakanaProviderWithoutModelShape(t *testing.T) {
@@ -893,6 +896,15 @@ func TestRunSetupWritesGoogleInteractionsProvider(t *testing.T) {
 	}
 	if len(provider.Models) != 1 || provider.Models[0].Name != "gemini-test" || provider.Models[0].ContextWindow != 1000000 {
 		t.Fatalf("provider models = %+v, want gemini-test", provider.Models)
+	}
+}
+
+func TestMetaSetupRepairsStatefulOverride(t *testing.T) {
+	enabled := true
+	cfg := setupProviderConfig{ResponsesStateful: &enabled}
+	applySyntheticProviderDefaults(modelcatalog.Provider{ID: "meta", API: "https://proxy.test/v1"}, &cfg)
+	if cfg.ResponsesStateful == nil || *cfg.ResponsesStateful {
+		t.Fatalf("responses_stateful = %v, want false", cfg.ResponsesStateful)
 	}
 }
 

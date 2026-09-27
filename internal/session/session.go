@@ -1463,22 +1463,35 @@ func followWithWaiter(ctx context.Context, dir string, w io.Writer, opts ReplayO
 	if err != nil {
 		return err
 	}
-	if header := target.header(); header != "" && !opts.Quiet {
+	headerEmitted := false
+	emitHeader := func(target followTarget) error {
+		header := target.header()
+		if headerEmitted || header == "" || opts.Quiet {
+			return nil
+		}
+		// A child identity may appear after following starts. Finish any pending
+		// streamed Markdown before inserting its display-only status line.
+		renderer.assistant.Finish()
 		if _, err := fmt.Fprintln(w, renderer.dimStatus(header)); err != nil {
 			return fmt.Errorf("session: write follow header: %w", err)
 		}
+		headerEmitted = true
+		return nil
+	}
+	if err := emitHeader(target); err != nil {
+		return err
 	}
 	for _, ev := range filterAbandonedAttemptOutput(initial) {
 		renderer.Render(ev)
 	}
 	sawPromptUsage := hasPromptUsage(initial)
 	if followComplete(target, sawPromptUsage) {
-		return finalFollowDrain(dir, follower, renderer)
+		return finalFollowDrain(dir, follower, renderer, emitHeader)
 	}
 
 	for {
 		if err := wait(ctx); err != nil {
-			if drainErr := finalFollowDrain(dir, follower, renderer); drainErr != nil {
+			if drainErr := finalFollowDrain(dir, follower, renderer, emitHeader); drainErr != nil {
 				return errors.Join(err, drainErr)
 			}
 			return err
@@ -1490,6 +1503,9 @@ func followWithWaiter(ctx context.Context, dir string, w io.Writer, opts ReplayO
 		if err != nil {
 			return err
 		}
+		if err := emitHeader(target); err != nil {
+			return err
+		}
 		events, err := follower.Read()
 		if err != nil {
 			return err
@@ -1499,7 +1515,7 @@ func followWithWaiter(ctx context.Context, dir string, w io.Writer, opts ReplayO
 		}
 		sawPromptUsage = sawPromptUsage || hasPromptUsage(events)
 		if followComplete(target, sawPromptUsage) {
-			return finalFollowDrain(dir, follower, renderer)
+			return finalFollowDrain(dir, follower, renderer, emitHeader)
 		}
 	}
 }
@@ -1517,11 +1533,15 @@ func followComplete(target followTarget, sawPromptUsage bool) bool {
 	return target.terminal() || (target.child && target.status == ChildStatusRunning && sawPromptUsage)
 }
 
-func finalFollowDrain(dir string, follower *eventFollower, renderer *replayRenderer) error {
+func finalFollowDrain(dir string, follower *eventFollower, renderer *replayRenderer, emitHeader func(followTarget) error) error {
 	if err := validateReplaySchema(dir); err != nil {
 		return err
 	}
-	if _, err := readFollowTarget(dir); err != nil {
+	target, err := readFollowTarget(dir)
+	if err != nil {
+		return err
+	}
+	if err := emitHeader(target); err != nil {
 		return err
 	}
 	events, err := follower.Read()
