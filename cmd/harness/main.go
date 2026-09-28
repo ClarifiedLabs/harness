@@ -1319,6 +1319,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Trajectory:                   trajectoryTracker,
 		GoalMaxContinuations:         cfg.GoalMaxContinuations,
 		GoalAutoContinue:             interactiveSession,
+		BackgroundAutoContinue:       interactiveSession && cfg.BackgroundAutoContinue,
 		HandoffAgent:                 cfg.HandoffAgent,
 		IdleCompactionAfter:          time.Duration(cfg.CompactIdleAfterSeconds) * time.Second,
 		IdleCompactionTriggerPercent: cfg.CompactIdleTriggerPercent,

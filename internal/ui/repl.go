@@ -244,6 +244,11 @@ type App struct {
 	// GoalAutoContinue enables the REPL idle-boundary continuation loop. It is
 	// wired from the same interactive-session condition as /handoff.
 	GoalAutoContinue bool
+	// BackgroundAutoContinue lets a background job completion observed at an idle
+	// REPL prompt start a host-created continuation turn that delivers the result
+	// to the model, instead of only printing a completion notice. User input,
+	// drafts, queued steer, and interrupts retain priority. Off by default.
+	BackgroundAutoContinue bool
 	// WorkflowStatusFunc optionally exposes authoritative bounded workflow state
 	// supplied by an embedding orchestrator. Harness does not infer it from text.
 	WorkflowStatusFunc func() agent.WorkflowStatus
@@ -350,9 +355,9 @@ type App struct {
 	pendingMaintenance   []queuedMaintenanceUsage
 	settleIdleCompaction func() // REPL-owned: discard/drain before session rotation
 
-	// lastPromptInterrupted is set by the run closure when a prompt ends because
-	// of context cancellation. It is read by the REPL loop to pause an active goal
-	// after a user interruption; deadline expiry does not count as interruption.
+	// lastPromptInterrupted is set by every prompt runner on context cancellation.
+	// The REPL uses it to suppress autonomous work after a user interruption;
+	// deadline expiry does not count as interruption.
 	lastPromptInterrupted bool
 
 	// pendingAPIContinuation is process-local recovery state for /continue. A
@@ -362,7 +367,8 @@ type App struct {
 }
 
 type apiContinuationState struct {
-	requestContext []string
+	requestContext           []string
+	backgroundRequestContext []string
 }
 
 type queuedMaintenanceUsage struct {
@@ -897,6 +903,34 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		loop.inputEnded = true
 		loop.inputErr = err
 	}
+	// claimDeliveredPlainInput moves an already-published canonical-mode read into
+	// the normal idle queue. Call it while holding promptBoundary immediately before
+	// autonomous admission so reader publication and admission have one ordering.
+	claimDeliveredPlainInput := func() bool {
+		if usePromptEditor || !loop.readPending {
+			return false
+		}
+		select {
+		case res := <-inputs:
+			loop.readPending = false
+			cancelIdleCompaction()
+			if loop.plainPromptRead {
+				loop.plainPromptRead = false
+				enableIdlePromptTerm()
+			}
+			switch {
+			case res.input.ended:
+				loop.inputEnded = true
+			case !res.ok:
+				setInputEnded(res.err)
+			default:
+				loop.queued = append(loop.queued, res.input)
+			}
+			return true
+		default:
+			return false
+		}
+	}
 	warnInputErr := func() {
 		if loop.inputErr != nil {
 			fmt.Fprintf(app.Errw, "[input error: %v]\n", loop.inputErr)
@@ -1117,6 +1151,39 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 		}
 		cancel()
 		run, ok := app.prepareDetachedWaitContinuation()
+		if !ok {
+			return false, ExitOK
+		}
+		startRun(run)
+		return false, ExitOK
+	}
+	startBackgroundCompletionContinuation := func() (exit bool, code int) {
+		cancelShiftTabPrewarm()
+		ctx, cancel, interrupted := exitContext()
+		err := app.refreshMCP(ctx)
+		if interrupted() || errors.Is(err, context.Canceled) {
+			cancel()
+			return true, ExitInterrupt
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			cancel()
+			return true, ExitInterrupt
+		}
+		cancel()
+
+		// Linearize plain-reader delivery with the final admission decision. A line
+		// published while MCP refresh was running must win; a detached wait that
+		// resolved meanwhile must retain its dedicated continuation cause.
+		promptBoundary.Lock()
+		defer promptBoundary.Unlock()
+		if claimDeliveredPlainInput() || app.Background == nil || app.Background.DetachedWaitPending() || !app.Background.CompletedContextPending() {
+			return false, ExitOK
+		}
+		if app.Renderer != nil {
+			app.Renderer.SubmittedPromptSeparator()
+			app.Renderer.StartPrompt()
+		}
+		run, ok := app.prepareBackgroundCompletionContinuation()
 		if !ok {
 			return false, ExitOK
 		}
@@ -1434,6 +1501,15 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 					}
 					continue
 				}
+				// An ordinary background completion gets the next autonomous slot after
+				// detached waits. Its result is still consumed only by the next model
+				// request's request-context drain.
+				if app.BackgroundAutoContinue && !app.lastPromptInterrupted && !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" && app.Background != nil && app.Background.CompletedContextPending() {
+					if exit, code := startBackgroundCompletionContinuation(); exit {
+						return finish(code)
+					}
+					continue
+				}
 				// Autonomous goal continuation: after a non-interrupted prompt, if
 				// there is no queued user input and an active goal remains, queue the
 				// next continuation prompt to run as a normal user turn.
@@ -1513,6 +1589,14 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			continue
 		}
 
+		// Subscribe before checking completion readiness. Changed closes and
+		// replaces its channel, so subscribing after the admission checks could
+		// miss a completion and leave its context stranded at the idle prompt.
+		var backgroundChanged <-chan struct{}
+		if app.Background != nil {
+			backgroundChanged = app.Background.Changed()
+		}
+
 		// Prefer a line that the reader has already delivered over autonomous
 		// continuation at every idle boundary, including one woken by a shared
 		// child-agent goal transition.
@@ -1546,10 +1630,31 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			}
 		}
 
+		// Background job completions observed at an idle prompt continue below
+		// detached waits and above goals. Reclaim a raw editor read exactly as the
+		// other autonomous work does, preserving any non-empty draft for the user,
+		// and re-check the predicate afterward: the reclaim may have delivered user
+		// input that already consumed the pending context.
+		if app.BackgroundAutoContinue && !app.lastPromptInterrupted && !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" && app.Background != nil && app.Background.CompletedContextPending() {
+			retry, exit, code := reclaimIdleEditorForAutonomous()
+			if exit {
+				return finish(code)
+			}
+			if retry {
+				continue
+			}
+			if app.Background.CompletedContextPending() {
+				if exit, code := startBackgroundCompletionContinuation(); exit {
+					return finish(code)
+				}
+				continue
+			}
+		}
+
 		// An active goal continues at every idle boundary before waiting for fresh
 		// input. This starts restored goals. It shares the raw-editor reclaim path
 		// above so delivered input and editable drafts retain their existing priority.
-		if !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" {
+		if !app.lastPromptInterrupted && !loop.inputEnded && len(loop.queued) == 0 && len(loop.preparedQueued) == 0 && loop.pendingPrefill == "" {
 			if cont, ok := app.goalContinuationReady(); ok {
 				retry, exit, code := reclaimIdleEditorForAutonomous()
 				if exit {
@@ -1591,12 +1696,6 @@ func runWithInitialPrompt(in io.Reader, app *App, exit <-chan struct{}, usePromp
 			return finish(ExitOK)
 		}
 		scheduleIdleCompaction()
-		var backgroundChanged <-chan struct{}
-		if app.Background != nil {
-			// Subscribe before draining. signalLocked closes and replaces this
-			// channel, so checking first could miss a completion in between.
-			backgroundChanged = app.Background.Changed()
-		}
 		app.pollBackgroundNotices()
 		if !loop.promptPrinted {
 			loop.prompt = renderPrompt()
@@ -1875,6 +1974,8 @@ const (
 	implementationStartPrompt          = "Continue the active approved work now."
 	detachedBackgroundWaitCause        = "detached_background_wait"
 	detachedBackgroundWaitContinuation = "A detached `background_jobs` wait has resolved. Review its result in request context and continue the task."
+	backgroundJobCompletedCause        = "background_job_completed"
+	backgroundJobCompletedContinuation = "One or more background jobs have completed. Review their results in request context and continue the task."
 )
 
 type escapePresses struct {
@@ -2866,8 +2967,7 @@ func (app *App) showGoalStatus() {
 }
 
 func (app *App) goalOnPromptEnd(ctx context.Context, err error, revision uint64, ownedActiveGoal bool) {
-	app.lastPromptInterrupted = errors.Is(err, context.Canceled)
-	if !app.lastPromptInterrupted || app.Goal == nil {
+	if !errors.Is(err, context.Canceled) || app.Goal == nil {
 		return
 	}
 	paused := false
@@ -4240,6 +4340,25 @@ func cloneRequestContext(contexts []string) []string {
 	return append([]string(nil), contexts...)
 }
 
+func appendUniqueRequestContext(base, additional []string) []string {
+	out := cloneRequestContext(base)
+	seen := make(map[string]struct{}, len(out)+len(additional))
+	for _, item := range out {
+		seen[item] = struct{}{}
+	}
+	for _, item := range additional {
+		if strings.TrimSpace(item) == "" {
+			continue
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		out = append(out, item)
+		seen[item] = struct{}{}
+	}
+	return out
+}
+
 func (app *App) clearAPIContinuation() {
 	app.pendingAPIContinuation = nil
 }
@@ -4259,6 +4378,7 @@ func (app *App) apiContinuationContext() ([]string, bool) {
 // interactive model-bound run. Cancellation takes precedence even if an error
 // chain also contains an APIError.
 func (app *App) finishPromptRun(err error, requestContext []string) {
+	app.lastPromptInterrupted = errors.Is(err, context.Canceled)
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		app.clearAPIContinuation()
 		return
@@ -4301,6 +4421,9 @@ func (app *App) preparePromptExecution(ctx context.Context, promptID int, reques
 		sink := newREPLSink(app.Renderer, app, promptID)
 		err := run(ctx, sink)
 		app.finishPromptRun(err, requestContext)
+		if app.pendingAPIContinuation != nil {
+			app.pendingAPIContinuation.backgroundRequestContext = cloneRequestContext(sink.backgroundRequestContext)
+		}
 		sink.FlushEvents()
 		if onEnd != nil {
 			onEnd(ctx, err)
@@ -4385,6 +4508,19 @@ func (app *App) prepareDetachedWaitContinuation() (func(), bool) {
 	}, nil), true
 }
 
+// prepareBackgroundCompletionContinuation admits the host-created continuation
+// started when background jobs finish at an idle prompt. Like the detached-wait
+// continuation it skips human prompt hooks, skills, images, and goal admission;
+// the completed-job results drain one-shot through the sink's per-request
+// request-context delivery, so a rejected admission cannot lose them.
+func (app *App) prepareBackgroundCompletionContinuation() (func(), bool) {
+	admission, promptID := app.admitInternalPrompt(backgroundJobCompletedContinuation, backgroundJobCompletedCause)
+	requestContext := app.promptHookContext(nil)
+	return app.preparePromptExecution(context.Background(), promptID, requestContext, func(ctx context.Context, sink *accumulatingSink) error {
+		return app.Agent.RunAdmittedPromptWithContext(ctx, admission, requestContext, promptID, sink)
+	}, nil), true
+}
+
 // prepareAPIContinuation starts a fresh accounting prompt from the existing
 // transcript boundary. It deliberately skips prompt admission, hooks, skills,
 // pending images, goal admission, and EventUser recording.
@@ -4393,9 +4529,13 @@ func (app *App) prepareAPIContinuation() (func(), bool) {
 	if !ok {
 		return nil, false
 	}
+	backgroundContext := cloneRequestContext(app.pendingAPIContinuation.backgroundRequestContext)
 	app.clearAPIContinuation()
 	promptID := app.beginContinuationPrompt()
 	return app.preparePromptExecution(context.Background(), promptID, requestContext, func(ctx context.Context, sink *accumulatingSink) error {
+		// Replay one-shot results through the recovered round and its retries,
+		// not as persistent prompt context on every subsequent model round.
+		sink.backgroundRequestContext = backgroundContext
 		sink.Notice("[continuing after API error]")
 		return app.Agent.ContinuePromptWithContext(ctx, requestContext, promptID, sink)
 	}, nil), true
@@ -5800,6 +5940,10 @@ type accumulatingSink struct {
 	terminalModelErrorDisplayed bool
 	attemptText                 strings.Builder
 	finalText                   string
+	// Keep one-shot results throughout a logical model round, including request
+	// rebuilds and retries. TurnComplete retires them; an API failure instead
+	// transfers them to /continue's first round, separate from prompt context.
+	backgroundRequestContext []string
 }
 
 // SetOTel installs the concrete OTEL sink before prompts begin. Keeping this
@@ -6242,6 +6386,7 @@ func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic
 }
 
 func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
+	s.backgroundRequestContext = nil
 	s.finalText = s.attemptText.String()
 	if !u.Usage.CostKnown {
 		u.Usage.CostUSD, u.Usage.CostKnown = s.app.Registry.Cost(s.app.usageKey(), u.Usage)
@@ -6360,8 +6505,8 @@ func (s *accumulatingSink) RequestContext() []string {
 	if ctx := s.app.goalRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
-	out = append(out, s.app.backgroundRequestContext(s)...)
-	return out
+	s.backgroundRequestContext = appendUniqueRequestContext(s.backgroundRequestContext, s.app.backgroundRequestContext(s))
+	return append(out, s.backgroundRequestContext...)
 }
 
 // PeekRequestContext mirrors RequestContext without consuming completed
@@ -6375,6 +6520,7 @@ func (s *accumulatingSink) PeekRequestContext() []string {
 	if ctx := s.app.goalRequestContext(); ctx != "" {
 		out = append(out, ctx)
 	}
+	out = append(out, s.backgroundRequestContext...)
 	if s.app.Background != nil {
 		out = append(out, s.app.Background.PeekCompletedContext()...)
 	}

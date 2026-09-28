@@ -1425,6 +1425,41 @@ func awaitJobDone(t *testing.T, m *Manager, id string) {
 	}
 }
 
+func TestManagerCompletedContextPending(t *testing.T) {
+	m := NewManager(Options{})
+	if m.CompletedContextPending() {
+		t.Fatal("empty manager reports pending context")
+	}
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	started, err := m.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "done"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartBackgroundJob: %v", err)
+	}
+	<-startedRun
+	if m.CompletedContextPending() {
+		t.Fatal("running job reports pending context")
+	}
+	close(release)
+	awaitJobDone(t, m, started.ID)
+	if !m.CompletedContextPending() {
+		t.Fatal("finished job does not report pending context")
+	}
+	if drained := m.DrainCompletedContext(nil); len(drained) != 1 {
+		t.Fatalf("drained context = %v, want one entry", drained)
+	}
+	if m.CompletedContextPending() {
+		t.Fatal("delivered context still reports pending")
+	}
+}
+
 // TestManagerExposesProgressOnJob verifies live progress supplied with a
 // background job request is surfaced immediately and after completion.
 func TestManagerExposesProgressOnJob(t *testing.T) {
@@ -1676,6 +1711,9 @@ func TestManagerWaitDetachesOnAcceptedSteerAndDeliversOnce(t *testing.T) {
 	}
 	if !m.DetachedWaitPending() {
 		t.Fatal("detached completion should remain pending")
+	}
+	if m.CompletedContextPending() {
+		t.Fatal("detached outcome reported as ordinary completion context")
 	}
 	peek := m.PeekCompletedContext()
 	if len(peek) != 1 || !strings.Contains(peek[0], "[detached background wait "+detached.WaitID+"]") || !strings.Contains(peek[0], "detached result") {

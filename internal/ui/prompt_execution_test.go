@@ -91,7 +91,7 @@ func TestPromptExecutionFinalizationOrder(t *testing.T) {
 }
 
 func TestPromptExecutionEntryPointGoalPolicies(t *testing.T) {
-	for _, kind := range []string{"prompt", "steered", "detached wait", "API continuation"} {
+	for _, kind := range []string{"prompt", "steered", "detached wait", "background completion", "API continuation"} {
 		for _, cancel := range []bool{false, true} {
 			name := kind + "/success"
 			if cancel {
@@ -120,6 +120,8 @@ func TestPromptExecutionEntryPointGoalPolicies(t *testing.T) {
 					run, ok = app.prepareSteeredPrompt(agent.SteerInput{Text: "task"})
 				case "detached wait":
 					run, ok = app.prepareDetachedWaitContinuation()
+				case "background completion":
+					run, ok = app.prepareBackgroundCompletionContinuation()
 				case "API continuation":
 					app.Agent.SetTranscript([]llm.Message{uiUserMsg("task")})
 					app.finishPromptRun(&llm.APIError{Message: "retry"}, nil)
@@ -135,11 +137,9 @@ func TestPromptExecutionEntryPointGoalPolicies(t *testing.T) {
 				if finished != 1 {
 					t.Fatalf("completion callbacks = %d, want 1", finished)
 				}
-				hostTurn := kind == "detached wait" || kind == "API continuation"
+				hostTurn := kind == "detached wait" || kind == "background completion" || kind == "API continuation"
 				wantInterrupted := cancel
-				if hostTurn {
-					wantInterrupted = !cancel
-				} else if cancel {
+				if !hostTurn && cancel {
 					before.Status = goal.StatusPaused
 				}
 				if got := app.Goal.Snapshot(); !reflect.DeepEqual(got, before) || app.lastPromptInterrupted != wantInterrupted {

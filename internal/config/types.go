@@ -156,6 +156,7 @@ type Config struct {
 	RetentionKeepTurns            int     `json:"retention_keep_turns"`
 	RetentionResultHeadBytes      int     `json:"retention_result_head_bytes"`
 	NoSteer                       bool    `json:"no_steer"`
+	BackgroundAutoContinue        bool    `json:"background_auto_continue"`
 
 	Agent        string                     `json:"agent"`
 	Agents       map[string]FileAgentConfig `json:"agents,omitempty"`

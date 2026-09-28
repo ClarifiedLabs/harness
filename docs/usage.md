@@ -282,6 +282,9 @@ value placeholders remain hand-maintained.
 -responses-stateful   use CLI-owned provider continuation when the selected target supports it (default true)
 -retention-policy <mode>   live transcript retention: auto, age, pressure, or disabled (default auto)
 -no-steer         disable in-prompt steering: queue input for the next prompt instead of injecting it before the next turn (default off; see "Steering")
+-background-auto-continue   when a background job finishes at an idle REPL prompt, start a continuation
+                    turn that delivers the result to the model automatically (default on; interactive only;
+                    use -background-auto-continue=false to disable)
 -image-detail <level>   default image detail: auto, low, high, or original
 -image <path|detail:path>   attach an image in one-shot mode or to the initial -i prompt; repeatable
 -agent <name>     agent: auto (default), explore, plan, review, independent, or a config-defined agent
@@ -733,6 +736,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `retention_keep_turns` | `integer` | - | - | `HARNESS_RETENTION_KEEP_TURNS` | `retention_keep_turns` | 4 | no | Harness retention keep turns setting. |
 | `retention_result_head_bytes` | `integer` | - | - | `HARNESS_RETENTION_RESULT_HEAD_BYTES` | `retention_result_head_bytes` | 800 (clamped to the 4096-byte retention threshold) | no | Harness retention result head bytes setting. |
 | `no_steer` | `boolean` | `true`, `false` | `-no-steer` | `HARNESS_NO_STEER` | `no_steer` | false | no | Harness no steer setting. |
+| `background_auto_continue` | `boolean` | `true`, `false` | `-background-auto-continue` | `HARNESS_BACKGROUND_AUTO_CONTINUE` | `background_auto_continue` | true | no | Harness background auto continue setting. |
 | `agent` | `string` | - | `-agent` | `HARNESS_AGENT` | `agent` | derived: runtime default agent | no | Harness agent setting. |
 | `handoff_agent` | `string` | - | `-handoff-agent` | `HARNESS_HANDOFF_AGENT` | `handoff_agent` | derived: runtime default implementation agent | no | Harness handoff agent setting. |
 | `verbose` | `boolean` | `true`, `false` | `-v` | `HARNESS_VERBOSE` | `verbose` | false | no | Harness verbose setting. |
@@ -1874,11 +1878,25 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/vi on\|off` | enable or disable vi-style prompt editing (persisted as the default) |
 | `!command` | run a local shell command at an interactive TTY prompt |
 
+With `background_auto_continue` enabled (the default; disable with
+`-background-auto-continue=false`, `HARNESS_BACKGROUND_AUTO_CONTINUE=false`, or
+config `background_auto_continue:false`),
+a background job that finishes while the interactive REPL sits idle at the
+prompt starts a host-created continuation turn with cause
+`background_job_completed`: the completed results drain as request-only
+context into that turn's first model request instead of waiting for the next
+user prompt. The continuation runs only after delivered user input, drafts,
+queued steer, approvals, EOF/shutdown, and interrupts, and only in interactive
+sessions. With `background_auto_continue:false`, completion prints a notice
+and the result rides the next user-initiated prompt.
+
 `/continue` is process-local recovery for the most recent non-cancelled model API
-failure. It reuses the valid current transcript and the failed prompt's
-request-only hook context, while dynamic TODO, goal, and background context is
-regenerated normally for each request. The command does not submit its literal
-text, add a user-role message, invoke `UserPromptSubmit`, resolve skills, or
+failure. It reuses the valid current transcript, the failed prompt's request-only
+hook context, and any one-shot background context consumed by that failed
+request. Recovered background results survive retries of that model round and
+are retired when it succeeds. Dynamic TODO, goal, and newly completed background
+context is sampled normally for each request. The command does not submit its
+literal text, add a user-role message, invoke `UserPromptSubmit`, resolve skills, or
 consume pending images. A repeated API failure leaves it available again. A
 successful run, cancellation, non-API failure, newer ordinary or host-created
 model prompt, `/clear`, or conversation branch invalidates it. Model, agent,

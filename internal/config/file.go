@@ -93,6 +93,7 @@ type fileConfig struct {
 	RetentionKeepTurns                 optional[int]                        `json:"retention_keep_turns"`
 	RetentionResultHeadBytes           optional[int]                        `json:"retention_result_head_bytes"`
 	NoSteer                            optional[bool]                       `json:"no_steer"`
+	BackgroundAutoContinue             optional[bool]                       `json:"background_auto_continue"`
 	Verbose                            optional[bool]                       `json:"verbose"`
 	ToolStream                         optional[bool]                       `json:"tool_stream"`
 	ShowDiffs                          optional[bool]                       `json:"show_diffs"`

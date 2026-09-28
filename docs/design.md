@@ -1800,8 +1800,11 @@ After a live REPL prompt terminates with a non-cancelled provider `*APIError`,
 the host may call the same loop through `ContinuePromptWithContext`. That entry
 point starts at the current validated, closed transcript boundary and appends no
 message before the provider request. The REPL's `/continue` path assigns a new
-prompt/accounting ID and restores the original request-only prompt context;
-dynamic sink-provided context is still sampled on every request. Stateful
+prompt/accounting ID and restores the original request-only prompt context.
+One-shot background context consumed by the failed request is retained separately
+through the recovered model round's rebuilds and retries, then retired when that
+round completes; it is not persistent prompt context. Fresh dynamic sink-provided
+context is still sampled on every request. Stateful
 Responses/Interactions continuation and their full-history fallback therefore
 follow the ordinary `modelRequest` rules rather than a dialect-specific recovery
 path.
@@ -3022,7 +3025,12 @@ delegates.
   The interactive scheduler then starts a continuation with cause
   `detached_background_wait` only after delivered user input, drafts,
   approvals, EOF/shutdown, and interrupts; ordinary fire-and-forget completion
-  context never starts an autonomous model call.
+  context never starts an autonomous model call; with `background_auto_continue`
+  (default on), a completion observed at an idle
+  REPL prompt starts a `cause:"background_job_completed"` continuation under
+  the same priority rules (below delivered input, drafts, and detached waits;
+  above goal continuation; interactive sessions only); setting it to `false`
+  restores notice-only completion.
 - The system prompt and background-capable tool schemas route a strict
   completion dependency to one `wait` call; `get` and `list` are for
   nonblocking inspection, not repeated status polling.

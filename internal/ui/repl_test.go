@@ -8049,8 +8049,12 @@ func TestRequestContextRecordsBackgroundJobDiagnosticsOnce(t *testing.T) {
 	if contexts := sink.RequestContext(); len(contexts) != 1 || !strings.Contains(contexts[0], "FAIL background checks") {
 		t.Fatalf("background request context = %+v", contexts)
 	}
+	if contexts := sink.RequestContext(); len(contexts) != 1 {
+		t.Fatalf("rebuilt background request context = %+v", contexts)
+	}
+	sink.TurnComplete(agent.TurnUsage{Turn: 1})
 	if contexts := sink.RequestContext(); len(contexts) != 0 {
-		t.Fatalf("second background request context = %+v", contexts)
+		t.Fatalf("next round background request context = %+v", contexts)
 	}
 	sink.FlushEvents()
 	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
@@ -8229,6 +8233,441 @@ func TestSteerAcceptedDetachesBackgroundWait(t *testing.T) {
 		snapshot, ok := manager.Get(job.ID)
 		return ok && snapshot.Status != background.StatusRunning
 	}, "background job completion")
+}
+
+func TestREPLBackgroundCompletionAutoContinues(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("continued after background job")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	app.BackgroundAutoContinue = true
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "background result body"}, nil
+		},
+	}); err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+
+	finished := make(chan struct{}, 1)
+	app.OnPromptFinished = func() { finished <- struct{}{} }
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background completion did not start a continuation")
+	}
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want one continuation", fp.RequestCount())
+	}
+	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "background result body") {
+		t.Fatalf("continuation request context = %q", got)
+	}
+	if prompts := transcriptPrompts(app); prompts != backgroundJobCompletedContinuation {
+		t.Fatalf("transcript prompts = %q, want background completion continuation", prompts)
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), `"purpose":"background_job_completed"`) {
+		t.Fatalf("background continuation cause missing from raw.ndjson:\n%s", raw)
+	}
+}
+
+func TestREPLBackgroundCompletionAPIContinueRetainsResult(t *testing.T) {
+	var out, errw lockedBuffer
+	fail := llmtest.Step{Err: &llm.APIError{StatusCode: 503, Message: "service unavailable", Retryable: true}}
+	fp := llmtest.New("fake",
+		fail, fail, fail,
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("recovered with background result")}, Stop: llm.StopEndTurn},
+	)
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	app.BackgroundAutoContinue = true
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "result needed after retry"}, nil
+		},
+	}); err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+
+	finished := make(chan struct{}, 2)
+	app.OnPromptFinished = func() { finished <- struct{}{} }
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+	close(release)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("failed background continuation did not finish")
+	}
+	writePipe(t, writer, "/continue\n")
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("API continuation did not finish")
+	}
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+
+	if fp.RequestCount() != 4 {
+		t.Fatalf("model requests = %d, want three failed attempts plus /continue", fp.RequestCount())
+	}
+	for i, req := range fp.Requests {
+		if got := strings.Join(req.RequestContext, "\n"); !strings.Contains(got, "result needed after retry") {
+			t.Fatalf("request %d lost background result context: %q", i+1, got)
+		}
+	}
+}
+
+func TestREPLBackgroundCompletionCancellationStopsAutonomousWork(t *testing.T) {
+	var out, errw lockedBuffer
+	started := make(chan struct{})
+	unexpectedGoalTurn := make(chan struct{})
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Stop: llm.StopEndTurn,
+			Block: func(ctx context.Context) {
+				close(started)
+				<-ctx.Done()
+			},
+		},
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("unexpected goal continuation")},
+			Stop:   llm.StopEndTurn,
+			Block:  func(context.Context) { close(unexpectedGoalTurn) },
+		},
+	)
+	app := newTestAppWithGoal(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	app.GoalMaxContinuations = 1
+	app.BackgroundAutoContinue = true
+	app.Interrupt = agent.NewInterruptWatcher(nil, time.Now, func() {})
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "cancel this continuation"}, nil
+		},
+	}); err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+	close(release)
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background continuation did not start")
+	}
+	if err := app.Goal.Set("do not continue until the user speaks"); err != nil {
+		t.Fatal(err)
+	}
+	app.Interrupt.CancelPrompt()
+	waitFor(t, func() bool { return strings.Count(errw.String(), "ready> ") >= 2 }, "idle prompt after cancellation")
+	select {
+	case <-unexpectedGoalTurn:
+		t.Fatal("canceled background continuation started autonomous goal work")
+	default:
+	}
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want only the canceled continuation", fp.RequestCount())
+	}
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+	if app.Goal.Status() != goal.StatusActive {
+		t.Fatalf("host-turn cancellation changed goal status to %q", app.Goal.Status())
+	}
+}
+
+func TestREPLBackgroundCompletionPlainInputWinsDuringRefresh(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("answered user input")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	app.BackgroundAutoContinue = true
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var refreshOnce sync.Once
+	app.RefreshMCP = func(context.Context, string) (*tools.Registry, string) {
+		refreshOnce.Do(func() {
+			close(refreshStarted)
+			<-releaseRefresh
+		})
+		return nil, ""
+	}
+	delivered := make(chan struct{}, 1)
+	app.onInputDelivered = func() { delivered <- struct{}{} }
+
+	startedRun := make(chan struct{})
+	releaseJob := make(chan struct{})
+	if _, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-releaseJob
+			return tools.BackgroundJobResult{Text: "background context for user input"}, nil
+		},
+	}); err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+
+	finished := make(chan struct{}, 1)
+	app.OnPromptFinished = func() { finished <- struct{}{} }
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+	close(releaseJob)
+	select {
+	case <-refreshStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("background continuation did not reach MCP refresh")
+	}
+	writePipe(t, writer, "user input wins\n")
+	select {
+	case <-delivered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("plain-reader input was not published during refresh")
+	}
+	close(releaseRefresh)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("user prompt did not finish")
+	}
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+
+	if fp.RequestCount() != 1 {
+		t.Fatalf("model requests = %d, want only the user prompt", fp.RequestCount())
+	}
+	if prompts := transcriptPrompts(app); prompts != "user input wins" {
+		t.Fatalf("transcript prompts = %q, want user input before autonomous work", prompts)
+	}
+	if got := strings.Join(fp.Requests[0].RequestContext, "\n"); !strings.Contains(got, "background context for user input") {
+		t.Fatalf("user request context = %q, want completed background result", got)
+	}
+}
+
+func TestREPLDetachedWaitPublishedDuringBackgroundAdmissionKeepsCause(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("handled detached wait")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	app.BackgroundAutoContinue = true
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	ordinaryStarted := make(chan struct{})
+	releaseOrdinary := make(chan struct{})
+	if _, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(ordinaryStarted)
+			<-releaseOrdinary
+			return tools.BackgroundJobResult{Text: "ordinary result"}, nil
+		},
+	}); err != nil {
+		t.Fatalf("start ordinary background job: %v", err)
+	}
+	<-ordinaryStarted
+
+	detachedStarted := make(chan struct{})
+	releaseDetached := make(chan struct{})
+	detachedJob, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(detachedStarted)
+			<-releaseDetached
+			return tools.BackgroundJobResult{Text: "detached result"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("start detached background job: %v", err)
+	}
+	<-detachedStarted
+	enteredWait := make(chan struct{})
+	waited := make(chan background.WaitResult, 1)
+	waitErr := make(chan error, 1)
+	go func() {
+		result, waitResultErr := manager.Wait(&waitEntryContext{Context: context.Background(), entered: enteredWait}, detachedJob.ID, time.Minute)
+		waited <- result
+		waitErr <- waitResultErr
+	}()
+	<-enteredWait
+	manager.NotifyAcceptedSteer()
+	if result := <-waited; !result.Detached {
+		t.Fatalf("wait result = %+v, want detached", result)
+	}
+	if err := <-waitErr; err != nil {
+		t.Fatalf("detach wait: %v", err)
+	}
+
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var refreshOnce sync.Once
+	app.RefreshMCP = func(context.Context, string) (*tools.Registry, string) {
+		refreshOnce.Do(func() {
+			close(refreshStarted)
+			<-releaseRefresh
+		})
+		return nil, ""
+	}
+	finished := make(chan struct{}, 1)
+	app.OnPromptFinished = func() { finished <- struct{}{} }
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+	close(releaseOrdinary)
+	select {
+	case <-refreshStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ordinary completion did not reach admission refresh")
+	}
+	close(releaseDetached)
+	waitFor(t, manager.DetachedWaitPending, "detached wait publication")
+	close(releaseRefresh)
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("detached continuation did not finish")
+	}
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+
+	if prompts := transcriptPrompts(app); prompts != detachedBackgroundWaitContinuation {
+		t.Fatalf("transcript prompts = %q, want detached-wait continuation", prompts)
+	}
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatalf("read raw.ndjson: %v", err)
+	}
+	if !strings.Contains(string(raw), `"purpose":"detached_background_wait"`) || strings.Contains(string(raw), `"purpose":"background_job_completed"`) {
+		t.Fatalf("detached outcome recorded with wrong cause:\n%s", raw)
+	}
+}
+
+func TestREPLBackgroundCompletionNoticeOnlyWhenDisabled(t *testing.T) {
+	var out, errw lockedBuffer
+	fp := llmtest.New("fake", llmtest.Step{
+		Events: []llm.StreamEvent{textDelta("unused")},
+		Stop:   llm.StopEndTurn,
+	})
+	app := newTestApp(t, &out, &errw, fp)
+	app.Prompt = "ready> "
+	app.BackgroundAutoContinue = false
+	manager := background.NewManager(background.Options{})
+	app.Background = manager
+
+	startedRun := make(chan struct{})
+	release := make(chan struct{})
+	if _, err := manager.StartBackgroundJob(tools.BackgroundJobRequest{
+		Kind: "shell",
+		Run: func(context.Context, string) (tools.BackgroundJobResult, error) {
+			close(startedRun)
+			<-release
+			return tools.BackgroundJobResult{Text: "background result body"}, nil
+		},
+	}); err != nil {
+		t.Fatalf("start background job: %v", err)
+	}
+	<-startedRun
+
+	reader, writer := io.Pipe()
+	codeCh := make(chan int, 1)
+	go func() { codeCh <- run(reader, app, nil, false) }()
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "ready> ") }, "idle REPL prompt")
+	close(release)
+	waitFor(t, func() bool { return strings.Contains(errw.String(), "completed") }, "background completion notice")
+	writePipe(t, writer, "/exit\n")
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close REPL input: %v", err)
+	}
+	if code := waitRun(t, codeCh); code != ExitOK {
+		t.Fatalf("exit code = %d, want 0; stderr=%q", code, errw.String())
+	}
+	if fp.RequestCount() != 0 {
+		t.Fatalf("model requests = %d, want none with background_auto_continue disabled", fp.RequestCount())
+	}
 }
 
 func TestREPLDetachedWaitCompletionStartsContinuation(t *testing.T) {

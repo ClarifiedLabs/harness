@@ -110,8 +110,11 @@ identical `raw.ndjson` output.
   terminal `prompt_usage` record are independent of the failed prompt. It
   deliberately emits no `EventUser` and contributes no new transcript block;
   saving synchronizes only the recovered assistant/tool suffix onto the
-  existing active leaf. The eligibility and original request-only hook context
-  are process-local and are not reconstructed by resume.
+  existing active leaf. The eligibility, original request-only hook context, and
+  any one-shot background context consumed by the failed request are
+  process-local and are not reconstructed by resume. Recovered background context
+  is kept separately from prompt context and retired when the recovered model
+  round completes, rather than replayed throughout the continuation.
 - `maintenance_usage` accounts for compaction, prewarming and branch-summary
   calls without creating turns. `model_request` records proxy/request
   lifecycle and every API issue with timing, parsed error, and correlation

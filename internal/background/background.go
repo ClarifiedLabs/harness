@@ -1037,6 +1037,25 @@ func (m *Manager) PeekCompletedContext() []string {
 	return m.completedContext(false, nil)
 }
 
+// CompletedContextPending reports whether a finished job still has ordinary
+// completion context the model has not received and no detached wait claims it.
+// Detached outcomes use DetachedWaitPending so the REPL can preserve their
+// distinct continuation cause.
+func (m *Manager) CompletedContextPending() bool {
+	if m == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, id := range m.order {
+		job := m.jobs[id]
+		if job != nil && job.finished && !job.contextDelivered && job.contextClaims == 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (m *Manager) completedContext(deliver bool, archiver toolresult.Archiver) []string {
 	m.mu.Lock()
 	var completed []Job
