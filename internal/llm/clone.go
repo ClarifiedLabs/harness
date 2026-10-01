@@ -80,3 +80,30 @@ func CloneCompactionMetadata(meta *CompactionMetadata) *CompactionMetadata {
 	out.ModifiedFiles = slices.Clone(meta.ModifiedFiles)
 	return &out
 }
+
+// CloneToolSchemas copies schemas and their JSON parameters. Empty slices are normalized to nil.
+func CloneToolSchemas(specs []ToolSchema) []ToolSchema {
+	out := append([]ToolSchema(nil), specs...)
+	for i := range out {
+		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
+	}
+	return out
+}
+
+// CloneToolGroups copies groups and their nested schemas. Empty slices are normalized to nil.
+func CloneToolGroups(groups []ToolGroup) []ToolGroup {
+	out := append([]ToolGroup(nil), groups...)
+	for i := range out {
+		out[i].Tools = CloneToolSchemas(groups[i].Tools)
+	}
+	return out
+}
+
+// CloneServerTools copies server tools and their JSON parameters. Empty slices are normalized to nil.
+func CloneServerTools(serverTools []ServerTool) []ServerTool {
+	out := append([]ServerTool(nil), serverTools...)
+	for i := range out {
+		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
+	}
+	return out
+}

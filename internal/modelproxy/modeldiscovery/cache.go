@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"harness/internal/atomicfile"
 )
 
 const cacheDirectory = "provider-models"
@@ -71,24 +73,13 @@ func WriteCache(configDir string, snapshot Snapshot) error {
 	}
 	data = append(data, '\n')
 	path := CachePath(configDir, snapshot.Provider)
-	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*.tmp")
-	if err != nil {
+	return atomicfile.Replace(path, "."+filepath.Base(path)+".*.tmp", func(tmp *os.File) error {
+		if err := tmp.Chmod(0o600); err != nil {
+			return err
+		}
+		_, err := tmp.Write(data)
 		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpPath, path)
+	})
 }
 
 func StateFromCache(snapshot Snapshot, now time.Time, ttl time.Duration) State {

@@ -99,7 +99,7 @@ internal/modelproxy      proxy protocol (including normalized subscription DTOs)
 internal/modelproxy/subscription isolated Kimi/Z.ai/Codex account-quota adapters and explicit Codex reset-credit redemption; injected HTTP/clock/credential resolver
 internal/modelproxy/config model-proxy top-level setting catalog, source resolution, and safe projections
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
-internal/llm             provider-agnostic types, canonical message cloning and additive usage accounting, Provider interface, model/price registry, and content-free physical attempt/retry/discard source facts
+internal/llm             provider-agnostic types, canonical message/tool-declaration cloning and additive usage accounting, Provider interface, model/price registry, and content-free physical attempt/retry/discard source facts
 internal/execution       neutral typed Observer/Scope for model, work, prompt, context, turn, and skill observations; ModelCall owns exact physical usage/discard lineage and legacy response segments; Group tracks actual workers and complete owners without wrapping Provider capabilities
 internal/llm/openai      Chat Completions dialect: wire structs, request builder, stream decode, tool-call assembly
 internal/llm/responses   OpenAI Responses dialect: same responsibilities
@@ -147,7 +147,7 @@ internal/lsptools        harness-side adapter exposing short `lsp_*` tools over 
 ```
 
 The block above lists the core data path plus the optional MCP/LSP surfaces; a few
-small leaf packages (`inputimage`, `markdown`, `mermaid`, `replprompt`, `httpserve`, `httpx`,
+small leaf packages (`atomicfile`, `inputimage`, `markdown`, `mermaid`, `replprompt`, `httpserve`, `httpx`,
 `mcpchild`, `term`) are omitted for brevity.
 
 `internal/llm` is the shared contract between the agent loop and any model provider.
@@ -205,7 +205,10 @@ metric catalog live in [telemetry.md](telemetry.md).
 This adds no core import cycles or telemetry dependency to `internal/mcp` or
 `internal/mcp/jsonrpc`. Existing invariants remain: system prompts travel on
 `llm.Request.System`, not history; `internal/sessionrec` is the sole canonical
-`raw.ndjson` recorder; session writes use temp-file then rename; ANSI escapes
+`raw.ndjson` recorder; session writes use temp-file then rename.
+`internal/atomicfile` owns shared temporary-file replacement for config, plans,
+task notes, and model caches, with permissions and syncing selected by each
+caller. ANSI escapes
 remain TTY/color-gated terminal-display output, never transcript, log, tool
 result, or model-facing text.
 

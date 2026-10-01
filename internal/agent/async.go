@@ -17,7 +17,7 @@ import (
 // No pending side effect crosses a response, retry, compaction, or process exit.
 func asyncReadName(name string) bool { return name == "read" || name == "web_fetch" }
 func (a *Agent) requestToolSpecs() []llm.ToolSchema {
-	specs := cloneToolSpecs(a.toolSpecs)
+	specs := llm.CloneToolSchemas(a.toolSpecs)
 	if !a.experimentalAsyncTools || a.provider == nil {
 		return specs
 	}

@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"harness/internal/atomicfile"
 )
 
 // optional preserves omission separately from explicit zero, false, and empty.
@@ -406,21 +408,10 @@ func writeConfigFile(path string, raw map[string]json.RawMessage) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".config-*.tmp")
-	if err != nil {
-		return fmt.Errorf("create temporary config: %w", err)
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := tmp.Write(output.Bytes()); err != nil {
-		tmp.Close()
-		return fmt.Errorf("write temporary config: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temporary config: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace config: %w", err)
-	}
-	return nil
+	return atomicfile.Replace(path, ".config-*.tmp", func(tmp *os.File) error {
+		if _, err := tmp.Write(output.Bytes()); err != nil {
+			return fmt.Errorf("write temporary config: %w", err)
+		}
+		return nil
+	})
 }

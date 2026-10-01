@@ -11,18 +11,11 @@ import (
 
 func runConfigList(env environment, invocation cli.Invocation) int {
 	format := strings.ToLower(strings.TrimSpace(cliLast(invocation.Flags, "format", "text")))
-	var err error
-	switch format {
-	case "text":
-		err = configmeta.WriteText(env.stdout, modelconfig.Catalog())
-	case "json":
-		err = configmeta.WriteJSON(env.stdout, modelconfig.Catalog())
-	case "markdown":
-		err = configmeta.WriteMarkdown(env.stdout, modelconfig.Catalog())
-	default:
+	if format != "text" && format != "json" && format != "markdown" {
 		fmt.Fprintln(env.stderr, "harness-model-proxy: config list: -format must be text, json, or markdown")
 		return exitUsage
 	}
+	err := configmeta.WriteReference(env.stdout, modelconfig.Catalog(), format)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: config list: %v\n", err)
 		return exitRuntime

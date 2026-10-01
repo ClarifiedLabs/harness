@@ -728,7 +728,7 @@ func New(provider llm.Provider, registry *tools.Registry, opts Options) *Agent {
 		contextWindow:             opts.ContextWindow,
 		reasoning:                 opts.Reasoning,
 		reasoningReplayDomain:     opts.ReasoningReplayDomain,
-		serverTools:               cloneServerTools(opts.ServerTools),
+		serverTools:               llm.CloneServerTools(opts.ServerTools),
 		now:                       now,
 		sleep:                     sleepContext,
 		compactKeepTurns:          opts.CompactKeepTurns,
@@ -799,7 +799,7 @@ func (a *Agent) ToolActivity(call llm.ToolCall) tools.Activity {
 }
 
 // ToolSpecs returns the model-facing tool specs in registration order.
-func (a *Agent) ToolSpecs() []llm.ToolSchema { return cloneToolSpecs(a.toolSpecs) }
+func (a *Agent) ToolSpecs() []llm.ToolSchema { return llm.CloneToolSchemas(a.toolSpecs) }
 
 // SetTools replaces the tool registry used for subsequent requests. Because the
 // agent advertises (Specs) and dispatches from the same registry, swapping it
@@ -868,7 +868,7 @@ func (a *Agent) SetReasoningReplayDomain(domain string) {
 // SetServerTools replaces provider-hosted tool declarations for subsequent
 // requests.
 func (a *Agent) SetServerTools(serverTools []llm.ServerTool) {
-	a.serverTools = cloneServerTools(serverTools)
+	a.serverTools = llm.CloneServerTools(serverTools)
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
 	a.resetResponseState()
@@ -1103,9 +1103,9 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 		System:               a.system,
 		Messages:             append([]llm.Message(nil), messages...),
 		Tools:                a.requestToolSpecs(),
-		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
+		DeferredToolGroups:   llm.CloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
-		ServerTools:          cloneServerTools(a.serverTools),
+		ServerTools:          llm.CloneServerTools(a.serverTools),
 		Reasoning:            a.requestReasoning(),
 		RequestContext:       append([]string(nil), extraContext...),
 		ProxySessionID:       a.proxySessionID,
@@ -1517,9 +1517,9 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 		System:               a.system,
 		Messages:             payloadMessages,
 		Tools:                a.requestToolSpecs(),
-		DeferredToolGroups:   cloneToolGroups(a.deferredToolGroups),
+		DeferredToolGroups:   llm.CloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
-		ServerTools:          cloneServerTools(a.serverTools),
+		ServerTools:          llm.CloneServerTools(a.serverTools),
 		Reasoning:            a.requestReasoning(),
 		MaxTokens:            a.maxOutputTokens,
 		StoreResponse:        a.responsesStateful,
@@ -2302,6 +2302,14 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		checkpoint(PromptCheckpointRequestBoundary)
 		attempts := newTurnAttemptCoordinator(a, sink, turns+1)
 		res, err := attempts.request(ctx, modelReq.request, lastContext)
+		rerun := func(refreshBoundary bool) {
+			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
+			if refreshBoundary {
+				appendBoundary = len(a.transcript)
+			}
+			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
+		}
 		if err != nil && !res.hasPartialOutput() {
 			if learned, ok := contextOverflowWindow(err); ok {
 				if learned > 0 && a.observeContextWindow(learned) {
@@ -2329,10 +2337,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 							refreshed := a.requestContext(baseRequestContext, sink)
 							requestContext = appendMissingRequestContext(requestContext, refreshed)
 						}
-						modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-						appendBoundary = len(a.transcript)
-						lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-						res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
+						rerun(true)
 					}
 				}
 			}
@@ -2340,21 +2345,13 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if err != nil && modelReq.request.StoreResponse && !res.hasPartialOutput() && storeResponseRejected(err) {
 			a.SetResponsesStateful(false)
 			sink.Notice(NoticeResponsesStateDisabledRejected)
-			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-
-			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
-
+			rerun(false)
 		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			sink.Notice(NoticeResponsesStateResetUnavailable)
 			a.noteContinuationFailure(sink)
-			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-
-			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
-
+			rerun(false)
 		}
 		if err != nil &&
 			!res.hasPartialOutput() &&
@@ -2367,11 +2364,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			lastInput = 0
 			appendBoundary = 0
 			sink.Notice(NoticeNativeCompactionReplayDisabled)
-			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-
-			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
-
+			rerun(false)
 		}
 		if err != nil &&
 			!res.hasPartialOutput() &&
@@ -2379,11 +2372,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			invalidEncryptedContent(err) {
 			a.disableCurrentReasoningReplay()
 			sink.Notice(NoticeReasoningReplayDisabled)
-			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
-
-			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
-
+			rerun(false)
 		}
 		wasted := attempts.wasted
 		wastedTotal = llm.AddUsage(wastedTotal, wasted)
@@ -4690,22 +4679,6 @@ func maxTurnsNotice(maxTurns int) string {
 	return fmt.Sprintf("[stopped: reached max turns (%d)]", maxTurns)
 }
 
-func cloneToolSpecs(specs []llm.ToolSchema) []llm.ToolSchema {
-	out := append([]llm.ToolSchema(nil), specs...)
-	for i := range out {
-		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
-	}
-	return out
-}
-
-func cloneToolGroups(groups []llm.ToolGroup) []llm.ToolGroup {
-	out := append([]llm.ToolGroup(nil), groups...)
-	for i := range out {
-		out[i].Tools = cloneToolSpecs(groups[i].Tools)
-	}
-	return out
-}
-
 func equalToolSpecs(left, right []llm.ToolSchema) bool {
 	return slices.EqualFunc(left, right, func(left, right llm.ToolSchema) bool {
 		return left.Name == right.Name && left.Async == right.Async && left.Description == right.Description && string(left.Parameters) == string(right.Parameters)
@@ -4716,14 +4689,6 @@ func equalToolGroups(left, right []llm.ToolGroup) bool {
 	return slices.EqualFunc(left, right, func(left, right llm.ToolGroup) bool {
 		return left.Name == right.Name && left.Description == right.Description && equalToolSpecs(left.Tools, right.Tools)
 	})
-}
-
-func cloneServerTools(serverTools []llm.ServerTool) []llm.ServerTool {
-	out := append([]llm.ServerTool(nil), serverTools...)
-	for i := range out {
-		out[i].Parameters = append(json.RawMessage(nil), out[i].Parameters...)
-	}
-	return out
 }
 
 func steerInputEmpty(input SteerInput) bool {

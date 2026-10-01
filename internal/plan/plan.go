@@ -7,9 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
+
+	"harness/internal/atomicfile"
 )
 
 // Plan is the latest self-contained implementation plan recorded in a session.
@@ -181,29 +182,16 @@ func writeFile(dir string, p Plan) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(base, fmt.Sprintf("%04d-%s.plan.md", index, slug(p.Title)))
-	tmp, err := os.CreateTemp(base, ".plan-*.tmp")
-	if err != nil {
-		return "", fmt.Errorf("plan: create temp: %w", err)
-	}
-	tmpPath := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpPath) }
-	if _, err := tmp.WriteString(Render(p)); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return "", fmt.Errorf("plan: write temp: %w", err)
-	}
-	if err := tmp.Chmod(0o644); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return "", fmt.Errorf("plan: chmod temp: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return "", fmt.Errorf("plan: close temp: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		cleanup()
-		return "", fmt.Errorf("plan: rename: %w", err)
+	if err := atomicfile.Replace(path, ".plan-*.tmp", func(tmp *os.File) error {
+		if _, err := tmp.WriteString(Render(p)); err != nil {
+			return fmt.Errorf("plan: write temp: %w", err)
+		}
+		if err := tmp.Chmod(0o644); err != nil {
+			return fmt.Errorf("plan: chmod temp: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("plan: publish: %w", err)
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -249,18 +237,21 @@ func nextIndex(base string) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("plan: read directory: %w", err)
 	}
-	var indexes []int
+	largest := 0
+	found := false
 	for _, entry := range entries {
 		var index int
 		if _, err := fmt.Sscanf(entry.Name(), "%04d-", &index); err == nil && strings.HasSuffix(entry.Name(), ".plan.md") {
-			indexes = append(indexes, index)
+			if !found || index > largest {
+				largest = index
+			}
+			found = true
 		}
 	}
-	sort.Ints(indexes)
-	if len(indexes) == 0 {
+	if !found {
 		return 1, nil
 	}
-	return indexes[len(indexes)-1] + 1, nil
+	return largest + 1, nil
 }
 
 func slug(title string) string {

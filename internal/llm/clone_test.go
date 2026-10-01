@@ -120,3 +120,55 @@ func TestClonePreservesNilAndEmpty(t *testing.T) {
 		t.Fatal("empty raw item slice became nil")
 	}
 }
+
+func TestCloneToolDeclarationsOwnMutableFields(t *testing.T) {
+	for name, clone := range map[string]func() (any, any){
+		"schemas": func() (any, any) {
+			source := []ToolSchema{{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}}
+			return source, CloneToolSchemas(source)
+		},
+		"groups": func() (any, any) {
+			source := []ToolGroup{{Name: "files", Tools: []ToolSchema{{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}}}}
+			return source, CloneToolGroups(source)
+		},
+		"server tools": func() (any, any) {
+			source := []ServerTool{{Parameters: json.RawMessage(`{"type":"object"}`)}}
+			return source, CloneServerTools(source)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, mutateSource := range []bool{false, true} {
+				source, cloned := clone()
+				if !reflect.DeepEqual(source, cloned) {
+					t.Fatal("clone changed declaration")
+				}
+				target, preserved := cloned, source
+				if mutateSource {
+					target, preserved = source, cloned
+				}
+				before, err := json.Marshal(preserved)
+				if err != nil {
+					t.Fatal(err)
+				}
+				mutateCloneTestValue(reflect.ValueOf(target))
+				after, err := json.Marshal(preserved)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if string(before) != string(after) {
+					t.Fatal("mutation crossed clone boundary")
+				}
+			}
+		})
+	}
+}
+
+func TestCloneToolDeclarationsNormalizeEmptySlices(t *testing.T) {
+	if CloneToolSchemas([]ToolSchema{}) != nil || CloneToolGroups([]ToolGroup{}) != nil || CloneServerTools([]ServerTool{}) != nil {
+		t.Fatal("empty tool declaration slices must remain normalized to nil")
+	}
+	groups := CloneToolGroups([]ToolGroup{{Tools: []ToolSchema{{Parameters: json.RawMessage{}}}}, {Tools: []ToolSchema{}}})
+	if groups[0].Tools[0].Parameters != nil || groups[1].Tools != nil {
+		t.Fatal("empty nested declaration slices must remain normalized to nil")
+	}
+}

@@ -461,7 +461,7 @@ func (r *Registry) Specs() []llm.ToolSchema {
 // hidden behind the local catalog. Providers with native tool search may use
 // the same inventory without changing local lookup or authorization.
 func (r *Registry) DeferredToolGroups() []llm.ToolGroup {
-	return cloneToolGroups(r.deferredToolGroups)
+	return llm.CloneToolGroups(r.deferredToolGroups)
 }
 
 func (r *Registry) toolSpec(name string) llm.ToolSchema {
@@ -477,17 +477,6 @@ func (r *Registry) toolSpec(name string) llm.ToolSchema {
 		Description: t.Description(),
 		Parameters:  parameters,
 	}
-}
-
-func cloneToolGroups(groups []llm.ToolGroup) []llm.ToolGroup {
-	out := append([]llm.ToolGroup(nil), groups...)
-	for i := range out {
-		out[i].Tools = append([]llm.ToolSchema(nil), groups[i].Tools...)
-		for j := range out[i].Tools {
-			out[i].Tools[j].Parameters = append(json.RawMessage(nil), groups[i].Tools[j].Parameters...)
-		}
-	}
-	return out
 }
 
 func modelSchema(raw json.RawMessage) json.RawMessage {

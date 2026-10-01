@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"harness/internal/atomicfile"
 )
 
 // Match Codex's per-file storage contract; retrieval and bootstrap are bounded separately.
@@ -86,23 +88,12 @@ func atomicWrite(path string, data []byte) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(filepath.Dir(path), ".task-context-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(f.Name())
-	if _, err = f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err = f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(f.Name(), path)
+	return atomicfile.Replace(path, ".task-context-*", func(f *os.File) error {
+		if _, err := f.Write(data); err != nil {
+			return err
+		}
+		return f.Sync()
+	})
 }
 
 func noteNames(ctx context.Context, dir string) ([]string, error) {

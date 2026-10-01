@@ -207,3 +207,17 @@ func yesNo(value bool) string {
 	}
 	return "no"
 }
+
+// WriteReference renders a catalog in the requested reference format.
+func WriteReference(w io.Writer, catalog Catalog, format string) error {
+	switch format {
+	case "text":
+		return WriteText(w, catalog)
+	case "json":
+		return WriteJSON(w, catalog)
+	case "markdown":
+		return WriteMarkdown(w, catalog)
+	default:
+		return fmt.Errorf("unsupported reference format %q", format)
+	}
+}

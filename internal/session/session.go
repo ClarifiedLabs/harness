@@ -2119,7 +2119,8 @@ func nextIndex(dir, suffix string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	var nums []int
+	largest := 0
+	found := false
 	for _, e := range entries {
 		name := e.Name()
 		if !strings.HasSuffix(name, suffix) {
@@ -2127,14 +2128,16 @@ func nextIndex(dir, suffix string) (int, error) {
 		}
 		var n int
 		if _, err := fmt.Sscanf(strings.TrimSuffix(name, suffix), "%d", &n); err == nil {
-			nums = append(nums, n)
+			if !found || n > largest {
+				largest = n
+			}
+			found = true
 		}
 	}
-	sort.Ints(nums)
-	if len(nums) == 0 {
+	if !found {
 		return 1, nil
 	}
-	return nums[len(nums)-1] + 1, nil
+	return largest + 1, nil
 }
 
 func safeName(s string) string {
