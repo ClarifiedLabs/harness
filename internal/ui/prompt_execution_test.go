@@ -56,7 +56,7 @@ func TestPromptExecutionFinalizationOrder(t *testing.T) {
 			run := app.preparePromptExecution(context.Background(), 1, []string{"request context"}, func(ctx context.Context, sink *accumulatingSink) error {
 				order = append(order, "run")
 				runContext = ctx
-				sink.TextDelta("buffered assistant text")
+				sink.Emit(agent.Event{Kind: agent.EventTextDelta, Text: "buffered assistant text"})
 				sink.terminalModelErrorDisplayed = test.displayed
 				if test.cancel {
 					app.Interrupt.CancelPrompt()

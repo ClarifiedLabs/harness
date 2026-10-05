@@ -310,9 +310,3 @@ func (s *Sink) Exporter() *Exporter {
 	}
 	return s.exp
 }
-
-// Ensure Sink implements optional agent sinks for static checks.
-var _ agent.TurnProgressSink = (*Sink)(nil)
-var _ agent.RetentionEventSink = (*Sink)(nil)
-var _ agent.MaintenanceSink = (*Sink)(nil)
-var _ agent.ModelRequestEventSink = (*Sink)(nil)

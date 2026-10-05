@@ -1203,35 +1203,78 @@ func newACPEventSink(root *acpRootSession, prompt int, wire acpagent.UpdateSink)
 	return &acpEventSink{root: root, wire: wire, rec: rec, prompt: prompt, pending: make(map[string]string)}
 }
 
-func (s *acpEventSink) TextDelta(text string) {
-	text = acp.SanitizeModelFacingText(text)
-	s.rec.TextDelta(text)
-	s.wire.Text(text)
+// Emit handles one agent event for an ACP root session. Model-facing text is
+// sanitized before it is recorded or sent to the client. Kinds listed only in
+// the final case are recorded as they are; kinds absent from the switch are
+// neither recorded nor sent.
+func (s *acpEventSink) Emit(ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventTextDelta:
+		text := acp.SanitizeModelFacingText(ev.Text)
+		s.rec.TextDelta(text)
+		s.wire.Text(text)
+	case agent.EventReasoningSummary:
+		s.rec.ReasoningSummary(acp.SanitizeModelFacingText(ev.Text))
+	case agent.EventAssistantPhase:
+		s.rec.AssistantPhase(acp.SanitizeModelFacingText(ev.Text))
+	case agent.EventNotice:
+		s.notice(ev.Text)
+	case agent.EventTurnAttemptStart:
+		s.turn = ev.Turn
+		s.root.todos.CommitModelRound(ev.Turn > 0)
+		s.rec.Emit(ev)
+	case agent.EventToolStart:
+		s.toolStart(ev.Call)
+	case agent.EventToolResult:
+		s.toolResult(*ev.Result)
+	case agent.EventToolDiff:
+		s.rec.ToolDiff(sanitizeACPToolCall(ev.Call), acp.SanitizeModelFacingText(ev.Path), acp.SanitizeModelFacingText(ev.Text))
+	case agent.EventToolMutation:
+		cleanPaths := make([]string, len(ev.Paths))
+		for i, path := range ev.Paths {
+			cleanPaths[i] = acp.SanitizeModelFacingText(path)
+		}
+		s.rec.ToolMutation(sanitizeACPToolCall(ev.Call), cleanPaths)
+	case agent.EventModelRequest:
+		s.rec.ModelRequestEvent(sanitizeACPModelRequestEvent(*ev.ModelRequest))
+	case agent.EventPromptCheckpoint:
+		s.promptCheckpoint(*ev.Checkpoint)
+	case agent.EventPromptComplete:
+		s.promptComplete(*ev.PromptUsage)
+	case agent.EventRetention:
+		s.rec.Append(session.Event{Type: session.EventRetention, Prompt: s.prompt, Turn: s.turn, Retention: sessionrec.RetentionSnapshot(*ev.Retention)})
+	case agent.EventHookContext:
+		for _, value := range ev.HookContext {
+			s.hookContext = append(s.hookContext, acp.SanitizeModelFacingText(value))
+		}
+	case agent.EventTranscriptRewritten:
+		s.root.todos.RequireRequestContext()
+	case agent.EventTurnAttemptComplete, agent.EventTurnAttemptAbandoned, agent.EventTurnComplete,
+		agent.EventMaintenance, agent.EventClosure, agent.EventTurnProgress,
+		agent.EventHookDiagnostic, agent.EventEvaluatorResult:
+		s.rec.Emit(ev)
+	}
 }
-func (s *acpEventSink) ReasoningSummary(text string) {
-	s.rec.ReasoningSummary(acp.SanitizeModelFacingText(text))
+
+// Host supplies the session services this prompt's agent run may ask for.
+func (s *acpEventSink) Host() agent.Host {
+	return agent.Host{
+		Archiver:           s,
+		RequestContext:     s.RequestContext,
+		PeekRequestContext: s.PeekRequestContext,
+		TryStagnationNudge: s.rec.TryStagnationNudge,
+		PromptWork:         s.root.jobs,
+	}
 }
-func (s *acpEventSink) TurnAttemptStart(turn, attempt int, estimate agent.ContextEstimate) {
-	s.turn = turn
-	s.root.todos.CommitModelRound(turn > 0)
-	s.rec.TurnAttemptStart(turn, attempt, estimate)
-}
-func (s *acpEventSink) TurnAttemptComplete(usage agent.TurnAttemptUsage) {
-	s.rec.TurnAttemptComplete(usage)
-}
-func (s *acpEventSink) TurnAttemptAbandoned(turn, attempt int) {
-	s.rec.TurnAttemptAbandoned(turn, attempt)
-}
-func (*acpEventSink) ToolUseStart(llm.ToolCall) {}
-func (*acpEventSink) ToolUseDelta(int, string)  {}
-func (s *acpEventSink) ToolStart(call llm.ToolCall) {
+
+func (s *acpEventSink) toolStart(call llm.ToolCall) {
 	call = sanitizeACPToolCall(call)
 	s.pending[call.ID] = call.Name
 	s.rec.ToolStart(call)
 	s.wire.ToolCall(acp.ToolCall{ToolCallID: acp.ToolCallID(call.ID), Title: call.Name, Kind: acpToolKind(call.Name), Status: acp.ToolCallPending, RawInput: append(json.RawMessage(nil), call.Input...)})
 	s.wire.ToolStatus(acp.ToolCallID(call.ID), acp.ToolCallInProgress)
 }
-func (s *acpEventSink) ToolResult(result llm.ToolResult) {
+func (s *acpEventSink) toolResult(result llm.ToolResult) {
 	result = sanitizeACPToolResult(result)
 	name := s.pending[result.ForID]
 	delete(s.pending, result.ForID)
@@ -1247,13 +1290,12 @@ func (s *acpEventSink) ToolResult(result llm.ToolResult) {
 		s.wire.Plan(entries)
 	}
 }
-func (s *acpEventSink) Notice(text string) {
+func (s *acpEventSink) notice(text string) {
 	text = acp.SanitizeModelFacingText(text)
 	s.rec.Notice(text, s.turn)
 	s.wire.Notice(text)
 }
-func (s *acpEventSink) TurnComplete(usage agent.TurnUsage) { s.rec.TurnComplete(usage) }
-func (s *acpEventSink) PromptComplete(usage agent.PromptUsage) {
+func (s *acpEventSink) promptComplete(usage agent.PromptUsage) {
 	if !usage.Usage.CostKnown {
 		usage.Usage.CostUSD, usage.Usage.CostKnown = s.root.registry.Cost(s.root.registryModel, usage.Usage)
 	}
@@ -1273,36 +1315,12 @@ func (s *acpEventSink) PromptComplete(usage agent.PromptUsage) {
 	}
 	s.wire.Usage(update)
 }
-func (s *acpEventSink) AssistantPhase(phase string) {
-	s.rec.AssistantPhase(acp.SanitizeModelFacingText(phase))
-}
-func (s *acpEventSink) ModelRequestEvent(event llm.ModelRequestEvent) {
-	s.rec.ModelRequestEvent(sanitizeACPModelRequestEvent(event))
-}
-func (s *acpEventSink) MaintenanceComplete(usage agent.MaintenanceUsage) {
-	s.rec.MaintenanceComplete(usage)
-}
-func (s *acpEventSink) ClosureStarted(event agent.ClosureEvent)  { s.rec.ClosureStarted(event) }
-func (s *acpEventSink) TurnProgress(progress agent.TurnProgress) { s.rec.TurnProgress(progress) }
-func (s *acpEventSink) RetentionApplied(event agent.RetentionEvent) {
-	s.rec.Append(session.Event{Type: session.EventRetention, Prompt: s.prompt, Turn: s.turn, Retention: sessionrec.RetentionSnapshot(event)})
-}
-func (s *acpEventSink) ToolDiff(call llm.ToolCall, path, text string) {
-	s.rec.ToolDiff(sanitizeACPToolCall(call), acp.SanitizeModelFacingText(path), acp.SanitizeModelFacingText(text))
-}
-func (s *acpEventSink) ToolMutation(call llm.ToolCall, paths []string) {
-	cleanPaths := make([]string, len(paths))
-	for i, path := range paths {
-		cleanPaths[i] = acp.SanitizeModelFacingText(path)
-	}
-	s.rec.ToolMutation(sanitizeACPToolCall(call), cleanPaths)
-}
 func (s *acpEventSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultArchive, error) {
 	result = sanitizeACPToolResult(result)
 	ref, err := session.SaveToolResultArtifact(s.root.path, s.prompt, s.turn, result)
 	return agent.ToolResultArchive{DisplayPath: ref, ModelPath: filepath.Join(s.root.path, ref)}, err
 }
-func (s *acpEventSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
+func (s *acpEventSink) promptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	state := s.root.snapshot(&checkpoint.Usage)
 	started := time.Now()
 	var err error
@@ -1312,7 +1330,7 @@ func (s *acpEventSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 		err = session.SaveActiveTurnCheckpoint(s.root.path, state, string(checkpoint.Kind), s.prompt, checkpoint.Turn)
 	}
 	if err != nil {
-		s.Notice("[checkpoint failed: " + err.Error() + "]")
+		s.notice("[checkpoint failed: " + err.Error() + "]")
 		return
 	}
 	s.rec.Append(session.Event{
@@ -1322,11 +1340,6 @@ func (s *acpEventSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 		ClosureTurn: checkpoint.Usage.ClosureTurn, TurnBudgetExhausted: checkpoint.Usage.TurnBudgetExhausted,
 		WorkflowStatus: sessionrec.WorkflowStatusSnapshot(checkpoint.Usage.WorkflowStatus),
 	})
-}
-func (s *acpEventSink) AddHookContext(values []string) {
-	for _, value := range values {
-		s.hookContext = append(s.hookContext, acp.SanitizeModelFacingText(value))
-	}
 }
 func (s *acpEventSink) RequestContext() []string {
 	out := append([]string(nil), s.hookContext...)
@@ -1343,21 +1356,6 @@ func (s *acpEventSink) PeekRequestContext() []string {
 		out = append(out, text)
 	}
 	return append(out, s.root.jobs.PeekCompletedContext()...)
-}
-func (s *acpEventSink) TranscriptRewritten()    { s.root.todos.RequireRequestContext() }
-func (s *acpEventSink) PendingPromptWork() bool { return s.root.jobs.PendingPromptWork() }
-func (s *acpEventSink) WaitForPromptWork(ctx context.Context) (llm.Usage, error) {
-	return s.root.jobs.WaitForPromptWork(ctx)
-}
-func (s *acpEventSink) DrainPromptWorkUsage() llm.Usage { return s.root.jobs.DrainPromptWorkUsage() }
-func (s *acpEventSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
-	s.rec.HookDiagnostic(diagnostic)
-}
-func (s *acpEventSink) EvaluatorResult(result hooks.EvaluatorResult) {
-	s.rec.EvaluatorResult(result)
-}
-func (s *acpEventSink) TryStagnationNudge(threshold int) bool {
-	return s.rec.TryStagnationNudge(threshold)
 }
 
 func acpToolKind(name string) acp.ToolKind {

@@ -1,5 +1,5 @@
-// Package ui drives the harness from stdin: a streaming renderer implementing
-// the agent's EventSink, an interactive REPL with meta-commands, and a one-shot
+// Package ui drives the harness from stdin: a streaming renderer fed by the
+// agent's EventSink, an interactive REPL with meta-commands, and a one-shot
 // mode for piping a single prompt (design §10).
 package ui
 
@@ -83,9 +83,9 @@ type RenderOptions struct {
 	CWD string
 }
 
-// Renderer implements agent.EventSink: assistant text streams to out, while tool
-// one-liners, the usage line, and notices go to errw so one-shot stdout carries
-// only the model's answer (design §10).
+// Renderer displays agent events, forwarded by accumulatingSink: assistant text
+// streams to out, while tool one-liners, the usage line, and notices go to errw
+// so one-shot stdout carries only the model's answer (design §10).
 type Renderer struct {
 	output                  *OutputCoordinator
 	out                     io.Writer

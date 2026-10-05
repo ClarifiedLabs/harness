@@ -35,9 +35,11 @@ type executionTrackingSink struct {
 	block func()
 }
 
-func (s *executionTrackingSink) PromptComplete(usage PromptUsage) {
-	s.block()
-	s.recordSink.PromptComplete(usage)
+func (s *executionTrackingSink) Emit(ev Event) {
+	if ev.Kind == EventPromptComplete {
+		s.block()
+	}
+	s.recordSink.Emit(ev)
 }
 
 func assertExecutionGroupBusy(t *testing.T, group *execution.Group) {

@@ -84,72 +84,81 @@ type stagnationNudgeRecordSink struct {
 	triggers []int
 }
 
-func (s *stagnationNudgeRecordSink) TryStagnationNudge(threshold int) bool {
-	s.triggers = append(s.triggers, threshold)
-	return s.deliver
+func (s *stagnationNudgeRecordSink) Host() Host {
+	return Host{TryStagnationNudge: func(threshold int) bool {
+		s.triggers = append(s.triggers, threshold)
+		return s.deliver
+	}}
 }
 
-func (s *workflowRecordSink) WorkflowStatus() WorkflowStatus { return s.status }
-func (s *workflowRecordSink) ClosureStarted(event ClosureEvent) {
-	s.closures = append(s.closures, event)
+func (s *workflowRecordSink) Host() Host {
+	return Host{WorkflowStatus: func() WorkflowStatus { return s.status }}
 }
 
-func (s *modelRequestRecordSink) ModelRequestEvent(event llm.ModelRequestEvent) {
-	s.events = append(s.events, event)
+func (s *workflowRecordSink) Emit(ev Event) {
+	if ev.Kind == EventClosure {
+		s.closures = append(s.closures, *ev.Closure)
+	}
+	s.recordSink.Emit(ev)
 }
 
-func (s *diagnosticRecordSink) ModelErrorDiagnostic(diagnostic ModelErrorDiagnostic) {
-	s.diagnostics = append(s.diagnostics, diagnostic)
+func (s *modelRequestRecordSink) Emit(ev Event) {
+	if ev.Kind == EventModelRequest {
+		s.events = append(s.events, *ev.ModelRequest)
+	}
+	s.recordSink.Emit(ev)
 }
 
-func (s *recordSink) TextDelta(t string) { s.text.WriteString(t) }
-func (s *recordSink) ReasoningSummary(t string) {
-	s.reasoning = append(s.reasoning, t)
+func (s *diagnosticRecordSink) Emit(ev Event) {
+	if ev.Kind == EventModelError {
+		s.diagnostics = append(s.diagnostics, *ev.ModelError)
+	}
+	s.recordSink.Emit(ev)
 }
-func (s *recordSink) AssistantPhase(phase string) {
-	s.phases = append(s.phases, phase)
-}
-func (s *recordSink) TurnAttemptStart(turn, attempt int, ctx ContextEstimate) {
-	s.attemptStarts = append(s.attemptStarts, turnAttemptEvent{turn: turn, attempt: attempt})
-	s.contexts = append(s.contexts, ctx)
-}
-func (s *recordSink) TurnAttemptComplete(u TurnAttemptUsage) {
-	s.attemptUsage = append(s.attemptUsage, u)
-}
-func (s *recordSink) TurnAttemptAbandoned(turn, attempt int) {
-	s.abandoned = append(s.abandoned, turnAttemptEvent{turn: turn, attempt: attempt})
-}
-func (s *recordSink) TurnComplete(u TurnUsage) {
-	s.completedTurns = append(s.completedTurns, u)
-}
-func (s *recordSink) ToolUseStart(c llm.ToolCall) { s.toolUses = append(s.toolUses, c) }
-func (s *recordSink) ToolUseDelta(_ int, delta string) {
-	s.argDeltas = append(s.argDeltas, delta)
-}
-func (s *recordSink) ToolStart(c llm.ToolCall)    { s.starts = append(s.starts, c) }
-func (s *recordSink) ToolResult(r llm.ToolResult) { s.results = append(s.results, r) }
-func (s *recordSink) Notice(msg string)           { s.notices = append(s.notices, msg) }
-func (s *recordSink) PromptComplete(u PromptUsage) {
-	s.promptUsage = append(s.promptUsage, u)
-	s.turnCounts = append(s.turnCounts, u.Turns)
-}
-func (s *recordSink) RetentionApplied(event RetentionEvent) {
-	s.retention = append(s.retention, event)
-}
-func (s *recordSink) TurnProgress(progress TurnProgress) {
-	s.progress = append(s.progress, progress)
-}
-func (s *recordSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
-	s.hookDiagnostics = append(s.hookDiagnostics, diagnostic)
-}
-func (s *recordSink) EvaluatorResult(result hooks.EvaluatorResult) {
-	s.evaluatorResults = append(s.evaluatorResults, result)
-}
-func (s *recordSink) ToolMutation(call llm.ToolCall, paths []string) {
-	s.toolMutations = append(s.toolMutations, toolMutationEvent{call: call, paths: append([]string(nil), paths...)})
-}
-func (s *recordSink) MaintenanceComplete(u MaintenanceUsage) {
-	s.maintenance = append(s.maintenance, u)
+
+func (s *recordSink) Emit(ev Event) {
+	switch ev.Kind {
+	case EventTextDelta:
+		s.text.WriteString(ev.Text)
+	case EventReasoningSummary:
+		s.reasoning = append(s.reasoning, ev.Text)
+	case EventAssistantPhase:
+		s.phases = append(s.phases, ev.Text)
+	case EventTurnAttemptStart:
+		s.attemptStarts = append(s.attemptStarts, turnAttemptEvent{turn: ev.Turn, attempt: ev.Attempt})
+		s.contexts = append(s.contexts, *ev.Context)
+	case EventTurnAttemptComplete:
+		s.attemptUsage = append(s.attemptUsage, *ev.AttemptUsage)
+	case EventTurnAttemptAbandoned:
+		s.abandoned = append(s.abandoned, turnAttemptEvent{turn: ev.Turn, attempt: ev.Attempt})
+	case EventTurnComplete:
+		s.completedTurns = append(s.completedTurns, *ev.TurnUsage)
+	case EventToolUseStart:
+		s.toolUses = append(s.toolUses, ev.Call)
+	case EventToolUseDelta:
+		s.argDeltas = append(s.argDeltas, ev.Text)
+	case EventToolStart:
+		s.starts = append(s.starts, ev.Call)
+	case EventToolResult:
+		s.results = append(s.results, *ev.Result)
+	case EventNotice:
+		s.notices = append(s.notices, ev.Text)
+	case EventPromptComplete:
+		s.promptUsage = append(s.promptUsage, *ev.PromptUsage)
+		s.turnCounts = append(s.turnCounts, ev.PromptUsage.Turns)
+	case EventRetention:
+		s.retention = append(s.retention, *ev.Retention)
+	case EventTurnProgress:
+		s.progress = append(s.progress, *ev.TurnProgress)
+	case EventHookDiagnostic:
+		s.hookDiagnostics = append(s.hookDiagnostics, *ev.HookDiagnostic)
+	case EventEvaluatorResult:
+		s.evaluatorResults = append(s.evaluatorResults, *ev.Evaluator)
+	case EventToolMutation:
+		s.toolMutations = append(s.toolMutations, toolMutationEvent{call: ev.Call, paths: append([]string(nil), ev.Paths...)})
+	case EventMaintenance:
+		s.maintenance = append(s.maintenance, *ev.Maintenance)
+	}
 }
 
 func assertPromptTermination(t *testing.T, sink *recordSink, want TerminationReason) {
@@ -276,12 +285,18 @@ func (s *promptWorkSink) WaitForPromptWork(context.Context) (llm.Usage, error) {
 
 func (s *promptWorkSink) DrainPromptWorkUsage() llm.Usage { return llm.Usage{} }
 
-func (s *promptWorkSink) PromptWorkWaitStart() {
-	s.progress = append(s.progress, "start")
+func (s *promptWorkSink) Host() Host {
+	return Host{RequestContext: s.RequestContext, PromptWork: s}
 }
 
-func (s *promptWorkSink) PromptWorkWaitComplete() {
-	s.progress = append(s.progress, "complete")
+func (s *promptWorkSink) Emit(ev Event) {
+	switch ev.Kind {
+	case EventPromptWorkWaitStart:
+		s.progress = append(s.progress, "start")
+	case EventPromptWorkWaitComplete:
+		s.progress = append(s.progress, "complete")
+	}
+	s.recordSink.Emit(ev)
 }
 
 type diffRecordSink struct {
@@ -290,9 +305,12 @@ type diffRecordSink struct {
 	paths []string
 }
 
-func (s *diffRecordSink) ToolDiff(_ llm.ToolCall, path, text string) {
-	s.paths = append(s.paths, path)
-	s.diffs = append(s.diffs, text)
+func (s *diffRecordSink) Emit(ev Event) {
+	if ev.Kind == EventToolDiff {
+		s.paths = append(s.paths, ev.Path)
+		s.diffs = append(s.diffs, ev.Text)
+	}
+	s.recordSink.Emit(ev)
 }
 
 type archiveSink struct {
@@ -320,6 +338,8 @@ func (s *archiveSink) ArchiveToolResult(r llm.ToolResult) (ToolResultArchive, er
 	s.archived = append(s.archived, r)
 	return s.archive, s.archiveErr
 }
+
+func (s *archiveSink) Host() Host { return Host{Archiver: s} }
 
 // recordTool is a fake tool whose Run is scriptable; it records inputs in
 // completion-independent entry order. The mutex guards default-parallel calls.
@@ -1716,20 +1736,17 @@ type citationOrderSink struct {
 	onNotice func(string)
 }
 
-func (s *citationOrderSink) TextDelta(t string) {
-	s.recordSink.TextDelta(t)
-	s.order = append(s.order, "text:"+t)
-}
-
-func (s *citationOrderSink) PromptComplete(u PromptUsage) {
-	s.recordSink.PromptComplete(u)
-	s.order = append(s.order, "prompt-complete")
-}
-
-func (s *citationOrderSink) Notice(msg string) {
-	s.recordSink.Notice(msg)
-	if s.onNotice != nil {
-		s.onNotice(msg)
+func (s *citationOrderSink) Emit(ev Event) {
+	s.recordSink.Emit(ev)
+	switch ev.Kind {
+	case EventTextDelta:
+		s.order = append(s.order, "text:"+ev.Text)
+	case EventPromptComplete:
+		s.order = append(s.order, "prompt-complete")
+	case EventNotice:
+		if s.onNotice != nil {
+			s.onNotice(ev.Text)
+		}
 	}
 }
 
@@ -4674,9 +4691,11 @@ type stageRecordSink struct {
 	resultCount atomic.Int32
 }
 
-func (s *stageRecordSink) ToolResult(result llm.ToolResult) {
-	s.recordSink.ToolResult(result)
-	s.resultCount.Add(1)
+func (s *stageRecordSink) Emit(ev Event) {
+	s.recordSink.Emit(ev)
+	if ev.Kind == EventToolResult {
+		s.resultCount.Add(1)
+	}
 }
 
 func TestPlanToolStagesKeepsProviderInvalidInputInCurrentStage(t *testing.T) {
@@ -6032,17 +6051,21 @@ func TestSteerContentInjectsImagesAndRequestContext(t *testing.T) {
 	}
 }
 
-// steerDeliverySink records SteerDelivered notifications on top of recordSink.
+// steerDeliverySink records EventSteerDelivered on top of recordSink.
 type steerDeliverySink struct {
 	*recordSink
 	mu        sync.Mutex
 	delivered []string
 }
 
-func (s *steerDeliverySink) SteerDelivered(input SteerInput) {
+func (s *steerDeliverySink) Emit(ev Event) {
+	if ev.Kind != EventSteerDelivered {
+		s.recordSink.Emit(ev)
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.delivered = append(s.delivered, input.Text)
+	s.delivered = append(s.delivered, ev.Steer.Text)
 }
 
 func (s *steerDeliverySink) deliveredTexts() []string {
@@ -6326,6 +6349,10 @@ func (s *peekCountingSink) PeekRequestContext() []string {
 	return []string{"[one-shot context]"}
 }
 
+func (s *peekCountingSink) Host() Host {
+	return Host{RequestContext: s.RequestContext, PeekRequestContext: s.PeekRequestContext}
+}
+
 type changingRequestContextSink struct {
 	recordSink
 	requestCalls int
@@ -6337,8 +6364,15 @@ func (s *changingRequestContextSink) RequestContext() []string {
 	return []string{fmt.Sprintf("[request context %d]", s.requestCalls)}
 }
 
-func (s *changingRequestContextSink) TranscriptRewritten() {
-	s.rewriteCalls++
+func (s *changingRequestContextSink) Host() Host {
+	return Host{RequestContext: s.RequestContext}
+}
+
+func (s *changingRequestContextSink) Emit(ev Event) {
+	if ev.Kind == EventTranscriptRewritten {
+		s.rewriteCalls++
+	}
+	s.recordSink.Emit(ev)
 }
 
 func TestPostPromptEstimateDoesNotConsumeRequestContext(t *testing.T) {

@@ -4446,7 +4446,7 @@ func (app *App) prepareAPIContinuation() (func(), bool) {
 		// Replay one-shot results through the recovered round and its retries,
 		// not as persistent prompt context on every subsequent model round.
 		sink.backgroundRequestContext = backgroundContext
-		sink.Notice("[continuing after API error]")
+		sink.notice("[continuing after API error]")
 		return app.Agent.ContinuePromptWithContext(ctx, requestContext, promptID, sink)
 	}, nil), true
 }
@@ -6013,21 +6013,109 @@ func (s *accumulatingSink) FlushEvents() {
 	s.rec.Flush()
 }
 
-func (s *accumulatingSink) TextDelta(text string) {
-	s.attemptText.WriteString(text)
-	s.r.TextDelta(text)
-	s.rec.TextDelta(text)
-}
-
-func (s *accumulatingSink) AssistantPhase(phase string) {
-	if !llm.ValidAssistantPhase(phase) || phase == "" {
-		return
+// Emit handles one agent event: sink-owned state first, then the live
+// renderer, then the recorder. Kinds listed only in the final case are
+// recorded without being rendered; kinds absent from the switch are ignored.
+func (s *accumulatingSink) Emit(ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventTextDelta:
+		s.attemptText.WriteString(ev.Text)
+		s.r.TextDelta(ev.Text)
+		s.rec.Emit(ev)
+	case agent.EventAssistantPhase:
+		if !llm.ValidAssistantPhase(ev.Text) || ev.Text == "" {
+			return
+		}
+		s.r.AssistantPhase(ev.Text)
+		s.rec.Emit(ev)
+	case agent.EventReasoningSummary:
+		s.reasoningSummary(ev.Text)
+	case agent.EventNotice:
+		s.notice(ev.Text)
+	case agent.EventCompactionStart:
+		s.inMaintenance = true
+		s.r.CompactionStart()
+	case agent.EventCompactionComplete:
+		s.r.CompactionComplete()
+		s.inMaintenance = false
+	case agent.EventTurnAttemptStart:
+		s.drainBackgroundNotices()
+		if s.app != nil && s.app.Todos != nil && s.app.agentHasTool("update_todos") {
+			s.app.Todos.CommitModelRound(ev.Turn != s.todoTurn)
+			s.todoTurn = ev.Turn
+		}
+		s.attemptText.Reset()
+		s.turn = ev.Turn
+		s.attempt = ev.Attempt
+		s.r.TurnAttemptStart(ev.Turn, ev.Attempt, *ev.Context)
+		s.rec.Emit(ev)
+	case agent.EventTurnAttemptAbandoned:
+		s.attemptText.Reset()
+		s.rec.Emit(ev)
+	case agent.EventTurnAttemptComplete:
+		s.r.TurnAttemptComplete(*ev.AttemptUsage)
+		s.rec.Emit(ev)
+	case agent.EventModelRequest:
+		s.modelRequestEvent(*ev.ModelRequest)
+	case agent.EventModelError:
+		s.modelErrorDiagnostic(*ev.ModelError)
+	case agent.EventToolUseStart:
+		s.r.ToolUseStart(ev.Call)
+	case agent.EventToolUseDelta:
+		s.r.ToolUseDelta(ev.Index, ev.Text)
+	case agent.EventToolStart:
+		s.pendingNames[ev.Call.ID] = ev.Call.Name
+		s.r.ToolStart(ev.Call)
+		s.rec.Emit(ev)
+	case agent.EventToolResult:
+		s.toolResult(*ev.Result)
+	case agent.EventToolDiff:
+		s.r.ToolDiff(ev.Call, ev.Path, ev.Text)
+		s.rec.Emit(ev)
+	case agent.EventSteerDelivered:
+		s.steerDelivered(*ev.Steer)
+	case agent.EventTurnComplete:
+		s.turnComplete(*ev.TurnUsage)
+	case agent.EventPromptCheckpoint:
+		s.promptCheckpoint(*ev.Checkpoint)
+	case agent.EventPromptComplete:
+		s.promptComplete(*ev.PromptUsage)
+	case agent.EventRetention:
+		s.recordEvent(session.Event{
+			Type:      session.EventRetention,
+			Prompt:    s.prompt,
+			Turn:      s.turn + 1,
+			Retention: sessionrec.RetentionSnapshot(*ev.Retention),
+		})
+	case agent.EventHookContext:
+		s.app.AddHookContext(ev.HookContext)
+	case agent.EventTranscriptRewritten:
+		s.app.ArmTodoContext()
+	case agent.EventPromptWorkWaitStart:
+		s.promptWorkWaitStart()
+	case agent.EventPromptWorkWaitComplete:
+		s.r.SetBackgroundProgress(nil)
+		s.r.PromptWorkWaitComplete()
+	case agent.EventToolMutation, agent.EventMaintenance, agent.EventClosure,
+		agent.EventTurnProgress, agent.EventHookDiagnostic, agent.EventEvaluatorResult:
+		s.rec.Emit(ev)
 	}
-	s.r.AssistantPhase(phase)
-	s.rec.AssistantPhase(phase)
 }
 
-func (s *accumulatingSink) ReasoningSummary(text string) {
+// Host supplies the session services this prompt's agent run may ask for.
+func (s *accumulatingSink) Host() agent.Host {
+	return agent.Host{
+		Archiver:           s,
+		RequestContext:     s.RequestContext,
+		PeekRequestContext: s.PeekRequestContext,
+		WorkflowStatus:     s.WorkflowStatus,
+		TryStagnationNudge: s.TryStagnationNudge,
+		PromptWork:         s,
+		ToolProgress:       s.ToolProgress,
+	}
+}
+
+func (s *accumulatingSink) reasoningSummary(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" || !reasoningSummaryDisplayEnabled(s.app.Reasoning.Summary) {
 		return
@@ -6040,40 +6128,7 @@ func (s *accumulatingSink) ReasoningSummary(text string) {
 	s.rec.ReasoningSummary(text)
 }
 
-func (s *accumulatingSink) CompactionStart() {
-	s.inMaintenance = true
-	s.r.CompactionStart()
-}
-
-func (s *accumulatingSink) CompactionComplete() {
-	s.r.CompactionComplete()
-	s.inMaintenance = false
-}
-
-func (s *accumulatingSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
-	s.drainBackgroundNotices()
-	if s.app != nil && s.app.Todos != nil && s.app.agentHasTool("update_todos") {
-		s.app.Todos.CommitModelRound(turn != s.todoTurn)
-		s.todoTurn = turn
-	}
-	s.attemptText.Reset()
-	s.turn = turn
-	s.attempt = attempt
-	s.r.TurnAttemptStart(turn, attempt, ctx)
-	s.rec.TurnAttemptStart(turn, attempt, ctx)
-}
-
-func (s *accumulatingSink) TurnAttemptAbandoned(turn, attempt int) {
-	s.attemptText.Reset()
-	s.rec.TurnAttemptAbandoned(turn, attempt)
-}
-
-func (s *accumulatingSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
-	s.r.TurnAttemptComplete(u)
-	s.rec.TurnAttemptComplete(u)
-}
-
-func (s *accumulatingSink) ModelRequestEvent(event llm.ModelRequestEvent) {
+func (s *accumulatingSink) modelRequestEvent(event llm.ModelRequestEvent) {
 	line := s.r.ModelRequestEvent(event)
 	if line != "" && event.Outcome == llm.ModelRequestOutcomeTerminal {
 		s.terminalModelErrorDisplayed = true
@@ -6126,21 +6181,7 @@ func modelRequestLogAttrs(prompt, turn, attempt int, event llm.ModelRequestEvent
 	return attrs
 }
 
-func (s *accumulatingSink) ToolUseStart(c llm.ToolCall) {
-	s.r.ToolUseStart(c)
-}
-
-func (s *accumulatingSink) ToolUseDelta(index int, delta string) {
-	s.r.ToolUseDelta(index, delta)
-}
-
-func (s *accumulatingSink) ToolStart(c llm.ToolCall) {
-	s.pendingNames[c.ID] = c.Name
-	s.r.ToolStart(c)
-	s.rec.ToolStart(c)
-}
-
-func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
+func (s *accumulatingSink) toolResult(res llm.ToolResult) {
 	name := s.pendingNames[res.ForID]
 	delete(s.pendingNames, res.ForID)
 	if res.BackgroundJobID != "" && s.app != nil && s.app.Background != nil {
@@ -6162,15 +6203,6 @@ func (s *accumulatingSink) ToolResult(res llm.ToolResult) {
 	if name == "record_plan" && !res.IsError {
 		s.app.printPlanStatus(s.planDisplayState())
 	}
-}
-
-func (s *accumulatingSink) ToolDiff(call llm.ToolCall, path, text string) {
-	s.r.ToolDiff(call, path, text)
-	s.rec.ToolDiff(call, path, text)
-}
-
-func (s *accumulatingSink) ToolMutation(call llm.ToolCall, paths []string) {
-	s.rec.ToolMutation(call, paths)
 }
 
 func (s *accumulatingSink) BackgroundJobDiagnostic(diagnostic background.CompletedDiagnostic) error {
@@ -6235,7 +6267,7 @@ func (s *accumulatingSink) ArchiveToolResult(res llm.ToolResult) (agent.ToolResu
 	}, nil
 }
 
-func (s *accumulatingSink) Notice(msg string) {
+func (s *accumulatingSink) notice(msg string) {
 	s.r.Notice(msg)
 	turn := s.turn
 	if s.inMaintenance {
@@ -6244,11 +6276,11 @@ func (s *accumulatingSink) Notice(msg string) {
 	s.rec.Notice(msg, turn)
 }
 
-// SteerDelivered reports that queued in-prompt steer input was injected into
+// steerDelivered reports that queued in-prompt steer input was injected into
 // the transcript: the dim line renders above the live status line and is
-// recorded as a sessionrec Display line via Notice.
-func (s *accumulatingSink) SteerDelivered(input agent.SteerInput) {
-	s.Notice("[steer sent: " + submissionPreview(input.Text, 0) + "]")
+// recorded as a sessionrec Display line via notice.
+func (s *accumulatingSink) steerDelivered(input agent.SteerInput) {
+	s.notice("[steer sent: " + submissionPreview(input.Text, 0) + "]")
 	for range skillInjectionsFromMetadata(input.DeliveryMetadata) {
 		if s.otel != nil {
 			s.otel.RecordSkill("explicit", "injected")
@@ -6263,7 +6295,7 @@ func (s *accumulatingSink) SteerDelivered(input agent.SteerInput) {
 	}
 }
 
-func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic) {
+func (s *accumulatingSink) modelErrorDiagnostic(event agent.ModelErrorDiagnostic) {
 	if s.app.DiagnosticLogger == nil || event.Diagnostic == nil || event.Diagnostic.Compatibility == nil {
 		return
 	}
@@ -6295,7 +6327,7 @@ func (s *accumulatingSink) ModelErrorDiagnostic(event agent.ModelErrorDiagnostic
 	)
 }
 
-func (s *accumulatingSink) TurnComplete(u agent.TurnUsage) {
+func (s *accumulatingSink) turnComplete(u agent.TurnUsage) {
 	s.backgroundRequestContext = nil
 	s.finalText = s.attemptText.String()
 	if !u.Usage.CostKnown {
@@ -6314,11 +6346,7 @@ func (s *accumulatingSink) FinalText() string {
 	return s.finalText
 }
 
-func (s *accumulatingSink) MaintenanceComplete(u agent.MaintenanceUsage) {
-	s.rec.MaintenanceComplete(u)
-}
-
-func (s *accumulatingSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
+func (s *accumulatingSink) promptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	if s == nil || s.app == nil || s.app.SessionPath == "" {
 		return
 	}
@@ -6359,22 +6387,6 @@ func (s *accumulatingSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	})
 }
 
-func (s *accumulatingSink) ClosureStarted(event agent.ClosureEvent) {
-	s.rec.ClosureStarted(event)
-}
-
-func (s *accumulatingSink) TurnProgress(progress agent.TurnProgress) {
-	s.rec.TurnProgress(progress)
-}
-
-func (s *accumulatingSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
-	s.rec.HookDiagnostic(diagnostic)
-}
-
-func (s *accumulatingSink) EvaluatorResult(result hooks.EvaluatorResult) {
-	s.rec.EvaluatorResult(result)
-}
-
 func (s *accumulatingSink) TryStagnationNudge(threshold int) bool {
 	if s == nil || s.rec == nil || !s.rec.TryStagnationNudge(threshold) {
 		return false
@@ -6388,23 +6400,6 @@ func (s *accumulatingSink) WorkflowStatus() agent.WorkflowStatus {
 		return agent.WorkflowStatus{}
 	}
 	return s.app.WorkflowStatusFunc()
-}
-
-func (s *accumulatingSink) RetentionApplied(event agent.RetentionEvent) {
-	s.recordEvent(session.Event{
-		Type:      session.EventRetention,
-		Prompt:    s.prompt,
-		Turn:      s.turn + 1,
-		Retention: sessionrec.RetentionSnapshot(event),
-	})
-}
-
-func (s *accumulatingSink) AddHookContext(ctx []string) {
-	s.app.AddHookContext(ctx)
-}
-
-func (s *accumulatingSink) TranscriptRewritten() {
-	s.app.ArmTodoContext()
 }
 
 func (s *accumulatingSink) RequestContext() []string {
@@ -6448,7 +6443,7 @@ func (s *accumulatingSink) WaitForPromptWork(ctx context.Context) (llm.Usage, er
 	return s.app.Background.WaitForPromptWork(ctx)
 }
 
-func (s *accumulatingSink) PromptWorkWaitStart() {
+func (s *accumulatingSink) promptWorkWaitStart() {
 	s.r.PromptWorkWaitStart()
 	// Surface the outstanding background delegate jobs' live progress so the
 	// wait ticker can summarize their activity while the parent joins them.
@@ -6466,11 +6461,6 @@ func (s *accumulatingSink) PromptWorkWaitStart() {
 	s.r.SetBackgroundProgress(progress)
 }
 
-func (s *accumulatingSink) PromptWorkWaitComplete() {
-	s.r.SetBackgroundProgress(nil)
-	s.r.PromptWorkWaitComplete()
-}
-
 // ToolProgress forwards a foreground tool call's live-progress closure to the
 // renderer's wait ticker so child-run activity is visible while the (blocking)
 // call runs. A nil progress clears it.
@@ -6485,7 +6475,7 @@ func (s *accumulatingSink) DrainPromptWorkUsage() llm.Usage {
 	return s.app.Background.DrainPromptWorkUsage()
 }
 
-func (s *accumulatingSink) PromptComplete(u agent.PromptUsage) {
+func (s *accumulatingSink) promptComplete(u agent.PromptUsage) {
 	s.drainBackgroundNotices()
 	cost, costKnown := s.app.promptCost(u.Usage)
 	s.promptUsage = u

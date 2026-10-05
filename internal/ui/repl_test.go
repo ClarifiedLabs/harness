@@ -215,10 +215,10 @@ func TestTurnCompletePricesTurnAgainstRegistry(t *testing.T) {
 	})
 	sink := newREPLSink(app.Renderer, app, 1)
 
-	sink.TurnComplete(agent.TurnUsage{
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{
 		Turn:  1,
 		Usage: llm.Usage{InputTokens: 100_000, OutputTokens: 10_000},
-	})
+	}})
 
 	if got := errw.String(); !strings.Contains(got, "· $1.200") {
 		t.Fatalf("turn line should show the registry-priced cost, got %q", got)
@@ -235,10 +235,10 @@ func TestTurnCompleteKeepsProviderCost(t *testing.T) {
 	})
 	sink := newREPLSink(app.Renderer, app, 1)
 
-	sink.TurnComplete(agent.TurnUsage{
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{
 		Turn:  1,
 		Usage: llm.Usage{InputTokens: 100_000, OutputTokens: 10_000, CostUSD: 0.5, CostKnown: true},
-	})
+	}})
 
 	got := errw.String()
 	if !strings.Contains(got, "· $0.500") {
@@ -255,10 +255,10 @@ func TestTurnCompleteUnpricedModelOmitsCost(t *testing.T) {
 	app := newTestApp(t, &out, &errw, fp) // test registry has no price
 	sink := newREPLSink(app.Renderer, app, 1)
 
-	sink.TurnComplete(agent.TurnUsage{
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{
 		Turn:  1,
 		Usage: llm.Usage{InputTokens: 100_000, OutputTokens: 10_000},
-	})
+	}})
 
 	if got := errw.String(); strings.Contains(got, "$") {
 		t.Fatalf("unpriced model must not print a dollar figure, got %q", got)
@@ -269,7 +269,7 @@ func TestRetentionTelemetryIsPersistedWithoutEnteringTranscript(t *testing.T) {
 	var out, errw bytes.Buffer
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
 	sink := newREPLSink(app.Renderer, app, 3)
-	sink.RetentionApplied(agent.RetentionEvent{
+	sink.Emit(agent.Event{Kind: agent.EventRetention, Retention: &agent.RetentionEvent{
 		Policy:              agent.RetentionEventPolicyPressureEpoch,
 		Trigger:             agent.RetentionTriggerContextPressure,
 		BlocksTrimmed:       2,
@@ -278,7 +278,7 @@ func TestRetentionTelemetryIsPersistedWithoutEnteringTranscript(t *testing.T) {
 		ContextTokensBefore: 8_000,
 		ContextTokensAfter:  2_000,
 		ResponseStateReset:  true,
-	})
+	}})
 
 	data, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
 	if err != nil {
@@ -7923,13 +7923,13 @@ func TestTodoContextReturnsAfterTwelveModelRounds(t *testing.T) {
 		if got := sink.RequestContext(); len(got) != 0 {
 			t.Fatalf("turn %d context = %+v, want empty", turn, got)
 		}
-		sink.TurnAttemptStart(turn, 1, agent.ContextEstimate{})
-		sink.TurnAttemptStart(turn, 2, agent.ContextEstimate{})
+		sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: turn, Attempt: 1, Context: &agent.ContextEstimate{}})
+		sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: turn, Attempt: 2, Context: &agent.ContextEstimate{}})
 	}
 	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
 		t.Fatalf("turn 12 context = %+v, want stale TODO reminder", got)
 	}
-	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 12, Attempt: 1, Context: &agent.ContextEstimate{}})
 	if got := sink.RequestContext(); len(got) != 0 {
 		t.Fatalf("post-reminder context = %+v, want empty", got)
 	}
@@ -7951,7 +7951,7 @@ func TestTodoContextDeliveryIsOneShotAfterTranscriptRewrite(t *testing.T) {
 	if got := sink.RequestContext(); len(got) != 1 {
 		t.Fatalf("request context = %+v", got)
 	}
-	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 1, Context: &agent.ContextEstimate{}})
 	if got := sink.RequestContext(); len(got) != 0 {
 		t.Fatalf("repeated context = %+v", got)
 	}
@@ -7960,7 +7960,7 @@ func TestTodoContextDeliveryIsOneShotAfterTranscriptRewrite(t *testing.T) {
 	if got := sink.PeekRequestContext(); len(got) != 0 {
 		t.Fatalf("tool-backed update injected redundant context: %+v", got)
 	}
-	sink.TranscriptRewritten()
+	sink.Emit(agent.Event{Kind: agent.EventTranscriptRewritten})
 	if got := sink.PeekRequestContext(); len(got) != 1 || !strings.Contains(got[0], "[ ] Verify") {
 		t.Fatalf("post-rewrite context = %+v", got)
 	}
@@ -7973,7 +7973,7 @@ func TestAccumulatingSinkSteerDeliveredRendersAndRecords(t *testing.T) {
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
 	sink := newAccumulatingSink(app.Renderer, app, 1)
 	sink.turn = 1
-	sink.SteerDelivered(agent.SteerInput{Text: "inspect this"})
+	sink.Emit(agent.Event{Kind: agent.EventSteerDelivered, Steer: &agent.SteerInput{Text: "inspect this"}})
 	if !strings.Contains(errw.String(), "[steer sent: inspect this]") {
 		t.Fatalf("steer delivery line missing from live output:\n%s", errw.String())
 	}
@@ -8052,7 +8052,7 @@ func TestRequestContextRecordsBackgroundJobDiagnosticsOnce(t *testing.T) {
 	if contexts := sink.RequestContext(); len(contexts) != 1 {
 		t.Fatalf("rebuilt background request context = %+v", contexts)
 	}
-	sink.TurnComplete(agent.TurnUsage{Turn: 1})
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{Turn: 1}})
 	if contexts := sink.RequestContext(); len(contexts) != 0 {
 		t.Fatalf("next round background request context = %+v", contexts)
 	}
@@ -8095,10 +8095,10 @@ func TestFlushEventsRecordsBackgroundDiagnosticsWithLaunchIdentity(t *testing.T)
 	}
 
 	sink := newAccumulatingSink(app.Renderer, app, 1)
-	sink.ToolStart(llm.ToolCall{ID: "launch", Name: "shell"})
-	sink.ToolResult(llm.ToolResult{
+	sink.Emit(agent.Event{Kind: agent.EventToolStart, Call: llm.ToolCall{ID: "launch", Name: "shell"}})
+	sink.Emit(agent.Event{Kind: agent.EventToolResult, Result: &llm.ToolResult{
 		ForID: "launch", Text: "started", BackgroundJobID: started.ID,
-	})
+	}})
 	app.AgentName = "switched-agent"
 	app.RegistryModel = "target-b"
 	app.Provider = "provider-b"
@@ -9522,7 +9522,7 @@ func TestGoalReminderSurvivesTranscriptRewrite(t *testing.T) {
 	if !strings.Contains(before, "preserve this objective") {
 		t.Fatalf("initial goal context = %q", before)
 	}
-	sink.TranscriptRewritten()
+	sink.Emit(agent.Event{Kind: agent.EventTranscriptRewritten})
 	after := strings.Join(sink.PeekRequestContext(), "\n")
 	if !strings.Contains(after, "preserve this objective") {
 		t.Fatalf("post-rewrite goal context = %q", after)

@@ -23,7 +23,6 @@ import (
 	"harness/internal/agent"
 	"harness/internal/agentsession"
 	"harness/internal/execution"
-	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/plan"
 	"harness/internal/session"
@@ -2261,21 +2260,92 @@ func (s *childSink) User(text string) {
 	s.rec.User(text)
 }
 
-func (s *childSink) TextDelta(text string) {
-	s.rec.TextDelta(text)
-	s.activity.MarkActivity("replying")
-	s.assistant.Write(text)
-}
-
-func (s *childSink) AssistantPhase(phase string) {
-	if phase == "" || !llm.ValidAssistantPhase(phase) {
-		return
+// Emit handles one child-agent event, keeping the recorder and the activity
+// feed in the order each kind needs. Kinds listed only in the final case are
+// recorded without touching the feed; kinds absent from the switch are ignored.
+func (s *childSink) Emit(ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventTextDelta:
+		s.rec.Emit(ev)
+		s.activity.MarkActivity("replying")
+		s.assistant.Write(ev.Text)
+	case agent.EventAssistantPhase:
+		if ev.Text == "" || !llm.ValidAssistantPhase(ev.Text) {
+			return
+		}
+		s.flushDisplay()
+		s.rec.Emit(ev)
+	case agent.EventReasoningSummary:
+		s.reasoningSummary(ev.Text)
+	case agent.EventNotice:
+		s.notice(ev.Text)
+	case agent.EventTurnAttemptStart:
+		if s.todos != nil && s.todoContext {
+			s.todos.CommitModelRound(ev.Turn != s.todoTurn)
+			s.todoTurn = ev.Turn
+		}
+		s.flushDisplay()
+		s.turn = ev.Turn
+		s.attempt = ev.Attempt
+		s.progress.markTurn(ev.Turn, ev.Attempt, *ev.Context)
+		s.activity.MarkTurn(ev.Turn, ev.Attempt, *ev.Context)
+		s.rec.Emit(ev)
+		s.activity.publish(ActivityEvent{Kind: ActivityEventTurnStart, Turn: ev.Turn, Attempt: ev.Attempt})
+	case agent.EventTurnAttemptAbandoned:
+		s.flushDisplay()
+		s.activity.MarkActivity(fmt.Sprintf("retrying after attempt %d", ev.Attempt))
+		s.rec.Emit(ev)
+		s.activity.publish(ActivityEvent{Kind: ActivityEventAttemptDiscarded, Turn: ev.Turn, Attempt: ev.Attempt})
+	case agent.EventTurnAttemptComplete:
+		s.progress.markUsage(ev.AttemptUsage.Usage)
+		s.activity.MarkUsage(ev.AttemptUsage.Usage)
+		s.rec.Emit(ev)
+	case agent.EventModelRequest:
+		s.modelRequestEvent(*ev.ModelRequest)
+	case agent.EventToolStart:
+		s.toolStart(ev.Call)
+	case agent.EventToolResult:
+		s.toolResult(*ev.Result)
+	case agent.EventToolDiff, agent.EventToolMutation:
+		// Recorded at parent fidelity. Nothing is published to the delegate
+		// activity feed: its curated-kind contract is pinned by feed tests.
+		s.flushDisplay()
+		s.rec.Emit(ev)
+	case agent.EventTurnComplete:
+		s.progress.markContext(ev.TurnUsage.Context)
+		s.activity.MarkContext(ev.TurnUsage.Context)
+		s.rec.Emit(ev)
+	case agent.EventPromptCheckpoint:
+		s.promptCheckpoint(*ev.Checkpoint)
+	case agent.EventPromptComplete:
+		s.promptComplete(*ev.PromptUsage)
+	case agent.EventRetention:
+		s.rec.Append(session.Event{
+			Type:      session.EventRetention,
+			Prompt:    1,
+			Turn:      s.turn + 1,
+			Retention: sessionrec.RetentionSnapshot(*ev.Retention),
+		})
+	case agent.EventTranscriptRewritten:
+		if s.todos != nil && s.todoContext {
+			s.todos.RequireRequestContext()
+		}
+	case agent.EventMaintenance, agent.EventClosure, agent.EventTurnProgress, agent.EventHookDiagnostic:
+		s.rec.Emit(ev)
 	}
-	s.flushDisplay()
-	s.rec.AssistantPhase(phase)
 }
 
-func (s *childSink) ReasoningSummary(text string) {
+// Host supplies the session services the child agent's run may ask for.
+func (s *childSink) Host() agent.Host {
+	return agent.Host{
+		Archiver:           s,
+		RequestContext:     s.RequestContext,
+		PeekRequestContext: s.PeekRequestContext,
+		WorkflowStatus:     s.WorkflowStatus,
+	}
+}
+
+func (s *childSink) reasoningSummary(text string) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return
@@ -2293,38 +2363,7 @@ func (s *childSink) ReasoningSummary(text string) {
 	accumulator.Flush()
 }
 
-func (s *childSink) TurnAttemptStart(turn, attempt int, ctx agent.ContextEstimate) {
-	if s.todos != nil && s.todoContext {
-		s.todos.CommitModelRound(turn != s.todoTurn)
-		s.todoTurn = turn
-	}
-	s.flushDisplay()
-	s.turn = turn
-	s.attempt = attempt
-	s.progress.markTurn(turn, attempt, ctx)
-	s.activity.MarkTurn(turn, attempt, ctx)
-	s.rec.TurnAttemptStart(turn, attempt, ctx)
-	s.activity.publish(ActivityEvent{Kind: ActivityEventTurnStart, Turn: turn, Attempt: attempt})
-}
-
-func (s *childSink) TurnAttemptAbandoned(turn, attempt int) {
-	s.flushDisplay()
-	s.activity.MarkActivity(fmt.Sprintf("retrying after attempt %d", attempt))
-	s.rec.TurnAttemptAbandoned(turn, attempt)
-	s.activity.publish(ActivityEvent{Kind: ActivityEventAttemptDiscarded, Turn: turn, Attempt: attempt})
-}
-
-func (s *childSink) TurnAttemptComplete(u agent.TurnAttemptUsage) {
-	s.progress.markUsage(u.Usage)
-	s.activity.MarkUsage(u.Usage)
-	s.rec.TurnAttemptComplete(u)
-}
-
-func (*childSink) ToolUseStart(llm.ToolCall) {}
-
-func (*childSink) ToolUseDelta(int, string) {}
-
-func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
+func (s *childSink) modelRequestEvent(event llm.ModelRequestEvent) {
 	kind, text, publish := safeModelRequestLine(event)
 	if publish {
 		s.flushDisplay()
@@ -2338,7 +2377,7 @@ func (s *childSink) ModelRequestEvent(event llm.ModelRequestEvent) {
 	}
 }
 
-func (s *childSink) ToolStart(call llm.ToolCall) {
+func (s *childSink) toolStart(call llm.ToolCall) {
 	s.flushDisplay()
 	summary := safeToolActivity(call)
 	s.pending[call.ID] = pendingChildTool{call: call, summary: summary}
@@ -2351,7 +2390,7 @@ func (s *childSink) ToolStart(call llm.ToolCall) {
 	s.activity.publishText(ActivityEventToolStart, summary, s.turn, s.attempt, false)
 }
 
-func (s *childSink) ToolResult(result llm.ToolResult) {
+func (s *childSink) toolResult(result llm.ToolResult) {
 	s.flushDisplay()
 	if result.BackgroundJobID != "" && s.background != nil {
 		if identity, ok := s.rec.PendingToolIdentity(result.ForID); ok {
@@ -2386,19 +2425,6 @@ func (s *childSink) ToolResult(result llm.ToolResult) {
 	s.activity.publishText(kind, summary, s.turn, s.attempt, false)
 }
 
-// ToolDiff records the rendered diff at parent fidelity. It deliberately
-// publishes nothing to the delegate activity feed: the feed's curated-kind
-// contract is pinned by feed tests.
-func (s *childSink) ToolDiff(call llm.ToolCall, path, text string) {
-	s.flushDisplay()
-	s.rec.ToolDiff(call, path, text)
-}
-
-func (s *childSink) ToolMutation(call llm.ToolCall, paths []string) {
-	s.flushDisplay()
-	s.rec.ToolMutation(call, paths)
-}
-
 func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultArchive, error) {
 	ref, err := session.SaveToolResultArtifact(s.sessionDir, 1, s.turn, result)
 	if err != nil || ref == "" {
@@ -2410,22 +2436,12 @@ func (s *childSink) ArchiveToolResult(result llm.ToolResult) (agent.ToolResultAr
 	}, nil
 }
 
-func (s *childSink) Notice(msg string) {
+func (s *childSink) notice(msg string) {
 	s.flushDisplay()
 	s.rec.Notice(msg, s.turn)
 	if text, ok := safeNoticeLine(msg); ok {
 		s.activity.publishText(ActivityEventNotice, text, s.turn, s.attempt, false)
 	}
-}
-
-func (s *childSink) TurnComplete(usage agent.TurnUsage) {
-	s.progress.markContext(usage.Context)
-	s.activity.MarkContext(usage.Context)
-	s.rec.TurnComplete(usage)
-}
-
-func (s *childSink) MaintenanceComplete(usage agent.MaintenanceUsage) {
-	s.rec.MaintenanceComplete(usage)
 }
 
 func (s *childSink) addPreflightMaintenance(purpose string, usage llm.Usage, compacted bool) {
@@ -2439,10 +2455,10 @@ func (s *childSink) addPreflightMaintenance(purpose string, usage llm.Usage, com
 	s.preflightMaintenance = llm.AddUsage(s.preflightMaintenance, usage)
 	s.usage.Usage = llm.AddUsage(s.usage.Usage, usage)
 	s.usage.Maintenance = llm.AddUsage(s.usage.Maintenance, usage)
-	s.MaintenanceComplete(agent.MaintenanceUsage{Purpose: purpose, Usage: usage})
+	s.rec.MaintenanceComplete(agent.MaintenanceUsage{Purpose: purpose, Usage: usage})
 }
 
-func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
+func (s *childSink) promptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	if s == nil || s.checkpoint == nil {
 		return
 	}
@@ -2472,38 +2488,11 @@ func (s *childSink) PromptCheckpoint(checkpoint agent.PromptCheckpoint) {
 	})
 }
 
-func (s *childSink) ClosureStarted(event agent.ClosureEvent) {
-	s.rec.ClosureStarted(event)
-}
-
-func (s *childSink) TurnProgress(progress agent.TurnProgress) {
-	s.rec.TurnProgress(progress)
-}
-
-func (s *childSink) HookDiagnostic(diagnostic hooks.Diagnostic) {
-	s.rec.HookDiagnostic(diagnostic)
-}
-
 func (s *childSink) WorkflowStatus() agent.WorkflowStatus {
 	if s == nil || s.workflowStatus == nil {
 		return agent.WorkflowStatus{}
 	}
 	return s.workflowStatus()
-}
-
-func (s *childSink) RetentionApplied(event agent.RetentionEvent) {
-	s.rec.Append(session.Event{
-		Type:      session.EventRetention,
-		Prompt:    1,
-		Turn:      s.turn + 1,
-		Retention: sessionrec.RetentionSnapshot(event),
-	})
-}
-
-func (s *childSink) TranscriptRewritten() {
-	if s.todos != nil && s.todoContext {
-		s.todos.RequireRequestContext()
-	}
 }
 
 func (s *childSink) RequestContext() []string {
@@ -2526,7 +2515,7 @@ func (s *childSink) PeekRequestContext() []string {
 	return out
 }
 
-func (s *childSink) PromptComplete(usage agent.PromptUsage) {
+func (s *childSink) promptComplete(usage agent.PromptUsage) {
 	s.flushDisplay()
 	usage.Usage = llm.AddUsage(usage.Usage, s.preflightMaintenance)
 	usage.Maintenance = llm.AddUsage(usage.Maintenance, s.preflightMaintenance)

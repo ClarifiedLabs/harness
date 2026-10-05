@@ -1854,12 +1854,27 @@ Responses/Interactions continuation and their full-history fallback therefore
 follow the ordinary `modelRequest` rules rather than a dialect-specific recovery
 path.
 
-`EventSink` remains the required rendering contract. `SteerDeliveredSink` is an
-optional sink interface: after a queued in-prompt steer is appended as a
-validated `MessageOriginSteer` user message, the agent calls `SteerDelivered` so
-TTY sinks can distinguish admission from actual delivery. It is not called for a
-failed validation rollback, a disabled steer, or input recovered for the next
-prompt.
+`EventSink` is the reporting contract: one `Emit(agent.Event)` method that
+receives every event of a prompt run, synchronously and in order. `Event` is a
+flat union discriminated by `Kind` (`internal/agent/events.go` lists the kinds
+and the fields each one populates); a sink switches on the kinds it uses and
+ignores the rest, so a new kind needs no change in sinks that do not care about
+it. `sessionrec.Recorder.Emit` is the single mapping from agent events to
+`raw.ndjson` records, and the root, delegate, and ACP sinks pass
+recorded-unchanged kinds through it.
+
+What a run asks of its caller, as opposed to what it reports, travels
+separately. A sink that also implements `HostProvider` returns an `agent.Host`:
+the tool-result archiver, consuming and non-consuming request-context sources,
+workflow status, the stagnation-nudge decision, the join-required background
+work coordinator, and the live tool-progress hook. Every field is optional and
+a nil field disables the behavior that depends on it. The services are
+supplied per run because the root sink answers them from per-prompt state.
+
+After a queued in-prompt steer is appended as a validated `MessageOriginSteer`
+user message, the agent emits `EventSteerDelivered` so TTY sinks can
+distinguish admission from actual delivery. It is not emitted for a failed
+validation rollback, a disabled steer, or input recovered for the next prompt.
 
 - **Staged, dependency-aware tool execution.** `_stage` is a positive integer whose
   effective value starts at 1 and is inherited from the preceding emitted call when
@@ -1878,7 +1893,7 @@ prompt.
   A timeout or cancellation result ordinarily releases the next stage; a reported
   mutation with a conflicting later-stage mutation additionally waits for the earlier
   execution goroutine's actual return before releasing that successor. Workers never
-  call `EventSink` or mutate the rich-result budget: starts, results, progress cleanup,
+  emit to the `EventSink` or mutate the rich-result budget: starts, results, progress cleanup,
   diffs/notices, usage, budgets, and failure-guard folding are processed by the parent
   in stage execution order and same-stage emission order. Raw tool calls remain
   untouched; result blocks are restored to original emission indexes, as are calls
@@ -1891,7 +1906,7 @@ prompt.
   use later stages when known calls require earlier side effects, `shell.steps` for a
   serial command list inside one call, background leases/jobs for detached work, or a
   separate model turn when later arguments depend on earlier output. No sandbox is added.
-- **Invalid stage plans:** preflight emits one `EventSink.Notice` with shape
+- **Invalid stage plans:** preflight emits one `EventNotice` with shape
   `[tool batch rejected: N calls not executed; invalid tool stage plan: ...]`.
   Every call still gets an error result for the model/transcript and a raw
   start/result record, but terminal and replay views suppress per-call results
@@ -3838,9 +3853,8 @@ Contradictory or invalid semantic fields are ignored and classify an otherwise
 successful exit-0 command as `parse_failed`, while legacy control fields and
 non-zero process outcomes retain their existing behavior.
 
-The agent reports each semantic result through the optional
-`EvaluatorResultSink`, and the root sink delegates persistence to
-`internal/sessionrec`. Delegate children currently receive no hook runner. The
+The agent reports each semantic result as an `EventEvaluatorResult`, and the
+root sink delegates persistence to `internal/sessionrec`. Delegate children currently receive no hook runner. The
 resulting displayless `evaluator_result` event
 contains no reason or command output. If an orchestrator has not supplied
 `WorkflowStatus`, an all-accepted set projects to `complete` and any rejection

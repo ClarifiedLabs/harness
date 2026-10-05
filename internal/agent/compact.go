@@ -348,7 +348,7 @@ func (a *Agent) ApplyIdleCompaction(ctx context.Context, sink EventSink, result 
 		if strings.HasPrefix(notice, "[compacted:") {
 			notice = "[idle compacted:" + strings.TrimPrefix(notice, "[compacted:")
 		}
-		sink.Notice(notice)
+		emitNotice(sink, notice)
 	}
 	return true, nil
 }
@@ -420,17 +420,11 @@ type idleCompactionSink struct {
 	notices []string
 }
 
-func (*idleCompactionSink) TextDelta(string)                           {}
-func (*idleCompactionSink) ReasoningSummary(string)                    {}
-func (*idleCompactionSink) TurnAttemptStart(int, int, ContextEstimate) {}
-func (*idleCompactionSink) TurnAttemptComplete(TurnAttemptUsage)       {}
-func (*idleCompactionSink) ToolUseStart(llm.ToolCall)                  {}
-func (*idleCompactionSink) ToolUseDelta(int, string)                   {}
-func (*idleCompactionSink) ToolStart(llm.ToolCall)                     {}
-func (*idleCompactionSink) ToolResult(llm.ToolResult)                  {}
-func (s *idleCompactionSink) Notice(message string)                    { s.notices = append(s.notices, message) }
-func (*idleCompactionSink) TurnComplete(TurnUsage)                     {}
-func (*idleCompactionSink) PromptComplete(PromptUsage)                 {}
+func (s *idleCompactionSink) Emit(event Event) {
+	if event.Kind == EventNotice {
+		s.notices = append(s.notices, event.Text)
+	}
+}
 
 // MaybeCompact compacts the transcript when automatic compaction is enabled and
 // lastInputTokens reaches the configured fraction of the model's context
@@ -507,10 +501,8 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 	forceCurrent := opts.forceCurrent
 	collapseAll := opts.collapseAll
 	focus := opts.focus
-	if progress, ok := sink.(CompactionProgressSink); ok {
-		progress.CompactionStart()
-		defer progress.CompactionComplete()
-	}
+	emit(sink, Event{Kind: EventCompactionStart})
+	defer emit(sink, Event{Kind: EventCompactionComplete})
 	if a.hooks != nil && a.hooks.HasEvent(hooks.PreCompact) {
 		payload := hooks.Payload{"trigger": trigger}
 		if focus != "" {
@@ -519,14 +511,14 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 		res := a.hooks.Run(ctx, hooks.PreCompact, trigger, payload)
 		reportHookDiagnostics(sink, res.Diagnostics)
 		for _, notice := range res.Notices {
-			sink.Notice(notice)
+			emitNotice(sink, notice)
 		}
 		if res.Block {
 			reason := res.Reason()
 			if reason == "" {
 				reason = "blocked by PreCompact hook"
 			}
-			sink.Notice("[compact skipped: " + reason + "]")
+			emitNotice(sink, "[compact skipped: "+reason+"]")
 			return llm.Usage{}, false, nil
 		}
 	}
@@ -596,7 +588,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 					return usage, false, err
 				}
 				if trigger == "idle" || a.archiveCompaction == nil {
-					sink.Notice(fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
+					emitNotice(sink, fmt.Sprintf("[compact failed: %v; keeping full transcript]", err))
 					return usage, false, err
 				}
 				ledger.discardFrom(summaryMark, "compaction_fallback")
@@ -646,7 +638,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 		a.trimToolResults(compacted, sink)
 	}
 	if err := llm.ValidateTranscript(compacted); err != nil {
-		sink.Notice(fmt.Sprintf("[compact failed: compacted transcript invalid: %v; keeping full transcript]", err))
+		emitNotice(sink, fmt.Sprintf("[compact failed: compacted transcript invalid: %v; keeping full transcript]", err))
 		return usage, false, err
 	}
 
@@ -665,7 +657,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 			ModifiedFiles:    append([]string(nil), modifiedFiles...),
 		})
 		if err != nil {
-			sink.Notice(fmt.Sprintf("[compact archive failed: %v; keeping full transcript]", err))
+			emitNotice(sink, fmt.Sprintf("[compact archive failed: %v; keeping full transcript]", err))
 			return usage, false, err
 		}
 		archiveRef = ref
@@ -687,9 +679,9 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 	after := a.estimateContextForTranscript(nil, compacted).Total
 	if fallbackNotice != "" {
-		sink.Notice(fallbackNotice)
+		emitNotice(sink, fallbackNotice)
 	}
-	sink.Notice(compactionReport(collapsed, before, after))
+	emitNotice(sink, compactionReport(collapsed, before, after))
 	a.runPostCompactHook(ctx, sink, trigger, focus)
 	return usage, true, nil
 }
@@ -777,7 +769,7 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		} else {
 			a.disableCurrentNativeCompaction()
 		}
-		sink.Notice(fmt.Sprintf("[native compact failed: %v; using textual compaction]", compactErr))
+		emitNotice(sink, fmt.Sprintf("[native compact failed: %v; using textual compaction]", compactErr))
 		return usage, false, false, nil
 	}
 	// Compaction used the old window's baseline. Only a successful replacement
@@ -803,7 +795,7 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		if waitErr := a.retryWait(ctx, llm.RequestPurposeCompaction, 0, llm.AttemptErrorRequest, ctx.Err); waitErr != nil {
 			return usage, false, true, waitErr
 		}
-		sink.Notice(fmt.Sprintf("[native compact failed: invalid provider checkpoint: %v; using textual compaction]", err))
+		emitNotice(sink, fmt.Sprintf("[native compact failed: invalid provider checkpoint: %v; using textual compaction]", err))
 		return usage, false, false, nil
 	}
 	// Only the newest checkpoint in a compatibility domain is useful. Retain
@@ -817,7 +809,7 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 	a.ResetProxySessionID()
 	a.compactFallbackNotice = compactFallbackNoticeState{}
 	after := a.estimateContext(nil).Total
-	sink.Notice(fmt.Sprintf("[native compacted: canonical provider window · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
+	emitNotice(sink, fmt.Sprintf("[native compacted: canonical provider window · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
 	a.runPostCompactHook(ctx, sink, trigger, "")
 	return usage, true, true, nil
 }
@@ -844,19 +836,17 @@ func (a *Agent) runPostCompactHook(ctx context.Context, sink EventSink, trigger,
 	res := a.hooks.Run(ctx, hooks.PostCompact, trigger, payload)
 	reportHookDiagnostics(sink, res.Diagnostics)
 	for _, notice := range res.Notices {
-		sink.Notice(notice)
+		emitNotice(sink, notice)
 	}
 	if len(res.AdditionalContext) > 0 {
-		if receiver, ok := sink.(HookContextReceiver); ok {
-			receiver.AddHookContext(res.AdditionalContext)
-		}
+		emit(sink, Event{Kind: EventHookContext, HookContext: res.AdditionalContext})
 	}
 	if res.Block {
 		reason := res.Reason()
 		if reason == "" {
 			reason = "blocked by PostCompact hook"
 		}
-		sink.Notice("[post-compact hook blocked after compaction: " + reason + "]")
+		emitNotice(sink, "[post-compact hook blocked after compaction: "+reason+"]")
 	}
 }
 
@@ -881,7 +871,7 @@ func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 		return false, nil
 	}
 	if err := llm.ValidateTranscript(compacted); err != nil {
-		sink.Notice(fmt.Sprintf("[compact failed: shrunk transcript invalid: %v; keeping full transcript]", err))
+		emitNotice(sink, fmt.Sprintf("[compact failed: shrunk transcript invalid: %v; keeping full transcript]", err))
 		return false, err
 	}
 	a.transcript = compacted
@@ -898,9 +888,7 @@ func (a *Agent) degradeCurrent(sink EventSink, trigger string) (bool, error) {
 const smallCurrentShrinkNoticeTokens = 1000
 
 func notifyTranscriptRewritten(sink EventSink) {
-	if receiver, ok := sink.(TranscriptRewriteSink); ok {
-		receiver.TranscriptRewritten()
-	}
+	emit(sink, Event{Kind: EventTranscriptRewritten})
 }
 
 func (a *Agent) noticeCurrentNoShrink(sink EventSink, trigger string) {
@@ -910,7 +898,7 @@ func (a *Agent) noticeCurrentNoShrink(sink EventSink, trigger string) {
 		}
 		a.compactFallbackNotice.noShrink = true
 	}
-	sink.Notice(NoticeCompactNothingToShrink)
+	emitNotice(sink, NoticeCompactNothingToShrink)
 }
 
 func (a *Agent) noticeCurrentShrink(sink EventSink, trigger string, before, after int) {
@@ -920,7 +908,7 @@ func (a *Agent) noticeCurrentShrink(sink EventSink, trigger string, before, afte
 		}
 		a.compactFallbackNotice.smallShrink = true
 	}
-	sink.Notice(fmt.Sprintf("[compacted: archived oversized turn payload · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
+	emitNotice(sink, fmt.Sprintf("[compacted: archived oversized turn payload · ctx ~%s → ~%s]", kiloTokens(before), kiloTokens(after)))
 }
 
 // cloneMessages preserves the agent's historical non-nil empty transcript while

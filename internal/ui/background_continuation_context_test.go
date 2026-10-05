@@ -32,7 +32,7 @@ func TestBackgroundRequestContextSurvivesRoundRebuilds(t *testing.T) {
 	if got := sink.PeekRequestContext(); len(got) != 1 || got[0] != first[0] {
 		t.Fatalf("peek lost retained background context: %v", got)
 	}
-	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 1, Context: &agent.ContextEstimate{}})
 
 	// An overflow rewrite may sample again, including a newly completed job.
 	release, done = backgroundSchedulerJob(t, app.Background, "second result")
@@ -41,11 +41,11 @@ func TestBackgroundRequestContextSurvivesRoundRebuilds(t *testing.T) {
 	if got := sink.RequestContext(); len(got) != 2 {
 		t.Fatalf("refreshed context = %v, want both results", got)
 	}
-	sink.TurnAttemptStart(1, 2, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 2, Context: &agent.ContextEstimate{}})
 	if got := sink.RequestContext(); len(got) != 2 {
 		t.Fatalf("retry context = %v, want both results exactly once", got)
 	}
-	sink.TurnComplete(agent.TurnUsage{Turn: 1})
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{Turn: 1}})
 	if got := sink.PeekRequestContext(); len(got) != 0 {
 		t.Fatalf("next round peek retained consumed results: %v", got)
 	}

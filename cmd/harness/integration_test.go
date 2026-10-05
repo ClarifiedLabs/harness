@@ -616,21 +616,14 @@ type integrationAgentSink struct {
 	notices []string
 }
 
-func (*integrationAgentSink) TextDelta(string)                                 {}
-func (*integrationAgentSink) ReasoningSummary(string)                          {}
-func (*integrationAgentSink) TurnAttemptStart(int, int, agent.ContextEstimate) {}
-func (*integrationAgentSink) TurnAttemptComplete(agent.TurnAttemptUsage)       {}
-func (*integrationAgentSink) ToolUseStart(llm.ToolCall)                        {}
-func (*integrationAgentSink) ToolUseDelta(int, string)                         {}
-func (*integrationAgentSink) ToolStart(llm.ToolCall)                           {}
-func (*integrationAgentSink) ToolResult(llm.ToolResult)                        {}
-func (s *integrationAgentSink) Notice(message string) {
+func (s *integrationAgentSink) Emit(ev agent.Event) {
+	if ev.Kind != agent.EventNotice {
+		return
+	}
 	s.mu.Lock()
-	s.notices = append(s.notices, message)
+	s.notices = append(s.notices, ev.Text)
 	s.mu.Unlock()
 }
-func (*integrationAgentSink) TurnComplete(agent.TurnUsage)     {}
-func (*integrationAgentSink) PromptComplete(agent.PromptUsage) {}
 
 func (s *integrationAgentSink) noticeCount(fragment string) int {
 	s.mu.Lock()

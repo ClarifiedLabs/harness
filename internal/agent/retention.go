@@ -141,7 +141,7 @@ func (a *Agent) applyRetentionPolicyWithDecision(sink EventSink, decision Contex
 	// The 2x-age trim below drops bytes the model cannot re-derive, so it is
 	// only offered when the sink can durably archive the exact original; an
 	// archive failure at trim time still refuses the trim (design §12).
-	_, canArchive := sink.(ToolResultArchiver)
+	canArchive := hostOf(sink).Archiver != nil
 	superseded := a.supersededMutationPaths(a.transcript, inputBoundary)
 	for i := range a.transcript {
 		for j := range a.transcript[i].Content {
@@ -323,7 +323,7 @@ func (a *Agent) trimToolResultBlock(b *llm.ContentBlock, sink EventSink) bool {
 	full := b.ResultText
 	head := full[:min(a.retentionResultHead(), len(full))]
 	hint := genericRetentionHint(len(head), len(full))
-	if archiver, ok := sink.(ToolResultArchiver); ok {
+	if archiver := hostOf(sink).Archiver; archiver != nil {
 		archiveInput := llm.ToolResult{
 			ForID:         b.ResultForID,
 			Text:          head,

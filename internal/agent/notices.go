@@ -1,6 +1,6 @@
 package agent
 
-// Fixed notice texts emitted through EventSink.Notice. The delegate activity
+// Fixed notice texts emitted as EventNotice. The delegate activity
 // feed allows only a fixed set of notices plus patterned ones
 // (internal/delegate safeFixedNotices / safeNoticePatterns); the constants
 // below are the single source of truth shared with that allowlist so a

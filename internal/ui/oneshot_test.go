@@ -1030,14 +1030,14 @@ func TestAccumulatingSinkFinalTextClearsOnTextlessCompletedTurn(t *testing.T) {
 	var out, errw bytes.Buffer
 	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
 	sink := newAccumulatingSink(app.Renderer, app, 1)
-	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
-	sink.TextDelta("earlier turn text")
-	sink.TurnComplete(agent.TurnUsage{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 1, Context: &agent.ContextEstimate{}})
+	sink.Emit(agent.Event{Kind: agent.EventTextDelta, Text: "earlier turn text"})
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{}})
 	if got := sink.FinalText(); got != "earlier turn text" {
 		t.Fatalf("first final text = %q", got)
 	}
-	sink.TurnAttemptStart(2, 1, agent.ContextEstimate{})
-	sink.TurnComplete(agent.TurnUsage{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 2, Attempt: 1, Context: &agent.ContextEstimate{}})
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{}})
 	if got := sink.FinalText(); got != "" {
 		t.Fatalf("textless latest turn final text = %q, want empty", got)
 	}

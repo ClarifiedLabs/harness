@@ -494,15 +494,11 @@ type contextDialectSink struct {
 	rewrite func()
 }
 
-func (s *contextDialectSink) TextDelta(text string)                          { s.text.WriteString(text) }
-func (*contextDialectSink) ReasoningSummary(string)                          {}
-func (*contextDialectSink) TurnAttemptStart(int, int, agent.ContextEstimate) {}
-func (*contextDialectSink) TurnAttemptComplete(agent.TurnAttemptUsage)       {}
-func (*contextDialectSink) ToolUseStart(llm.ToolCall)                        {}
-func (*contextDialectSink) ToolUseDelta(int, string)                         {}
-func (*contextDialectSink) ToolStart(llm.ToolCall)                           {}
-func (*contextDialectSink) ToolResult(llm.ToolResult)                        {}
-func (*contextDialectSink) Notice(string)                                    {}
-func (*contextDialectSink) TurnComplete(agent.TurnUsage)                     {}
-func (*contextDialectSink) PromptComplete(agent.PromptUsage)                 {}
-func (s *contextDialectSink) TranscriptRewritten()                           { s.rewrite() }
+func (s *contextDialectSink) Emit(ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventTextDelta:
+		s.text.WriteString(ev.Text)
+	case agent.EventTranscriptRewritten:
+		s.rewrite()
+	}
+}

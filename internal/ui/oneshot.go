@@ -292,6 +292,4 @@ func readAll(r io.Reader) (string, error) {
 // Ensure the accumulating sink stays compatible with the required and optional
 // agent event contracts it forwards.
 var _ agent.EventSink = (*accumulatingSink)(nil)
-var _ agent.AssistantPhaseSink = (*accumulatingSink)(nil)
-var _ agent.SteerDeliveredSink = (*accumulatingSink)(nil)
-var _ agent.CompactionProgressSink = (*accumulatingSink)(nil)
+var _ agent.HostProvider = (*accumulatingSink)(nil)

@@ -159,7 +159,7 @@ func (b *nativeSteerBridge) finish(res *turnResult, retErr *error, sink EventSin
 		if *retErr == nil {
 			*retErr = &llm.APIError{Code: "native_steering_interrupted", Message: "native steering connection lost; input retained in history"}
 		}
-		sink.Notice("[native steering interrupted; unresolved input retained in history; no automatic resend]")
+		emitNotice(sink, "[native steering interrupted; unresolved input retained in history; no automatic resend]")
 	}
 	if *retErr != nil && len(res.contextPrefix) > 0 {
 		*retErr = errors.Join(llm.ErrSteeringInterrupted, *retErr)
@@ -236,10 +236,8 @@ func (a *Agent) applyNativeRecovery() {
 }
 
 func deliverNativeSteers(inputs []SteerInput, sink EventSink) {
-	if delivered, ok := sink.(SteerDeliveredSink); ok {
-		for _, input := range inputs {
-			delivered.SteerDelivered(input)
-		}
+	for _, input := range inputs {
+		emit(sink, Event{Kind: EventSteerDelivered, Steer: &input})
 	}
 }
 

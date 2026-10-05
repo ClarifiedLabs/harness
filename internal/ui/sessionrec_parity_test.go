@@ -105,19 +105,19 @@ func TestChildParentRawEventParity(t *testing.T) {
 	child.User("task")
 
 	ctx := agent.ContextEstimate{Total: 1200, Window: 128000, System: 500, Tools: 300, Messages: 400}
-	parent.TurnAttemptStart(1, 1, ctx)
+	parent.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 1, Context: &ctx})
 	child.TurnAttemptStart(1, 1, ctx)
 
-	parent.TextDelta("working on it")
+	parent.Emit(agent.Event{Kind: agent.EventTextDelta, Text: "working on it"})
 	child.TextDelta("working on it")
 
-	parent.AssistantPhase(llm.AssistantPhaseCommentary)
+	parent.Emit(agent.Event{Kind: agent.EventAssistantPhase, Text: llm.AssistantPhaseCommentary})
 	child.AssistantPhase(llm.AssistantPhaseCommentary)
 
-	parent.ReasoningSummary("checking the code")
+	parent.Emit(agent.Event{Kind: agent.EventReasoningSummary, Text: "checking the code"})
 	child.ReasoningSummary("checking the code")
 
-	parent.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 1, Attempt: 1, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}})
+	parent.Emit(agent.Event{Kind: agent.EventTurnAttemptComplete, AttemptUsage: &agent.TurnAttemptUsage{Turn: 1, Attempt: 1, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}}})
 	child.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 1, Attempt: 1, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}})
 
 	// The read input carries an absolute path under the parent cwd; both sides
@@ -127,20 +127,20 @@ func TestChildParentRawEventParity(t *testing.T) {
 		t.Fatal(err)
 	}
 	call := llm.ToolCall{ID: "call-1", Name: "read", Input: callInput}
-	parent.ToolStart(call)
+	parent.Emit(agent.Event{Kind: agent.EventToolStart, Call: call})
 	child.ToolStart(call)
 
 	result := llm.ToolResult{ForID: "call-1", Text: "package a\n\nfunc A() {}\n"}
-	parent.ToolResult(result)
+	parent.Emit(agent.Event{Kind: agent.EventToolResult, Result: &result})
 	child.ToolResult(result)
-	parent.ToolMutation(call, []string{"a.go"})
+	parent.Emit(agent.Event{Kind: agent.EventToolMutation, Call: call, Paths: []string{"a.go"}})
 	child.ToolMutation(call, []string{"a.go"})
 
 	diff := "--- a/a.go\n+++ b/a.go\n@@ -1,1 +1,1 @@\n-old\n+new\n"
-	parent.ToolDiff(call, "a.go", diff)
+	parent.Emit(agent.Event{Kind: agent.EventToolDiff, Call: call, Path: "a.go", Text: diff})
 	child.ToolDiff(call, "a.go", diff)
 
-	parent.Notice("[notice: context at 80%]")
+	parent.Emit(agent.Event{Kind: agent.EventNotice, Text: "[notice: context at 80%]"})
 	child.Notice("[notice: context at 80%]", 1)
 
 	requestEvent := llm.ModelRequestEvent{
@@ -149,12 +149,12 @@ func TestChildParentRawEventParity(t *testing.T) {
 		Message:    "upstream exploded",
 		Outcome:    llm.ModelRequestOutcomeRetrying,
 	}
-	parent.ModelRequestEvent(requestEvent)
+	parent.Emit(agent.Event{Kind: agent.EventModelRequest, ModelRequest: &requestEvent})
 	child.ModelRequestEvent(requestEvent)
 
 	// Unpriced turn usage: both sides price against the registry.
 	turn := agent.TurnUsage{Turn: 1, Context: ctx, Usage: llm.Usage{InputTokens: 900, OutputTokens: 40}}
-	parent.TurnComplete(turn)
+	parent.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &turn})
 	child.TurnComplete(turn)
 
 	score := 0.0
@@ -163,7 +163,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 		Handler: "verify", Score: &score, ScoreDirection: hooks.ScoreDirectionMaximize, Candidate: "sha256:abc",
 		RemainingRequirements: &remaining, EvidenceRef: "artifacts/verify.log",
 	}
-	parent.EvaluatorResult(evaluation)
+	parent.Emit(agent.Event{Kind: agent.EventEvaluatorResult, Evaluator: &evaluation})
 	child.EvaluatorResult(evaluation)
 
 	// Provider-priced prompt usage: both sides keep the streamed cost.
@@ -172,7 +172,7 @@ func TestChildParentRawEventParity(t *testing.T) {
 		Context: ctx,
 		Usage:   llm.Usage{InputTokens: 900, OutputTokens: 40, CostUSD: 0.0055, CostKnown: true},
 	}
-	parent.PromptComplete(prompt)
+	parent.Emit(agent.Event{Kind: agent.EventPromptComplete, PromptUsage: &prompt})
 	child.PromptComplete(prompt)
 
 	parent.FlushEvents()

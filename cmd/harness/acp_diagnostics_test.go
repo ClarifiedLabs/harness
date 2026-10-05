@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"harness/internal/acp"
+	"harness/internal/agent"
 	"harness/internal/llm"
 )
 
@@ -126,21 +127,21 @@ func TestACPEventSinkRejectedBatchCompletesEveryToolCall(t *testing.T) {
 	sink := newACPEventSink(&acpRootSession{path: dir, cwd: dir, now: time.Now}, 1, wire)
 	ids := []string{"first\x1b[31m", "second\x00"}
 	for i, id := range ids {
-		sink.ToolStart(llm.ToolCall{
+		sink.Emit(agent.Event{Kind: agent.EventToolStart, Call: llm.ToolCall{
 			ID: id, Name: "read", Input: json.RawMessage(`{"path":"safe"}`),
 			Stage: &llm.ToolStage{EmissionIndex: i, Emitted: json.RawMessage(`"invalid\u001b[31m"`), BatchRejected: true},
-		})
+		}})
 	}
 	for _, id := range ids {
-		sink.ToolResult(llm.ToolResult{
+		sink.Emit(agent.Event{Kind: agent.EventToolResult, Result: &llm.ToolResult{
 			ForID: id, Text: "batch rejected\x1b[31m", IsError: true,
 			ErrorDetails: &llm.ToolErrorDetails{LeaseConflict: &llm.LeaseConflictDetails{
 				BlockingJobID: "job\x1b[31m", BlockingAgent: "worker\x00", BlockingStatus: "running\x00",
 				ResourceKey: "/workspace\x00", RequestedAccess: "read_only\x00", ActiveAccess: "exclusive\x00", Guidance: "wait\x00",
 			}},
-		})
+		}})
 	}
-	sink.Notice("Tool batch rejected: invalid stage.\x1b[31m")
+	sink.Emit(agent.Event{Kind: agent.EventNotice, Text: "Tool batch rejected: invalid stage.\x1b[31m"})
 	sink.rec.Flush()
 	if err := sink.rec.Err(); err != nil {
 		t.Fatal(err)

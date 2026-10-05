@@ -22,13 +22,13 @@ func TestActivityFeedPublishesLifecycleAndChildLines(t *testing.T) {
 	})
 	dir := t.TempDir()
 	sink := newChildSink(dir, nil, false, NewProgress(), registration, true)
-	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 1, Context: &agent.ContextEstimate{}})
 
-	sink.TextDelta("\x1b[")
-	sink.TextDelta("31mhello\r")
-	sink.TextDelta("\n世\n\t \n")
-	sink.TextDelta(strings.Repeat("x", activityChunkMaxBytes+1))
-	sink.PromptComplete(agent.PromptUsage{Turns: 1})
+	sink.Emit(agent.Event{Kind: agent.EventTextDelta, Text: "\x1b["})
+	sink.Emit(agent.Event{Kind: agent.EventTextDelta, Text: "31mhello\r"})
+	sink.Emit(agent.Event{Kind: agent.EventTextDelta, Text: "\n世\n\t \n"})
+	sink.Emit(agent.Event{Kind: agent.EventTextDelta, Text: strings.Repeat("x", activityChunkMaxBytes+1)})
+	sink.Emit(agent.Event{Kind: agent.EventPromptComplete, PromptUsage: &agent.PromptUsage{Turns: 1}})
 	registration.Finish(session.ChildStatusCompleted, 1)
 
 	events, gaps := readAllActivity(t, feed, 0)
@@ -89,30 +89,30 @@ func TestActivityFeedPublishesOnlyCuratedToolNoticeRetryAndReasoningData(t *test
 	feed := NewActivityFeed()
 	registration := NewActivityRegistry(feed).Register(ActivityStart{ID: "child", Agent: "plan"})
 	sink := newChildSink("", nil, false, NewProgress(), registration, true)
-	sink.TurnAttemptStart(2, 3, agent.ContextEstimate{})
-	sink.ReasoningSummary("safe summary")
-	sink.ToolStart(llm.ToolCall{
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 2, Attempt: 3, Context: &agent.ContextEstimate{}})
+	sink.Emit(agent.Event{Kind: agent.EventReasoningSummary, Text: "safe summary"})
+	sink.Emit(agent.Event{Kind: agent.EventToolStart, Call: llm.ToolCall{
 		ID:    "call-secret",
 		Name:  "read",
 		Input: json.RawMessage(`{"path":"docs/design.md","token":"must-not-leak"}`),
-	})
-	sink.ToolResult(llm.ToolResult{ForID: "call-secret", IsError: true, Text: "raw secret result"})
-	sink.Notice("[hook blocked: password=secret]")
-	sink.Notice("[stopped: prompt token budget 123 exceeded]")
-	sink.ModelRequestEvent(llm.ModelRequestEvent{
+	}})
+	sink.Emit(agent.Event{Kind: agent.EventToolResult, Result: &llm.ToolResult{ForID: "call-secret", IsError: true, Text: "raw secret result"}})
+	sink.Emit(agent.Event{Kind: agent.EventNotice, Text: "[hook blocked: password=secret]"})
+	sink.Emit(agent.Event{Kind: agent.EventNotice, Text: "[stopped: prompt token budget 123 exceeded]"})
+	sink.Emit(agent.Event{Kind: agent.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
 		State:        llm.ModelRequestRetryScheduled,
 		Attempt:      2,
 		MaxAttempts:  4,
 		RetryDelayMS: 2000,
 		Message:      "provider secret",
-	})
-	sink.ModelRequestEvent(llm.ModelRequestEvent{
+	}})
+	sink.Emit(agent.Event{Kind: agent.EventModelRequest, ModelRequest: &llm.ModelRequestEvent{
 		State:      llm.ModelRequestUpstreamAttemptFailed,
 		Outcome:    llm.ModelRequestOutcomeTerminal,
 		StatusCode: 503,
 		Message:    "terminal provider secret",
-	})
-	sink.TurnAttemptAbandoned(2, 3)
+	}})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptAbandoned, Turn: 2, Attempt: 3})
 	registration.Finish(session.ChildStatusFailed, 2)
 
 	events, _ := readAllActivity(t, feed, 0)
@@ -175,7 +175,7 @@ func TestActivityFeedReasoningRequiresResolvedSummarySetting(t *testing.T) {
 	feed := NewActivityFeed()
 	registration := NewActivityRegistry(feed).Register(ActivityStart{ID: "child"})
 	sink := newChildSink("", nil, false, NewProgress(), registration, false)
-	sink.ReasoningSummary("must stay replay-only")
+	sink.Emit(agent.Event{Kind: agent.EventReasoningSummary, Text: "must stay replay-only"})
 	registration.Finish(session.ChildStatusCompleted, 1)
 	events, _ := readAllActivity(t, feed, 0)
 	for _, event := range events {

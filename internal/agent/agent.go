@@ -43,45 +43,6 @@ const streamRetries = 2
 // connect-level Retry-After guard.
 const maxStreamRetryAfter = time.Minute
 
-// EventSink receives the prompt's observable events for rendering. The agent loop
-// owns the transcript and the control flow; the sink only reports. Phase 10's
-// renderer implements it (design §8.1, §10).
-type EventSink interface {
-	TextDelta(text string) // incremental assistant text
-	ReasoningSummary(text string)
-	TurnAttemptStart(turn, attempt int, ctx ContextEstimate)
-	TurnAttemptComplete(usage TurnAttemptUsage)
-	ToolUseStart(call llm.ToolCall)
-	ToolUseDelta(index int, delta string)
-	ToolStart(call llm.ToolCall)      // a tool call is about to run
-	ToolResult(result llm.ToolResult) // a tool call finished
-	Notice(msg string)                // out-of-band notices (max-turns, cancelled)
-	TurnComplete(usage TurnUsage)     // end of one conversational turn
-	PromptComplete(usage PromptUsage) // end of the prompt
-}
-
-// AssistantPhaseSink is implemented by sinks that want provider phase metadata
-// before the corresponding assistant text is rendered.
-type AssistantPhaseSink interface {
-	AssistantPhase(phase string)
-}
-
-// SteerDeliveredSink is implemented by sinks that want to know when queued
-// in-prompt steer input is injected as the Origin=MessageOriginSteer RoleUser
-// message ahead of the next model request. It fires only after the message is
-// appended and the retained transcript validates, never on the rollback path,
-// and never when steering is disabled.
-type SteerDeliveredSink interface {
-	SteerDelivered(input SteerInput)
-}
-
-// ModelRequestEventSink receives diagnostics-only model request lifecycle
-// telemetry. Implementations may render or persist it, but it must never be
-// added to the agent transcript or subsequent model requests.
-type ModelRequestEventSink interface {
-	ModelRequestEvent(llm.ModelRequestEvent)
-}
-
 // ModelErrorDiagnostic is the safe structured record emitted for a final model
 // failure carrying a proxy compatibility classification. Message and Code have
 // already been sanitized by the proxy; Diagnostic contains only correlation and
@@ -96,31 +57,6 @@ type ModelErrorDiagnostic struct {
 	Diagnostic *llm.APIErrorDiagnostic
 }
 
-// ModelErrorDiagnosticSink is optionally implemented by event sinks that want a
-// durable structured record in addition to the ordinary user-facing notice. It
-// deliberately does not expand EventSink, so non-UI sinks remain compatible.
-type ModelErrorDiagnosticSink interface {
-	ModelErrorDiagnostic(ModelErrorDiagnostic)
-}
-
-// HookDiagnosticSink optionally receives bounded hook execution diagnostics.
-type HookDiagnosticSink interface {
-	HookDiagnostic(hooks.Diagnostic)
-}
-
-// EvaluatorResultSink optionally receives bounded semantic outcomes from Stop
-// hooks. These are diagnostics-only events; repair context is added separately
-// by the agent when a rejecting result is allowed to continue the prompt.
-type EvaluatorResultSink interface {
-	EvaluatorResult(hooks.EvaluatorResult)
-}
-
-// StagnationNudgeSink owns the replayable trajectory decision. It returns true
-// only after a lane-scoped trigger has been durably recorded.
-type StagnationNudgeSink interface {
-	TryStagnationNudge(threshold int) bool
-}
-
 // StagnationNudgeThreshold is the validated trigger: real
 // successful evaluator trajectories peaked at one, while the synthetic
 // plateau/cycle oracle reaches two.
@@ -129,39 +65,11 @@ const StagnationNudgeThreshold = 2
 const stagnationNudgeContext = `[host strategy reset]
 The evaluator has rejected or failed to improve two consecutive candidates in the same evaluation lane. Before changing anything else, stop repeating the current approach. Re-read the latest evaluator evidence and relevant current state, form a materially different hypothesis, and test that strategy. Preserve verified progress, stay within the task, and do not bypass the evaluator.`
 
-// CompactionProgressSink is implemented by sinks that want transient progress
-// while compaction inspects or summarizes old context. The callbacks are
-// balanced around every invoked compaction, including local degradation.
-type CompactionProgressSink interface {
-	CompactionStart()
-	CompactionComplete()
-}
-
 // ToolResultArchive and ToolResultArchiver remain agent-level aliases because
-// event sinks implement the archival boundary. Formatting and model guidance
+// a run's Host supplies the archival boundary. Formatting and model guidance
 // live in toolresult so foreground and background results share them.
 type ToolResultArchive = toolresult.Archive
 type ToolResultArchiver = toolresult.Archiver
-
-// ToolDiffSink is implemented by renderers that want user-facing file diffs
-// after a mutating tool result. Diffs are not transcript/tool-result content.
-type ToolDiffSink interface {
-	ToolDiff(call llm.ToolCall, path, text string)
-}
-
-// ToolMutationSink receives host-derived paths after a mutation-reporting tool
-// completes successfully. It is diagnostics-only and never changes the tool
-// result or model transcript.
-type ToolMutationSink interface {
-	ToolMutation(call llm.ToolCall, paths []string)
-}
-
-// ToolProgressSink is optionally implemented by sinks that want bounded live
-// progress attached to an outstanding tool call's wait ticker. Set is called
-// before the call's ToolResult and cleared with nil after.
-type ToolProgressSink interface {
-	ToolProgress(call llm.ToolCall, progress tools.BackgroundProgress)
-}
 
 // RetentionRequestMode describes the request shape before or after a retention
 // observation. Empty means the mode was not recorded by an older event.
@@ -217,12 +125,6 @@ type RetentionEvent struct {
 	NextRequestMode           RetentionRequestMode
 }
 
-// RetentionEventSink is implemented by sinks that persist retention decisions
-// and their effect on Responses continuation.
-type RetentionEventSink interface {
-	RetentionApplied(RetentionEvent)
-}
-
 // RetentionPolicy selects when the live transcript retention pass runs.
 type RetentionPolicy string
 
@@ -237,53 +139,6 @@ const (
 	// and provider-overflow recovery unchanged.
 	RetentionPolicyDisabled RetentionPolicy = "disabled"
 )
-
-// HookContextReceiver is implemented by sinks that can keep hook-generated
-// context available for later turns without adding it to the saved transcript.
-type HookContextReceiver interface {
-	AddHookContext([]string)
-}
-
-// RequestContextProvider is implemented by sinks that can add fresh
-// request-only context before conversational model rounds. RequestContext may
-// consume one-shot signals as it attaches them; sizing-only paths use
-// RequestContextPeeker when available. Transport and compatibility retries
-// reuse attached context, while a retry after a transcript rewrite may refresh
-// and merge it.
-type RequestContextProvider interface {
-	RequestContext() []string
-}
-
-// RequestContextPeeker is implemented by sinks whose RequestContext consumes
-// one-shot signals. PeekRequestContext returns what the next request would
-// carry without consuming anything, for local sizing estimates.
-type RequestContextPeeker interface {
-	PeekRequestContext() []string
-}
-
-// TranscriptRewriteSink is implemented by sinks that need to recover
-// request-only state after compaction or another transcript rewrite.
-type TranscriptRewriteSink interface {
-	TranscriptRewritten()
-}
-
-// PromptWorkCoordinator is implemented by sinks that own background work whose
-// results must be incorporated before the current parent prompt may finish.
-// Usage is drained exactly once into the parent prompt; completion context is
-// delivered separately through RequestContextProvider.
-type PromptWorkCoordinator interface {
-	PendingPromptWork() bool
-	WaitForPromptWork(context.Context) (llm.Usage, error)
-	DrainPromptWorkUsage() llm.Usage
-}
-
-// PromptWorkProgressSink is implemented by sinks that want transient progress
-// while the parent prompt waits for join-required background work. The callbacks
-// are balanced around every wait, including cancellation and errors.
-type PromptWorkProgressSink interface {
-	PromptWorkWaitStart()
-	PromptWorkWaitComplete()
-}
 
 // SteerInput is a prepared in-prompt steering message. Text and images are
 // appended as a RoleUser transcript message when a tool round gives the loop a
@@ -348,28 +203,12 @@ type WorkflowStatus struct {
 	ExpectedWait          bool
 }
 
-// WorkflowStatusProvider is optionally implemented by an EventSink. Detailed
-// model-visible requirements continue to use RequestContextProvider.
-type WorkflowStatusProvider interface {
-	WorkflowStatus() WorkflowStatus
-}
-
 // ClosureEvent is diagnostics-only and records the first closure trigger at the
 // point it is selected, including optional workflow status sampled then.
 type ClosureEvent struct {
 	Trigger        ClosureTrigger
 	Turn           int
 	WorkflowStatus WorkflowStatus
-}
-
-type ClosureEventSink interface {
-	ClosureStarted(ClosureEvent)
-}
-
-// TurnProgressSink optionally receives diagnostics-only semantic activity after
-// completed tool turns. These events never enter model history.
-type TurnProgressSink interface {
-	TurnProgress(TurnProgress)
 }
 
 // PromptUsage is the per-prompt summary handed to the sink (design §10 usage line).
@@ -413,13 +252,6 @@ type PromptCheckpoint struct {
 	Usage PromptUsage
 }
 
-// PromptCheckpointSink is implemented by durable root and child session sinks.
-// Checkpoint failures are reported by the sink and do not corrupt agent-loop
-// control flow or turn an otherwise successful model/tool turn into a failure.
-type PromptCheckpointSink interface {
-	PromptCheckpoint(PromptCheckpoint)
-}
-
 // TerminationReason records why Harness stopped a prompt loop. It describes
 // loop control, not semantic task completion.
 type TerminationReason string
@@ -449,12 +281,6 @@ type TurnAttemptUsage struct {
 type MaintenanceUsage struct {
 	Purpose string
 	Usage   llm.Usage
-}
-
-// MaintenanceSink is implemented by sinks that persist maintenance accounting
-// separately from conversational turns.
-type MaintenanceSink interface {
-	MaintenanceComplete(MaintenanceUsage)
 }
 
 // ContextEstimate is a coarse request-footprint estimate for UI diagnostics.
@@ -1032,7 +858,7 @@ func (a *Agent) ensureResponseContinuation(sink EventSink) bool {
 	}
 	a.resetResponseState()
 	if sink != nil {
-		sink.Notice("[responses state reset: continuation unavailable; sending full context]")
+		emitNotice(sink, "[responses state reset: continuation unavailable; sending full context]")
 	}
 	a.noteContinuationFailure(sink)
 	return true
@@ -1046,7 +872,7 @@ func (a *Agent) noteContinuationFailure(sink EventSink) {
 	a.continuationFailures = 0
 	a.SetResponsesStateful(false)
 	if sink != nil {
-		sink.Notice("[responses state disabled: continuation repeatedly unavailable; running stateless]")
+		emitNotice(sink, "[responses state disabled: continuation repeatedly unavailable; running stateless]")
 	}
 }
 
@@ -1431,13 +1257,6 @@ type RequestSnapshot struct {
 	UsedPrevious bool
 }
 
-// TurnAttemptAbandonSink is an optional event sink extension for renderers that
-// persist replay metadata. It marks a streamed attempt whose visible deltas were
-// discarded from the transcript because the turn will be retried.
-type TurnAttemptAbandonSink interface {
-	TurnAttemptAbandoned(turn, attempt int)
-}
-
 // turnAttemptCoordinator keeps physical attempt IDs and discarded billed usage
 // continuous across request-shape rebuilds within one logical turn. Each rebuilt
 // request receives a fresh local transport-retry budget.
@@ -1486,9 +1305,7 @@ func (c *turnAttemptCoordinator) abandon(res turnResult) {
 	c.abandoned[res.attempts] = true
 	c.wasted = llm.AddUsage(c.wasted, res.usage)
 	res.modelCall.Discard("request_rebuild")
-	if abandon, ok := c.sink.(TurnAttemptAbandonSink); ok {
-		abandon.TurnAttemptAbandoned(c.turn, res.attempts)
-	}
+	emit(c.sink, Event{Kind: EventTurnAttemptAbandoned, Turn: c.turn, Attempt: res.attempts})
 }
 
 func (a *Agent) modelRequest(requestContext []string) modelRequest {
@@ -2062,7 +1879,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			// assistant text so the saved transcript matches what was displayed.
 			a.transcript = append(a.transcript, a.textMessage(llm.RoleAssistant, strings.TrimLeft(sources, "\n")))
 		}
-		sink.TextDelta(sources)
+		emit(sink, Event{Kind: EventTextDelta, Text: sources})
 	}
 	var terminationReason TerminationReason
 	var closureTrigger ClosureTrigger
@@ -2151,7 +1968,8 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		terminationReason = reason
 		workflowStatus = currentWorkflowStatus()
 		scope.Prompt(execution.PromptEvent{Duration: time.Since(started), Turns: turns, Termination: string(reason), ClosureTrigger: string(closureTrigger)})
-		sink.PromptComplete(promptUsage())
+		usage := promptUsage()
+		emit(sink, Event{Kind: EventPromptComplete, PromptUsage: &usage})
 	}()
 	// Stop notifies session coordinators on every prompt exit. The normal
 	// model-stop path below can request another turn; every other exit still needs
@@ -2341,9 +2159,9 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if err != nil && !res.hasPartialOutput() {
 			if learned, ok := contextOverflowWindow(err); ok {
 				if learned > 0 && a.observeContextWindow(learned) {
-					sink.Notice(fmt.Sprintf("[context window adjusted: provider reported %d tokens; retrying request]", learned))
+					emitNotice(sink, fmt.Sprintf("[context window adjusted: provider reported %d tokens; retrying request]", learned))
 				} else {
-					sink.Notice(NoticeContextOverflowCompacting)
+					emitNotice(sink, NoticeContextOverflowCompacting)
 				}
 				compUsage, changed, cerr := a.compactTriggered(ctx, sink, "context-overflow")
 				if compUsage != (llm.Usage{}) {
@@ -2372,12 +2190,12 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		}
 		if err != nil && modelReq.request.StoreResponse && !res.hasPartialOutput() && storeResponseRejected(err) {
 			a.SetResponsesStateful(false)
-			sink.Notice(NoticeResponsesStateDisabledRejected)
+			emitNotice(sink, NoticeResponsesStateDisabledRejected)
 			rerun(false)
 		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
-			sink.Notice(NoticeResponsesStateResetUnavailable)
+			emitNotice(sink, NoticeResponsesStateResetUnavailable)
 			a.noteContinuationFailure(sink)
 			rerun(false)
 		}
@@ -2391,7 +2209,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			}
 			lastInput = 0
 			appendBoundary = 0
-			sink.Notice(NoticeNativeCompactionReplayDisabled)
+			emitNotice(sink, NoticeNativeCompactionReplayDisabled)
 			rerun(false)
 		}
 		if err != nil &&
@@ -2399,7 +2217,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			hasProviderOwnedReasoning(modelReq.request.Messages) &&
 			invalidEncryptedContent(err) {
 			a.disableCurrentReasoningReplay()
-			sink.Notice(NoticeReasoningReplayDisabled)
+			emitNotice(sink, NoticeReasoningReplayDisabled)
 			rerun(false)
 		}
 		wasted := attempts.wasted
@@ -2424,7 +2242,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			if cancelled && res.text != "" {
 				if sources := takePendingSources(); sources != "" {
 					res.text += sources
-					sink.TextDelta(sources)
+					emit(sink, Event{Kind: EventTextDelta, Text: sources})
 				}
 			} else {
 				flushPendingCitations()
@@ -2442,7 +2260,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				completeTurn()
 			}
 			if cancelled {
-				sink.Notice(NoticeCancelled)
+				emitNotice(sink, NoticeCancelled)
 			}
 			if verr := a.validateTranscript("after failed turn"); verr != nil {
 				err = errors.Join(err, verr)
@@ -2450,7 +2268,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				deliverNativeSteers(res.deliveredSteers, sink)
 			}
 			if turns > 0 && cancelled && res.text != "" {
-				sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(res.usage, wasted), Wasted: wasted, Context: lastContext})
+				emit(sink, Event{Kind: EventTurnComplete, TurnUsage: &TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(res.usage, wasted), Wasted: wasted, Context: lastContext}})
 				checkpoint(PromptCheckpointClosedTurn)
 			}
 			return err
@@ -2471,7 +2289,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			pendingCitations = append(pendingCitations, res.citations...)
 			if sources := llm.FormatCitationSources(pendingCitations); sources != "" {
 				res.text += sources
-				sink.TextDelta(sources)
+				emit(sink, Event{Kind: EventTextDelta, Text: sources})
 			}
 			pendingCitations = nil
 		}
@@ -2500,7 +2318,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			if err := a.validateTranscript("after assistant turn"); err != nil {
 				return err
 			}
-			sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(res.usage, wasted), Wasted: wasted, Context: lastContext})
+			emit(sink, Event{Kind: EventTurnComplete, TurnUsage: &TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(res.usage, wasted), Wasted: wasted, Context: lastContext}})
 			checkpoint(PromptCheckpointClosedTurn)
 			// A model may try to finalize while background delegates are still
 			// running. Join them, then issue another model request with their reports
@@ -2527,7 +2345,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			// compacts first when this extra request would approach the context window.
 			if continueMaxTokens {
 				outputContinuations++
-				sink.Notice(NoticeContinuingMaxTokens)
+				emitNotice(sink, NoticeContinuingMaxTokens)
 				message := a.textMessage(llm.RoleUser, "[The previous response was truncated by the output-token limit. Continue from the exact point it stopped without repeating completed content.]")
 				message.Origin = llm.MessageOriginInternal
 				a.transcript = append(a.transcript, message)
@@ -2537,7 +2355,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				continue
 			}
 			if notice := stopReasonNotice(res.stopReason); notice != "" {
-				sink.Notice(notice)
+				emitNotice(sink, notice)
 			}
 			if a.hooks != nil && !stopHookActive && a.hooks.HasEvent(hooks.Stop) {
 				canBlock := (unlimited || turns < a.maxTurns) &&
@@ -2565,7 +2383,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 						reason = "Stop hook requested continuation"
 					}
 					if a.stagnationNudge && hasRejectedEvaluatorResult(hookRes.EvaluatorResults) {
-						if nudgeSink, ok := sink.(StagnationNudgeSink); ok && nudgeSink.TryStagnationNudge(StagnationNudgeThreshold) {
+						if nudge := hostOf(sink).TryStagnationNudge; nudge != nil && nudge(StagnationNudgeThreshold) {
 							reason += "\n\n" + stagnationNudgeContext
 						}
 					}
@@ -2589,7 +2407,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if manager := a.continuityManager(); manager != nil {
 			manager.SetContextBudget(max(0, a.contextRemaining(liveInputTokens)), a.contextSoftLimit())
 		}
-		_, reserveReadArchiveHint := sink.(ToolResultArchiver)
+		reserveReadArchiveHint := hostOf(sink).Archiver != nil
 		reserveReadHookContext := a.hooksHasMatchingHooks("read")
 		dispatchCtx := withReadResultBatchBudget(
 			ctx,
@@ -2610,7 +2428,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if err := a.validateTranscript("after tool results"); err != nil {
 			return err
 		}
-		sink.TurnComplete(TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(llm.AddUsage(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext})
+		emit(sink, Event{Kind: EventTurnComplete, TurnUsage: &TurnUsage{Turn: turns, Attempts: res.attempts, Usage: llm.AddUsage(llm.AddUsage(res.usage, wasted), toolUsage), Wasted: wasted, Context: lastContext}})
 		checkpoint(PromptCheckpointClosedTurn)
 		progress := guard.aggregateTurnProgress(a.tools, turns, executionCalls, results)
 
@@ -2659,9 +2477,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				}
 				return err
 			}
-			if deliverySink, ok := sink.(SteerDeliveredSink); ok {
-				deliverySink.SteerDelivered(steered)
-			}
+			emit(sink, Event{Kind: EventSteerDelivered, Steer: &steered})
 		}
 
 		// Hard stop: an unrelenting error storm. Finalize with a tools-disabled
@@ -2670,7 +2486,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			reportTurnProgress(scope, sink, progress, executionCalls)
 			startClosure(ClosureTriggerErrorGuard, turns)
 			terminationReason = TerminationErrorGuard
-			sink.Notice(errorStormNotice(guard.errorRuns))
+			emitNotice(sink, errorStormNotice(guard.errorRuns))
 			if err := finalizePrompt("after error-guard summary"); err != nil {
 				return err
 			}
@@ -2685,9 +2501,9 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			startClosure(ClosureTriggerRepeatGuard, turns)
 			terminationReason = TerminationRepeatGuard
 			if guard.shouldBreakRepeat() {
-				sink.Notice(repeatLoopNotice(guard.repeatRuns))
+				emitNotice(sink, repeatLoopNotice(guard.repeatRuns))
 			} else {
-				sink.Notice(commandRepeatLoopNotice(guard.commandRuns))
+				emitNotice(sink, commandRepeatLoopNotice(guard.commandRuns))
 			}
 			if err := finalizePrompt("after repeat-guard summary"); err != nil {
 				return err
@@ -2700,7 +2516,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if a.maxPromptTokens > 0 && totalTokens(total) >= a.maxPromptTokens {
 			reportTurnProgress(scope, sink, progress, executionCalls)
 			terminationReason = TerminationTokenLimit
-			sink.Notice(promptTokenBudgetNotice(a.maxPromptTokens))
+			emitNotice(sink, promptTokenBudgetNotice(a.maxPromptTokens))
 			break
 		}
 
@@ -2711,7 +2527,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			if total.CostKnown && total.CostUSD >= a.maxPromptCostUSD {
 				reportTurnProgress(scope, sink, progress, executionCalls)
 				terminationReason = TerminationCostLimit
-				sink.Notice(promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))
+				emitNotice(sink, promptCostBudgetNotice(a.maxPromptCostUSD, total.CostUSD))
 				break
 			}
 		}
@@ -2729,7 +2545,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		reportTurnProgress(scope, sink, progress, executionCalls)
 		if unlimited || turns < a.maxTurns {
 			if changed, err := a.applyContextEpoch(ctx, sink); err != nil {
-				sink.Notice("[work context checkpoint failed; continuing current context: " + err.Error() + "]")
+				emitNotice(sink, "[work context checkpoint failed; continuing current context: "+err.Error()+"]")
 			} else if changed {
 				lastInput, appendBoundary = 0, 0
 				lastContext = a.estimateContext(nil)
@@ -2741,7 +2557,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			turnBudgetExhausted = true
 			startClosure(ClosureTriggerTurnBudget, turns)
 			terminationReason = TerminationTurnLimit
-			sink.Notice(maxTurnsNotice(a.maxTurns))
+			emitNotice(sink, maxTurnsNotice(a.maxTurns))
 			if err := finalizePrompt("after turn-limit summary"); err != nil {
 				return err
 			}
@@ -2808,15 +2624,11 @@ func (a *Agent) refreshToolSpecs() {
 }
 
 func reportPromptCheckpoint(sink EventSink, checkpoint PromptCheckpoint) {
-	if checkpointSink, ok := sink.(PromptCheckpointSink); ok {
-		checkpointSink.PromptCheckpoint(checkpoint)
-	}
+	emit(sink, Event{Kind: EventPromptCheckpoint, Checkpoint: &checkpoint})
 }
 
 func reportClosure(sink EventSink, event ClosureEvent) {
-	if closureSink, ok := sink.(ClosureEventSink); ok {
-		closureSink.ClosureStarted(event)
-	}
+	emit(sink, Event{Kind: EventClosure, Closure: &event})
 }
 
 func reportTurnProgress(scope execution.Scope, sink EventSink, progress TurnProgress, calls []llm.ToolCall) {
@@ -2833,9 +2645,7 @@ func reportTurnProgress(scope execution.Scope, sink EventSink, progress TurnProg
 			Activity: dominantActivity(progress.Activity), SteerReason: string(progress.SteerReason),
 		})
 	}
-	if progressSink, ok := sink.(TurnProgressSink); ok {
-		progressSink.TurnProgress(progress)
-	}
+	emit(sink, Event{Kind: EventTurnProgress, TurnProgress: &progress})
 }
 
 func (a *Agent) runStopHook(ctx context.Context, sink EventSink, payload hooks.Payload) hooks.Result {
@@ -2843,7 +2653,7 @@ func (a *Agent) runStopHook(ctx context.Context, sink EventSink, payload hooks.P
 	reportHookDiagnostics(sink, result.Diagnostics)
 	reportEvaluatorResults(sink, result.EvaluatorResults)
 	for _, notice := range result.Notices {
-		sink.Notice(notice)
+		emitNotice(sink, notice)
 	}
 	return result
 }
@@ -2858,22 +2668,14 @@ func hasRejectedEvaluatorResult(results []hooks.EvaluatorResult) bool {
 }
 
 func reportHookDiagnostics(sink EventSink, diagnostics []hooks.Diagnostic) {
-	diagnosticSink, ok := sink.(HookDiagnosticSink)
-	if !ok {
-		return
-	}
 	for _, diagnostic := range diagnostics {
-		diagnosticSink.HookDiagnostic(diagnostic)
+		emit(sink, Event{Kind: EventHookDiagnostic, HookDiagnostic: &diagnostic})
 	}
 }
 
 func reportEvaluatorResults(sink EventSink, results []hooks.EvaluatorResult) {
-	evaluatorSink, ok := sink.(EvaluatorResultSink)
-	if !ok {
-		return
-	}
 	for _, result := range results {
-		evaluatorSink.EvaluatorResult(result)
+		emit(sink, Event{Kind: EventEvaluatorResult, Evaluator: &result})
 	}
 }
 
@@ -2888,11 +2690,11 @@ func normalizeWorkflowOutcome(outcome WorkflowOutcome) WorkflowOutcome {
 }
 
 func sampleWorkflowStatus(sink EventSink) WorkflowStatus {
-	provider, ok := sink.(WorkflowStatusProvider)
-	if !ok {
+	sample := hostOf(sink).WorkflowStatus
+	if sample == nil {
 		return WorkflowStatus{}
 	}
-	status := provider.WorkflowStatus()
+	status := sample()
 	if !status.Available {
 		return WorkflowStatus{}
 	}
@@ -2934,9 +2736,7 @@ func sampleWorkflowStatusWithEvaluations(sink EventSink, results []hooks.Evaluat
 }
 
 func reportRetention(sink EventSink, event RetentionEvent) {
-	if retentionSink, ok := sink.(RetentionEventSink); ok {
-		retentionSink.RetentionApplied(event)
-	}
+	emit(sink, Event{Kind: EventRetention, Retention: &event})
 }
 
 func emitModelErrorDiagnostic(sink EventSink, err error, prompt, turn, attempt int) {
@@ -2953,10 +2753,8 @@ func emitModelErrorDiagnostic(sink EventSink, err error, prompt, turn, attempt i
 		Message:    apiErr.Message,
 		Diagnostic: cloneAPIErrorDiagnostic(apiErr.Diagnostic),
 	}
-	sink.Notice(modelCompatibilityNotice(diagnostic.Diagnostic))
-	if diagnosticSink, ok := sink.(ModelErrorDiagnosticSink); ok {
-		diagnosticSink.ModelErrorDiagnostic(diagnostic)
-	}
+	emitNotice(sink, modelCompatibilityNotice(diagnostic.Diagnostic))
+	emit(sink, Event{Kind: EventModelError, ModelError: &diagnostic})
 }
 
 func modelCompatibilityNotice(diagnostic *llm.APIErrorDiagnostic) string {
@@ -3005,9 +2803,7 @@ func reportMaintenance(sink EventSink, purpose string, usage llm.Usage) {
 	if usage == (llm.Usage{}) {
 		return
 	}
-	if maintenance, ok := sink.(MaintenanceSink); ok {
-		maintenance.MaintenanceComplete(MaintenanceUsage{Purpose: purpose, Usage: usage})
-	}
+	emit(sink, Event{Kind: EventMaintenance, Maintenance: &MaintenanceUsage{Purpose: purpose, Usage: usage}})
 }
 
 // finalizeWithSummary issues one final model request with tools disabled so a
@@ -3034,7 +2830,7 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 	res, err := attempts.request(ctx, modelReq.request, modelReq.estimate)
 	if err != nil && !res.hasPartialOutput() && hasProviderOwnedReasoning(modelReq.request.Messages) && invalidEncryptedContent(err) {
 		a.disableCurrentReasoningReplay()
-		sink.Notice(NoticeReasoningReplayDisabled)
+		emitNotice(sink, NoticeReasoningReplayDisabled)
 		modelReq = a.modelRequest(requestContext)
 		modelReq.request.NativeSteering = false
 		modelReq.request.DisableTools = true
@@ -3065,7 +2861,7 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 		a.resetResponseState()
 		res.modelCall.Discard("summary_replaced")
 	}
-	sink.TurnComplete(TurnUsage{Turn: turn, Attempts: res.attempts, Usage: usage, Wasted: wasted, Context: modelReq.estimate})
+	emit(sink, Event{Kind: EventTurnComplete, TurnUsage: &TurnUsage{Turn: turn, Attempts: res.attempts, Usage: usage, Wasted: wasted, Context: modelReq.estimate}})
 	return usage, wasted, modelReq.estimate, true
 }
 
@@ -3225,9 +3021,9 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 	blocks := make([]llm.ContentBlock, len(calls))
 	if planErr != nil {
 		text := invalidStagePlanText(planErr)
-		sink.Notice(fmt.Sprintf("[tool batch rejected: %d calls not executed; %s]", len(calls), text))
+		emitNotice(sink, fmt.Sprintf("[tool batch rejected: %d calls not executed; %s]", len(calls), text))
 		for i, call := range executionCalls {
-			sink.ToolStart(call)
+			emit(sink, Event{Kind: EventToolStart, Call: call})
 			result := llm.ToolResult{ForID: call.ID, Text: text, IsError: true, ErrorKind: llm.ToolErrorInvalidArgs}
 			blocks[i], _ = a.finishToolResult(result, call.Name, sink)
 		}
@@ -3236,7 +3032,7 @@ func (a *Agent) dispatchCalls(ctx context.Context, calls []llm.ToolCall, promptI
 
 	suppressed, duplicates, overLimit := planCallSuppression(executionCalls, stages)
 	if len(suppressed) > 0 {
-		sink.Notice(suppressionNotice(duplicates, overLimit))
+		emitNotice(sink, suppressionNotice(duplicates, overLimit))
 	}
 	ctx = withPerReadResultLimits(ctx, executionCalls, suppressed)
 
@@ -3377,7 +3173,7 @@ func (a *Agent) dispatchCallStage(ctx context.Context, calls []llm.ToolCall, sta
 // no hooks, progress, or diff capture, mirroring the invalid-stage preflight
 // path. The guard error keeps the transcript closed and steers the model.
 func (a *Agent) emitGuardedCall(call llm.ToolCall, text string, sink EventSink) llm.ContentBlock {
-	sink.ToolStart(call)
+	emit(sink, Event{Kind: EventToolStart, Call: call})
 	result := llm.ToolResult{ForID: call.ID, Text: text, IsError: true, ErrorKind: llm.ToolErrorBlocked}
 	block, _ := a.finishToolResult(result, call.Name, sink)
 	return block
@@ -3482,7 +3278,7 @@ func (a *Agent) hooksHasMatchingHooks(target string) bool {
 
 func (a *Agent) dispatchSequentialCall(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink, awaitActualCompletion bool, richEncodedBytes *int) (llm.ContentBlock, llm.Usage, <-chan struct{}) {
 	startToolProgress(a.tools, call, sink)
-	sink.ToolStart(call)
+	emit(sink, Event{Kind: EventToolStart, Call: call})
 	diffState := a.snapshotToolDiff(call)
 	r, completion := a.dispatchOne(ctx, call, promptID, turnID, sink)
 	if awaitActualCompletion && completion != nil && (r.ErrorKind == llm.ToolErrorTimeout || r.ErrorKind == llm.ToolErrorCancelled) {
@@ -3517,7 +3313,7 @@ func (a *Agent) dispatchParallelBatch(ctx context.Context, calls []llm.ToolCall,
 	}
 	for _, call := range calls {
 		startToolProgress(a.tools, call, sink)
-		sink.ToolStart(call)
+		emit(sink, Event{Kind: EventToolStart, Call: call})
 	}
 
 	results := make([]scheduledToolResult, len(calls))
@@ -3727,34 +3523,35 @@ func (a *Agent) finishToolResultWithLimit(r llm.ToolResult, toolName string, sin
 	if maxBytes > 0 && len(r.Text) > maxBytes {
 		r.Text = utf8Prefix(r.Text, maxBytes)
 	}
-	sink.ToolResult(safeToolResultForSink(r))
+	shown := safeToolResultForSink(r)
+	emit(sink, Event{Kind: EventToolResult, Result: &shown})
 	if notice != "" {
-		sink.Notice(notice)
+		emitNotice(sink, notice)
 	}
 	return resultBlock(r, toolName), r.Usage
 }
 
 // startToolProgress hands the renderer the tool's live-progress closure before
 // the call begins, so the wait ticker can show child-run activity while the
-// (possibly long, blocking) tool runs. Sinks that do not implement
-// ToolProgressSink, or tools without ProgressStarter, are silently skipped.
+// (possibly long, blocking) tool runs. Hosts without ToolProgress, or tools
+// without ProgressStarter, are silently skipped.
 func startToolProgress(registry *tools.Registry, call llm.ToolCall, sink EventSink) {
-	ps, ok := sink.(ToolProgressSink)
-	if !ok || registry == nil {
+	report := hostOf(sink).ToolProgress
+	if report == nil || registry == nil {
 		return
 	}
 	progress, ok := registry.ProgressFor(call)
 	if !ok {
 		return
 	}
-	ps.ToolProgress(call, progress)
+	report(call, progress)
 }
 
 // clearToolProgress drops the tool's progress closure after the call returns so
 // a stale snapshot cannot leak into the next tool's wait ticker.
 func clearToolProgress(call llm.ToolCall, sink EventSink) {
-	if ps, ok := sink.(ToolProgressSink); ok {
-		ps.ToolProgress(call, nil)
+	if report := hostOf(sink).ToolProgress; report != nil {
+		report(call, nil)
 	}
 }
 
@@ -3809,12 +3606,10 @@ func (a *Agent) captureToolDiff(state toolDiffState) []toolDiffEvent {
 func emitToolDiff(call llm.ToolCall, events []toolDiffEvent, sink EventSink) {
 	for _, event := range events {
 		if event.notice != "" {
-			sink.Notice(event.notice)
+			emitNotice(sink, event.notice)
 			continue
 		}
-		if ds, ok := sink.(ToolDiffSink); ok {
-			ds.ToolDiff(call, event.path, event.text)
-		}
+		emit(sink, Event{Kind: EventToolDiff, Call: call, Path: event.path, Text: event.text})
 	}
 }
 
@@ -3826,11 +3621,7 @@ func reportToolMutation(registry *tools.Registry, call llm.ToolCall, result llm.
 	if !ok {
 		return
 	}
-	mutationSink, ok := sink.(ToolMutationSink)
-	if !ok {
-		return
-	}
-	mutationSink.ToolMutation(call, append([]string(nil), paths...))
+	emit(sink, Event{Kind: EventToolMutation, Call: call, Paths: append([]string(nil), paths...)})
 }
 
 func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, turnID int, sink EventSink) (llm.ToolResult, <-chan struct{}) {
@@ -3856,7 +3647,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 		})
 		reportHookDiagnostics(sink, res.Diagnostics)
 		for _, notice := range res.Notices {
-			sink.Notice(notice)
+			emitNotice(sink, notice)
 		}
 		preContext = append(preContext, res.AdditionalContext...)
 		if res.Block {
@@ -3886,7 +3677,7 @@ func (a *Agent) dispatchOne(ctx context.Context, call llm.ToolCall, promptID, tu
 		})
 		reportHookDiagnostics(sink, res.Diagnostics)
 		for _, notice := range res.Notices {
-			sink.Notice(notice)
+			emitNotice(sink, notice)
 		}
 		if len(res.AdditionalContext) > 0 {
 			appendHookContext(&r, res.AdditionalContext, toolResultHookTextLimit(ctx, call.ID))
@@ -3951,8 +3742,7 @@ func invalidToolInputResult(call llm.ToolCall) string {
 }
 
 func (a *Agent) prepareToolResult(r llm.ToolResult, sink EventSink) (llm.ToolResult, string) {
-	archiver, _ := sink.(ToolResultArchiver)
-	return toolresult.PrepareTruncated(r, archiver)
+	return toolresult.PrepareTruncated(r, hostOf(sink).Archiver)
 }
 
 func resultBlock(r llm.ToolResult, toolName string) llm.ContentBlock {
@@ -3968,19 +3758,17 @@ func resultBlock(r llm.ToolResult, toolName string) llm.ContentBlock {
 }
 
 func pendingPromptWork(sink EventSink) bool {
-	coordinator, ok := sink.(PromptWorkCoordinator)
-	return ok && coordinator.PendingPromptWork()
+	coordinator := hostOf(sink).PromptWork
+	return coordinator != nil && coordinator.PendingPromptWork()
 }
 
 func waitForPromptWork(ctx context.Context, sink EventSink) (usage llm.Usage, err error) {
-	coordinator, ok := sink.(PromptWorkCoordinator)
-	if !ok {
+	coordinator := hostOf(sink).PromptWork
+	if coordinator == nil {
 		return llm.Usage{}, nil
 	}
-	if progress, ok := sink.(PromptWorkProgressSink); ok {
-		progress.PromptWorkWaitStart()
-		defer progress.PromptWorkWaitComplete()
-	}
+	emit(sink, Event{Kind: EventPromptWorkWaitStart})
+	defer emit(sink, Event{Kind: EventPromptWorkWaitComplete})
 	scope := execution.FromContext(ctx)
 	started := time.Now()
 	scope.Work(execution.WorkEvent{Kind: execution.WorkWait, Phase: execution.WorkStart, Mode: "prompt_join", Count: 1})
@@ -3992,8 +3780,8 @@ func waitForPromptWork(ctx context.Context, sink EventSink) (usage llm.Usage, er
 }
 
 func drainPromptWorkUsage(sink EventSink) llm.Usage {
-	coordinator, ok := sink.(PromptWorkCoordinator)
-	if !ok {
+	coordinator := hostOf(sink).PromptWork
+	if coordinator == nil {
 		return llm.Usage{}
 	}
 	return coordinator.DrainPromptWorkUsage()
@@ -4003,22 +3791,22 @@ func (a *Agent) requestContext(extraContext []string, sink EventSink) []string {
 	if guidance := a.contextManagementContext(); guidance != "" {
 		extraContext = append(append([]string(nil), extraContext...), guidance)
 	}
-	provider, ok := sink.(RequestContextProvider)
-	if !ok {
+	fresh := hostOf(sink).RequestContext
+	if fresh == nil {
 		return append([]string(nil), extraContext...)
 	}
-	return mergeRequestContext(extraContext, provider.RequestContext())
+	return mergeRequestContext(extraContext, fresh())
 }
 
 // estimateRequestContext gathers request context for local sizing only. No
-// request is sent, so use the sink's non-consuming peek when available and
+// request is sent, so use the host's non-consuming peek when available and
 // otherwise omit dynamic context rather than consuming a one-shot signal.
 func (a *Agent) estimateRequestContext(extraContext []string, sink EventSink) []string {
-	peeker, ok := sink.(RequestContextPeeker)
-	if !ok {
+	peek := hostOf(sink).PeekRequestContext
+	if peek == nil {
 		return append([]string(nil), extraContext...)
 	}
-	return mergeRequestContext(extraContext, peeker.PeekRequestContext())
+	return mergeRequestContext(extraContext, peek())
 }
 
 func mergeRequestContext(extraContext, items []string) []string {
@@ -4154,7 +3942,7 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 			}
 		}
 		physicalAttempt := startAttempt + attempt
-		sink.TurnAttemptStart(turn, physicalAttempt, estimate)
+		emit(sink, Event{Kind: EventTurnAttemptStart, Turn: turn, Attempt: physicalAttempt, Context: &estimate})
 		attemptCtx := ctx
 		if physicalAttempt > 1 {
 			attemptCtx = llm.WithAttemptCause(ctx, llm.AttemptRetry, llm.RetryLayerAgent)
@@ -4167,7 +3955,7 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 			}
 		}
 		res.attempts = physicalAttempt
-		sink.TurnAttemptComplete(TurnAttemptUsage{Turn: turn, Attempt: physicalAttempt, Usage: res.usage})
+		emit(sink, Event{Kind: EventTurnAttemptComplete, AttemptUsage: &TurnAttemptUsage{Turn: turn, Attempt: physicalAttempt, Usage: res.usage}})
 		if err == nil || attempt >= streamRetries || !retryableStreamError(err) {
 			return res, wasted, err
 		}
@@ -4184,14 +3972,12 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 		retryEvent.MaxAttempts = startAttempt + streamRetries
 		retryEvent.RetryDelayMS = delay.Milliseconds()
 		emitModelRequestEvent(sink, retryEvent)
-		if abandon, ok := sink.(TurnAttemptAbandonSink); ok {
-			abandon.TurnAttemptAbandoned(turn, physicalAttempt)
-		}
+		emit(sink, Event{Kind: EventTurnAttemptAbandoned, Turn: turn, Attempt: physicalAttempt})
 		discarded := ""
 		if n := totalTokens(res.usage); n > 0 {
 			discarded = fmt.Sprintf("; discarded ~%d tokens", n)
 		}
-		sink.Notice(fmt.Sprintf("[stream interrupted: %v; retrying turn in %s%s]", err, delay, discarded))
+		emitNotice(sink, fmt.Sprintf("[stream interrupted: %v; retrying turn in %s%s]", err, delay, discarded))
 		reason, _ := llm.ClassifyAttemptError(err, 0)
 		if serr := a.retryWait(ctx, req.Purpose, delay, reason, func() error { return a.sleep(ctx, delay) }); serr != nil {
 			// This physical attempt was already abandoned and moved into wasted.
@@ -4409,7 +4195,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 				continue
 			}
 			bridge.observe(*ev.LiveSteer)
-			sink.Notice("[native steer " + ev.LiveSteer.Status + "]")
+			emitNotice(sink, "[native steer "+ev.LiveSteer.Status+"]")
 			if ev.LiveSteer.Status == "applied" {
 				if ev.LiveSteer.Boundary {
 					call.Retain()
@@ -4437,10 +4223,10 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 		case llm.EventTextDelta:
 			text = append(text, ev.Text...)
 			textBlocks[ev.Index] = append(textBlocks[ev.Index], ev.Text...)
-			sink.TextDelta(ev.Text)
+			emit(sink, Event{Kind: EventTextDelta, Text: ev.Text})
 		case llm.EventReasoningSummary:
 			if summary := reasoningSummaryText(ev.Text); summary != "" {
-				sink.ReasoningSummary(summary)
+				emit(sink, Event{Kind: EventReasoningSummary, Text: summary})
 			}
 			if block, ok := llm.PersistedReasoningBlock(ev); ok {
 				block.ReasoningReplayDomain = a.reasoningReplayDomain
@@ -4467,22 +4253,20 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 		case llm.EventAssistantPhase:
 			if llm.ValidAssistantPhase(ev.Phase) && ev.Phase != "" {
 				res.phase = ev.Phase
-				if phaseSink, ok := sink.(AssistantPhaseSink); ok {
-					phaseSink.AssistantPhase(ev.Phase)
-				}
+				emit(sink, Event{Kind: EventAssistantPhase, Text: ev.Phase})
 			}
 		case llm.EventToolCallReady:
 			reads.start(ev)
 		case llm.EventToolCallStart:
 			reads.observeStart(ev)
-			sink.ToolUseStart(llm.ToolCall{
+			emit(sink, Event{Kind: EventToolUseStart, Call: llm.ToolCall{
 				ID:        ev.ToolID,
 				Name:      ev.ToolName,
 				Namespace: ev.ToolNamespace,
 				Input:     ev.ToolInput,
-			})
+			}})
 		case llm.EventToolCallDelta:
-			sink.ToolUseDelta(ev.Index, ev.ArgsDelta)
+			emit(sink, Event{Kind: EventToolUseDelta, Index: ev.Index, Text: ev.ArgsDelta})
 		case llm.EventToolCallDone:
 			call := llm.ToolCall{
 				ID:                ev.ToolID,
@@ -4557,9 +4341,7 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 }
 
 func emitModelRequestEvent(sink EventSink, event llm.ModelRequestEvent) {
-	if statusSink, ok := sink.(ModelRequestEventSink); ok {
-		statusSink.ModelRequestEvent(event)
-	}
+	emit(sink, Event{Kind: EventModelRequest, ModelRequest: &event})
 }
 
 func modelRequestEventFromError(err error, state llm.ModelRequestState) llm.ModelRequestEvent {

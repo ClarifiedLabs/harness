@@ -26,8 +26,8 @@ func (r *executionTurnRecorder) ObserveTurn(event execution.TurnEvent) {
 	r.turns = append(r.turns, event)
 }
 
-// Hiding optional sink methods models callers that only implement EventSink.
-// Source diagnostics must not rely on a UI/recorder TurnProgress forwarder.
+// Hiding Host models callers that only implement Emit. Source diagnostics
+// must not rely on a UI/recorder handling EventTurnProgress.
 type executionBasicSink struct{ EventSink }
 
 func executionTurnToolRun(_ context.Context, input json.RawMessage) (string, error) {

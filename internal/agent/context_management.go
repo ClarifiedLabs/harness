@@ -219,7 +219,7 @@ func (a *Agent) compactFromNotes(ctx context.Context, sink EventSink, opts compa
 	a.compactions++
 	a.ResetProxySessionID()
 	notifyTranscriptRewritten(sink)
-	sink.Notice("[context refreshed from task notes; full history archived]")
+	emitNotice(sink, "[context refreshed from task notes; full history archived]")
 	a.runPostCompactHook(ctx, sink, opts.trigger, opts.focus)
 	return llm.Usage{}, true, nil
 }

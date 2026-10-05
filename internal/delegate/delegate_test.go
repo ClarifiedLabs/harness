@@ -1727,30 +1727,30 @@ func TestChildSinkTodoContextUsesBoundedCadenceAndRetrySafeRounds(t *testing.T) 
 		if got := sink.RequestContext(); len(got) != 0 {
 			t.Fatalf("turn %d context = %+v, want empty", turn, got)
 		}
-		sink.TurnAttemptStart(turn, 1, agent.ContextEstimate{})
-		sink.TurnAttemptStart(turn, 2, agent.ContextEstimate{})
+		sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: turn, Attempt: 1, Context: &agent.ContextEstimate{}})
+		sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: turn, Attempt: 2, Context: &agent.ContextEstimate{}})
 	}
 	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
 		t.Fatalf("turn 12 context = %+v, want stale TODO reminder", got)
 	}
-	sink.TurnAttemptStart(12, 1, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 12, Attempt: 1, Context: &agent.ContextEstimate{}})
 
 	for turn := 13; turn < 36; turn++ {
 		if got := sink.RequestContext(); len(got) != 0 {
 			t.Fatalf("turn %d context = %+v, want empty", turn, got)
 		}
-		sink.TurnAttemptStart(turn, 1, agent.ContextEstimate{})
+		sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: turn, Attempt: 1, Context: &agent.ContextEstimate{}})
 	}
 	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
 		t.Fatalf("turn 36 context = %+v, want backed-off TODO reminder", got)
 	}
-	sink.TurnAttemptStart(36, 1, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 36, Attempt: 1, Context: &agent.ContextEstimate{}})
 
-	sink.TranscriptRewritten()
+	sink.Emit(agent.Event{Kind: agent.EventTranscriptRewritten})
 	if got := sink.RequestContext(); len(got) != 1 || !strings.Contains(got[0], "[~] Implement") {
 		t.Fatalf("rewrite context = %+v, want immediate recovery reminder", got)
 	}
-	sink.TurnAttemptStart(36, 2, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 36, Attempt: 2, Context: &agent.ContextEstimate{}})
 	if got := sink.RequestContext(); len(got) != 0 {
 		t.Fatalf("post-recovery context = %+v, want reset cadence", got)
 	}
@@ -1761,31 +1761,31 @@ func TestChildSinkPersistsReplayFidelityAndPromptUsageLast(t *testing.T) {
 	sink := newChildSink(dir, nil, false, NewProgress(), nil)
 	ctx := agent.ContextEstimate{Total: 123, Window: 456, System: 7, Tools: 8, Messages: 9}
 	sink.User("inspect")
-	sink.TurnAttemptStart(2, 3, ctx)
-	sink.AssistantPhase("")
-	sink.AssistantPhase("invalid")
-	sink.AssistantPhase(llm.AssistantPhaseCommentary)
-	sink.TextDelta("working")
-	sink.ToolStart(llm.ToolCall{ID: "call-1", Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)})
-	sink.ToolResult(llm.ToolResult{ForID: "call-1", Text: "package a\n\nfunc A() {}\n"})
-	sink.TurnComplete(agent.TurnUsage{Turn: 2, Usage: llm.Usage{InputTokens: 10, OutputTokens: 4}})
-	sink.TurnAttemptAbandoned(2, 3)
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 2, Attempt: 3, Context: &ctx})
+	sink.Emit(agent.Event{Kind: agent.EventAssistantPhase, Text: ""})
+	sink.Emit(agent.Event{Kind: agent.EventAssistantPhase, Text: "invalid"})
+	sink.Emit(agent.Event{Kind: agent.EventAssistantPhase, Text: llm.AssistantPhaseCommentary})
+	sink.Emit(agent.Event{Kind: agent.EventTextDelta, Text: "working"})
+	sink.Emit(agent.Event{Kind: agent.EventToolStart, Call: llm.ToolCall{ID: "call-1", Name: "read", Input: json.RawMessage(`{"path":"a.go"}`)}})
+	sink.Emit(agent.Event{Kind: agent.EventToolResult, Result: &llm.ToolResult{ForID: "call-1", Text: "package a\n\nfunc A() {}\n"}})
+	sink.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{Turn: 2, Usage: llm.Usage{InputTokens: 10, OutputTokens: 4}}})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptAbandoned, Turn: 2, Attempt: 3})
 	requestEvent := llm.ModelRequestEvent{State: llm.ModelRequestRetryScheduled, Sequence: 4, RetryDelayMS: 25}
-	sink.ModelRequestEvent(requestEvent)
-	sink.RetentionApplied(agent.RetentionEvent{
+	sink.Emit(agent.Event{Kind: agent.EventModelRequest, ModelRequest: &requestEvent})
+	sink.Emit(agent.Event{Kind: agent.EventRetention, Retention: &agent.RetentionEvent{
 		Policy:             agent.RetentionEventPolicyPressureEpoch,
 		Trigger:            agent.RetentionTriggerContextPressure,
 		BlocksTrimmed:      1,
 		BytesBefore:        10_000,
 		BytesAfter:         4_000,
 		ResponseStateReset: true,
-	})
-	sink.TurnProgress(agent.TurnProgress{Turn: 2, Activity: agent.ToolActivityCounts{Inspect: 1}, NewEvidence: true})
-	sink.HookDiagnostic(hooks.Diagnostic{Event: hooks.PreToolUse, Handler: "child-policy", Outcome: hooks.OutcomeSuccess})
-	sink.PromptComplete(agent.PromptUsage{
+	}})
+	sink.Emit(agent.Event{Kind: agent.EventTurnProgress, TurnProgress: &agent.TurnProgress{Turn: 2, Activity: agent.ToolActivityCounts{Inspect: 1}, NewEvidence: true}})
+	sink.Emit(agent.Event{Kind: agent.EventHookDiagnostic, HookDiagnostic: &hooks.Diagnostic{Event: hooks.PreToolUse, Handler: "child-policy", Outcome: hooks.OutcomeSuccess}})
+	sink.Emit(agent.Event{Kind: agent.EventPromptComplete, PromptUsage: &agent.PromptUsage{
 		Usage:             llm.Usage{InputTokens: 11, OutputTokens: 5},
 		TerminationReason: agent.TerminationTurnLimit,
-	})
+	}})
 
 	events := readDelegateChildEvents(t, dir)
 	wantTypes := []string{
@@ -1861,11 +1861,11 @@ func TestChildSinkRegistersBackgroundJobLaunchIdentity(t *testing.T) {
 	sink := newChildSink(t.TempDir(), nil, false, NewProgress(), nil)
 	sink.background = starter
 	sink.configureRecorder(time.Now, nil, "child-agent", "child-provider", "child-model", "")
-	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
-	sink.ToolStart(llm.ToolCall{ID: "shell-call", Name: "shell"})
-	sink.ToolResult(llm.ToolResult{
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 1, Context: &agent.ContextEstimate{}})
+	sink.Emit(agent.Event{Kind: agent.EventToolStart, Call: llm.ToolCall{ID: "shell-call", Name: "shell"}})
+	sink.Emit(agent.Event{Kind: agent.EventToolResult, Result: &llm.ToolResult{
 		ForID: "shell-call", Text: "started", BackgroundJobID: "bg_child_shell",
-	})
+	}})
 
 	if starter.identityID != "bg_child_shell" || starter.identity.Agent != "child-agent" ||
 		starter.identity.Provider != "child-provider" || starter.identity.Model != "child-model" {
@@ -1877,11 +1877,11 @@ func TestChildSinkFoldsPreflightMaintenanceIntoPromptUsage(t *testing.T) {
 	dir := t.TempDir()
 	sink := newChildSink(dir, nil, false, NewProgress(), nil)
 	sink.addPreflightMaintenance("continuation_compaction", llm.Usage{InputTokens: 7, OutputTokens: 2}, true)
-	sink.PromptComplete(agent.PromptUsage{
+	sink.Emit(agent.Event{Kind: agent.EventPromptComplete, PromptUsage: &agent.PromptUsage{
 		Turns:       1,
 		Usage:       llm.Usage{InputTokens: 11, OutputTokens: 5},
 		Maintenance: llm.Usage{InputTokens: 3, OutputTokens: 1},
-	})
+	}})
 
 	if sink.usage.Usage.InputTokens != 18 || sink.usage.Usage.OutputTokens != 7 ||
 		sink.usage.Maintenance.InputTokens != 10 || sink.usage.Maintenance.OutputTokens != 3 ||
@@ -2284,28 +2284,28 @@ func TestProgressSnapshotZeroAndFinished(t *testing.T) {
 
 	s := newChildSink("", nil, false, p, nil)
 	ctx := agent.ContextEstimate{Total: 1000, Window: 200000}
-	s.TurnAttemptStart(3, 1, ctx)
+	s.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 3, Attempt: 1, Context: &ctx})
 	if got := p.Snapshot(); got.Turn != 3 || got.Attempt != 1 || got.ContextUsed != 1000 || got.ContextWindow != 200000 {
 		t.Fatalf("after TurnAttemptStart = %+v", got)
 	}
 
-	s.TurnAttemptComplete(agent.TurnAttemptUsage{Turn: 3, Attempt: 1, Usage: llm.Usage{InputTokens: 7, CostUSD: 0.01, CostKnown: true}})
+	s.Emit(agent.Event{Kind: agent.EventTurnAttemptComplete, AttemptUsage: &agent.TurnAttemptUsage{Turn: 3, Attempt: 1, Usage: llm.Usage{InputTokens: 7, CostUSD: 0.01, CostKnown: true}}})
 	if got := p.Snapshot(); got.Usage.InputTokens != 7 || !got.Usage.CostKnown {
 		t.Fatalf("after TurnAttemptComplete = %+v", got)
 	}
 
-	s.ToolStart(llm.ToolCall{ID: "t1", Name: "read"})
-	s.ToolStart(llm.ToolCall{ID: "t2", Name: "read"})
+	s.Emit(agent.Event{Kind: agent.EventToolStart, Call: llm.ToolCall{ID: "t1", Name: "read"}})
+	s.Emit(agent.Event{Kind: agent.EventToolStart, Call: llm.ToolCall{ID: "t2", Name: "read"}})
 	if got := p.Snapshot(); got.Tools != 2 {
 		t.Fatalf("after two ToolStart = %+v, want 2 tools", got)
 	}
 
-	s.TurnComplete(agent.TurnUsage{Turn: 3, Context: ctx})
+	s.Emit(agent.Event{Kind: agent.EventTurnComplete, TurnUsage: &agent.TurnUsage{Turn: 3, Context: ctx}})
 	if got := p.Snapshot(); got.ContextUsed != 1000 {
 		t.Fatalf("after TurnComplete = %+v", got)
 	}
 
-	s.PromptComplete(agent.PromptUsage{Turns: 3})
+	s.Emit(agent.Event{Kind: agent.EventPromptComplete, PromptUsage: &agent.PromptUsage{Turns: 3}})
 	if got := p.Snapshot(); got.Finished || got.Turn != 3 {
 		t.Fatalf("after PromptComplete = %+v, want unfinished turn 3", got)
 	}

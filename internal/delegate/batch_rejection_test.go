@@ -20,11 +20,11 @@ func TestChildSinkRejectedBatchPublishesOneSafeNotice(t *testing.T) {
 	progress := NewProgress()
 	dir := t.TempDir()
 	sink := newChildSink(dir, nil, false, progress, registration)
-	sink.TurnAttemptStart(1, 1, agent.ContextEstimate{})
+	sink.Emit(agent.Event{Kind: agent.EventTurnAttemptStart, Turn: 1, Attempt: 1, Context: &agent.ContextEstimate{}})
 	cursor := feed.Tail()
 
 	const notice = `[tool batch rejected: 3 calls not executed; invalid tool stage plan: tool "private-model-name" has _stage="private-stage-value"]`
-	sink.Notice(notice)
+	sink.Emit(agent.Event{Kind: agent.EventNotice, Text: notice})
 	before := registry.Snapshot().Recent
 	calls := make([]llm.ToolCall, 3)
 	for i := range calls {
@@ -33,7 +33,7 @@ func TestChildSinkRejectedBatchPublishesOneSafeNotice(t *testing.T) {
 			Input: json.RawMessage(`{"path":"private-input"}`),
 			Stage: &llm.ToolStage{EmissionIndex: i, Emitted: json.RawMessage(`"private-stage-value"`), BatchRejected: true},
 		}
-		sink.ToolStart(calls[i])
+		sink.Emit(agent.Event{Kind: agent.EventToolStart, Call: calls[i]})
 		if pending, ok := sink.pending[calls[i].ID]; !ok || !reflect.DeepEqual(pending.call, calls[i]) {
 			t.Fatalf("rejected call not retained: %+v, %v", pending, ok)
 		}
@@ -42,10 +42,10 @@ func TestChildSinkRejectedBatchPublishesOneSafeNotice(t *testing.T) {
 		}
 	}
 	for i := len(calls) - 1; i >= 0; i-- {
-		sink.ToolResult(llm.ToolResult{
+		sink.Emit(agent.Event{Kind: agent.EventToolResult, Result: &llm.ToolResult{
 			ForID: calls[i].ID, IsError: true, ErrorKind: llm.ToolErrorInvalidArgs,
 			Text: "invalid tool stage plan: private-result",
-		})
+		}})
 		if _, ok := sink.pending[calls[i].ID]; ok {
 			t.Fatalf("rejected call %q remains pending", calls[i].ID)
 		}
@@ -126,7 +126,7 @@ func TestChildSinkNonRejectedToolsKeepActivity(t *testing.T) {
 				if staged {
 					call.Stage = &llm.ToolStage{EmissionIndex: 1, Emitted: json.RawMessage(`2`), Resolved: 2}
 				}
-				sink.ToolStart(call)
+				sink.Emit(agent.Event{Kind: agent.EventToolStart, Call: call})
 				const summary = `tool read path="docs/design.md"`
 				if got := registry.Snapshot().Recent.Activity; got != summary {
 					t.Fatalf("start activity = %q", got)
@@ -134,7 +134,7 @@ func TestChildSinkNonRejectedToolsKeepActivity(t *testing.T) {
 				if got := progress.Snapshot().Tools; got != 1 {
 					t.Fatalf("executed tools = %d, want 1", got)
 				}
-				sink.ToolResult(llm.ToolResult{ForID: call.ID, IsError: failed, Text: "private-result"})
+				sink.Emit(agent.Event{Kind: agent.EventToolResult, Result: &llm.ToolResult{ForID: call.ID, IsError: failed, Text: "private-result"}})
 				wantKind, wantActivity := ActivityEventToolComplete, "tool read complete"
 				if failed {
 					wantKind, wantActivity = ActivityEventToolError, "tool read failed"

@@ -205,6 +205,52 @@ func (r *Recorder) appendLocked(write func() error) error {
 	return err
 }
 
+// Emit records an agent event whose durable form needs nothing beyond the
+// event itself. It is the one mapping from agent events to recorder calls, so
+// the root, delegate, and ACP sinks pass such events through unchanged. Kinds
+// that need caller state (notices, checkpoints, retention) or are not recorded
+// are ignored; callers record those through the specific methods.
+func (r *Recorder) Emit(ev agent.Event) {
+	switch ev.Kind {
+	case agent.EventTextDelta:
+		r.TextDelta(ev.Text)
+	case agent.EventReasoningSummary:
+		r.ReasoningSummary(ev.Text)
+	case agent.EventAssistantPhase:
+		r.AssistantPhase(ev.Text)
+	case agent.EventTurnAttemptStart:
+		r.TurnAttemptStart(ev.Turn, ev.Attempt, *ev.Context)
+	case agent.EventTurnAttemptComplete:
+		r.TurnAttemptComplete(*ev.AttemptUsage)
+	case agent.EventTurnAttemptAbandoned:
+		r.TurnAttemptAbandoned(ev.Turn, ev.Attempt)
+	case agent.EventToolStart:
+		r.ToolStart(ev.Call)
+	case agent.EventToolResult:
+		r.ToolResult(*ev.Result)
+	case agent.EventToolDiff:
+		r.ToolDiff(ev.Call, ev.Path, ev.Text)
+	case agent.EventToolMutation:
+		r.ToolMutation(ev.Call, ev.Paths)
+	case agent.EventModelRequest:
+		r.ModelRequestEvent(*ev.ModelRequest)
+	case agent.EventTurnComplete:
+		r.TurnComplete(*ev.TurnUsage)
+	case agent.EventPromptComplete:
+		r.PromptComplete(*ev.PromptUsage)
+	case agent.EventMaintenance:
+		r.MaintenanceComplete(*ev.Maintenance)
+	case agent.EventHookDiagnostic:
+		r.HookDiagnostic(*ev.HookDiagnostic)
+	case agent.EventEvaluatorResult:
+		r.EvaluatorResult(*ev.Evaluator)
+	case agent.EventTurnProgress:
+		r.TurnProgress(*ev.TurnProgress)
+	case agent.EventClosure:
+		r.ClosureStarted(*ev.Closure)
+	}
+}
+
 // User records the prompt's user event and starts the prompt clock.
 func (r *Recorder) User(text string) {
 	if r == nil {
