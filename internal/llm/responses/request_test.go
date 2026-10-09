@@ -428,18 +428,22 @@ func TestBuildRequestPromptCacheBreakpointCapabilityGate(t *testing.T) {
 			CachePolicy: llm.CachePolicy{StableMessagePrefix: 1},
 		}
 	}
-	for _, model := range []string{"gpt-6-astra", "openai:gpt-6-astra", "gpt-6-astra-2026-09-03"} {
+	for _, model := range []string{"gpt-6-astra", "openai:gpt-6-astra", "gpt-6-astra-2026-09-03", "gpt-6.1-sol", "openai:gpt-6.1-sol"} {
 		if got := countPromptCacheBreakpoints(buildRequest(request(model), 0, 0).Input); got != 1 {
 			t.Errorf("%s breakpoint count = %d, want 1", model, got)
 		}
 	}
-	if got := countPromptCacheBreakpoints(buildRequest(request("gpt-5.5"), 0, 0).Input); got != 0 {
-		t.Fatalf("older model breakpoint count = %d, want 0", got)
+	for _, model := range []string{"gpt-5.5", "gpt-6.1", "gpt-6.1-sol-mini", "gpt-6.1-sol-2026-10-08"} {
+		if got := countPromptCacheBreakpoints(buildRequest(request(model), 0, 0).Input); got != 0 {
+			t.Fatalf("unsupported %s breakpoint count = %d, want 0", model, got)
+		}
 	}
-	if got := countPromptCacheBreakpoints(buildRequestWithOptions(request("gpt-5.6"), 0, 0, buildOptions{
-		baseURL: "https://compatible.test/v1",
-	}).Input); got != 0 {
-		t.Fatalf("compatible auto breakpoint count = %d, want 0", got)
+	for _, model := range []string{"gpt-5.6", "gpt-6.1-sol"} {
+		if got := countPromptCacheBreakpoints(buildRequestWithOptions(request(model), 0, 0, buildOptions{
+			baseURL: "https://compatible.test/v1",
+		}).Input); got != 0 {
+			t.Fatalf("%s compatible auto breakpoint count = %d, want 0", model, got)
+		}
 	}
 	enabled, disabled := true, false
 	if got := countPromptCacheBreakpoints(buildRequestWithOptions(request("custom-model"), 0, 0, buildOptions{
@@ -447,10 +451,12 @@ func TestBuildRequestPromptCacheBreakpointCapabilityGate(t *testing.T) {
 	}).Input); got != 1 {
 		t.Fatalf("compatible opt-in breakpoint count = %d, want 1", got)
 	}
-	if got := countPromptCacheBreakpoints(buildRequestWithOptions(request("gpt-5.6"), 0, 0, buildOptions{
-		baseURL: defaultBaseURL, promptCache: llm.PromptCacheConfig{ExplicitBreakpoints: &disabled},
-	}).Input); got != 0 {
-		t.Fatalf("first-party opt-out breakpoint count = %d, want 0", got)
+	for _, model := range []string{"gpt-5.6", "gpt-6.1-sol"} {
+		if got := countPromptCacheBreakpoints(buildRequestWithOptions(request(model), 0, 0, buildOptions{
+			baseURL: defaultBaseURL, promptCache: llm.PromptCacheConfig{ExplicitBreakpoints: &disabled},
+		}).Input); got != 0 {
+			t.Fatalf("%s first-party opt-out breakpoint count = %d, want 0", model, got)
+		}
 	}
 }
 

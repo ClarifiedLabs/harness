@@ -39,6 +39,11 @@ func cloneTestMessages() []Message {
 	return []Message{{
 		Role: RoleUser, Origin: MessageOriginCompactionCheckpoint, SteerID: "steer",
 		Content: cloneTestBlocks(2),
+		ToolContext: &ToolContext{
+			ReplayDomain: "domain", After: true,
+			Tools:   []ToolSchema{{Name: "read", Parameters: json.RawMessage(`{"type":"object"}`)}},
+			Removed: []string{"write"},
+		},
 		ReasoningState: &ReasoningState{
 			ReplayDomain: "domain",
 			Baseline:     ReasoningConfig{Enabled: &enabled, BudgetTokens: &budget, Effort: "low"},
@@ -108,12 +113,13 @@ func TestClonePreservesNilAndEmpty(t *testing.T) {
 		}, {ProviderCompaction: []json.RawMessage{}}},
 		ParallelToolBatches: []ParallelToolBatch{{ToolUseIDs: nil}, {ToolUseIDs: []string{}}},
 		Compaction:          &CompactionMetadata{UserInstructions: []ContentBlock{}, ReadFiles: []string{}, ModifiedFiles: []string{}},
-	}}, {{ParallelToolBatches: []ParallelToolBatch{}}}} {
+		ToolContext:         &ToolContext{Tools: []ToolSchema{{Parameters: json.RawMessage{}}}, Removed: []string{}},
+	}}, {{ParallelToolBatches: []ParallelToolBatch{}}}, {{ToolContext: &ToolContext{Tools: []ToolSchema{}}}}} {
 		if got := CloneMessages(messages); !reflect.DeepEqual(got, messages) {
 			t.Errorf("clone changed nil/empty shape: got %#v, want %#v", got, messages)
 		}
 	}
-	if CloneContentBlocks(nil) != nil || CloneCompactionMetadata(nil) != nil || CloneRawMessages(nil) != nil {
+	if CloneContentBlocks(nil) != nil || CloneCompactionMetadata(nil) != nil || CloneRawMessages(nil) != nil || CloneToolContext(nil) != nil {
 		t.Fatal("nil primitive input became non-nil")
 	}
 	if got := CloneRawMessages([]json.RawMessage{}); got == nil {

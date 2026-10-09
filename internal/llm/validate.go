@@ -17,6 +17,9 @@ func ValidateMessageContent(msgs []Message) error {
 		if state := message.ReasoningState; state != nil && (message.Role != RoleUser || state.ReplayDomain == "") {
 			return fmt.Errorf("message %d: reasoning state requires a user message and replay domain", i)
 		}
+		if err := validateToolContext(message.ToolContext); err != nil {
+			return fmt.Errorf("message %d: tool context: %w", i, err)
+		}
 		openToolSearch := make(map[string]bool)
 		seenToolSearch := make(map[string]bool)
 		for j, block := range message.Content {

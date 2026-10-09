@@ -135,6 +135,7 @@ func Registry(catalog protocol.Catalog) *llm.Registry {
 			continue
 		}
 		info := llm.ModelInfo{
+			IncrementalTools: target.IncrementalTools,
 			ReasoningUpdates: target.ReasoningUpdates,
 			AsyncTools:       target.AsyncTools,
 			NativeSteering:   target.NativeSteering,

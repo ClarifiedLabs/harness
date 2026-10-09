@@ -266,6 +266,7 @@ type testInfoModelJSON struct {
 	APIType                  string     `json:"api_type"`
 	ContinuationStateful     bool       `json:"continuation_stateful"`
 	NativeCompaction         bool       `json:"native_compaction"`
+	IncrementalTools         bool       `json:"incremental_tools"`
 	ReasoningUpdates         bool       `json:"reasoning_updates"`
 	AsyncTools               bool       `json:"async_tools"`
 	NativeSteering           bool       `json:"native_steering"`
@@ -1848,6 +1849,7 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 			proxy.catalog.Targets[i].APIType = "responses"
 			proxy.catalog.Targets[i].ContinuationStateful = true
 			proxy.catalog.Targets[i].Prewarm = true
+			proxy.catalog.Targets[i].IncrementalTools = true
 			proxy.catalog.Targets[i].ReasoningUpdates = true
 			proxy.catalog.Targets[i].AsyncTools = true
 			proxy.catalog.Targets[i].NativeSteering = true
@@ -1884,7 +1886,7 @@ func TestRunModelsFlagJSONListsCatalogAndExits(t *testing.T) {
 		t.Fatalf("openrouter price = %+v\n%s", openRouterModel.PricePerMillionTokensUSD, out.String())
 	}
 	openAIModel := findJSONModel(t, got.Models, "openai:gpt-5.5")
-	if !openAIModel.ReasoningUpdates || !openAIModel.AsyncTools || !openAIModel.NativeSteering || openRouterModel.ReasoningUpdates || openRouterModel.AsyncTools || openRouterModel.NativeSteering {
+	if !openAIModel.IncrementalTools || openRouterModel.IncrementalTools || !openAIModel.ReasoningUpdates || !openAIModel.AsyncTools || !openAIModel.NativeSteering || openRouterModel.ReasoningUpdates || openRouterModel.AsyncTools || openRouterModel.NativeSteering {
 		t.Fatalf("provider capabilities not preserved: openai=%+v, openrouter=%+v", openAIModel, openRouterModel)
 	}
 	if openAIModel.APIType != "responses" || !openAIModel.ContinuationStateful || !openAIModel.Prewarm {

@@ -34,6 +34,7 @@ func (p *Provider) CountInputTokens(ctx context.Context, req llm.Request) (llm.I
 		toolSearch:                    p.toolSearch,
 		baseURL:                       p.baseURL,
 		providerName:                  p.providerName,
+		codexBackend:                  p.isCodexBackend(),
 		disablePromptCacheBreakpoints: true,
 	})
 	body, err := json.Marshal(countRequest{

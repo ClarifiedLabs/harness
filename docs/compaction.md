@@ -58,6 +58,22 @@ they need Harness-owned summary semantics or detached application. Live
 retention is skipped while native compaction is available, preserving the
 semantic history needed for cross-provider fallback.
 
+## Chronological tool catalogs across replacement windows
+
+For eligible incremental-tool sessions, successful native compaction,
+textual compaction, and notes-based context resets rebuild one initial catalog
+from the currently available tool schemas. Retained message history does not
+replay old catalog deltas over that new baseline; the canonical archive keeps
+those original events. The replacement window clears the old continuation
+anchor and uses the new catalog with the still-authoritative `Request.System`.
+Legacy windows that used ordinary tool declarations can enter incremental mode
+at this boundary, not by retrofitting already-sampled history on resume.
+
+Count and maintenance requests omit explicit cache markers and cache mode/TTL
+options. Catalog history still contributes to context usage: preserving a prefix
+for potential cache hits or sending a shorter continuation payload does not
+reduce the provider's context footprint to the transmitted suffix alone.
+
 ## Trigger policy
 
 When `max(reported input tokens, estimated full-request footprint)` reaches

@@ -85,6 +85,7 @@ type ModelUsage struct {
 }
 
 type Target struct {
+	IncrementalTools bool     `json:"incremental_tools,omitempty"`
 	NativeSteering   bool     `json:"native_steering,omitempty"`
 	AsyncTools       bool     `json:"async_tools,omitempty"`
 	ReasoningUpdates bool     `json:"reasoning_updates,omitempty"`

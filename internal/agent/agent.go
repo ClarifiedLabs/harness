@@ -807,12 +807,15 @@ func (a *Agent) ToolSpecs() []llm.ToolSchema { return llm.CloneToolSchemas(a.too
 // switch uses. A nil registry is ignored.
 func (a *Agent) SetTools(registry *tools.Registry) {
 	if registry != nil {
+		incremental := a.incrementalToolsIn(a.transcript)
 		a.tools = registry
 		a.toolSpecs = registry.Specs()
 		a.deferredToolGroups = registry.DeferredToolGroups()
 		a.compactionRuntimeVersion++
 		a.retentionEpochArmed = true
-		a.resetResponseState()
+		if !incremental || !a.incrementalToolsEnabled() {
+			a.resetResponseState()
+		}
 	}
 }
 
@@ -1088,20 +1091,23 @@ func (a *Agent) ContextRequest() llm.Request {
 // the message shape used by RunPromptContentWithContext. EstimatedInputTokens
 // is the current estimate anchored to the last measured turn when one exists.
 func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
-	messages := a.providerVisibleMessages(a.transcript)
+	transcript, _ := a.prepareToolContext(a.transcript)
+	messages := a.providerVisibleMessages(transcript)
 	est := a.anchorContextEstimate(estimateRequest(llm.Request{
-		System:         a.system,
-		Messages:       messages,
-		Tools:          a.toolSpecs,
-		ServerTools:    a.serverTools,
-		RequestContext: extraContext,
+		System:           a.system,
+		Messages:         messages,
+		IncrementalTools: a.incrementalToolsIn(messages),
+		Tools:            a.toolSpecs,
+		ServerTools:      a.serverTools,
+		RequestContext:   extraContext,
 	}, a.window()), a.measuredInput, a.measuredBoundary)
 	return llm.Request{
 		Model:                a.model,
 		NativeSteering:       a.nativeSteeringEnabled(),
 		Purpose:              llm.RequestPurposeTurn,
 		System:               a.system,
-		Messages:             append([]llm.Message(nil), messages...),
+		Messages:             llm.CloneMessages(messages),
+		IncrementalTools:     a.incrementalToolsIn(messages),
 		Tools:                a.requestToolSpecs(),
 		DeferredToolGroups:   llm.CloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
@@ -1186,6 +1192,11 @@ func newOpaqueID(prefix string) string {
 // nothing cacheable yet. The returned request is a self-contained snapshot.
 func (a *Agent) PrewarmRequest() (llm.Request, bool) {
 	a.refreshToolSpecs()
+	// Prefix-only prewarm cannot safely establish a chronological tool window:
+	// its zero-message anchor does not include the initial catalog/instructions.
+	if a.incrementalToolsEnabled() {
+		return llm.Request{}, false
+	}
 	if len(a.nativePending) > 0 || len(a.nativeRecovery) > 0 {
 		return llm.Request{}, false
 	}
@@ -1292,7 +1303,7 @@ func (a *Agent) PrewarmFunc() (func(context.Context) PrewarmResult, bool) {
 // that owns the Agent.
 func (a *Agent) ApplyPrewarmResult(result PrewarmResult) bool {
 	state := result.ResponseState
-	if !a.responsesStateful ||
+	if !a.responsesStateful || a.incrementalToolsEnabled() ||
 		state == nil ||
 		state.PreviousResponseID == "" ||
 		result.ResponseStateEpoch != a.responseStateEpoch ||
@@ -1368,11 +1379,12 @@ func (a *Agent) estimateContext(extraContext []string) ContextEstimate {
 func (a *Agent) estimateContextForTranscript(extraContext []string, transcript []llm.Message) ContextEstimate {
 	transcript = a.providerVisibleMessages(transcript)
 	est := estimateRequest(llm.Request{
-		System:         a.system,
-		Messages:       transcript,
-		Tools:          a.toolSpecs,
-		ServerTools:    a.serverTools,
-		RequestContext: extraContext,
+		System:           a.system,
+		Messages:         transcript,
+		IncrementalTools: a.incrementalToolsIn(transcript),
+		Tools:            a.toolSpecs,
+		ServerTools:      a.serverTools,
+		RequestContext:   extraContext,
 	}, a.window())
 	est.PayloadSystem = est.System
 	est.PayloadTools = est.Tools
@@ -1487,6 +1499,10 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 			a.SetTranscript(transcript)
 		}
 	}
+	if transcript, changed := a.prepareToolContext(a.transcript); changed {
+		a.transcript = transcript
+		a.validatedPrefix = 0
+	}
 	request := a.modelRequestForTranscript(requestContext, a.transcript)
 	if a.requestSanitizer == nil {
 		return request
@@ -1502,6 +1518,8 @@ func (a *Agent) modelRequest(requestContext []string) modelRequest {
 }
 
 func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []llm.Message) modelRequest {
+	transcript, _ = a.prepareToolContext(transcript)
+	incremental := a.incrementalToolsIn(transcript)
 	payloadMessages, usedPrevious := a.payloadMessagesIn(transcript)
 	visibleTranscript := a.providerVisibleMessages(transcript)
 	payloadMessages = a.providerVisibleMessages(payloadMessages)
@@ -1509,13 +1527,14 @@ func (a *Agent) modelRequestForTranscript(requestContext []string, transcript []
 	if visiblePayloadStart < 0 {
 		visiblePayloadStart = 0
 	}
-	estimate := a.estimatePayloadContextForTranscript(requestContext, visibleTranscript, payloadMessages)
+	estimate := a.estimatePayloadContextForTranscript(requestContext, visibleTranscript, payloadMessages, usedPrevious)
 	req := llm.Request{
 		Model:                a.model,
 		NativeSteering:       a.nativeSteeringEnabled(),
 		Purpose:              llm.RequestPurposeTurn,
 		System:               a.system,
 		Messages:             payloadMessages,
+		IncrementalTools:     incremental,
 		Tools:                a.requestToolSpecs(),
 		DeferredToolGroups:   llm.CloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
@@ -1600,7 +1619,10 @@ func (a *Agent) providerVisibleMessages(messages []llm.Message) []llm.Message {
 				content = append(content, block)
 			}
 		}
-		if len(content) == 0 {
+		if message.ToolContext != nil && (!a.incrementalToolsEnabled() || message.ToolContext.ReplayDomain != domain) {
+			message.ToolContext = nil
+		}
+		if len(content) == 0 && message.ToolContext == nil {
 			continue
 		}
 		message.Content = content
@@ -1825,14 +1847,20 @@ func (a *Agent) validResponseStateFor(transcript []llm.Message) bool {
 	return valid
 }
 
-func (a *Agent) estimatePayloadContextForTranscript(requestContext []string, transcript, payloadMessages []llm.Message) ContextEstimate {
+func (a *Agent) estimatePayloadContextForTranscript(requestContext []string, transcript, payloadMessages []llm.Message, usedPrevious bool) ContextEstimate {
 	est := a.estimateContextForTranscript(requestContext, transcript)
+	previous := ""
+	if usedPrevious {
+		previous = a.responseState.PreviousResponseID
+	}
 	payload := estimateRequest(llm.Request{
-		System:         a.system,
-		Messages:       payloadMessages,
-		Tools:          a.toolSpecs,
-		ServerTools:    a.serverTools,
-		RequestContext: requestContext,
+		System:             a.system,
+		Messages:           payloadMessages,
+		IncrementalTools:   a.incrementalToolsIn(transcript),
+		PreviousResponseID: previous,
+		Tools:              a.toolSpecs,
+		ServerTools:        a.serverTools,
+		RequestContext:     requestContext,
 	}, a.window())
 	est.PayloadSystem = payload.System
 	est.PayloadTools = payload.Tools
@@ -2764,6 +2792,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 }
 
 func (a *Agent) refreshToolSpecs() {
+	incremental := a.incrementalToolsIn(a.transcript)
 	next := a.tools.Specs()
 	nextDeferred := a.tools.DeferredToolGroups()
 	if equalToolSpecs(a.toolSpecs, next) && equalToolGroups(a.deferredToolGroups, nextDeferred) {
@@ -2773,7 +2802,9 @@ func (a *Agent) refreshToolSpecs() {
 	a.deferredToolGroups = nextDeferred
 	a.compactionRuntimeVersion++
 	a.retentionEpochArmed = true
-	a.resetResponseState()
+	if !incremental || !a.incrementalToolsEnabled() {
+		a.resetResponseState()
+	}
 }
 
 func reportPromptCheckpoint(sink EventSink, checkpoint PromptCheckpoint) {
@@ -2994,16 +3025,23 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 	requestContext := a.requestContext(extraContext, sink)
 	modelReq := a.modelRequest(requestContext)
 	modelReq.request.NativeSteering = false
-	modelReq.request.Tools = nil // no tools: force a text-only wind-down
+	modelReq.request.DisableTools = true // also suppress tools retained by continuation
+	modelReq.request.Tools = nil
 	modelReq.request.ServerTools = nil
+	modelReq.request.DeferredToolGroups = nil
+	modelReq.request.ToolSearchFallback = ""
 	attempts := newTurnAttemptCoordinator(a, sink, turn)
 	res, err := attempts.request(ctx, modelReq.request, modelReq.estimate)
 	if err != nil && !res.hasPartialOutput() && hasProviderOwnedReasoning(modelReq.request.Messages) && invalidEncryptedContent(err) {
 		a.disableCurrentReasoningReplay()
 		sink.Notice(NoticeReasoningReplayDisabled)
 		modelReq = a.modelRequest(requestContext)
+		modelReq.request.NativeSteering = false
+		modelReq.request.DisableTools = true
 		modelReq.request.Tools = nil
 		modelReq.request.ServerTools = nil
+		modelReq.request.DeferredToolGroups = nil
+		modelReq.request.ToolSearchFallback = ""
 		res, err = attempts.rerun(ctx, res, modelReq.request, modelReq.estimate)
 	}
 	wasted := attempts.wasted
@@ -3017,8 +3055,14 @@ func (a *Agent) finalizeWithSummary(ctx context.Context, sink EventSink, extraCo
 		msg := a.textMessage(llm.RoleAssistant, res.text)
 		msg.Phase = llm.AssistantPhaseFinal
 		a.transcript = append(a.transcript, msg)
-		a.updateResponseState(res)
+		if len(res.toolCalls) == 0 {
+			a.updateResponseState(res)
+		} else {
+			// Discarded remote tool calls have no local results to continue with.
+			a.resetResponseState()
+		}
 	} else {
+		a.resetResponseState()
 		res.modelCall.Discard("summary_replaced")
 	}
 	sink.TurnComplete(TurnUsage{Turn: turn, Attempts: res.attempts, Usage: usage, Wasted: wasted, Context: modelReq.estimate})

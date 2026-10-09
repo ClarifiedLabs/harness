@@ -235,10 +235,31 @@ func targetReasoningUpdates(pc llm.ProviderConfig, entry llm.ModelEntry) bool {
 		(model == "gpt-6-astra" || strings.HasPrefix(model, "gpt-6-astra-"))
 }
 
+func targetIncrementalTools(pc llm.ProviderConfig, entry llm.ModelEntry) bool {
+	return strings.EqualFold(strings.TrimSpace(pc.APIType), "responses") &&
+		!pc.CodexBackend() && pc.PromptCache.IncrementalToolsEnabled(entry.Name, pc.BaseURL)
+}
+
 func (h *Handler) mapReasoningStates(target resolvedTarget, req llm.Request) llm.Request {
+	req.IncrementalTools = req.IncrementalTools && targetIncrementalTools(target.pc, target.entry)
 	req.Messages = append([]llm.Message(nil), req.Messages...)
 	domain := reasoningReplayDomain(target.pc.Name, target.entry, target.baseTargetID)
+	for _, message := range req.Messages {
+		// Unlike direct API replay, proxy metadata requires an exact, server-resolved
+		// compatibility domain; an empty client domain is not a wildcard. One
+		// incompatible event invalidates the whole catalog history, not just itself.
+		if tools := message.ToolContext; tools != nil && tools.ReplayDomain != domain {
+			req.IncrementalTools = false
+			break
+		}
+	}
+	// Keep PreviousResponseID: a suffix cannot reconstruct the remote history.
+	// Disabling incremental tools reasserts the current top-level catalog and
+	// instructions, but cannot erase tool events already stored in that history.
 	for i := range req.Messages {
+		if !req.IncrementalTools {
+			req.Messages[i].ToolContext = nil
+		}
 		state := req.Messages[i].ReasoningState
 		req.Messages[i].ReasoningState = nil
 		if state == nil || !targetReasoningUpdates(target.pc, target.entry) || state.ReplayDomain != domain {

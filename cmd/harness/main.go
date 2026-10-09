@@ -1848,6 +1848,7 @@ type modelListEntry struct {
 	APIType                  string     `json:"api_type,omitempty"`
 	ContinuationStateful     bool       `json:"continuation_stateful,omitempty"`
 	NativeCompaction         bool       `json:"native_compaction,omitempty"`
+	IncrementalTools         bool       `json:"incremental_tools"`
 	ReasoningUpdates         bool       `json:"reasoning_updates"`
 	AsyncTools               bool       `json:"async_tools"`
 	NativeSteering           bool       `json:"native_steering"`
@@ -1928,6 +1929,7 @@ func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
 			APIType:                  strings.TrimSpace(target.APIType),
 			ContinuationStateful:     target.ContinuationStateful,
 			NativeCompaction:         target.NativeCompaction,
+			IncrementalTools:         target.IncrementalTools,
 			ReasoningUpdates:         target.ReasoningUpdates,
 			AsyncTools:               target.AsyncTools,
 			NativeSteering:           target.NativeSteering,

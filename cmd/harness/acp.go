@@ -775,6 +775,21 @@ func sanitizeACPTranscript(messages []llm.Message) ([]llm.Message, bool) {
 				out[i].ParallelToolBatches[batchIndex].ToolUseIDs = ids
 			}
 		}
+		if toolContext := llm.CloneToolContext(messages[i].ToolContext); toolContext != nil {
+			for index := range toolContext.Tools {
+				tool := &toolContext.Tools[index]
+				changed = sanitizeACPString(&tool.Name) || changed
+				changed = sanitizeACPString(&tool.Description) || changed
+				if parameters, parametersChanged := sanitizeACPJSON(tool.Parameters); parametersChanged {
+					tool.Parameters = parameters
+					changed = true
+				}
+			}
+			for index := range toolContext.Removed {
+				changed = sanitizeACPString(&toolContext.Removed[index]) || changed
+			}
+			out[i].ToolContext = toolContext
+		}
 		if messages[i].Compaction != nil {
 			compaction := *messages[i].Compaction
 			for _, field := range []*string{&compaction.Summary, &compaction.SummarySource, &compaction.FallbackReason, &compaction.Focus} {

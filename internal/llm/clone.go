@@ -22,6 +22,7 @@ func CloneMessage(message Message) Message {
 		message.ParallelToolBatches[i].ToolUseIDs = slices.Clone(message.ParallelToolBatches[i].ToolUseIDs)
 	}
 	message.Compaction = CloneCompactionMetadata(message.Compaction)
+	message.ToolContext = CloneToolContext(message.ToolContext)
 	if message.ReasoningState != nil {
 		state := *message.ReasoningState
 		state.Baseline = cloneReasoningConfig(state.Baseline)
@@ -78,6 +79,20 @@ func CloneCompactionMetadata(meta *CompactionMetadata) *CompactionMetadata {
 	out.UserInstructions = CloneContentBlocks(meta.UserInstructions)
 	out.ReadFiles = slices.Clone(meta.ReadFiles)
 	out.ModifiedFiles = slices.Clone(meta.ModifiedFiles)
+	return &out
+}
+
+// CloneToolContext copies tool-context metadata, preserving nil and empty slices.
+func CloneToolContext(context *ToolContext) *ToolContext {
+	if context == nil {
+		return nil
+	}
+	out := *context
+	out.Tools = slices.Clone(context.Tools)
+	for i := range out.Tools {
+		out.Tools[i].Parameters = slices.Clone(context.Tools[i].Parameters)
+	}
+	out.Removed = slices.Clone(context.Removed)
 	return &out
 }
 

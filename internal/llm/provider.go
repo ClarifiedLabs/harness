@@ -118,6 +118,14 @@ type Request struct {
 	System         string         `json:"system,omitempty"`
 	Messages       []Message      `json:"messages,omitempty"`
 	Tools          []ToolSchema   `json:"tools,omitempty"`
+	// IncrementalTools selects chronological ToolContext events for capable
+	// targets. Tools remains the current authoritative catalog and fallback.
+	// This never changes local dispatch permissions or instruction authority.
+	IncrementalTools bool `json:"incremental_tools,omitempty"`
+	// DisableTools requests text-only output even when a stateful provider retains
+	// historical tool declarations. Callers also clear current tool catalogs for
+	// dialects that do not support an explicit tool-choice override.
+	DisableTools bool `json:"disable_tools,omitempty"`
 	// DeferredToolGroups contains trusted local function schemas grouped by the
 	// integration that provides them. A capable provider may expose the functions
 	// through native tool search instead of loading them into the initial model

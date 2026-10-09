@@ -24,7 +24,6 @@ const responsesWebSocketBeta = "responses_websockets=2026-02-06"
 type wireWebSocketRequest struct {
 	Type string `json:"type"`
 	wireRequest
-	ToolChoice     string            `json:"tool_choice"`
 	Generate       *bool             `json:"generate,omitempty"`
 	ClientMetadata map[string]string `json:"client_metadata,omitempty"`
 }
@@ -318,10 +317,14 @@ func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
 		toolSearch:          p.toolSearch,
 		baseURL:             p.baseURL,
 		providerName:        p.providerName,
+		codexBackend:        p.isCodexBackend(),
 	})
 	// Codex's Responses WebSocket path carries continuation through
 	// previous_response_id, while the ChatGPT backend requires store:false.
 	w.Store = false
+	if w.ToolChoice == "" {
+		w.ToolChoice = "auto"
+	}
 	var generate *bool
 	if req.Purpose == llm.RequestPurposePrewarm {
 		// Codex can materialize the stable instructions/tools prefix without
@@ -339,7 +342,6 @@ func (p *Provider) buildWebSocketRequest(req llm.Request) wireWebSocketRequest {
 	return wireWebSocketRequest{
 		Type:           "response.create",
 		wireRequest:    w,
-		ToolChoice:     "auto",
 		Generate:       generate,
 		ClientMetadata: meta,
 	}

@@ -145,6 +145,18 @@ func (p *Provider) Stream(ctx context.Context, req llm.Request) iter.Seq2[llm.St
 			return
 		}
 		req = p.withToolSearchDowngrade(req)
+		if req.Purpose == llm.RequestPurposePrewarm && req.IncrementalTools &&
+			!p.isCodexBackend() && p.promptCache.IncrementalToolsEnabled(req.Model, p.baseURL) {
+			// Prewarm's zero anchor excludes input messages. Incremental tools
+			// place the stable prefix in those messages, so it cannot be warmed
+			// independently without losing or duplicating that prefix.
+			yield(llm.StreamEvent{}, &llm.APIError{
+				StatusCode: http.StatusBadRequest,
+				Code:       "incremental_tools_prewarm_unsupported",
+				Message:    "Responses prewarm is unsupported with incremental tools; send the full initial request instead",
+			})
+			return
+		}
 		if p.useWebSocket {
 			if p.streamWebSocket(ctx, req, yield) {
 				return
@@ -233,6 +245,11 @@ func (p *Provider) nativeToolSearchActive(req llm.Request) bool {
 }
 
 func (p *Provider) withToolSearchDowngrade(req llm.Request) llm.Request {
+	if len(req.DeferredToolGroups) > 0 {
+		// A compatibility retry must not silently switch catalog protocols when
+		// removing native tool-search declarations.
+		req.IncrementalTools = false
+	}
 	if p.nativeToolSearchDowngraded(req.Model) {
 		req.DeferredToolGroups = nil
 	}
@@ -291,6 +308,7 @@ func (p *Provider) streamHTTP(ctx context.Context, req llm.Request, yield func(l
 		toolSearch:          p.toolSearch,
 		baseURL:             p.baseURL,
 		providerName:        p.providerName,
+		codexBackend:        p.isCodexBackend(),
 	}))
 	if err != nil {
 		yield(llm.StreamEvent{}, &llm.APIError{Message: "marshal request: " + err.Error()})

@@ -204,7 +204,9 @@ metric catalog live in [telemetry.md](telemetry.md).
 
 This adds no core import cycles or telemetry dependency to `internal/mcp` or
 `internal/mcp/jsonrpc`. Existing invariants remain: system prompts travel on
-`llm.Request.System`, not history; `internal/sessionrec` is the sole canonical
+`llm.Request.System`, not history (dialects may lower it to an authoritative
+wire instruction item, never arbitrary user-transcript instructions);
+`internal/sessionrec` is the sole canonical
 `raw.ndjson` recorder; session writes use temp-file then rename.
 `internal/atomicfile` owns shared temporary-file replacement for config, plans,
 task notes, and model caches, with permissions and syncing selected by each
@@ -283,9 +285,19 @@ out in the design notes below.
 
 Design notes:
 
-- **System prompt lives on `Request.System`,** not in the message list. This is the
-  natural Anthropic shape, trivially becomes a leading `role:"system"` message for
-  OpenAI, and means compaction can never accidentally summarize it away.
+- **System prompt lives on `Request.System`,** not in the message list. It remains
+  the logical authoritative prompt and cannot be summarized away by compaction.
+  Dialects choose wire placement: top-level instructions/system blocks, a leading
+  Chat Completions system message, or the developer input item described under
+  chronological tool catalogs below. Wire lowering does not permit arbitrary
+  user-transcript instructions to become system/developer instructions.
+- **`Message.ToolContext` is typed catalog metadata, not general instructions.**
+  `ReplayDomain` scopes replay; `Initial` carries the complete catalog (even when
+  empty); subsequent `Tools` add or redefine schemas and `Removed` names removed
+  tools. `After` places the event after its message content rather than before.
+  The agent appends changes at a closed tool boundary without rewriting sampled
+  history. These declarations never authorize local dispatch: removed tools stay
+  unavailable even when their older schemas remain in history.
 - **`ToolInput` is `json.RawMessage`,** not `map[string]any`: it arrives as a byte stream,
   the tool layer decodes it into its own typed struct anyway, and raw bytes round-trip
   through session files without re-encoding surprises. Assistant `tool_use` blocks and
@@ -384,7 +396,7 @@ any assistant `Phase` outside `""`, `AssistantPhaseCommentary` (`commentary`), o
 
 | Internal | OpenAI Chat Completions | OpenAI Responses | Anthropic Messages |
 |---|---|---|---|
-| `Request.System` | leading `{"role":"system","content":…}` message | top-level `instructions` | top-level `system` blocks |
+| `Request.System` | leading `{"role":"system","content":…}` message | top-level `instructions`; eligible incremental-tool windows use developer input after the initial `additional_tools` item | top-level `system` blocks |
 | user text | `{"role":"user","content":"…"}` | `message` item with `input_text` content | user message with `text` content |
 | user image | structured `image_url` content with a data URL and detail | `input_image` content with a data URL and detail | `image` content with a base64 source |
 | assistant text | assistant message content | `message` item with `output_text` content and optional phase | assistant message with `text` content |
@@ -956,9 +968,39 @@ stable prefix to at most one explicit `input_text` or `input_image` breakpoint
 while retaining OpenAI's implicit tail breakpoint. It scans backward across
 ineligible assistant/function/reasoning items, never rewrites opaque provider
 items or string-shaped function outputs, and caps placement before volatile
-request context. Top-level `instructions` remains unchanged. Compatible
-Responses backends are opt-in through `prompt_cache.explicit_breakpoints`, and
-count/compaction requests omit the marker.
+request context. Ordinary requests retain top-level `instructions`. Compatible
+Responses backends are opt-in through `prompt_cache.explicit_breakpoints`;
+count and maintenance requests omit markers and cache mode/TTL options.
+
+**Chronological tool catalogs.** This path defaults on for Responses on public
+`https://api.openai.com/v1` with `gpt-5.6` and `gpt-6-astra` (including their valid
+`-YYYY-MM-DD` date snapshots), plus the exact model ID `gpt-6.1-sol`. Provider config
+`prompt_cache.incremental_tools:false` disables it; explicit `true` does not
+widen the support gate. The proxy catalog exposes the gated `incremental_tools`
+capability. Codex, custom endpoints, other
+models, and requests with hosted server tools or deferred tool groups keep the
+ordinary layout. Explicit-breakpoint opt-in does not widen this capability gate.
+
+A fresh supported window records one initial `Message.ToolContext` catalog and
+later changes as deltas. `Request.Tools` still carries the current complete
+catalog for ordinary fallback; it is not used to reconstruct historical events.
+On full-history replay, Responses lowers the initial catalog to a developer
+`additional_tools` input item, then lowers `Request.System` to a developer
+`message` with `input_text`, then replays history and catalog changes in order.
+Additions/redefinitions become later `additional_tools` items; removals become
+an advisory developer notice, with availability enforced locally. Top-level
+`instructions` and `tools` are omitted on this path. A stored-response suffix
+sends only new history/deltas, not the initial catalog or instruction prefix.
+Compatible schema changes preserve continuation rather than resetting it.
+
+The existing explicit-cache controls also apply here: the stable instruction
+breakpoint is on the developer instruction text, never on `additional_tools`.
+Count and maintenance requests omit markers and cache mode/TTL options.
+Preserving earlier prefix bytes may help cache hits; a smaller continuation
+payload does not make historical schemas free context. No measured cache-hit or
+cost improvement is claimed. Compaction rebuilds the current catalog rather
+than replaying stale deltas (see [compaction.md](compaction.md)); existing legacy
+windows retain the ordinary layout until compaction or a fresh window.
 
 ### 5.5 Errors and retries (`internal/retry`)
 
@@ -2392,8 +2434,10 @@ assertion at dispatch:
   use the same inventory through the local
   catalog: `list` and `describe` are read-only; sequential `activate` makes
   at most 16 selected schemas visible on the following request. The agent detects
-  this spec change after dispatch, invalidates continuation/cache state, and
-  rebuilds the request. Activation persists only for that registry lifetime.
+  this spec change after dispatch and rebuilds the request. Ordinary windows
+  invalidate continuation state; eligible incremental-tool windows append a
+  catalog delta and preserve compatible continuation. Cache affinity survives
+  either path. Activation persists only for that registry lifetime.
   Native and local search are prompt optimizations, not authorization boundaries.
 
 ### 9.1 `read`

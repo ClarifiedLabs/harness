@@ -151,6 +151,11 @@ func (p *Provider) compactContextV2(ctx context.Context, req llm.Request) (resul
 }
 
 func (p *Provider) compactionRequestBase(req llm.Request) (wireRequest, []wireInputItem) {
+	req.Purpose = llm.RequestPurposeCompaction
+	if p.usesCompactionV2() {
+		// V2 always sends a full stateless input, including its catalog prefix.
+		req.PreviousResponseID = ""
+	}
 	req = p.withToolSearchDowngrade(req)
 	base := buildRequestWithOptions(req, p.contextWindow, p.outputLimit, buildOptions{
 		omitMaxOutputTokens:           p.omitMaxOutputTokens,
@@ -159,8 +164,15 @@ func (p *Provider) compactionRequestBase(req llm.Request) (wireRequest, []wireIn
 		toolSearch:                    p.toolSearch,
 		baseURL:                       p.baseURL,
 		providerName:                  p.providerName,
+		codexBackend:                  p.isCodexBackend(),
 		disablePromptCacheBreakpoints: true,
+		forceReplayReasoning:          true,
 	})
+	if incrementalToolsEnabled(req, buildOptions{promptCache: p.promptCache, baseURL: p.baseURL, codexBackend: p.isCodexBackend()}) {
+		// The shared builder has already interleaved catalog events and stable
+		// instructions. Rebuilding only message content would discard them.
+		return base, base.Input
+	}
 	// Compaction canonicalizes provider-owned reasoning state, so retain encrypted
 	// reasoning inputs even when no new reasoning controls were selected for the
 	// maintenance request.

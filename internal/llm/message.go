@@ -76,6 +76,7 @@ type ReasoningState struct {
 type Message struct {
 	SteerID             string              `json:"steer_id,omitempty"`
 	ReasoningState      *ReasoningState     `json:"reasoning_state,omitempty"`
+	ToolContext         *ToolContext        `json:"tool_context,omitempty"`
 	Role                Role                `json:"role"`
 	Time                time.Time           `json:"time,omitempty"`
 	Phase               string              `json:"phase,omitempty"`

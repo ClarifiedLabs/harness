@@ -196,7 +196,7 @@ func (a *Agent) compactFromNotes(ctx context.Context, sink EventSink, opts compa
 	checkpoint.Content = append([]llm.ContentBlock(nil), originals...)
 	checkpoint.Content = append(checkpoint.Content, llm.ContentBlock{Kind: llm.BlockText, Text: "\n=== Fresh context window ===\n" + summary})
 	checkpoint.Compaction = &llm.CompactionMetadata{Summary: summary, SummarySource: "task_notes", Focus: opts.focus, UserInstructions: originals}
-	next := []llm.Message{checkpoint}
+	next := a.rebaseToolContext([]llm.Message{checkpoint})
 	if err := llm.ValidateTranscript(next); err != nil {
 		return llm.Usage{}, false, err
 	}

@@ -617,7 +617,7 @@ func (a *Agent) compactInternal(ctx context.Context, sink EventSink, opts compac
 		// A successful textual rewrite supersedes provider-native checkpoints.
 		// Keeping one in the suffix would let a resumed same-domain session skip
 		// the new textual checkpoint and replay stale provider state instead.
-		compacted = withoutProviderCompactionMessages(compacted)
+		compacted = a.rebaseToolContext(withoutProviderCompactionMessages(compacted))
 		if collapseAll || a.estimateContextForTranscript(nil, compacted).Total <= a.compactTargetTokens() {
 			break
 		}
@@ -737,7 +737,8 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		Purpose:              llm.RequestPurposeCompaction,
 		System:               a.system,
 		Messages:             visible,
-		Tools:                llm.CloneToolSchemas(a.toolSpecs),
+		IncrementalTools:     a.incrementalToolsIn(visible),
+		Tools:                a.requestToolSpecs(),
 		DeferredToolGroups:   llm.CloneToolGroups(a.deferredToolGroups),
 		ToolSearchFallback:   tools.ToolCatalogName,
 		ServerTools:          llm.CloneServerTools(a.serverTools),
@@ -787,6 +788,7 @@ func (a *Agent) compactNative(ctx context.Context, sink EventSink, trigger strin
 		reasoningState.Baseline = reasoningState.Active
 	}
 	checkpoint := llm.Message{
+		ToolContext:    a.initialToolContext(),
 		ReasoningState: reasoningState,
 		Role:           llm.RoleUser,
 		Time:           a.now(),
@@ -1976,6 +1978,7 @@ const imageTokenEstimate = llm.EstimatedImageTokens
 func estimateTokens(msgs []llm.Message) int {
 	bytes, opaque, images := 0, 0, 0
 	for _, m := range msgs {
+		bytes += toolContextBytes(m.ToolContext)
 		for _, b := range m.Content {
 			blockBytes, blockOpaque, blockImages := estimateTranscriptContentBlock(b)
 			bytes += blockBytes
@@ -2009,8 +2012,13 @@ func estimateTranscriptContentBlock(b llm.ContentBlock) (bytes, opaque, images i
 func estimateRequest(req llm.Request, window int) ContextEstimate {
 	systemBytes := len(req.System)
 	toolBytes := 0
-	for _, t := range req.Tools {
-		toolBytes += len(t.Name) + len(t.Description) + len(t.Parameters)
+	if !req.IncrementalTools {
+		for _, t := range req.Tools {
+			toolBytes += len(t.Name) + len(t.Description) + len(t.Parameters)
+		}
+	} else if req.PreviousResponseID != "" {
+		// The stable instruction prefix is already on the remote continuation.
+		systemBytes = 0
 	}
 	for _, t := range req.ServerTools {
 		toolBytes += len(t.Name) + len(t.Kind) + len(t.Parameters)
@@ -2019,6 +2027,9 @@ func estimateRequest(req llm.Request, window int) ContextEstimate {
 	opaqueBytes := 0
 	images := 0
 	for _, m := range req.Messages {
+		if req.IncrementalTools {
+			toolBytes += toolContextBytes(m.ToolContext)
+		}
 		messageBytes += len(m.Role)
 		for _, b := range m.Content {
 			blockBytes, blockOpaque, blockImages := estimateRequestContentBlock(b)

@@ -1491,17 +1491,18 @@ func streamProviderCacheKey(opts factory.Options, providerID, promptCacheKey str
 		Value string `json:"value"`
 	}
 	type connectionConfig struct {
-		ProviderID        string `json:"provider_id"`
-		Provider          string `json:"provider"`
-		ProviderName      string `json:"provider_name"`
-		Model             string `json:"model"`
-		BaseURL           string `json:"base_url"`
-		ContextWindow     int    `json:"context_window"`
-		OutputLimit       int    `json:"output_limit"`
-		MinOutputTokens   int    `json:"min_output_tokens"`
-		OmitMaxOutput     bool   `json:"omit_max_output_tokens"`
-		APIKey            string `json:"api_key"`
-		AuthHeadersSHA256 string `json:"auth_headers_sha256"`
+		ProviderID        string                `json:"provider_id"`
+		Provider          string                `json:"provider"`
+		ProviderName      string                `json:"provider_name"`
+		Model             string                `json:"model"`
+		BaseURL           string                `json:"base_url"`
+		ContextWindow     int                   `json:"context_window"`
+		OutputLimit       int                   `json:"output_limit"`
+		MinOutputTokens   int                   `json:"min_output_tokens"`
+		OmitMaxOutput     bool                  `json:"omit_max_output_tokens"`
+		APIKey            string                `json:"api_key"`
+		AuthHeadersSHA256 string                `json:"auth_headers_sha256"`
+		PromptCache       llm.PromptCacheConfig `json:"prompt_cache"`
 	}
 	keys := make([]string, 0, len(opts.AuthHeaders))
 	for key := range opts.AuthHeaders {
@@ -1526,6 +1527,7 @@ func streamProviderCacheKey(opts factory.Options, providerID, promptCacheKey str
 		OmitMaxOutput:     opts.OmitMaxOutputTokens,
 		APIKey:            opts.APIKey,
 		AuthHeadersSHA256: hex.EncodeToString(headerDigest[:]),
+		PromptCache:       opts.PromptCache,
 	})
 	return wsPoolKey{
 		Connection: sha256.Sum256(connectionJSON),
@@ -2135,6 +2137,7 @@ func catalogFromProviderConfigs(providers []llm.ProviderConfig, pricer pricing.P
 				}
 			}
 			target := protocol.Target{
+				IncrementalTools:      targetIncrementalTools(pc, entry),
 				ReasoningUpdates:      targetReasoningUpdates(pc, entry),
 				AsyncTools:            targetReasoningUpdates(pc, entry),
 				NativeSteering:        targetReasoningUpdates(pc, entry) && targetResponsesWebSocket(pc, entry),

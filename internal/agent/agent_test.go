@@ -1363,7 +1363,7 @@ func TestFinalizeWithSummaryInvalidEncryptedFallback(t *testing.T) {
 		t.Fatalf("finalization replay filtering = first %s second %s", dump(fp.Requests[0].Messages), dump(fp.Requests[1].Messages))
 	}
 	for i, request := range fp.Requests {
-		if len(request.Tools) != 0 || len(request.ServerTools) != 0 {
+		if !request.DisableTools || request.NativeSteering || len(request.Tools) != 0 || len(request.ServerTools) != 0 || len(request.DeferredToolGroups) != 0 {
 			t.Fatalf("finalization request %d advertised tools", i+1)
 		}
 	}

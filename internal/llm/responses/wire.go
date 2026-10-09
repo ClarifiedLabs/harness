@@ -23,6 +23,7 @@ type wireRequest struct {
 	Instructions       string                  `json:"instructions,omitempty"`
 	Input              []wireInputItem         `json:"input"`
 	Tools              []wireTool              `json:"tools,omitempty"`
+	ToolChoice         string                  `json:"tool_choice,omitempty"`
 	MaxOutputTokens    *int                    `json:"max_output_tokens,omitempty"`
 	Temperature        *float64                `json:"temperature,omitempty"`
 	ServiceTier        string                  `json:"service_tier,omitempty"`
@@ -64,9 +65,10 @@ type wireInputItem struct {
 	Reasoning *wireReasoning `json:"reasoning,omitempty"`
 
 	// message
-	Role    string `json:"role,omitempty"`
-	Phase   string `json:"phase,omitempty"`
-	Content any    `json:"content,omitempty"`
+	Role    string      `json:"role,omitempty"`
+	Phase   string      `json:"phase,omitempty"`
+	Content any         `json:"content,omitempty"`
+	Tools   *[]wireTool `json:"tools,omitempty"`
 
 	// function_call / function_call_output
 	Async     bool    `json:"async,omitempty"`
@@ -260,6 +262,8 @@ type buildOptions struct {
 	baseURL                       string
 	providerName                  string
 	disablePromptCacheBreakpoints bool
+	forceReplayReasoning          bool
+	codexBackend                  bool
 }
 
 func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, opts buildOptions) wireRequest {
@@ -269,7 +273,7 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 	// Textual summaries and prewarm deliberately omit it unless requested;
 	// native compaction separately canonicalizes all reasoning inputs.
 	explicitReasoning := req.Reasoning.Effort != "" || req.Reasoning.Summary != ""
-	replayReasoning := explicitReasoning || req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn
+	replayReasoning := opts.forceReplayReasoning || explicitReasoning || req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn
 	updates := canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model) && (req.Purpose == "" || req.Purpose == llm.RequestPurposeTurn || req.Purpose == llm.RequestPurposeCompaction)
 	input, messageEnds := buildInputWithMessageEndsOrdered(req.Messages, replayReasoning, updates, canonicalOpenAIEndpoint(opts.baseURL) && isAstraModel(req.Model), metaProvider(opts.providerName, opts.baseURL))
 	if updates {
@@ -282,6 +286,10 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 				break
 			}
 		}
+	}
+	incrementalTools := incrementalToolsEnabled(req, opts)
+	if incrementalTools {
+		input, messageEnds = lowerToolContext(input, messageEnds, req, opts)
 	}
 	contextText := llm.RequestContextText(req.RequestContext)
 	if !opts.disablePromptCacheBreakpoints && promptCacheBreakpointsEnabled(req.Model, opts.baseURL, opts.promptCache) {
@@ -299,6 +307,15 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 		PreviousResponseID: req.PreviousResponseID,
 		Temperature:        req.Temperature,
 		ServiceTier:        req.ServiceTier,
+	}
+	if req.DisableTools {
+		w.ToolChoice = "none"
+	}
+	if incrementalTools {
+		w.Instructions = ""
+		// This is a protocol setting, not a property of the current delta. Keep
+		// it stable across full requests, continuations, and empty catalogs.
+		w.ParallelTools = true
 	}
 	if llm.ResolvePromptCacheKeyField(opts.providerName, "responses", opts.baseURL, opts.promptCache) == llm.PromptCacheKeyFieldPromptCacheKey {
 		w.PromptCacheKey = req.PromptCacheKey
@@ -355,6 +372,9 @@ func buildRequestWithOptions(req llm.Request, contextWindow, outputLimit int, op
 		}
 	}
 	for _, t := range req.Tools {
+		if incrementalTools {
+			break
+		}
 		if nativeToolSearch && (t.Name == req.ToolSearchFallback || deferredNames[t.Name]) {
 			continue
 		}
@@ -743,7 +763,7 @@ func promptCacheBreakpointsEnabled(model, baseURL string, cfg llm.PromptCacheCon
 		return false
 	}
 	model = normalizeToolSearchModel(model)
-	return isAstraModel(model) || model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
+	return isAstraModel(model) || model == "gpt-6.1-sol" || model == "gpt-5.6" || strings.HasPrefix(model, "gpt-5.6-")
 }
 
 // placePromptCacheBreakpoint maps the neutral stable-message count onto the

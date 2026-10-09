@@ -17,6 +17,7 @@ type ModelInfo struct {
 	NativeSteering   bool           `json:"native_steering,omitempty"`
 	AsyncTools       bool           `json:"async_tools,omitempty"`
 	ReasoningUpdates bool           `json:"reasoning_updates,omitempty"`
+	IncrementalTools bool           `json:"incremental_tools,omitempty"`
 	ContextWindow    int            `json:"context_window"`
 	OutputLimit      int            `json:"output_limit,omitempty"`
 	InputModalities  []string       `json:"input_modalities,omitempty"`
@@ -204,6 +205,9 @@ func (a *AnthropicToolSearch) UnmarshalJSON(data []byte) error {
 // provider-specific defaults. ExplicitBreakpoints is tri-state so compatible
 // Responses backends remain off unless an operator opts them in.
 type PromptCacheConfig struct {
+	// IncrementalTools defaults on for supported targets. An explicit false
+	// disables chronological tool catalogs; true never widens the support gate.
+	IncrementalTools    *bool    `json:"incremental_tools,omitempty"`
 	KeyField            string   `json:"key_field,omitempty"`
 	AffinityHeaders     []string `json:"affinity_headers,omitempty"`
 	ExplicitBreakpoints *bool    `json:"explicit_breakpoints,omitempty"`

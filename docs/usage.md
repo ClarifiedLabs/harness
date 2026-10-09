@@ -31,7 +31,7 @@ config-defined agents. Both commands exit before creating a session.
 `--models --format json` also shows each target's `api_type`,
 `continuation_stateful`, provider-native `native_compaction`, zero-generation
 `prewarm` support, `reasoning_updates`, `async_tools`, `native_steering`,
-`server_tools`, price, and variant relationship
+`incremental_tools`, `server_tools`, price, and variant relationship
 (`base_target_id` / `variant`). When a target advertises `web_search`,
 `-web-search auto` lets harness declare the provider-hosted web search tool for
 model calls. The default is `off`.
@@ -1399,16 +1399,40 @@ copy the same key into non-auth routing headers such as `x-session-id`. The
 proxy derives the provider-facing value as a SHA-256 hash of harness's local
 cache-affinity key, so providers do not receive the raw identifier.
 `explicit_breakpoints` is a tri-state Responses override: omitted enables one
-conservative stable-message breakpoint for GPT-5.6 and GPT-6 Astra on the
-canonical OpenAI API, `false` disables it, and `true` opts a compatible Responses
+conservative stable-message breakpoint for GPT-5.6, GPT-6 Astra, and GPT-6.1 Sol
+on the canonical OpenAI API, `false` disables it, and `true` opts a compatible Responses
 backend in.
 `mode` may be `implicit` (the provider default) or `explicit`; `ttl` may be
 `30m`. These options use the same capability gate. Explicit mode disables the
 implicit tail cache: Harness marks the stable prefix even when it ends at the
 request tail. A request with no eligible stable content has no cache write in
 that mode. For example, `"prompt_cache":{"mode":"explicit","ttl":"30m"}`.
-Top-level `instructions` remain unchanged; token-count and compaction requests
-omit cache mode, TTL, and markers.
+Ordinary requests retain top-level `instructions`; token-count and maintenance
+requests omit cache mode, TTL, and markers.
+
+`incremental_tools` defaults to enabled for Responses on public
+`https://api.openai.com/v1` with `gpt-5.6` and `gpt-6-astra` (including their valid
+`-YYYY-MM-DD` date snapshots), plus the exact model ID `gpt-6.1-sol`. Set
+`"prompt_cache":{"incremental_tools":false}` to disable chronological tool
+catalogs. Explicit `true` does not widen the model/endpoint support gate. The catalog's
+`incremental_tools` field reports this gated capability. Codex, custom endpoints,
+other models, and requests using hosted server tools or deferred tool groups
+retain ordinary current-tool declarations; `explicit_breakpoints:true` does not
+opt those targets into incremental tools.
+
+A fresh eligible window sends its initial catalog once and appends later schema
+changes in chronological order. Full-history requests place the authoritative
+system prompt in developer input after the initial `additional_tools` catalog;
+stored-response continuation sends only the new suffix, without repeating the
+instruction/tool prefix. Existing explicit-cache settings apply, with the stable
+instruction marker on developer text, not `additional_tools`. Compatible schema
+changes preserve continuation; removed tools are still unavailable locally.
+Compaction rebuilds the current catalog, while existing legacy windows stay
+ordinary until compaction or a fresh window. Stable prefixes may help cache hits,
+but smaller payloads do not make historical tool schemas free context. No
+measured cache-hit or cost improvement is claimed. Background prefix prewarm is
+disabled for targets with incremental tools enabled: a zero-message anchor cannot safely establish the
+chronological catalog/instruction baseline.
 
 Responses provider configs may set `responses_tool_search`. When omitted,
 Harness enables native hosted tool search on the canonical OpenAI API for

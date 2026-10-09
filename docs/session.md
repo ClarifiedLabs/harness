@@ -43,6 +43,19 @@ persist coordination state; `Usage`/`UsageByModel` aggregate spend.
 
 ## Saving and recovery
 
+Chronological tool catalogs, enabled by default on supported targets, are stored
+as typed `llm.Message.ToolContext` metadata in the canonical tree's ordinary
+message snapshots; there is no second
+catalog log. `ReplayDomain`, `Initial`, and `After` preserve scope and placement;
+`Tools` carries initial/add/redefine schemas and `Removed` carries removed names.
+Changes are appended at closed tool boundaries and participate in transcript
+fingerprints, so resume and branch replay retain their chronological meaning.
+The current `Request.Tools` remains the complete fallback catalog, not local
+authorization derived from old events. Existing legacy windows without an
+initial catalog stay ordinary on resume until compaction or a fresh window;
+enabling the option does not retrofit their sampled history. Replacement
+windows rebuild the current catalog as described in [compaction.md](compaction.md).
+
 - Segment entries are safe navigation boundaries. An assistant tool-use
   message and its immediately following tool-result message share one segment,
   so a branch cannot split the §4 transcript invariant.
@@ -76,7 +89,9 @@ persist coordination state; `Usage`/`UsageByModel` aggregate spend.
   fingerprint matches the materialized active prefix. `active-turn.json`
   enforces the same invariant; invalid recovery state is discarded.
   `-responses-stateful=false` installs no anchor and sends complete history on
-  every request.
+  every request. Eligible incremental-tool windows preserve a compatible anchor
+  across schema changes by appending catalog deltas; other continuation checks
+  and fallback rules remain unchanged.
 - Gemini Interactions uses the same CLI-owned continuation contract.
   `interactions_stateful` controls the target's catalog capability; sessions
   retain signed thought and Google Search steps so a missing/rejected stored

@@ -53,11 +53,15 @@ func EstimateOpenAIChat(req llm.Request) int {
 		return 0
 	}
 	total := enc.CountText(req.System)
-	for _, t := range req.Tools {
-		total += chatToolOverhead
-		total += enc.CountText(t.Name)
-		total += enc.CountText(t.Description)
-		total += enc.CountText(string(t.Parameters))
+	toolTokens := func(t llm.ToolSchema) int {
+		return chatToolOverhead + enc.CountText(t.Name) + enc.CountText(t.Description) + enc.CountText(string(t.Parameters))
+	}
+	if !req.IncrementalTools {
+		for _, t := range req.Tools {
+			total += toolTokens(t)
+		}
+	} else if req.PreviousResponseID != "" {
+		total = 0 // The instruction prefix is already part of the continuation.
 	}
 	for _, t := range req.ServerTools {
 		total += chatToolOverhead
@@ -66,6 +70,17 @@ func EstimateOpenAIChat(req llm.Request) int {
 		total += enc.CountText(string(t.Parameters))
 	}
 	for _, m := range req.Messages {
+		if req.IncrementalTools && m.ToolContext != nil {
+			for _, tool := range m.ToolContext.Tools {
+				total += toolTokens(tool)
+			}
+			if len(m.ToolContext.Removed) > 0 {
+				total += enc.CountText("These tools are no longer available; do not call them:")
+				for _, name := range m.ToolContext.Removed {
+					total += enc.CountText(name) + chatBlockOverhead
+				}
+			}
+		}
 		total += chatMessageOverhead
 		total += enc.CountText(string(m.Role))
 		for _, b := range m.Content {
