@@ -26,7 +26,18 @@ func (a *Agent) initialToolContext() *llm.ToolContext {
 	if !a.incrementalToolsEnabled() {
 		return nil
 	}
-	return &llm.ToolContext{ReplayDomain: a.reasoningReplayDomain, Initial: true, Tools: a.requestToolSpecs()}
+	initial := &llm.ToolContext{ReplayDomain: a.reasoningReplayDomain, Initial: true, Tools: a.requestToolSpecs()}
+	if a.transcriptSanitizer != nil {
+		// New catalog metadata must be safe before it reaches checkpoints or
+		// compaction history, not just the final provider request. The specs
+		// above are detached copies, so sanitization cannot change the registry.
+		messages, _ := a.transcriptSanitizer([]llm.Message{{Role: llm.RoleUser, ToolContext: initial}})
+		if len(messages) != 1 {
+			return nil
+		}
+		return messages[0].ToolContext
+	}
+	return initial
 }
 
 func (a *Agent) toolContextStart(messages []llm.Message) int {
@@ -64,7 +75,11 @@ func (a *Agent) incrementalToolsIn(messages []llm.Message) bool {
 // events at a closed tool boundary. Debug/count projections use the same code
 // without changing live history. Legacy windows keep their ordinary layout.
 func (a *Agent) prepareToolContext(messages []llm.Message) ([]llm.Message, bool) {
-	if !a.incrementalToolsEnabled() || len(messages) == 0 {
+	if len(messages) == 0 {
+		return messages, false
+	}
+	initial := a.initialToolContext()
+	if initial == nil {
 		return messages, false
 	}
 	if !a.incrementalToolsIn(messages) {
@@ -73,7 +88,7 @@ func (a *Agent) prepareToolContext(messages []llm.Message) ([]llm.Message, bool)
 		// merely because the provider configuration changed on resume.
 		if messages[0].ToolContext == nil && len(messages) == 1 && messages[0].Role == llm.RoleUser && !hasToolResult(messages[0]) {
 			out := append([]llm.Message(nil), messages...)
-			out[0].ToolContext = a.initialToolContext()
+			out[0].ToolContext = initial
 			return out, true
 		}
 		return messages, false
@@ -92,7 +107,9 @@ func (a *Agent) prepareToolContext(messages []llm.Message) ([]llm.Message, bool)
 		}
 	}
 	event := &llm.ToolContext{ReplayDomain: a.reasoningReplayDomain, After: true}
-	for _, tool := range a.requestToolSpecs() {
+	// Compare the same sanitized definitions that are committed to history;
+	// comparing raw specs would repeatedly re-add an unchanged unsafe catalog.
+	for _, tool := range initial.Tools {
 		previous, exists := current[tool.Name]
 		if !exists || !sameToolDefinition(previous, tool) {
 			event.Tools = append(event.Tools, tool)

@@ -296,6 +296,9 @@ consolidated save. Validated image payloads are preserved byte-for-byte during
 text sanitization. ACP TODO steps and plan titles/bodies are sanitized before
 they enter live state or immutable plan artifacts, including delegate child
 state; root snapshots also sanitize detached copies as a persistence safeguard.
+Chronological tool catalogs are sanitized before entering root or child history,
+including compaction baselines. Catalog updates compare the sanitized definitions
+so unchanged tools do not create repeated updates or invalidate continuation.
 `session/close` or connection teardown closes reusable child sessions/background
 work and performs a final consolidated save. If explicit root teardown times
 out, the connection retains its closing session and rejects successor roots. These paths

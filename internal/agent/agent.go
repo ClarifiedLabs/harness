@@ -758,8 +758,10 @@ func (a *Agent) DrainSteerContents() []SteerInput {
 
 // SetTranscriptSanitizer installs an optional host-boundary sanitizer. It runs
 // immediately before each provider request, and any rewrite invalidates remote
-// response continuation state. Protocol providers use this to keep transport
-// control sequences out of same-prompt model replay.
+// response continuation state. It also sanitizes new tool-context projections
+// (including compaction baselines) before they enter history. Protocol providers
+// use this to keep transport control sequences out of model replay and saved
+// tool catalogs.
 func (a *Agent) SetTranscriptSanitizer(sanitize func([]llm.Message) ([]llm.Message, bool)) {
 	a.transcriptSanitizer = sanitize
 }
