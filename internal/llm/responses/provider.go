@@ -74,6 +74,7 @@ type Provider struct {
 
 	wsMu         sync.Mutex
 	wsConn       *ws.Conn
+	wsOpenedAt   time.Time
 	wsTurnState  string
 	wsResponseID string
 	wsIDs        wsIDs
@@ -120,6 +121,7 @@ func (p *Provider) CanContinueResponse(responseID string) bool {
 	if !p.useWebSocket {
 		return true
 	}
+	p.expireWebSocketLocked()
 	return responseID != "" &&
 		responseID == p.wsResponseID &&
 		p.wsConn != nil &&

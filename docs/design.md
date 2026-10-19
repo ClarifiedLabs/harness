@@ -782,7 +782,12 @@ the agent disables stateful continuation for that agent, rebuilds the request,
 and retries once stateless. Responses providers can set `responses_websocket:true`
 to use the Responses WebSocket transport; the proxy defaults that on for public
 OpenAI Astra targets and `codex_oauth` Responses configs, preserving explicit
-true/false overrides.
+true/false overrides. The Responses transport tracks each socket's dial time
+and retires it between requests after 55 minutes, leaving headroom before the
+upstream 60-minute limit. Continuation probes retire aged sockets too; expiration
+between a probe and a stream returns `previous_response_unavailable` without
+sending a suffix on a replacement socket. Active streams are never interrupted
+by local age checks.
 The Codex WebSocket request always carries `store:false`; its response IDs are
 continuation handles scoped to the originating live socket rather than durable
 stored Responses objects. If a WebSocket request without a previous response
@@ -1486,8 +1491,9 @@ strictly valid, intentionally concise example rather than a duplicate schema.
 - **Bounded Responses WebSocket pool.** The proxy keys pooled transports by
   separately hashed connection configuration, `ProxySessionID`, and authenticated
   API-key identity. Defaults are
-  64 connections, a one-hour idle TTL, no absolute-age cap, and a 30-second
-  janitor tick. Acquisitions lease an entry; idle capacity pressure evicts LRU,
+  64 connections, a one-hour idle TTL, no pool-entry absolute-age cap, and a
+  30-second janitor tick. Independently, the Responses transport rotates actual
+  sockets at 55 minutes between requests. Acquisitions lease an entry; idle capacity pressure evicts LRU,
   while all-busy pressure creates an unpooled provider that closes on release.
   Expired active entries leave lookup immediately but close only after their last
   idempotent release. Shutdown rejects new leases, closes idle entries, retires

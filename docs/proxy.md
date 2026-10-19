@@ -112,7 +112,12 @@ logical-session routing.
 Stickiness improves WebSocket continuation hit rate but is never required for
 correctness. HTTP stored continuations work on any replica; a Codex
 `store:false` socket miss returns 409 and the CLI resends complete history
-once.
+once. Responses sockets rotate between requests after 55 minutes to avoid the
+upstream 60-minute lifetime limit; their continuation IDs expire with them. This
+is separate from the pool's one-hour idle timeout. An upstream
+`websocket_connection_limit_reached` before output triggers one fresh-socket
+retry for full-context requests, or a continuation reset for suffix-only
+requests. Errors after output has begun are not automatically replayed.
 
 For a replicated production deployment, bake `models.dev.api.json` into the
 image or mount an identical read-only copy in every pod. Set

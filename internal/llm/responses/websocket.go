@@ -21,6 +21,10 @@ import (
 
 const responsesWebSocketBeta = "responses_websockets=2026-02-06"
 
+// Rotate between requests before the upstream 60-minute connection limit.
+// Leave headroom for an in-flight response; never interrupt one locally.
+const webSocketMaxAge = 55 * time.Minute
+
 type wireWebSocketRequest struct {
 	Type string `json:"type"`
 	wireRequest
@@ -105,6 +109,15 @@ func (p *Provider) runWebSocketLocked(ctx context.Context, req llm.Request, yiel
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
+		}
+		if p.expireWebSocketLocked() && req.PreviousResponseID != "" {
+			// The socket may age out between the continuation probe and Stream.
+			// Only the caller has the full history needed to replace this suffix.
+			return &llm.APIError{
+				StatusCode: http.StatusConflict,
+				Code:       "previous_response_unavailable",
+				Message:    "Responses websocket connection expired; resend full context.",
+			}
 		}
 		nativeToolSearch := p.nativeToolSearchActive(req)
 		// Local serialization failures are not physical upstream attempts.
@@ -297,10 +310,20 @@ func (p *Provider) webSocketConnLocked(ctx context.Context, req llm.Request) (*w
 		return nil, false, &llm.APIError{Message: "websocket connect: " + err.Error(), Retryable: true, Stage: llm.APIErrorStageUpstreamConnect}
 	}
 	p.wsConn = conn
+	p.wsOpenedAt = time.Now()
 	return conn, false, nil
 }
 
+func (p *Provider) expireWebSocketLocked() bool {
+	if p.wsConn == nil || time.Since(p.wsOpenedAt) < webSocketMaxAge {
+		return false
+	}
+	p.closeWebSocketLocked()
+	return true
+}
+
 func (p *Provider) closeWebSocketLocked() {
+	p.wsOpenedAt = time.Time{}
 	p.wsResponseID = ""
 	p.wsTurnState = ""
 	if p.wsConn != nil {

@@ -1022,7 +1022,7 @@ continuation with `continuation_unsupported`. A connection-affine WebSocket
 provider can reject a known-unavailable ID before streaming with
 `previous_response_unavailable`; an upstream previous-ID rejection is also
 passed through unchanged. The exception is a Responses WebSocket
-`websocket_connection_limit_reached` error: the proxy normalizes it to
+`websocket_connection_limit_reached` error before output: the proxy normalizes it to
 `previous_response_unavailable` for a socket-scoped continuation, or retries it
 once when the request has no previous ID and already contains full context. In
 the continuation case harness clears its local anchor and performs one
@@ -1042,8 +1042,12 @@ model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
 defaults this on for public OpenAI Astra targets and `codex_oauth` Responses
 providers, and preserves an explicit `responses_websocket:false` override.
 Other models on the same public OpenAI provider keep their existing transport
-default. WebSocket connections live in a bounded per-pod lease pool. Harness
-sends its opaque session ID as
+default. WebSocket connections live in a bounded per-pod lease pool. The
+Responses transport rotates sockets between requests after 55 minutes, before
+OpenAI's 60-minute limit; an expired continuation uses the reset-and-resend path
+above. Rotation never interrupts an active response. If a response crosses the
+upstream limit after output has begun, the error still surfaces rather than
+risking duplicate output. Harness sends its opaque session ID as
 `X-Harness-Session`, allowing a load balancer to keep that connection-affine
 traffic on one pod as a performance optimization. Correctness does not depend
 on stickiness: a pod/socket miss produces the reset-and-resend path above.
