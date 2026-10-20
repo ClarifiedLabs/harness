@@ -3352,7 +3352,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 1.8,
@@ -3380,7 +3380,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 1.8,
@@ -17334,6 +17334,74 @@
           "cache_write": 2.5
         }
       },
+      "gemini/gemini-3.8-flash": {
+        "id": "gemini/gemini-3.8-flash",
+        "name": "Gemini 3.8 Flash",
+        "release_date": "2026-09-02",
+        "last_updated": "2026-09-02",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.75,
+          "output": 3.75,
+          "cache_read": 0.075,
+          "input_audio": 0.75
+        }
+      },
+      "gemini/gemini-4-argon": {
+        "id": "gemini/gemini-4-argon",
+        "name": "Gemini 4 Argon",
+        "release_date": "2026-10-13",
+        "last_updated": "2026-10-13",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "audio"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 32768
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.1,
+          "input_audio": 2
+        }
+      },
       "openai/gpt-5.6-luna": {
         "id": "openai/gpt-5.6-luna",
         "name": "GPT-5.6 Luna",
@@ -21553,7 +21621,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.5,
@@ -42043,7 +42111,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.5,
@@ -42337,7 +42405,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 1.25,
@@ -56333,7 +56401,7 @@
         },
         "limit": {
           "context": 256000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.5,
@@ -67280,6 +67348,28 @@
           "output": 120
         }
       },
+      "openai/gpt-5-search-api": {
+        "id": "openai/gpt-5-search-api",
+        "name": "GPT-5 Search API",
+        "release_date": "2025-10-14",
+        "last_updated": "2025-10-14",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "limit": {
+          "context": 272000,
+          "output": 100000
+        },
+        "cost": {
+          "input": 1.25,
+          "output": 10,
+          "cache_read": 0.125
+        }
+      },
       "openai/gpt-5.1": {
         "id": "openai/gpt-5.1",
         "name": "GPT-5.1",
@@ -70791,7 +70881,8 @@
               "none",
               "low",
               "medium",
-              "high"
+              "high",
+              "xhigh"
             ]
           }
         ],
@@ -70832,7 +70923,8 @@
             "values": [
               "low",
               "medium",
-              "high"
+              "high",
+              "xhigh"
             ]
           }
         ],
@@ -79987,7 +80079,7 @@
         "reasoning": true,
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.5,
@@ -89900,7 +89992,7 @@
           }
         ],
         "limit": {
-          "context": 1000000,
+          "context": 1048576,
           "output": 262144
         },
         "cost": {
@@ -89932,7 +90024,7 @@
           }
         ],
         "limit": {
-          "context": 1000000,
+          "context": 1048576,
           "output": 262144
         },
         "cost": {
@@ -92684,7 +92776,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.5,
@@ -97683,8 +97775,7 @@
         "modalities": {
           "input": [
             "text",
-            "image",
-            "pdf"
+            "image"
           ]
         },
         "limit": {
@@ -97704,7 +97795,7 @@
           ]
         },
         "limit": {
-          "context": 8000,
+          "context": 64000,
           "output": 0
         }
       },
@@ -99546,12 +99637,12 @@
           ]
         },
         "limit": {
-          "context": 163840,
-          "output": 16384
+          "context": 128000,
+          "output": 16000
         },
         "cost": {
-          "input": 0.32,
-          "output": 0.89
+          "input": 0.2574,
+          "output": 1.0287
         }
       },
       "deepseek/deepseek-chat-v3-0324": {
@@ -99941,9 +100032,9 @@
           "output": 393216
         },
         "cost": {
-          "input": 0.15,
-          "output": 0.6,
-          "cache_read": 0.003
+          "input": 0.3,
+          "output": 1.2,
+          "cache_read": 0.006
         }
       },
       "dots-studio/dots-3-note-preview:free": {
@@ -100883,7 +100974,7 @@
         },
         "limit": {
           "context": 131072,
-          "output": 16384
+          "output": 117964
         },
         "cost": {
           "input": 0.04,
@@ -104976,9 +105067,9 @@
       },
       "openai/gpt-audio": {
         "id": "openai/gpt-audio",
-        "name": "OpenAI: GPT Audio",
-        "release_date": "2026-01-19",
-        "last_updated": "2026-01-19",
+        "name": "GPT-Audio",
+        "release_date": "2025-08-28",
+        "last_updated": "2025-08-28",
         "modalities": {
           "input": [
             "text",
@@ -104997,9 +105088,9 @@
       },
       "openai/gpt-audio-mini": {
         "id": "openai/gpt-audio-mini",
-        "name": "OpenAI: GPT Audio Mini",
-        "release_date": "2026-01-19",
-        "last_updated": "2026-01-19",
+        "name": "GPT-Audio Mini",
+        "release_date": "2025-10-06",
+        "last_updated": "2025-10-06",
         "modalities": {
           "input": [
             "text",
@@ -106362,7 +106453,7 @@
         ],
         "limit": {
           "context": 262144,
-          "output": 235929
+          "output": 65536
         },
         "cost": {
           "input": 0.39,
@@ -106552,8 +106643,8 @@
           "output": 235929
         },
         "cost": {
-          "input": 0.15,
-          "output": 1,
+          "input": 0.1,
+          "output": 0.95,
           "cache_read": 0.05
         }
       },
@@ -107694,9 +107785,9 @@
           "output": 128000
         },
         "cost": {
-          "input": 0.0825,
-          "output": 0.33,
-          "cache_read": 0.020625
+          "input": 0.132,
+          "output": 0.528,
+          "cache_read": 0.033
         }
       },
       "tencent/hy3-preview": {
@@ -107756,9 +107847,9 @@
           "output": 64000
         },
         "cost": {
-          "input": 0.7506,
-          "output": 2.2509,
-          "cache_read": 0.0378
+          "input": 0.834,
+          "output": 2.501,
+          "cache_read": 0.042
         }
       },
       "thedrummer/cydonia-24b-v4.1": {
@@ -108445,9 +108536,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 0.1,
-          "output": 0.28,
-          "cache_read": 0.05
+          "input": 0.03,
+          "output": 0.08,
+          "cache_read": 0.003
         }
       },
       "xiaomi/mimo-v2.6-pro": {
@@ -108774,13 +108865,13 @@
           }
         ],
         "limit": {
-          "context": 202752,
-          "output": 131072
+          "context": 198000,
+          "output": 128000
         },
         "cost": {
-          "input": 1,
-          "output": 3.2,
-          "cache_read": 0.2
+          "input": 0.6,
+          "output": 1.92,
+          "cache_read": 0.12
         }
       },
       "z-ai/glm-5-turbo": {
@@ -109207,9 +109298,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.035,
+          "input": 0.045,
           "output": 0.6,
-          "cache_read": 0.004
+          "cache_read": 0.007
         }
       },
       "~deepseek/deepseek-pro-latest": {
@@ -109239,9 +109330,9 @@
           "output": 393216
         },
         "cost": {
-          "input": 0.1307,
+          "input": 0.225,
           "output": 8,
-          "cache_read": 0.13
+          "cache_read": 0.23
         }
       },
       "~deepseek/deepseek-v4-flash-latest": {
@@ -109271,9 +109362,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.0086,
-          "output": 0.45,
-          "cache_read": 0.0086
+          "input": 0.00912,
+          "output": 0.12,
+          "cache_read": 0.00336
         }
       },
       "~google/gemini-flash-latest": {
@@ -109679,9 +109770,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.053,
+          "input": 0.051,
           "output": 6,
-          "cache_read": 0.033
+          "cache_read": 0.032
         }
       }
     }
@@ -113382,6 +113473,18 @@
           "cache_write": 2.5
         }
       },
+      "gpt-live-transcribe": {
+        "id": "gpt-live-transcribe",
+        "name": "GPT-Live-Transcribe",
+        "release_date": "2026-07-28",
+        "last_updated": "2026-07-28",
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
+        }
+      },
       "gpt-oss-120b": {
         "id": "gpt-oss-120b",
         "name": "GPT OSS 120B",
@@ -113442,6 +113545,18 @@
           "input": 0.04,
           "output": 0.19,
           "cache_read": 0.01
+        }
+      },
+      "gpt-transcribe": {
+        "id": "gpt-transcribe",
+        "name": "GPT-Transcribe",
+        "release_date": "2026-07-28",
+        "last_updated": "2026-07-28",
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
         }
       },
       "granite-4.2-8b": {
@@ -116277,7 +116392,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 1.25,
@@ -127173,6 +127288,30 @@
           "cache_write": 2.5
         }
       },
+      "openai/gpt-live-transcribe": {
+        "id": "openai/gpt-live-transcribe",
+        "name": "GPT Live Transcribe (OpenAI)",
+        "release_date": "2026-07-28",
+        "last_updated": "2026-07-28",
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
+        }
+      },
+      "openai/gpt-transcribe": {
+        "id": "openai/gpt-transcribe",
+        "name": "GPT Transcribe (OpenAI)",
+        "release_date": "2026-07-28",
+        "last_updated": "2026-07-28",
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
+        }
+      },
       "openai/o1": {
         "id": "openai/o1",
         "name": "o1 (OpenAI)",
@@ -133247,6 +133386,37 @@
           "cache_read": 0.011592
         }
       },
+      "deepseek-v4.1-flash-1017": {
+        "id": "deepseek-v4.1-flash-1017",
+        "name": "DeepSeek V4.1 Flash 1017",
+        "release_date": "2026-10-17",
+        "last_updated": "2026-10-17",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 384000
+        },
+        "cost": {
+          "input": 0.33675,
+          "output": 1.347,
+          "cache_read": 0.033675
+        }
+      },
       "glm-5": {
         "id": "glm-5",
         "name": "GLM-5",
@@ -136759,6 +136929,27 @@
           "cache_read": 0.005
         }
       },
+      "openai/gpt-5-search-api": {
+        "id": "openai/gpt-5-search-api",
+        "name": "GPT-5 Search API",
+        "release_date": "2025-10-14",
+        "last_updated": "2025-10-14",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "limit": {
+          "context": 272000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 1.25,
+          "output": 10
+        }
+      },
       "openai/gpt-5.1": {
         "id": "openai/gpt-5.1",
         "name": "GPT-5.1",
@@ -137351,6 +137542,62 @@
           "cache_write": 2.5
         }
       },
+      "openai/gpt-audio": {
+        "id": "openai/gpt-audio",
+        "name": "GPT Audio",
+        "release_date": "2025-08-28",
+        "last_updated": "2025-08-28",
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
+        },
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "cost": {
+          "input": 2.5,
+          "output": 10
+        }
+      },
+      "openai/gpt-audio-mini": {
+        "id": "openai/gpt-audio-mini",
+        "name": "GPT Audio Mini",
+        "release_date": "2025-10-06",
+        "last_updated": "2025-10-06",
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
+        },
+        "limit": {
+          "context": 128000,
+          "output": 16384
+        },
+        "cost": {
+          "input": 0.6,
+          "output": 2.4
+        }
+      },
+      "openai/gpt-live-1": {
+        "id": "openai/gpt-live-1",
+        "name": "GPT-Live 1",
+        "release_date": "2026-09-10",
+        "last_updated": "2026-09-10",
+        "modalities": {
+          "input": [
+            "text",
+            "audio"
+          ]
+        },
+        "limit": {
+          "context": 128000,
+          "output": 4096
+        }
+      },
       "openai/gpt-oss-120b": {
         "id": "openai/gpt-oss-120b",
         "name": "GPT-OSS 120B",
@@ -137561,6 +137808,21 @@
           "input": 1.1,
           "output": 4.4,
           "cache_read": 0.275
+        }
+      },
+      "openai/whisper-1": {
+        "id": "openai/whisper-1",
+        "name": "Whisper",
+        "release_date": "2023-03-01",
+        "last_updated": "2023-03-01",
+        "modalities": {
+          "input": [
+            "audio"
+          ]
+        },
+        "limit": {
+          "context": 448000,
+          "output": 4096
         }
       },
       "qwen/qwen-flash": {
@@ -142245,7 +142507,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 3,
@@ -147062,9 +147324,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.1452,
-          "output": 0.4356,
-          "cache_read": 0.00462
+          "input": 0.66,
+          "output": 1.98,
+          "cache_read": 0.022
         }
       },
       "deepseek/deepseek-v3.2": {
@@ -147298,7 +147560,7 @@
         },
         "cost": {
           "input": 0.1,
-          "output": 0.5,
+          "output": 0.6,
           "cache_read": 0.003
         }
       },
@@ -147424,9 +147686,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.1452,
-          "output": 0.4356,
-          "cache_read": 0.00462
+          "input": 0.66,
+          "output": 1.98,
+          "cache_read": 0.022
         }
       },
       "deepseek/deepseek-v4-pro-0813:thinking": {
@@ -147456,9 +147718,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.1452,
-          "output": 0.4356,
-          "cache_read": 0.00462
+          "input": 0.66,
+          "output": 1.98,
+          "cache_read": 0.022
         }
       },
       "deepseek/deepseek-v4-pro:thinking": {
@@ -147554,7 +147816,7 @@
         },
         "cost": {
           "input": 0.1,
-          "output": 0.5,
+          "output": 0.6,
           "cache_read": 0.003
         }
       },
@@ -147587,7 +147849,7 @@
         },
         "cost": {
           "input": 0.1,
-          "output": 0.5,
+          "output": 0.6,
           "cache_read": 0.003
         }
       },
@@ -152042,9 +152304,9 @@
           "output": 65536
         },
         "cost": {
-          "input": 0.43225,
-          "output": 1.82,
-          "cache_read": 0.0728
+          "input": 0.45,
+          "output": 1.95,
+          "cache_read": 0.045
         }
       },
       "moonshotai/kimi-k2.6:thinking": {
@@ -152064,9 +152326,9 @@
           "output": 65536
         },
         "cost": {
-          "input": 0.43225,
-          "output": 1.82,
-          "cache_read": 0.0728
+          "input": 0.45,
+          "output": 1.95,
+          "cache_read": 0.045
         }
       },
       "moonshotai/kimi-k2.7-code": {
@@ -156913,9 +157175,9 @@
           "output": 64000
         },
         "cost": {
-          "input": 0.7506,
-          "output": 2.2509,
-          "cache_read": 0.0378
+          "input": 0.834,
+          "output": 2.501,
+          "cache_read": 0.042
         }
       },
       "thinkingmachines/Inkling-Small": {
@@ -160423,7 +160685,7 @@
         "reasoning": true,
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.8,
@@ -170050,7 +170312,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.5,
@@ -175165,36 +175427,6 @@
           }
         ]
       },
-      "gpt-5.2-chat-latest": {
-        "id": "gpt-5.2-chat-latest",
-        "name": "GPT-5.2 Chat",
-        "release_date": "2025-12-11",
-        "last_updated": "2025-12-11",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "medium"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "cost": {
-          "input": 1.75,
-          "output": 14,
-          "cache_read": 0.175
-        }
-      },
       "gpt-5.2-pro": {
         "id": "gpt-5.2-pro",
         "name": "GPT-5.2 Pro",
@@ -175224,27 +175456,6 @@
         "cost": {
           "input": 21,
           "output": 168
-        }
-      },
-      "gpt-5.3-chat-latest": {
-        "id": "gpt-5.3-chat-latest",
-        "name": "GPT-5.3 Chat (latest)",
-        "release_date": "2026-03-03",
-        "last_updated": "2026-03-03",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "cost": {
-          "input": 1.75,
-          "output": 14,
-          "cache_read": 0.175
         }
       },
       "gpt-5.3-codex": {
@@ -182910,11 +183121,11 @@
         },
         "limit": {
           "context": 163840,
-          "output": 16384
+          "output": 16000
         },
         "cost": {
-          "input": 0.32,
-          "output": 0.89
+          "input": 0.2574,
+          "output": 1.0287
         }
       },
       "deepseek/deepseek-chat-v3-0324": {
@@ -183118,9 +183329,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 0.1298,
-          "output": 0.3894,
-          "cache_read": 0.00413
+          "input": 0.44,
+          "output": 1.32,
+          "cache_read": 0.014
         }
       },
       "deepseek/deepseek-v4-flash-vision-exp": {
@@ -183182,9 +183393,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.375144,
-          "output": 0.750288,
-          "cache_read": 0.031262
+          "input": 0.95526,
+          "output": 1.91052,
+          "cache_read": 0.079605
         }
       },
       "deepseek/deepseek-v4-pro-0813": {
@@ -183247,8 +183458,8 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.028,
-          "output": 0.08,
+          "input": 0.0352,
+          "output": 0.0112,
           "cache_read": 0.0016
         }
       },
@@ -183280,9 +183491,9 @@
           "output": 393216
         },
         "cost": {
-          "input": 0.15,
-          "output": 0.6,
-          "cache_read": 0.003
+          "input": 0.3,
+          "output": 1.2,
+          "cache_read": 0.006
         }
       },
       "dots-studio/dots-3-note-preview:free": {
@@ -184214,11 +184425,12 @@
         },
         "limit": {
           "context": 131072,
-          "output": 16384
+          "output": 117964
         },
         "cost": {
-          "input": 0.05,
-          "output": 0.1
+          "input": 0.04,
+          "output": 0.05,
+          "cache_read": 0.02
         }
       },
       "google/gemma-4-26b-a4b-it": {
@@ -186524,9 +186736,9 @@
           "output": 235929
         },
         "cost": {
-          "input": 0.1,
-          "output": 0.4,
-          "cache_read": 0.08
+          "input": 0.15,
+          "output": 0.5,
+          "cache_read": 0.02
         }
       },
       "nvidia/nemotron-3.5-super-vl:free": {
@@ -188241,9 +188453,9 @@
       },
       "openai/gpt-audio": {
         "id": "openai/gpt-audio",
-        "name": "GPT Audio",
-        "release_date": "2026-01-19",
-        "last_updated": "2026-01-19",
+        "name": "GPT-Audio",
+        "release_date": "2025-08-28",
+        "last_updated": "2025-08-28",
         "modalities": {
           "input": [
             "text",
@@ -188261,9 +188473,9 @@
       },
       "openai/gpt-audio-mini": {
         "id": "openai/gpt-audio-mini",
-        "name": "GPT Audio Mini",
-        "release_date": "2026-01-19",
-        "last_updated": "2026-01-19",
+        "name": "GPT-Audio Mini",
+        "release_date": "2025-10-06",
+        "last_updated": "2025-10-06",
         "modalities": {
           "input": [
             "text",
@@ -189565,12 +189777,11 @@
         ],
         "limit": {
           "context": 262144,
-          "output": 235929
+          "output": 65536
         },
         "cost": {
-          "input": 0.5,
-          "output": 3.6,
-          "cache_read": 0.3
+          "input": 0.39,
+          "output": 2.34
         }
       },
       "qwen/qwen3.5-9b": {
@@ -189748,8 +189959,8 @@
           "output": 235929
         },
         "cost": {
-          "input": 0.15,
-          "output": 1,
+          "input": 0.1,
+          "output": 0.95,
           "cache_read": 0.05
         }
       },
@@ -190667,9 +190878,9 @@
           "output": 128000
         },
         "cost": {
-          "input": 0.0825,
-          "output": 0.33,
-          "cache_read": 0.020625
+          "input": 0.132,
+          "output": 0.528,
+          "cache_read": 0.033
         }
       },
       "tencent/hy3-preview": {
@@ -190729,9 +190940,9 @@
           "output": 64000
         },
         "cost": {
-          "input": 0.7506,
-          "output": 2.2509,
-          "cache_read": 0.0378
+          "input": 0.834,
+          "output": 2.501,
+          "cache_read": 0.042
         }
       },
       "thedrummer/cydonia-24b-v4.1": {
@@ -191086,9 +191297,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 0.09,
-          "output": 0.36,
-          "cache_read": 0.018
+          "input": 0.15,
+          "output": 0.6,
+          "cache_read": 0.03
         }
       },
       "writer/palmyra-x5": {
@@ -191751,12 +191962,12 @@
         ],
         "limit": {
           "context": 204800,
-          "output": 131072
+          "output": 128000
         },
         "cost": {
-          "input": 1,
-          "output": 3.2,
-          "cache_read": 0.2
+          "input": 0.6,
+          "output": 1.92,
+          "cache_read": 0.12
         }
       },
       "z-ai/glm-5-turbo": {
@@ -192180,9 +192391,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.035,
+          "input": 0.045,
           "output": 0.6,
-          "cache_read": 0.004
+          "cache_read": 0.007
         }
       },
       "~deepseek/deepseek-pro-latest": {
@@ -192212,9 +192423,9 @@
           "output": 393216
         },
         "cost": {
-          "input": 0.1307,
+          "input": 0.225,
           "output": 8,
-          "cache_read": 0.13
+          "cache_read": 0.23
         }
       },
       "~deepseek/deepseek-v4-flash-latest": {
@@ -192244,9 +192455,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.0086,
-          "output": 0.45,
-          "cache_read": 0.0086
+          "input": 0.00912,
+          "output": 0.12,
+          "cache_read": 0.00336
         }
       },
       "~google/gemini-flash-latest": {
@@ -192704,9 +192915,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.053,
+          "input": 0.051,
           "output": 6,
-          "cache_read": 0.033
+          "cache_read": 0.032
         }
       }
     }
@@ -197453,7 +197664,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 1.25,
@@ -217926,6 +218137,37 @@
           "cache_read": 0.01
         }
       },
+      "zai-org/GLM-5.3": {
+        "id": "zai-org/GLM-5.3",
+        "name": "GLM-5.3",
+        "release_date": "2026-08-14",
+        "last_updated": "2026-08-14",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 32768
+        },
+        "cost": {
+          "input": 1.3,
+          "output": 4.2,
+          "cache_read": 0.13
+        }
+      },
       "zai-org/GLM-5.3-Flash": {
         "id": "zai-org/GLM-5.3-Flash",
         "name": "GLM-5.3-Flash",
@@ -231864,7 +232106,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 500000
+          "output": 65536
         },
         "cost": {
           "input": 0.5,
@@ -231883,7 +232125,7 @@
         },
         "limit": {
           "context": 1000000,
-          "output": 500000
+          "output": 131072
         },
         "cost": {
           "input": 1.25,
@@ -236345,6 +236587,38 @@
           "cache_read": 0.025
         }
       },
+      "mercury-3": {
+        "id": "mercury-3",
+        "name": "Mercury 3",
+        "release_date": "2026-10-19",
+        "last_updated": "2026-10-20",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 131072
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.35,
+          "cache_read": 0.01
+        }
+      },
       "minimax-m25": {
         "id": "minimax-m25",
         "name": "MiniMax M2.5",
@@ -238296,38 +238570,6 @@
           "input": 0.55,
           "output": 2.65,
           "cache_read": 0.11
-        }
-      },
-      "zai-org-glm-4.7-flash": {
-        "id": "zai-org-glm-4.7-flash",
-        "name": "GLM 4.7 Flash",
-        "release_date": "2026-01-29",
-        "last_updated": "2026-06-11",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "none",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 128000,
-          "output": 16384
-        },
-        "cost": {
-          "input": 0.06,
-          "output": 0.4,
-          "cache_read": 0.01
         }
       },
       "zai-org-glm-5": {
@@ -241102,7 +241344,8 @@
         "modalities": {
           "input": [
             "text",
-            "image"
+            "image",
+            "pdf"
           ]
         },
         "reasoning": true,
@@ -241119,7 +241362,7 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 1048576
+          "output": 32768
         },
         "cost": {
           "input": 0.075,
@@ -241893,8 +242136,8 @@
       "google/gemini-3.8-flash-lite-tts": {
         "id": "google/gemini-3.8-flash-lite-tts",
         "name": "Gemini 3.8 Flash-Lite TTS",
-        "release_date": "2026-09-23",
-        "last_updated": "2026-09-23",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
         "modalities": {
           "input": [
             "text"
@@ -241908,8 +242151,8 @@
       "google/gemini-3.8-flash-tts": {
         "id": "google/gemini-3.8-flash-tts",
         "name": "Gemini 3.8 Flash TTS",
-        "release_date": "2026-09-23",
-        "last_updated": "2026-09-23",
+        "release_date": "2026-09-22",
+        "last_updated": "2026-09-22",
         "modalities": {
           "input": [
             "text"
@@ -244517,8 +244760,8 @@
       "openai/gpt-4o-mini-transcribe": {
         "id": "openai/gpt-4o-mini-transcribe",
         "name": "GPT-4o mini Transcribe",
-        "release_date": "2024-03-13",
-        "last_updated": "2024-03-13",
+        "release_date": "2025-03-20",
+        "last_updated": "2025-03-20",
         "modalities": {
           "input": [
             "audio"
@@ -244532,8 +244775,8 @@
       "openai/gpt-4o-transcribe": {
         "id": "openai/gpt-4o-transcribe",
         "name": "GPT-4o Transcribe",
-        "release_date": "2024-03-13",
-        "last_updated": "2024-03-13",
+        "release_date": "2025-03-20",
+        "last_updated": "2025-03-20",
         "modalities": {
           "input": [
             "audio"
@@ -246517,8 +246760,8 @@
       "openai/gpt-realtime-mini": {
         "id": "openai/gpt-realtime-mini",
         "name": "GPT-Realtime mini",
-        "release_date": "2025-10-10",
-        "last_updated": "2025-10-10",
+        "release_date": "2025-10-06",
+        "last_updated": "2025-10-06",
         "modalities": {
           "input": [
             "text",
@@ -246891,8 +247134,8 @@
       "openai/whisper-1": {
         "id": "openai/whisper-1",
         "name": "Whisper",
-        "release_date": "2022-09-21",
-        "last_updated": "2022-09-21",
+        "release_date": "2023-03-01",
+        "last_updated": "2023-03-01",
         "modalities": {
           "input": [
             "audio"
@@ -253032,7 +253275,8 @@
               "none",
               "low",
               "medium",
-              "high"
+              "high",
+              "xhigh"
             ]
           }
         ],
@@ -253073,7 +253317,8 @@
             "values": [
               "low",
               "medium",
-              "high"
+              "high",
+              "xhigh"
             ]
           }
         ],
@@ -253218,8 +253463,7 @@
         "modalities": {
           "input": [
             "text",
-            "image",
-            "pdf"
+            "image"
           ]
         },
         "limit": {
@@ -253235,8 +253479,7 @@
         "modalities": {
           "input": [
             "text",
-            "image",
-            "pdf"
+            "image"
           ]
         },
         "limit": {
@@ -253253,8 +253496,7 @@
           "input": [
             "text",
             "image",
-            "video",
-            "pdf"
+            "video"
           ]
         },
         "limit": {
@@ -253271,8 +253513,7 @@
           "input": [
             "text",
             "image",
-            "audio",
-            "pdf"
+            "audio"
           ]
         },
         "limit": {
@@ -253288,8 +253529,7 @@
         "modalities": {
           "input": [
             "text",
-            "image",
-            "pdf"
+            "image"
           ]
         },
         "limit": {
@@ -257797,7 +258037,7 @@
         ],
         "limit": {
           "context": 1000000,
-          "output": 65536
+          "output": 131072
         },
         "cost": {
           "input": 2.5,
@@ -258424,8 +258664,8 @@
       "x-ai/grok-voice-stt-1.0": {
         "id": "x-ai/grok-voice-stt-1.0",
         "name": "Grok Voice STT 1.0",
-        "release_date": "2026-08-04",
-        "last_updated": "2026-08-04",
+        "release_date": "2026-09-17",
+        "last_updated": "2026-09-17",
         "modalities": {
           "input": [
             "audio"
@@ -258439,8 +258679,8 @@
       "x-ai/grok-voice-tts-1.0": {
         "id": "x-ai/grok-voice-tts-1.0",
         "name": "Grok Voice TTS 1.0",
-        "release_date": "2026-07-31",
-        "last_updated": "2026-07-31",
+        "release_date": "2026-03-16",
+        "last_updated": "2026-03-16",
         "modalities": {
           "input": [
             "text"
