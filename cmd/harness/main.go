@@ -394,12 +394,15 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	reasoning := llm.ReasoningConfig{
 		Profile: cfg.Reasoning,
 	}
-	// A startup agent with a pinned reasoning profile sets the session base
-	// profile (model compatibility is enforced by the validation below).
-	if startupAgent.Reasoning != "" {
+	// Explicit CLI flags win over startup agent defaults. Keep the agent
+	// definition intact for later agent switches and delegate launches.
+	if startupAgent.Reasoning != "" && result.Sources["reasoning"].Kind != configmeta.SourceFlag {
 		reasoning.Profile = startupAgent.Reasoning
 	}
-	startProvider, startModel := agentModelInputs(startupAgent, cfg.Provider, cfg.Model)
+	startProvider, startModel := cfg.Provider, cfg.Model
+	if result.Sources["model"].Kind != configmeta.SourceFlag {
+		startProvider, startModel = agentModelInputs(startupAgent, startProvider, startModel)
+	}
 	selection, err := resolveCatalogSelection(catalog, startProvider, startModel, cfg.Provider)
 	if err != nil {
 		configuredSelectionUnavailable := startModel != "" || startProvider != ""

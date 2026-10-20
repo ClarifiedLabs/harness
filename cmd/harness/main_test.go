@@ -5295,6 +5295,48 @@ func TestRunConfigAgentCanSetQualifiedModel(t *testing.T) {
 	}
 }
 
+func TestRunStartupFlagsOverrideAgentDefaults(t *testing.T) {
+	for _, interactive := range []bool{false, true} {
+		for _, tc := range []struct {
+			name      string
+			flags     []string
+			model     string
+			reasoning string
+		}{
+			{"agent defaults", nil, "openai:gpt-5.5", "high"},
+			{"model flag", []string{"--model", "anthropic:claude-opus-4-8"}, "anthropic:claude-opus-4-8", "high"},
+			{"reasoning flag", []string{"--reasoning", "low"}, "openai:gpt-5.5", "low"},
+			{"both flags", []string{"--model", "anthropic:claude-opus-4-8", "--reasoning", "low"}, "anthropic:claude-opus-4-8", "low"},
+		} {
+			t.Run(fmt.Sprintf("%s/interactive=%t", tc.name, interactive), func(t *testing.T) {
+				cfgPath := writeMainConfig(t, `{
+					"model":"openrouter:openai/gpt-5.5",
+					"reasoning":"medium",
+					"agents":{"auto":{"model":"openai:gpt-5.5","reasoning":"high"}}
+				}`)
+				args := append([]string{"--config", cfgPath}, tc.flags...)
+				input := "hi\n/quit\n"
+				if !interactive {
+					args = append(args, "-p", "hi")
+					input = ""
+				}
+				fp := llmtest.New("fake", okStepWithUsage(1, 1))
+				env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, args, fp, input)
+				if code := run(env); code != ui.ExitOK {
+					t.Fatalf("exit code = %d; stderr=%q", code, errw.String())
+				}
+				if len(proxy.requests) != 1 {
+					t.Fatalf("requests = %d, want 1", len(proxy.requests))
+				}
+				req := proxy.requests[0]
+				if req.TargetID != tc.model || req.Request.Reasoning.Profile != tc.reasoning {
+					t.Fatalf("model/reasoning = %s/%s, want %s/%s", req.TargetID, req.Request.Reasoning.Profile, tc.model, tc.reasoning)
+				}
+			})
+		}
+	}
+}
+
 func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-5.5", "-p", "hi"}, fp, "")

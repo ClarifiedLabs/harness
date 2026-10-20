@@ -2137,7 +2137,12 @@ value. Other fields continue to merge onto a built-in of the same name:
 ```
 
 An agent without `model` inherits the current session target. When set, `model`
-is a complete `<provider>:<model>` model-proxy target ID. New custom agents
+is a complete `<provider>:<model>` model-proxy target ID. At startup, explicit
+`--model` and `--reasoning` flags override the selected agent's corresponding
+settings. Without those flags, the agent's settings override the session defaults.
+This does not change the agent definition: later agent switches and explicit
+named-agent delegation still apply that agent's configured settings.
+New custom agents
 default to `interactive_selectable: true`; set it to false for agents intended
 only for one-shot execution or delegation. Built-in overrides inherit each
 built-in's explicit value unless the field is set.
