@@ -95,21 +95,23 @@ type Target struct {
 	ProviderLabel    string   `json:"provider_label,omitempty"`
 	// Profile carries the provider config's profile (llm.ProviderConfig.Profile)
 	// so clients can apply profile-level defaults without name matching.
-	Profile               string    `json:"profile,omitempty"`
-	ModelLabel            string    `json:"model_label,omitempty"`
-	ContextWindow         int       `json:"context_window,omitempty"`
-	OutputLimit           int       `json:"output_limit,omitempty"`
-	InputModalities       []string  `json:"input_modalities,omitempty"`
-	ServerTools           []string  `json:"server_tools,omitempty"`
-	BaseTargetID          string    `json:"base_target_id,omitempty"`
-	Variant               string    `json:"variant,omitempty"`
-	APIType               string    `json:"api_type,omitempty"`
-	ContinuationStateful  bool      `json:"continuation_stateful,omitempty"`
-	NativeCompaction      bool      `json:"native_compaction,omitempty"`
-	Prewarm               bool      `json:"prewarm,omitempty"`
-	Price                 llm.Price `json:"price,omitempty"`
-	Reasoning             bool      `json:"reasoning,omitempty"`
-	ReasoningReplayDomain string    `json:"reasoning_replay_domain,omitempty"`
+	Profile                     string                               `json:"profile,omitempty"`
+	ModelLabel                  string                               `json:"model_label,omitempty"`
+	ContextWindow               int                                  `json:"context_window,omitempty"`
+	OutputLimit                 int                                  `json:"output_limit,omitempty"`
+	InputModalities             []string                             `json:"input_modalities,omitempty"`
+	ServerTools                 []string                             `json:"server_tools,omitempty"`
+	BaseTargetID                string                               `json:"base_target_id,omitempty"`
+	Variant                     string                               `json:"variant,omitempty"`
+	APIType                     string                               `json:"api_type,omitempty"`
+	ContinuationStateful        bool                                 `json:"continuation_stateful,omitempty"`
+	NativeCompaction            bool                                 `json:"native_compaction,omitempty"`
+	Prewarm                     bool                                 `json:"prewarm,omitempty"`
+	Price                       llm.Price                            `json:"price,omitempty"`
+	Reasoning                   bool                                 `json:"reasoning,omitempty"`
+	ReasoningReplayDomain       string                               `json:"reasoning_replay_domain,omitempty"`
+	SupportsExperimentalContext bool                                 `json:"supports_experimental_context,omitempty"`
+	ContextToolDefinitions      map[string]llm.ContextToolDefinition `json:"context_tool_definitions,omitempty"`
 }
 
 // CallerAttempt carries only the caller's inherited retry/continuation origin.

@@ -47,6 +47,71 @@ type codexModel struct {
 	ServiceTiers                      []codexServiceTier     `json:"service_tiers,omitempty"`
 	DefaultServiceTier                *string                `json:"default_service_tier"`
 	AdditionalSpeedTiers              []string               `json:"additional_speed_tiers,omitempty"`
+	SupportsExperimentalContext       bool                   `json:"supports_experimental_context"`
+	ModelMessages                     json.RawMessage        `json:"model_messages,omitempty"`
+}
+
+type codexToolMessage struct {
+	Description *string `json:"description"`
+	Parameters  *string `json:"parameters"`
+}
+
+type codexHistoryToolMessages struct {
+	ListItems     *codexToolMessage `json:"list_items"`
+	ReadItem      *codexToolMessage `json:"read_item"`
+	SearchContent *codexToolMessage `json:"search_contents"`
+}
+
+type codexNotesToolMessages struct {
+	NamespaceDescription *string `json:"namespace_description"`
+}
+
+type codexContextManagementToolMessages struct {
+	NewContext          *codexToolMessage `json:"new_context"`
+	GetContextRemaining *codexToolMessage `json:"get_context_remaining"`
+}
+
+// DecodeCodexContextToolDefinitions maps Codex's namespaced Memento V2 tool
+// messages onto Harness's flattened local context tools. Notes has several
+// upstream operations but one local action-based tool, so only its namespace
+// description has a direct local equivalent.
+func DecodeCodexContextToolDefinitions(data json.RawMessage) map[string]llm.ContextToolDefinition {
+	if len(data) == 0 {
+		return nil
+	}
+	var messages struct {
+		Tools struct {
+			History           *codexHistoryToolMessages           `json:"history"`
+			Notes             *codexNotesToolMessages             `json:"notes"`
+			ContextManagement *codexContextManagementToolMessages `json:"context_management"`
+		} `json:"tools"`
+	}
+	if json.Unmarshal(data, &messages) != nil {
+		return nil
+	}
+	out := map[string]llm.ContextToolDefinition{}
+	add := func(name string, message *codexToolMessage) {
+		if message == nil {
+			return
+		}
+		out[name] = llm.ContextToolDefinition{Description: message.Description, Parameters: message.Parameters}
+	}
+	if history := messages.Tools.History; history != nil {
+		add("history_list", history.ListItems)
+		add("history_read", history.ReadItem)
+		add("history_search", history.SearchContent)
+	}
+	if notes := messages.Tools.Notes; notes != nil && notes.NamespaceDescription != nil {
+		out["task_notes"] = llm.ContextToolDefinition{Description: notes.NamespaceDescription}
+	}
+	if context := messages.Tools.ContextManagement; context != nil {
+		add("new_context", context.NewContext)
+		add("get_context_remaining", context.GetContextRemaining)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 type codexReasoningPreset struct {
@@ -187,13 +252,15 @@ func codexModelToCatalog(model codexModel) (Model, bool) {
 		summarySupported = *model.SupportsReasoningSummaries
 	}
 	entry := Model{
-		ID:                        id,
-		Name:                      name,
-		Modalities:                Modalities{Input: append([]string(nil), model.InputModalities...)},
-		Reasoning:                 len(reasoningValues) > 0,
-		ReasoningSummarySupported: &summarySupported,
-		Limit:                     Limit{Context: contextWindow},
-		ServiceTiers:              codexServiceTiers(model),
+		ID:                          id,
+		Name:                        name,
+		Modalities:                  Modalities{Input: append([]string(nil), model.InputModalities...)},
+		Reasoning:                   len(reasoningValues) > 0,
+		ReasoningSummarySupported:   &summarySupported,
+		Limit:                       Limit{Context: contextWindow},
+		ServiceTiers:                codexServiceTiers(model),
+		SupportsExperimentalContext: model.SupportsExperimentalContext,
+		ContextToolDefinitions:      DecodeCodexContextToolDefinitions(model.ModelMessages),
 	}
 	if len(reasoningValues) > 0 {
 		entry.ReasoningOptions = []llm.ReasoningOption{{Type: "effort", Values: reasoningValues}}

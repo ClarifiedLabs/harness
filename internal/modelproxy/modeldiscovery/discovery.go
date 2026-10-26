@@ -43,19 +43,21 @@ var (
 // Model is one normalized provider model. Pointer and Known fields distinguish
 // an absent capability from an explicit zero or false value.
 type Model struct {
-	ID                        string                `json:"id"`
-	Name                      string                `json:"name,omitempty"`
-	ContextWindow             *int                  `json:"context_window,omitempty"`
-	OutputLimit               *int                  `json:"output_limit,omitempty"`
-	InputModalities           []string              `json:"input_modalities,omitempty"`
-	InputModalitiesKnown      bool                  `json:"input_modalities_known,omitempty"`
-	Reasoning                 *bool                 `json:"reasoning,omitempty"`
-	ReasoningSummarySupported *bool                 `json:"reasoning_summary_supported,omitempty"`
-	ReasoningOptions          []llm.ReasoningOption `json:"reasoning_options,omitempty"`
-	Shape                     *string               `json:"shape,omitempty"`
-	Price                     *llm.Price            `json:"price,omitempty"`
-	ServiceTiers              []llm.ServiceTier     `json:"service_tiers,omitempty"`
-	Eligible                  bool                  `json:"eligible"`
+	ID                          string                               `json:"id"`
+	Name                        string                               `json:"name,omitempty"`
+	ContextWindow               *int                                 `json:"context_window,omitempty"`
+	OutputLimit                 *int                                 `json:"output_limit,omitempty"`
+	InputModalities             []string                             `json:"input_modalities,omitempty"`
+	InputModalitiesKnown        bool                                 `json:"input_modalities_known,omitempty"`
+	Reasoning                   *bool                                `json:"reasoning,omitempty"`
+	ReasoningSummarySupported   *bool                                `json:"reasoning_summary_supported,omitempty"`
+	ReasoningOptions            []llm.ReasoningOption                `json:"reasoning_options,omitempty"`
+	Shape                       *string                              `json:"shape,omitempty"`
+	Price                       *llm.Price                           `json:"price,omitempty"`
+	ServiceTiers                []llm.ServiceTier                    `json:"service_tiers,omitempty"`
+	SupportsExperimentalContext *bool                                `json:"supports_experimental_context,omitempty"`
+	ContextToolDefinitions      map[string]llm.ContextToolDefinition `json:"context_tool_definitions,omitempty"`
+	Eligible                    bool                                 `json:"eligible"`
 }
 
 // Snapshot is a complete successful response from one provider endpoint.

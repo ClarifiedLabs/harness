@@ -354,7 +354,7 @@ func TestCodexDiscoveryUsesAccountCatalogVisibility(t *testing.T) {
 		if values := r.Header.Values("User-Agent"); len(values) != 1 || !strings.HasPrefix(values[0], codexclient.Originator+"/0.99.0 ") {
 			t.Errorf("User-Agent = %q, want a single codex_cli_rs/0.99.0 value", values)
 		}
-		_, _ = w.Write([]byte(`{"models":[{"slug":"spark","display_name":"Spark","context_window":100000,"visibility":"list","supported_in_api":false,"service_tiers":[{"id":"priority","name":"Fast"}],"additional_speed_tiers":["fast"]},{"slug":"hidden","context_window":100000,"visibility":"hide"}]}`))
+		_, _ = w.Write([]byte(`{"models":[{"slug":"spark","display_name":"Spark","context_window":100000,"visibility":"list","supports_experimental_context":true,"model_messages":{"tools":{"history":{"read_item":{"description":"catalog history"}}}},"supported_in_api":false,"service_tiers":[{"id":"priority","name":"Fast"}],"additional_speed_tiers":["fast"]},{"slug":"hidden","context_window":100000,"visibility":"hide"}]}`))
 	}))
 	defer server.Close()
 	pc := llm.ProviderConfig{Name: "openai-codex", APIType: "responses", BaseURL: server.URL, APIKey: "secret", Managed: true}
@@ -365,6 +365,12 @@ func TestCodexDiscoveryUsesAccountCatalogVisibility(t *testing.T) {
 	model, ok := snapshot.Models["spark"]
 	if len(snapshot.Models) != 1 || !ok || model.Name != "Spark" || snapshot.CodexClientVersion != "0.99.0" {
 		t.Fatalf("models = %+v", snapshot.Models)
+	}
+	if model.SupportsExperimentalContext == nil || !*model.SupportsExperimentalContext {
+		t.Fatal("Codex discovery dropped experimental-context capability")
+	}
+	if got := model.ContextToolDefinitions["history_read"].Description; got == nil || *got != "catalog history" {
+		t.Fatalf("Codex discovery tool definition = %v", got)
 	}
 	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
 	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
@@ -431,6 +437,34 @@ func TestMergeProviderKeepsKnownBasicIDsAndEligibleLiveOnlyModels(t *testing.T) 
 	merged := MergeProvider(baseline, snapshot)
 	if len(merged.Models) != 2 || merged.Models["known"].Limit.Context != 200 {
 		t.Fatalf("merged = %+v", merged.Models)
+	}
+}
+
+func TestMergeProviderAppliesExperimentalContextMetadata(t *testing.T) {
+	t.Parallel()
+	disabled := false
+	oldDescription, newDescription := "old", "new"
+	baseline := modelcatalog.Provider{ID: modelcatalog.OpenAICodexProviderID, Models: map[string]modelcatalog.Model{
+		"gpt": {ID: "gpt", SupportsExperimentalContext: true, ContextToolDefinitions: map[string]llm.ContextToolDefinition{
+			"history_read": {Description: &oldDescription},
+		}},
+	}}
+	snapshot := Snapshot{Models: map[string]Model{"gpt": {
+		ID: "gpt", SupportsExperimentalContext: &disabled,
+		ContextToolDefinitions: map[string]llm.ContextToolDefinition{"history_read": {Description: &newDescription}},
+	}}}
+	for name, merge := range map[string]func(modelcatalog.Provider, Snapshot) modelcatalog.Provider{
+		"authoritative": MergeProvider, "stale": OverlaySnapshotMetadata,
+	} {
+		t.Run(name, func(t *testing.T) {
+			model := merge(baseline, snapshot).Models["gpt"]
+			if model.SupportsExperimentalContext {
+				t.Fatal("explicit false capability did not override baseline")
+			}
+			if got := model.ContextToolDefinitions["history_read"].Description; got == nil || *got != "new" {
+				t.Fatalf("merged tool description = %v", got)
+			}
+		})
 	}
 }
 

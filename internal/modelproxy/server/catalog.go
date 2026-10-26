@@ -110,12 +110,15 @@ func (h *Handler) effectiveProviders(md *modelcatalog.Catalog, providerCatalogs 
 		cp := pc
 		cp.Models = make([]llm.ModelEntry, 0, len(pc.Models))
 		for _, entry := range pc.Models {
-			info, ok := effective.ModelInfo(entry.Name)
+			model, ok := effectiveCatalogModel(effective, entry.Name)
 			if !ok {
 				pruned = true
 				h.logger.Warn("configured model is absent from authoritative model catalog; removing it from live catalog", "provider", pc.Name, "model", entry.Name)
 				continue
 			}
+			info := model.ModelInfo()
+			entry.SupportsExperimentalContext = model.SupportsExperimentalContext
+			entry.ContextToolDefinitions = modelcatalog.CloneContextToolDefinitions(model.ContextToolDefinitions)
 			configuredPrice := entry.Price
 			if info.ContextWindow > 0 {
 				entry.ContextWindow = info.ContextWindow
@@ -166,4 +169,18 @@ func (h *Handler) effectiveProviders(md *modelcatalog.Catalog, providerCatalogs 
 		out = append(out, cp)
 	}
 	return out, pruned
+}
+
+// effectiveCatalogModel preserves ModelInfo's key-first, then model-ID lookup
+// while retaining metadata that is intentionally not part of registry info.
+func effectiveCatalogModel(provider modelcatalog.Provider, id string) (modelcatalog.Model, bool) {
+	if model, ok := provider.Models[id]; ok {
+		return model, true
+	}
+	for _, model := range provider.Models {
+		if model.ID == id {
+			return model, true
+		}
+	}
+	return modelcatalog.Model{}, false
 }

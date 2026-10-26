@@ -490,7 +490,9 @@ func decodeCodex(data []byte, spec Spec) (map[string]Model, string, error) {
 			ServiceTiers       []struct {
 				ID, Name, Description string
 			} `json:"service_tiers"`
-			AdditionalSpeedTiers []string `json:"additional_speed_tiers"`
+			AdditionalSpeedTiers        []string        `json:"additional_speed_tiers"`
+			SupportsExperimentalContext *bool           `json:"supports_experimental_context"`
+			ModelMessages               json.RawMessage `json:"model_messages"`
 		} `json:"models"`
 	}
 	if err := decodeOne(data, &envelope); err != nil {
@@ -503,7 +505,7 @@ func decodeCodex(data []byte, spec Spec) (map[string]Model, string, error) {
 		if id == "" || (visibility != "" && visibility != "list") {
 			continue
 		}
-		model := Model{ID: id, Name: item.DisplayName, Eligible: true}
+		model := Model{ID: id, Name: item.DisplayName, Eligible: true, SupportsExperimentalContext: item.SupportsExperimentalContext, ContextToolDefinitions: modelcatalog.DecodeCodexContextToolDefinitions(item.ModelMessages)}
 		contextWindow := item.ContextWindow
 		if contextWindow <= 0 {
 			contextWindow = item.MaxContextWindow

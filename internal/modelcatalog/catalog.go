@@ -28,19 +28,21 @@ type Provider struct {
 
 // Model is the provider-local model metadata used by harness.
 type Model struct {
-	ID                        string                `json:"id"`
-	Name                      string                `json:"name"`
-	ReleaseDate               string                `json:"release_date"`
-	LastUpdated               string                `json:"last_updated"`
-	Modalities                Modalities            `json:"modalities"`
-	Reasoning                 bool                  `json:"reasoning"`
-	ReasoningSummarySupported *bool                 `json:"reasoning_summary_supported,omitempty"`
-	ReasoningOptions          []llm.ReasoningOption `json:"reasoning_options"`
-	Limit                     Limit                 `json:"limit"`
-	Provider                  ModelProvider         `json:"provider"`
-	Cost                      llm.Price             `json:"cost"`
-	ServiceTiers              []llm.ServiceTier     `json:"service_tiers,omitempty"`
-	Experimental              modelExperimental     `json:"experimental,omitzero"`
+	ID                          string                               `json:"id"`
+	Name                        string                               `json:"name"`
+	ReleaseDate                 string                               `json:"release_date"`
+	LastUpdated                 string                               `json:"last_updated"`
+	Modalities                  Modalities                           `json:"modalities"`
+	Reasoning                   bool                                 `json:"reasoning"`
+	ReasoningSummarySupported   *bool                                `json:"reasoning_summary_supported,omitempty"`
+	ReasoningOptions            []llm.ReasoningOption                `json:"reasoning_options"`
+	Limit                       Limit                                `json:"limit"`
+	Provider                    ModelProvider                        `json:"provider"`
+	Cost                        llm.Price                            `json:"cost"`
+	ServiceTiers                []llm.ServiceTier                    `json:"service_tiers,omitempty"`
+	SupportsExperimentalContext bool                                 `json:"supports_experimental_context,omitempty"`
+	ContextToolDefinitions      map[string]llm.ContextToolDefinition `json:"context_tool_definitions,omitempty"`
+	Experimental                modelExperimental                    `json:"experimental,omitzero"`
 }
 
 type modelExperimental struct {
@@ -238,15 +240,17 @@ func (p Provider) ProviderConfig(apiKey string) llm.ProviderConfig {
 	entries := make([]llm.ModelEntry, 0, len(models))
 	for _, m := range models {
 		entry := llm.ModelEntry{
-			Name:                      m.ID,
-			ContextWindow:             m.Limit.Context,
-			OutputLimit:               m.Limit.Output,
-			InputModalities:           append([]string(nil), m.Modalities.Input...),
-			Price:                     m.Cost,
-			Shape:                     m.Provider.Shape,
-			ReasoningSummarySupported: m.ReasoningSummarySupported,
-			ReasoningOptions:          append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
-			ServiceTiers:              llm.NormalizeServiceTiers(m.ServiceTiers),
+			Name:                        m.ID,
+			ContextWindow:               m.Limit.Context,
+			OutputLimit:                 m.Limit.Output,
+			InputModalities:             append([]string(nil), m.Modalities.Input...),
+			Price:                       m.Cost,
+			Shape:                       m.Provider.Shape,
+			ReasoningSummarySupported:   m.ReasoningSummarySupported,
+			ReasoningOptions:            append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
+			ServiceTiers:                llm.NormalizeServiceTiers(m.ServiceTiers),
+			SupportsExperimentalContext: m.SupportsExperimentalContext,
+			ContextToolDefinitions:      CloneContextToolDefinitions(m.ContextToolDefinitions),
 		}
 		reasoning := m.Reasoning
 		entry.Reasoning = &reasoning
@@ -277,6 +281,26 @@ func (m Model) ModelInfo() llm.ModelInfo {
 			Options:          append([]llm.ReasoningOption(nil), m.ReasoningOptions...),
 		},
 	}
+}
+
+// CloneContextToolDefinitions copies model-owned context-tool overrides.
+func CloneContextToolDefinitions(in map[string]llm.ContextToolDefinition) map[string]llm.ContextToolDefinition {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]llm.ContextToolDefinition, len(in))
+	for name, definition := range in {
+		if definition.Description != nil {
+			value := *definition.Description
+			definition.Description = &value
+		}
+		if definition.Parameters != nil {
+			value := *definition.Parameters
+			definition.Parameters = &value
+		}
+		out[name] = definition
+	}
+	return out
 }
 
 func modelSortDate(m Model) string {

@@ -785,11 +785,12 @@ These warnings are suppressed by `-q` / `--quiet` or `--log-level error`.
 ## Experimental context management
 
 The top-level Harness config setting `context_management` defaults to `"auto"`,
-activating notes-based resets only for **Astra on `openai-codex`**, including
-snapshots, aliases, and service tiers. Set it to `"on"` to explicitly opt in any
+activating notes-based resets only for resolved targets whose catalog metadata
+sets `supports_experimental_context:true`. Aliases and service tiers inherit the
+capability; absent metadata means false. Set it to `"on"` to explicitly opt in any
 model/provider. Once activated, the five memory/budget tools stay available across
 model switches and resume. In `auto`, other models use ordinary compaction and
-omit/reject `new_context`; a fresh non-Astra session does not activate memory.
+omit/reject `new_context`; a fresh unsupported-target session does not activate memory.
 Delegates use their own resolved target and private session, not parent activation.
 
 `"off"` hides/rejects all six tools and restores ordinary compaction, but an
@@ -803,6 +804,16 @@ remains active until a nonempty, changed `task_notes` write/append reconciles
 intervening work; `new_context` reports this requirement rather than resetting
 from stale notes. Saving an unchanged or empty note does not acknowledge it.
 The implementation is local, without Codex's private notes/history endpoints.
+The bundled and authenticated Codex catalogs can supply per-model tool
+descriptions and parameter schemas. These follow the acting model across
+switches. History operations map to Harness's flattened history tools, the notes
+namespace description maps to `task_notes`, and `new_context` /
+`get_context_remaining` map directly. Descriptions may be explicitly empty.
+Because Codex's namespaced history/notes operations do not all share Harness's
+calling contract, parameter overrides are used only when they are valid object
+schemas whose keywords, properties, primitive types, enum values, and numeric
+bounds are supported by the local tool. Invalid or incompatible schemas retain
+the built-in schema.
 
 - `task_notes`: `action` is `read`, `write`, `append`, `list`, or `search`.
   Omitting `action` reads unless `text` is supplied, which replaces the note.

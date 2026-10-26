@@ -3223,15 +3223,26 @@ copy of the plan body.
 
 `context_management` exposes `task_notes`, `history_search`, `history_read`,
 `history_list`, `get_context_remaining`, and `new_context`. Its default `auto`
-policy enables only catalog-resolved Astra-family models on `openai-codex`;
-`on` explicitly enables any resolved model/provider, and `off` disables it.
+policy enables targets whose resolved catalog metadata sets
+`supports_experimental_context:true` (absent means false), including aliases and
+service-tier variants; `on` explicitly enables any resolved model/provider, and
+`off` disables it.
 The legacy `codex_experimental_context_management:false` disables `auto`, but
 explicit `on`/`off` wins. Target policy is resolved by the CLI; core agent code
 remains provider-neutral. `internal/taskcontext.Manager` persists sticky memory
 activation and reconciliation state in atomic `context-state.json`, independently
 of the reset policy. Once activated, notes/history/budget tools survive model
 switches and resume; `new_context` remains model-policy-gated. Optional tool
-availability keeps schemas and dispatch current. Off still prepares a bounded
+availability keeps schemas and dispatch current. Model-owned
+`model_messages.tools` metadata follows the acting target across model switches.
+Codex history operations map to their flattened Harness counterparts, the notes
+namespace description maps to `task_notes`, and context-management definitions
+map directly. Descriptions override independently, including explicit empty
+text. Parameter overrides must be valid object schemas using only supported keywords,
+properties, primitive types, enum values, and numeric bounds within the
+corresponding local tool contract; invalid or incompatible Codex namespaced
+schemas retain the built-in schema rather than advertising calls Harness cannot
+execute. Off still prepares a bounded
 recovery handoff using ordinary file paths before dropping memory access.
 Handoff inspection is non-consuming; the agent acknowledges it after a successful
 model attempt (failed sends retain it for retry). Policy/model/session changes

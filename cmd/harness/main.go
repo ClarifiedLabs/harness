@@ -2381,22 +2381,23 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		provider = proxyClient.Provider(providerName)
 	}
 	return delegate.Launch{
-		ContextManagement:     contextManagementForProvider(cfg, modelCatalog, providerName),
-		ContextMemoryOff:      !contextManagementToolsEnabled(cfg),
-		Provider:              provider,
-		ProviderName:          providerName,
-		Model:                 model,
-		ContextWindow:         runtime.ContextWindow,
-		MaxOutputTokens:       runtime.MaxOutputTokens,
-		Registry:              runtime.Registry,
-		Reasoning:             launchReasoning,
-		ReasoningReplayDomain: reasoningReplayDomain,
-		ServerTools:           serverTools,
-		ResponsesStateful:     responsesStatefulForProvider(cfg, modelCatalog, providerName),
-		NativeCompaction:      nativeCompactionForProvider(modelCatalog, providerName),
-		System:                system,
-		Agent:                 target,
-		Tools:                 reg,
+		ContextManagement:      contextManagementForProvider(cfg, modelCatalog, providerName),
+		ContextMemoryOff:       !contextManagementToolsEnabled(cfg),
+		ContextToolDefinitions: contextToolDefinitionsForProvider(modelCatalog, providerName),
+		Provider:               provider,
+		ProviderName:           providerName,
+		Model:                  model,
+		ContextWindow:          runtime.ContextWindow,
+		MaxOutputTokens:        runtime.MaxOutputTokens,
+		Registry:               runtime.Registry,
+		Reasoning:              launchReasoning,
+		ReasoningReplayDomain:  reasoningReplayDomain,
+		ServerTools:            serverTools,
+		ResponsesStateful:      responsesStatefulForProvider(cfg, modelCatalog, providerName),
+		NativeCompaction:       nativeCompactionForProvider(modelCatalog, providerName),
+		System:                 system,
+		Agent:                  target,
+		Tools:                  reg,
 	}, nil
 }
 
@@ -2589,9 +2590,10 @@ func contextPolicy(cfg config.Config, catalog protocol.Catalog, providerID strin
 		identity = target.ID
 	}
 	return taskcontext.Policy{
-		Reset:    contextManagementForProvider(cfg, catalog, providerID),
-		Off:      !contextManagementToolsEnabled(cfg),
-		Identity: identity,
+		Reset:           contextManagementForProvider(cfg, catalog, providerID),
+		Off:             !contextManagementToolsEnabled(cfg),
+		Identity:        identity,
+		ToolDefinitions: contextToolDefinitionsForProvider(catalog, providerID),
 	}
 }
 
@@ -2607,9 +2609,9 @@ func contextManagementToolsEnabled(cfg config.Config) bool {
 	}
 }
 
-// Context management is local and provider-neutral. Auto mode is conservative:
-// only the resolved ChatGPT-sign-in Astra family is enabled by default. Resolve
-// aliases and service tiers before checking the actual model, never the alias.
+// Context management is local and provider-neutral. Auto mode follows the
+// resolved target's catalog capability; aliases and service tiers inherit it.
+// Explicit on remains available for models without that capability.
 func contextManagementForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
 	if !contextManagementToolsEnabled(cfg) {
 		return false
@@ -2621,16 +2623,15 @@ func contextManagementForProvider(cfg config.Config, catalog protocol.Catalog, p
 	if cfg.ContextManagement == "on" {
 		return true
 	}
-	provider, model, _ := strings.Cut(target.ID, ":")
-	if target.ProviderLabel != "" {
-		provider = target.ProviderLabel
+	return target.SupportsExperimentalContext
+}
+
+func contextToolDefinitionsForProvider(catalog protocol.Catalog, providerID string) map[string]llm.ContextToolDefinition {
+	target, ok := catalogTarget(catalog, providerID)
+	if !ok {
+		return nil
 	}
-	if target.ModelLabel != "" {
-		model = target.ModelLabel
-	}
-	model, _, _ = strings.Cut(model, ":")
-	codexProfile := strings.EqualFold(target.Profile, llm.ProfileCodex)
-	return (codexProfile || provider == llm.CodexProviderName) && (model == "gpt-6-astra" || strings.HasPrefix(model, "gpt-6-astra-"))
+	return target.ContextToolDefinitions
 }
 
 func prewarmForProvider(catalog protocol.Catalog, providerID string) bool {

@@ -37,6 +37,18 @@ func TestDecodeCodexModelsUsesListVisibleModels(t *testing.T) {
 	if model.ReasoningSummarySupported == nil || !*model.ReasoningSummarySupported {
 		t.Fatalf("gpt-5.5 reasoning summary support = %v, want true", model.ReasoningSummarySupported)
 	}
+	if !model.SupportsExperimentalContext {
+		t.Fatal("Codex experimental-context capability was dropped")
+	}
+	if got := model.ContextToolDefinitions["history_search"].Description; got == nil || *got != "catalog search" {
+		t.Fatalf("history description = %v", got)
+	}
+	if got := model.ContextToolDefinitions["task_notes"].Description; got == nil || *got != "" {
+		t.Fatalf("explicit empty notes description = %v", got)
+	}
+	if got := model.ContextToolDefinitions["new_context"].Parameters; got == nil || *got != "not valid JSON" {
+		t.Fatalf("schema override = %v", got)
+	}
 	fast, ok := llm.ResolveServiceTier("fast", model.ServiceTiers)
 	if len(model.ServiceTiers) != 1 || !ok || fast.ID != "fast" || fast.Request.ServiceTier != "priority" {
 		t.Fatalf("gpt-5.5 fast tier = %+v, %v", fast, ok)
@@ -178,6 +190,12 @@ func testCodexModelsCatalogJSON() string {
         {"effort": "xhigh"}
       ],
       "supports_reasoning_summaries": true,
+      "supports_experimental_context": true,
+      "model_messages": {"tools": {
+        "history": {"search_contents": {"description": "catalog search", "parameters": "{\"type\":\"object\"}"}},
+        "notes": {"namespace_description": ""},
+        "context_management": {"new_context": {"description": "catalog reset", "parameters": "not valid JSON"}}
+      }},
       "visibility": "list",
       "supported_in_api": true,
       "service_tiers": [{"id":"priority","name":"Fast","description":"Lower latency"}],

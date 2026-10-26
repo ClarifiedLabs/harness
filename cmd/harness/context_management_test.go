@@ -16,22 +16,23 @@ import (
 	"harness/internal/ui"
 )
 
-func TestContextManagementDefaultsToResolvedAstra(t *testing.T) {
+func TestContextManagementDefaultsToCatalogCapability(t *testing.T) {
 	catalog := protocol.Catalog{Targets: []protocol.Target{
-		{ID: "openai-codex:gpt-6-astra", Aliases: []string{"astra"}, ProviderLabel: "openai-codex", ModelLabel: "gpt-6-astra"},
-		{ID: "openai-codex:gpt-6-astra:priority", Aliases: []string{"astra:priority"}, ProviderLabel: "openai-codex", ModelLabel: "gpt-6-astra"},
-		{ID: "openai-codex:gpt-6-astra-2026-09-03:priority"}, // Older catalog: labels omitted.
+		{ID: "openai-codex:gpt-6-astra", Aliases: []string{"astra"}, ProviderLabel: "openai-codex", ModelLabel: "gpt-6-astra", SupportsExperimentalContext: true},
+		{ID: "openai-codex:gpt-6-astra:priority", Aliases: []string{"astra:priority"}, ProviderLabel: "openai-codex", ModelLabel: "gpt-6-astra", SupportsExperimentalContext: true},
+		{ID: "openai-codex:gpt-6-astra-2026-09-03:priority", SupportsExperimentalContext: true}, // Older catalog: labels omitted.
 		{ID: "openai-codex:gpt-6-astral"},
 		{ID: "openai-codex:gpt-5.6-sol", ProviderLabel: "openai-codex"},
 		{ID: "openai:gpt-6-astra", ProviderLabel: "openai"},
 		{ID: "anthropic:claude", Aliases: []string{"openai-codex", "gpt-6-astra"}, ProviderLabel: "anthropic"},
 		{ID: "legacy-astra-id", ProviderLabel: "openai-codex", ModelLabel: "gpt-5.6-sol"},
+		{ID: "other:custom", SupportsExperimentalContext: true},
 	}}
 	for _, mode := range []string{"", "auto", "on", "off"} {
 		for _, legacy := range []bool{false, true} {
 			cfg := config.Config{ContextManagement: mode, CodexExperimentalContextManagement: legacy}
-			for _, id := range []string{"astra", "astra:priority", "openai-codex:gpt-6-astra-2026-09-03:priority", "openai-codex:gpt-6-astral", "openai-codex:gpt-5.6-sol", "openai:gpt-6-astra", "openai-codex", "gpt-6-astra", "legacy-astra-id", "missing"} {
-				auto := id == "astra" || id == "astra:priority" || id == "openai-codex:gpt-6-astra-2026-09-03:priority"
+			for _, id := range []string{"astra", "astra:priority", "openai-codex:gpt-6-astra-2026-09-03:priority", "openai-codex:gpt-6-astral", "openai-codex:gpt-5.6-sol", "openai:gpt-6-astra", "openai-codex", "gpt-6-astra", "legacy-astra-id", "other:custom", "missing"} {
+				auto := id == "astra" || id == "astra:priority" || id == "openai-codex:gpt-6-astra-2026-09-03:priority" || id == "other:custom"
 				want := id != "missing" && (mode == "on" || (mode == "" || mode == "auto") && legacy && auto)
 				if got := contextManagementForProvider(cfg, catalog, id); got != want {
 					t.Fatalf("mode=%q legacy=%v target=%s got=%v want=%v", mode, legacy, id, got, want)
@@ -54,7 +55,7 @@ func TestContextToolsFollowREPLModelSwitches(t *testing.T) {
 			env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-config", cfg, "-model", targets[0]}, fp, input)
 			env.stdinPiped = true
 			for _, id := range []string{targets[0], targets[1], targets[3]} {
-				proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: id, ContextWindow: 100000})
+				proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: id, ContextWindow: 100000, SupportsExperimentalContext: id == targets[0] || id == targets[3]})
 			}
 			if code := run(env); code != ui.ExitOK {
 				t.Fatalf("run = %d: %s", code, errw.String())
@@ -102,7 +103,7 @@ func TestContextToolsUseResolvedChildModel(t *testing.T) {
 			fp := llmtest.New("fake", llmtest.Step{Events: []llm.StreamEvent{{Kind: llm.EventToolCallDone, ToolID: "child", ToolName: "delegate", ToolInput: json.RawMessage(`{"task":"inspect","agent":"context-child"}`)}}, Stop: llm.StopToolUse}, okStep(), okStep())
 			env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-config", cfg, "-model", tc.parent, "-p", "inspect"}, fp, "")
 			for _, id := range []string{"openai-codex:gpt-6-astra", "openai-codex:gpt-5.6-sol"} {
-				proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: id, ContextWindow: 100000})
+				proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: id, ContextWindow: 100000, SupportsExperimentalContext: id == "openai-codex:gpt-6-astra", ContextToolDefinitions: map[string]llm.ContextToolDefinition{"history_search": {Description: func() *string { value := id + " history"; return &value }()}}})
 			}
 			if code := run(env); code != ui.ExitOK {
 				t.Fatalf("run = %d: %s", code, errw.String())
@@ -124,6 +125,20 @@ func TestContextToolsUseResolvedChildModel(t *testing.T) {
 						t.Errorf("request %d %s exposed=%v want=%v", i, name, got, want)
 					}
 				}
+				if want && strings.HasPrefix(request.TargetID, "openai-codex:") {
+					found := false
+					for _, spec := range request.Request.Tools {
+						if spec.Name == "history_search" {
+							found = true
+							if want := request.TargetID + " history"; spec.Description != want {
+								t.Errorf("request %d history description=%q want=%q", i, spec.Description, want)
+							}
+						}
+					}
+					if !found {
+						t.Errorf("request %d missing history_search definition", i)
+					}
+				}
 			}
 		})
 	}
@@ -138,7 +153,7 @@ func TestRootContextToolsFollowCodexProfile(t *testing.T) {
 	}
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-config", cfg, "-model", "openai-codex-2:gpt-6-astra", "-p", "hi"}, fp, "")
-	proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: "openai-codex-2:gpt-6-astra", ProviderLabel: "openai-codex-2", Profile: "codex", ModelLabel: "gpt-6-astra", ContextWindow: 100000})
+	proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: "openai-codex-2:gpt-6-astra", ProviderLabel: "openai-codex-2", Profile: "codex", ModelLabel: "gpt-6-astra", ContextWindow: 100000, SupportsExperimentalContext: true})
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("run = %d: %s", code, errw.String())
 	}
@@ -149,6 +164,62 @@ func TestRootContextToolsFollowCodexProfile(t *testing.T) {
 	for _, name := range taskcontext.Names {
 		if !slices.Contains(toolNames(req), name) {
 			t.Fatalf("%s not exposed for codex-profile Astra target", name)
+		}
+	}
+}
+
+func TestContextToolDefinitionsFollowModelSwitches(t *testing.T) {
+	text := func(value string) *string { return &value }
+	firstSchema := `{"type":"object","properties":{"query":{"type":"string","description":"first query"}},"required":["query"]}`
+	secondSchema := `{"type":"object","properties":{"query":{"type":"string","description":"second query"}},"required":["query"]}`
+	invalidSchema := `{"type":"object","properties":{"item_id":{"type":"string"}}}`
+	targets := []protocol.Target{
+		{ID: "openai-codex:gpt-6-astra", SupportsExperimentalContext: true, ContextToolDefinitions: map[string]llm.ContextToolDefinition{
+			"history_search": {Description: text("first search"), Parameters: &firstSchema},
+			"new_context":    {Description: text("first reset")},
+		}},
+		{ID: "openai-codex:gpt-5.6-sol", SupportsExperimentalContext: true, ContextToolDefinitions: map[string]llm.ContextToolDefinition{
+			"history_search": {Description: text("second search"), Parameters: &secondSchema},
+			"history_read":   {Parameters: &invalidSchema},
+			"new_context":    {Description: text("second reset")},
+		}},
+	}
+	cfg := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(cfg, []byte(`{"context_management":"auto"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fp := llmtest.New("fake", okStep(), okStep())
+	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-config", cfg, "-model", targets[0].ID}, fp, "first\n/model "+targets[1].ID+"\nsecond\n/exit\n")
+	env.stdinPiped = true
+	proxy.catalog.Targets = append(proxy.catalog.Targets, targets...)
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("run = %d: %s", code, errw.String())
+	}
+	if len(fp.Requests) != 2 {
+		t.Fatalf("requests = %d", len(fp.Requests))
+	}
+	for i, request := range fp.Requests {
+		var search, reset, read llm.ToolSchema
+		for _, spec := range request.Tools {
+			switch spec.Name {
+			case "history_search":
+				search = spec
+			case "new_context":
+				reset = spec
+			case "history_read":
+				read = spec
+			}
+		}
+		wantDescription := []string{"first search", "second search"}[i]
+		wantQueryGuidance := []string{"first query", "second query"}[i]
+		if search.Description != wantDescription || !strings.Contains(string(search.Parameters), wantQueryGuidance) || !strings.Contains(string(search.Parameters), `"required":["query"]`) {
+			t.Errorf("request %d search = %+v", i, search)
+		}
+		if want := []string{"first reset", "second reset"}[i]; reset.Description != want {
+			t.Errorf("request %d reset description = %q, want %q", i, reset.Description, want)
+		}
+		if strings.Contains(string(read.Parameters), "item_id") || !strings.Contains(string(read.Parameters), `"id"`) {
+			t.Errorf("request %d incompatible history schema did not fall back: %s", i, read.Parameters)
 		}
 	}
 }
@@ -179,7 +250,7 @@ func TestRootContextToolsFollowProviderOnFirstRequest(t *testing.T) {
 			fp := llmtest.New("fake", okStepWithUsage(1, 1))
 			id := tc.provider + ":" + tc.model
 			env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-config", cfg, "-model", id, "-p", "hi"}, fp, "")
-			proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: id, ProviderLabel: tc.provider, ModelLabel: tc.model, ContextWindow: 100000})
+			proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: id, ProviderLabel: tc.provider, ModelLabel: tc.model, ContextWindow: 100000, SupportsExperimentalContext: tc.provider == "openai-codex" && tc.model == "gpt-6-astra"})
 			if code := run(env); code != ui.ExitOK {
 				t.Fatalf("run = %d: %s", code, errw.String())
 			}

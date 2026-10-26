@@ -121,6 +121,36 @@ func TestCatalogReasoningReplayDomainsAreProviderLocalAndVariantStable(t *testin
 	}
 }
 
+func TestCatalogCarriesExperimentalContextMetadataAcrossVariants(t *testing.T) {
+	description := "model-owned search"
+	parameters := `{"type":"object","properties":{"query":{"type":"string"}}}`
+	catalog, _, err := catalogFromProviderConfigs([]llm.ProviderConfig{{
+		Name: "codex",
+		Models: []llm.ModelEntry{{
+			Name: "astra", SupportsExperimentalContext: true,
+			ServiceTiers: []llm.ServiceTier{{ID: "fast"}},
+			ContextToolDefinitions: map[string]llm.ContextToolDefinition{
+				"history_search": {Description: &description, Parameters: &parameters},
+			},
+		}},
+	}}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Targets) != 2 {
+		t.Fatalf("targets = %+v", catalog.Targets)
+	}
+	for _, target := range catalog.Targets {
+		if !target.SupportsExperimentalContext {
+			t.Errorf("%s lost experimental-context capability", target.ID)
+		}
+		definition := target.ContextToolDefinitions["history_search"]
+		if definition.Description == nil || *definition.Description != description || definition.Parameters == nil || *definition.Parameters != parameters {
+			t.Errorf("%s lost tool definition: %+v", target.ID, definition)
+		}
+	}
+}
+
 func (b *lockedLogBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

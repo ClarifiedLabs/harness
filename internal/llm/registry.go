@@ -234,19 +234,28 @@ func (p *PromptCacheConfig) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// ContextToolDefinition is optional model-owned wording and a JSON-schema
+// string for one local experimental context tool. Nil fields retain built-ins.
+type ContextToolDefinition struct {
+	Description *string `json:"description,omitempty"`
+	Parameters  *string `json:"parameters,omitempty"`
+}
+
 // ModelEntry is one model inside a ProviderConfig.
 type ModelEntry struct {
-	Name                      string            `json:"name"`
-	ContextWindow             int               `json:"context_window"`
-	OutputLimit               int               `json:"output_limit,omitempty"`
-	InputModalities           []string          `json:"input_modalities,omitempty"`
-	ServerTools               []string          `json:"server_tools,omitempty"`
-	ServiceTiers              []ServiceTier     `json:"service_tiers,omitempty"`
-	Price                     Price             `json:"price"`
-	Shape                     string            `json:"shape,omitempty"`
-	Reasoning                 *bool             `json:"reasoning,omitempty"`
-	ReasoningSummarySupported *bool             `json:"reasoning_summary_supported,omitempty"`
-	ReasoningOptions          []ReasoningOption `json:"reasoning_options,omitempty"`
+	Name                        string                           `json:"name"`
+	ContextWindow               int                              `json:"context_window"`
+	OutputLimit                 int                              `json:"output_limit,omitempty"`
+	InputModalities             []string                         `json:"input_modalities,omitempty"`
+	ServerTools                 []string                         `json:"server_tools,omitempty"`
+	ServiceTiers                []ServiceTier                    `json:"service_tiers,omitempty"`
+	Price                       Price                            `json:"price"`
+	Shape                       string                           `json:"shape,omitempty"`
+	Reasoning                   *bool                            `json:"reasoning,omitempty"`
+	ReasoningSummarySupported   *bool                            `json:"reasoning_summary_supported,omitempty"`
+	ReasoningOptions            []ReasoningOption                `json:"reasoning_options,omitempty"`
+	SupportsExperimentalContext bool                             `json:"supports_experimental_context,omitempty"`
+	ContextToolDefinitions      map[string]ContextToolDefinition `json:"context_tool_definitions,omitempty"`
 	// ReasoningReplayDomain is a provider-local compatibility label for opaque
 	// reasoning returned by this model. Empty gives the model its own domain.
 	ReasoningReplayDomain string `json:"reasoning_replay_domain,omitempty"`

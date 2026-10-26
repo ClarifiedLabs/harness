@@ -85,22 +85,23 @@ type Runtime struct {
 
 // Launch is the fully resolved child-agent runtime for one delegate call.
 type Launch struct {
-	ContextManagement     bool
-	ContextMemoryOff      bool
-	Provider              llm.Provider
-	ProviderName          string
-	Model                 string
-	ContextWindow         int
-	MaxOutputTokens       int
-	Registry              *llm.Registry
-	Reasoning             llm.ReasoningConfig
-	ReasoningReplayDomain string
-	ServerTools           []llm.ServerTool
-	ResponsesStateful     bool
-	NativeCompaction      bool
-	System                string
-	Agent                 string
-	Tools                 *tools.Registry
+	ContextManagement      bool
+	ContextMemoryOff       bool
+	ContextToolDefinitions map[string]llm.ContextToolDefinition
+	Provider               llm.Provider
+	ProviderName           string
+	Model                  string
+	ContextWindow          int
+	MaxOutputTokens        int
+	Registry               *llm.Registry
+	Reasoning              llm.ReasoningConfig
+	ReasoningReplayDomain  string
+	ServerTools            []llm.ServerTool
+	ResponsesStateful      bool
+	NativeCompaction       bool
+	System                 string
+	Agent                  string
+	Tools                  *tools.Registry
 	// TranscriptSanitizer and RequestSanitizer, when non-nil, are installed on
 	// every child agent (see agent.SetTranscriptSanitizer/SetRequestSanitizer).
 	// Protocol-served roots (ACP) set them so transport control sequences stay
@@ -678,7 +679,7 @@ func (r *Runner) runPrepared(ctx context.Context, prepared preparedRun, progress
 			manager := taskcontext.New(func() string { return childDir })
 			childContext = manager
 			manager.SetPolicy(func() taskcontext.Policy {
-				return taskcontext.Policy{Reset: launch.ContextManagement, Off: launch.ContextMemoryOff, Identity: launch.ProviderName + "/" + launch.Model}
+				return taskcontext.Policy{Reset: launch.ContextManagement, Off: launch.ContextMemoryOff, Identity: launch.ProviderName + "/" + launch.Model, ToolDefinitions: launch.ContextToolDefinitions}
 			})
 			manager.Register(launch.Tools, toolNames...)
 			break

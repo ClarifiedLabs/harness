@@ -795,19 +795,22 @@ environment variables, JSON paths, types, and defaults. The concise
   the configured proxy model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
 - `context_management` is a top-level config-file setting: `"auto"` (default)
-  enables notes-based context management only for **Astra on `openai-codex`**,
-  including snapshots, aliases, and service tiers; `"on"` explicitly opts in any
-  model/provider; `"off"` restores ordinary compaction. For example,
+  enables notes-based context management only when the resolved model-proxy
+  target advertises `supports_experimental_context:true`. Aliases and service
+  tiers inherit that capability; an absent field means false. `"on"` explicitly
+  opts in any model/provider; `"off"` restores ordinary compaction. For example,
   `{"context_management":"on"}` enables the tools for Claude or Gemini too.
   Reset eligibility follows the current model; once activated, notes/history and
   budget tools remain available across switches and resume. Only `new_context`
-  disappears on non-Astra models in `auto`. Returning to notes-reset mode requires
+  disappears on targets without the capability in `auto`. Returning to notes-reset mode requires
   an updated note checkpoint first; ordinary compaction remains active until then.
   `off` hides all tools but prepares recovery references for an existing session.
   Fresh delegates resolve their own target and activation. The legacy
   `codex_experimental_context_management:false` still disables `auto` mode;
   explicit `on`/`off` takes precedence. There is no flag or environment override.
-  The agent saves/retrieves durable notes and history across fresh windows,
+  Model-provided context-tool descriptions and compatible parameter schemas
+  follow the acting target across model switches; invalid or incompatible
+  schemas retain Harness's built-ins. The agent saves/retrieves durable notes and history across fresh windows,
   with budget reminders before automatic reset. `/compact` uses the same
   notes-based reset while enabled. Non-default models are experimental: quality
   depends on maintaining notes and recovering evidence reliably. See

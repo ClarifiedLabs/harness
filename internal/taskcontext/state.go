@@ -19,9 +19,10 @@ const maxState = 16 << 10
 // Policy separates notes-reset eligibility from the explicit memory-tool opt-out.
 // Identity must change when the resolved provider/model identity changes.
 type Policy struct {
-	Reset    bool
-	Off      bool
-	Identity string
+	Reset           bool
+	Off             bool
+	Identity        string
+	ToolDefinitions map[string]llm.ContextToolDefinition
 }
 
 type continuityState struct {

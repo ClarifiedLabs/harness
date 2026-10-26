@@ -25,7 +25,9 @@ func ProviderFromConfig(pc llm.ProviderConfig) modelcatalog.Provider {
 			ReasoningOptions: append([]llm.ReasoningOption(nil), entry.ReasoningOptions...),
 			Limit:            modelcatalog.Limit{Context: entry.ContextWindow, Output: entry.OutputLimit},
 			Provider:         modelcatalog.ModelProvider{Shape: entry.Shape}, Cost: entry.Price,
-			ServiceTiers: llm.NormalizeServiceTiers(entry.ServiceTiers),
+			ServiceTiers:                llm.NormalizeServiceTiers(entry.ServiceTiers),
+			SupportsExperimentalContext: entry.SupportsExperimentalContext,
+			ContextToolDefinitions:      modelcatalog.CloneContextToolDefinitions(entry.ContextToolDefinitions),
 		}
 	}
 	return modelcatalog.Provider{ID: pc.Name, Name: pc.Name, API: pc.BaseURL, Env: append([]string(nil), pc.APIKeyEnv...), Models: models}
@@ -145,6 +147,10 @@ func mergeCatalogModel(base, higher modelcatalog.Model) modelcatalog.Model {
 	if higher.ServiceTiers != nil {
 		out.ServiceTiers = llm.NormalizeServiceTiers(higher.ServiceTiers)
 	}
+	out.SupportsExperimentalContext = higher.SupportsExperimentalContext
+	if higher.ContextToolDefinitions != nil {
+		out.ContextToolDefinitions = modelcatalog.CloneContextToolDefinitions(higher.ContextToolDefinitions)
+	}
 	return out
 }
 
@@ -178,6 +184,12 @@ func mergeModel(base modelcatalog.Model, direct Model, codex bool) modelcatalog.
 	}
 	if direct.Price != nil {
 		out.Cost = *direct.Price
+	}
+	if direct.SupportsExperimentalContext != nil {
+		out.SupportsExperimentalContext = *direct.SupportsExperimentalContext
+	}
+	if direct.ContextToolDefinitions != nil {
+		out.ContextToolDefinitions = modelcatalog.CloneContextToolDefinitions(direct.ContextToolDefinitions)
 	}
 	if direct.ServiceTiers != nil {
 		if codex {
@@ -216,6 +228,7 @@ func cloneCatalogModel(model modelcatalog.Model) modelcatalog.Model {
 	model.Modalities.Output = append([]string(nil), model.Modalities.Output...)
 	model.ReasoningOptions = append([]llm.ReasoningOption(nil), model.ReasoningOptions...)
 	model.ServiceTiers = append([]llm.ServiceTier(nil), model.ServiceTiers...)
+	model.ContextToolDefinitions = modelcatalog.CloneContextToolDefinitions(model.ContextToolDefinitions)
 	if model.ReasoningSummarySupported != nil {
 		value := *model.ReasoningSummarySupported
 		model.ReasoningSummarySupported = &value

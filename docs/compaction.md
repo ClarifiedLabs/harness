@@ -339,11 +339,12 @@ a low-water mark below each enabled threshold to avoid immediate retriggers.
 
 ## Experimental context management
 
-With the default `context_management:"auto"`, catalog-resolved Astra-family
-models on `openai-codex` use persistent notes and searchable history in place
-of model-written compaction summaries. Other targets retain ordinary compaction.
-Aliases, snapshots, and service-tier variants follow the resolved provider/model,
-not alias text. Set `context_management:"on"` to opt any model/provider in, or
+With the default `context_management:"auto"`, resolved targets whose catalog
+sets `supports_experimental_context:true` use persistent notes and searchable
+history in place of model-written compaction summaries. Other targets retain
+ordinary compaction. Aliases, snapshots, and service-tier variants inherit the
+resolved target capability, not alias text. Set `context_management:"on"` to opt
+any model/provider in, or
 `"off"` to restore ordinary compaction. The legacy
 `codex_experimental_context_management:false` still disables `auto`; explicit
 `on`/`off` wins. Root and ACP sessions, model switches, and fresh delegates resolve
@@ -402,12 +403,21 @@ Codex **0.154.0** additionally checks the starting model's
 `supports_experimental_context` capability (default false; bundled Astra enabled),
 and resolves fresh children's model defaults independently
 ([#43147](https://github.com/openai/codex/pull/43147)). Its hosted activation also
-requires an eligible Codex backend/account. Harness instead uses a conservative
-Astra/Codex auto policy plus explicit provider-neutral opt-in. Codex's subsequent
+requires an eligible Codex backend/account. Harness uses local catalog-driven
+activation plus explicit provider-neutral opt-in rather than hosted account
+eligibility. Codex's subsequent
 originating-model history fix
 ([#44243](https://github.com/openai/codex/pull/44243)) motivates model-switch and
 multimodal recovery regression coverage, not a dependency on its private protocol.
-Its note contract also caps each file at 1,000,000 UTF-8 bytes.
+Its note contract also caps each file at 1,000,000 UTF-8 bytes. Codex later
+removed the bundled Astra capability in [#47397](https://github.com/openai/codex/pull/47397),
+so Harness consumes the resolved flag rather than inferring eligibility from
+the Astra name; explicit provider-neutral opt-in remains available. Codex
+[#56313](https://github.com/openai/codex/pull/56313) added acting-model catalog
+overrides for history, notes, and context-tool descriptions and schemas. Harness
+carries the same metadata through bundled/discovered catalogs and the model
+proxy, maps applicable definitions to its flattened tools, and retains local
+schemas when an override is invalid or incompatible with the local call contract.
 Harness uses its own canonical tree IDs and existing tool interface
 rather than duplicating Codex's hosted storage or private protocol. Notes stay
 isolated per Harness session/delegate. Forks, clones, and compatible delegate continuations inherit
