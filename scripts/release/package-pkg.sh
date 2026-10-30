@@ -67,7 +67,9 @@ if [[ "$signing_mode" == "signed" ]]; then
 fi
 
 payload="${work_dir}/payload"
-mkdir -p "${payload}/usr/local/bin"
+mkdir -p "${payload}/usr/local/bin" "${payload}/usr/local/share/doc/harness"
+install -m 0644 LICENSE "${payload}/usr/local/share/doc/harness/LICENSE"
+install -m 0644 THIRD_PARTY_NOTICES.md "${payload}/usr/local/share/doc/harness/THIRD_PARTY_NOTICES.md"
 for name in harness harness-model-proxy harness-mcp-proxy; do
 	install -m 0755 "${stage_dir}/${name}" "${payload}/usr/local/bin/${name}"
 	if [[ "$signing_mode" == "signed" ]]; then

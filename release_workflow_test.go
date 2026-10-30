@@ -32,6 +32,9 @@ func TestHomebrewFormulaeDisableGoWorkspace(t *testing.T) {
 			if !strings.Contains(string(formula), want) {
 				t.Fatalf("formula should start install with GOWORK=off:\n%s", formula)
 			}
+			if !strings.Contains(string(formula), `doc.install "THIRD_PARTY_NOTICES.md"`) {
+				t.Fatalf("formula should install dependency notices:\n%s", formula)
+			}
 		})
 	}
 }

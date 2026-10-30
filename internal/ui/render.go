@@ -12,12 +12,12 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/ClarifiedLabs/mdcli/highlight"
+	"github.com/ClarifiedLabs/mdcli/markdown"
 	"harness/internal/agent"
 	"harness/internal/delegate"
 	"harness/internal/llm"
-	"harness/internal/markdown"
 	"harness/internal/sessionrec"
-	"harness/internal/term/highlight"
 	"harness/internal/tools"
 )
 
@@ -287,10 +287,11 @@ func (r *Renderer) SetCumulativeUsage(inputTokens, outputTokens int, costUSD flo
 // ANSI, and terminal-width policy as streamed assistant text.
 func (r *Renderer) FormatMarkdown(text string) string {
 	return markdown.Render(text, markdown.Options{
-		Enabled:    r.markdown,
-		ANSI:       r.color,
-		ColorTheme: r.colorTheme,
-		Width:      r.outputWidth(),
+		MermaidMaxVirtualNodes: 1024,
+		Enabled:                r.markdown,
+		ANSI:                   r.color,
+		ColorTheme:             r.colorTheme,
+		Width:                  r.outputWidth(),
 	})
 }
 
@@ -804,11 +805,12 @@ func (r *Renderer) reasoningSummaryBlock(text string) string {
 		header = "[" + r.now().Format(r.timestampLayout) + " reasoning]"
 	}
 	body := markdown.Render(text, markdown.Options{
-		Enabled:    true,
-		ANSI:       r.color,
-		ColorTheme: r.colorTheme,
-		Width:      r.outputWidth(),
-		Prefix:     "  ",
+		MermaidMaxVirtualNodes: 1024,
+		Enabled:                true,
+		ANSI:                   r.color,
+		ColorTheme:             r.colorTheme,
+		Width:                  r.outputWidth(),
+		Prefix:                 "  ",
 	})
 	var b strings.Builder
 	b.WriteString(header)
@@ -1925,10 +1927,11 @@ func (r *Renderer) ensureAssistantMarkdownLocked() {
 		return
 	}
 	r.assistantMarkdown = markdown.NewStream(markdown.Options{
-		Enabled:    true,
-		ANSI:       r.color,
-		ColorTheme: r.colorTheme,
-		Width:      r.outputWidth(),
+		MermaidMaxVirtualNodes: 1024,
+		Enabled:                true,
+		ANSI:                   r.color,
+		ColorTheme:             r.colorTheme,
+		Width:                  r.outputWidth(),
 	})
 }
 

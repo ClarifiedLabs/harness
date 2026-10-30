@@ -1,6 +1,6 @@
 # AGENTS.md - harness
 
-Harness is a small, terminal-first Go CLI for a provider-neutral, tool-using LLM loop. Keep it simple and standard-library-only.
+Harness is a small, terminal-first Go CLI for a provider-neutral, tool-using LLM loop. Keep it simple, with minimal dependencies.
 
 ## Hard Rules
 

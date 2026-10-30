@@ -12,11 +12,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClarifiedLabs/mdcli/highlight"
+	"github.com/ClarifiedLabs/mdcli/markdown"
 	"harness/internal/goal"
 	"harness/internal/llm"
-	"harness/internal/markdown"
 	"harness/internal/plan"
-	"harness/internal/term/highlight"
 	"harness/internal/todo"
 	"harness/internal/trajectory"
 )

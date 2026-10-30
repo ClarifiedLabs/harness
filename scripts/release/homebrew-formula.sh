@@ -36,6 +36,7 @@ class ${class_name} < Formula
       -X harness/internal/buildinfo.Version=v#{version}
     ]
     system "go", "build", "-trimpath", "-ldflags", ldflags.join(" "), "-o", bin/"${binary_name}", "${command_path}"
+    doc.install "THIRD_PARTY_NOTICES.md"
   end
 
   test do

@@ -19,5 +19,6 @@ install -m 0755 "${stage_dir}/harness-model-proxy" "${root}/harness-model-proxy"
 install -m 0755 "${stage_dir}/harness-mcp-proxy" "${root}/harness-mcp-proxy"
 install -m 0644 README.md "${root}/README.md"
 install -m 0644 LICENSE "${root}/LICENSE"
+install -m 0644 THIRD_PARTY_NOTICES.md "${root}/THIRD_PARTY_NOTICES.md"
 
 tar -C "$work_dir" -czf "${dist_dir}/${name}.tar.gz" "$name"

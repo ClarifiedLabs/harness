@@ -1,10 +1,12 @@
-package markdown
+package session
 
 import (
 	"strings"
 	"testing"
 
 	"harness/internal/llm"
+
+	"github.com/ClarifiedLabs/mdcli/markdown"
 )
 
 func TestRenderCitationSources(t *testing.T) {
@@ -12,12 +14,12 @@ func TestRenderCitationSources(t *testing.T) {
 	if strings.Contains(sources, "\x1b") {
 		t.Fatal("citation text contains ANSI")
 	}
-	if got := Render(sources, Options{}); got != sources {
+	if got := markdown.Render(sources, markdown.Options{}); got != sources {
 		t.Fatalf("raw text changed: %q", got)
 	}
 	for _, ansi := range []bool{false, true} {
-		opts := Options{Enabled: true, ANSI: ansi}
-		got := Render(sources, opts)
+		opts := markdown.Options{Enabled: true, ANSI: ansi}
+		got := markdown.Render(sources, opts)
 		for _, want := range []string{"Sources:", "https://example.com/a%28b%29?q=a%20b", "Example title"} {
 			if !strings.Contains(got, want) {
 				t.Fatalf("rendered sources missing %q: %q", want, got)
@@ -27,7 +29,7 @@ func TestRenderCitationSources(t *testing.T) {
 			t.Fatalf("ANSI in plain render: %q", got)
 		}
 		for split := 0; split <= len(sources); split++ {
-			stream := NewStream(opts)
+			stream := markdown.NewStream(opts)
 			streamed := stream.Write(sources[:split]) + stream.Write(sources[split:]) + stream.Flush()
 			if streamed != got {
 				t.Fatalf("split %d render = %q, want %q", split, streamed, got)

@@ -24,11 +24,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ClarifiedLabs/mdcli/highlight"
+	"github.com/ClarifiedLabs/mdcli/markdown"
 	"harness/internal/goal"
 	"harness/internal/llm"
-	"harness/internal/markdown"
 	"harness/internal/plan"
-	"harness/internal/term/highlight"
 	"harness/internal/todo"
 	"harness/internal/trajectory"
 )
@@ -1074,10 +1074,11 @@ func newAssistantDisplay(w io.Writer, opts ReplayOptions) *assistantDisplay {
 	}
 	if opts.Markdown {
 		d.markdown = markdown.NewStream(markdown.Options{
-			Enabled:    true,
-			ANSI:       opts.ANSI,
-			ColorTheme: opts.ColorTheme,
-			Width:      opts.Width,
+			MermaidMaxVirtualNodes: 1024,
+			Enabled:                true,
+			ANSI:                   opts.ANSI,
+			ColorTheme:             opts.ColorTheme,
+			Width:                  opts.Width,
 		})
 	}
 	return d
@@ -1921,11 +1922,12 @@ func ReasoningSummaryLines(text string, format ReasoningSummaryFormat) []string 
 	}
 
 	body := markdown.Render(text, markdown.Options{
-		Enabled:    true,
-		ANSI:       format.ANSI,
-		ColorTheme: format.ColorTheme,
-		Width:      format.Width,
-		Prefix:     indent,
+		MermaidMaxVirtualNodes: 1024,
+		Enabled:                true,
+		ANSI:                   format.ANSI,
+		ColorTheme:             format.ColorTheme,
+		Width:                  format.Width,
+		Prefix:                 indent,
 	})
 
 	out := []string{header}

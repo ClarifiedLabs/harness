@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ClarifiedLabs/mdcli/highlight"
 	"harness/internal/agent"
 	"harness/internal/delegate"
 	"harness/internal/llm"
 	"harness/internal/session"
-	"harness/internal/term/highlight"
 	"harness/internal/tools"
 )
 

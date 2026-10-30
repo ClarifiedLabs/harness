@@ -9,8 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"harness/internal/markdown"
-	"harness/internal/mermaid"
+	"github.com/ClarifiedLabs/mdcli/markdown"
 )
 
 const sessionMermaidFlow = "flowchart TD\n  A[Start] --> B[End]\n"
@@ -26,11 +25,7 @@ func appendMermaidEvents(t *testing.T, dir string, events ...Event) {
 
 func sessionMermaidDiagram(t *testing.T) string {
 	t.Helper()
-	diagram, err := mermaid.Render(sessionMermaidFlow, mermaid.Options{Width: markdown.DefaultWidth})
-	if err != nil {
-		t.Fatalf("render expected Mermaid diagram: %v", err)
-	}
-	return diagram
+	return markdown.Render("```mermaid\n"+sessionMermaidFlow+"```\n", markdown.Options{Enabled: true, MermaidMaxVirtualNodes: 1024})
 }
 
 func TestMermaidReplayFollowSplitFence(t *testing.T) {

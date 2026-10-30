@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ClarifiedLabs/mdcli/markdown"
 	"harness/internal/agent"
 	"harness/internal/delegate"
-	"harness/internal/markdown"
 	"harness/internal/session"
 )
 

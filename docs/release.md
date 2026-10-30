@@ -19,6 +19,14 @@ protocol version is separate and is shown by both MCP-proxy version spellings
 and by `harness lsp version`. Persisted session `state.json` files use schema
 version `3`. Earlier schemas are rejected rather than migrated.
 
+## Dependency notices
+
+`go.mod` pins the shared mdcli rendering module. Update `THIRD_PARTY_NOTICES.md`
+when adding or changing dependency licenses. Tarballs ship it beside `LICENSE`;
+Debian packages (and their container images) include it in `/usr/share/doc/<package>/`,
+RPMs in `/usr/share/licenses/<package>/`, macOS installers in
+`/usr/local/share/doc/harness/`, and Homebrew binary formulae install it as documentation.
+
 ## Artifacts
 
 Pushing a `v*` tag runs `.github/workflows/release.yml`. The workflow builds:

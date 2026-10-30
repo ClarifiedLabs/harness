@@ -5,7 +5,7 @@ supports basic tool use, delegate sub-agents, skills, and MCP.
 
 ## Design Invariants
 
-- **Zero third-party Go dependencies.** Go standard library only.
+- **Minimal dependencies.** Keep the tool simple and lightweight.
 - **No sandbox.** `harness` assumes it is launched in an environment that is
   already sandboxed enough; tools run with the process's privileges.
 - **Isolated provider and MCP access.** `harness` uses separate services for

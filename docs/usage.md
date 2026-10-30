@@ -78,8 +78,8 @@ Fenced blocks tagged `mermaid` (case-insensitive, backticks or tildes) render as
 plain-text diagrams in terminal Markdown, including assistant output, reasoning
 summaries, displayed plans, and session replay/follow. Supported types are
 flowcharts (`flowchart`/`graph`), sequence diagrams, state diagrams, and class
-diagrams, using the same built-in renderer as mdcli. No browser, external
-command, or additional dependency is needed. Diagrams also render with
+diagrams, using mdcli's shared Go rendering packages. No browser, external
+command, or separate mdcli installation is needed. Diagrams also render with
 `-no-color`/`NO_COLOR`. They appear when the closing fence arrives, or when the
 remaining output is flushed at a display boundary or completion. Unsupported or
 unrenderable diagrams fall back to an indented code fence. If a status message
@@ -96,7 +96,7 @@ Fixed per-diagram budgets (64 KiB of source, 256 nodes/participants, 1,024
 edges/events, 1,024 internal layout nodes, and a canvas of at most 4,096 columns
 or rows and 1,000,000 cells) prevent excessive expansion; over-budget diagrams
 fall back to source, not a list. Harness deliberately keeps a lower internal
-layout-node limit than mdcli (8,192), since rendering and width adaptation run
+layout-node limit than mdcli's default (8,192), since rendering and width adaptation run
 synchronously during live output. Stored session text retains the original
 Mermaid source.
 

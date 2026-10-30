@@ -29,6 +29,7 @@ package_one() {
 	install -m 0755 "${stage_dir}/${binary}" "${pkgroot}/usr/bin/${binary}"
 	install -m 0644 README.md "${pkgroot}/usr/share/doc/${name}/README.md"
 	install -m 0644 LICENSE "${pkgroot}/usr/share/doc/${name}/LICENSE"
+	install -m 0644 THIRD_PARTY_NOTICES.md "${pkgroot}/usr/share/doc/${name}/THIRD_PARTY_NOTICES.md"
 
 	local installed_size
 	installed_size="$(du -sk "${pkgroot}/usr" | awk '{print $1}')"

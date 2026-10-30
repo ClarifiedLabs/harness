@@ -26,6 +26,7 @@ esac
 work_dir="$(abs_path "${WORK_DIR:-dist/package-rpm}")"
 readme_path="$(abs_path README.md)"
 license_path="$(abs_path LICENSE)"
+notices_path="$(abs_path THIRD_PARTY_NOTICES.md)"
 rm -rf "$work_dir"
 mkdir -p "$dist_dir"
 
@@ -82,11 +83,13 @@ mkdir -p %{buildroot}/usr/share/licenses/${name}
 install -m 0755 "${stage_dir}/${binary}" %{buildroot}/usr/bin/${binary}
 install -m 0644 "${readme_path}" %{buildroot}/usr/share/doc/${name}/README.md
 install -m 0644 "${license_path}" %{buildroot}/usr/share/licenses/${name}/LICENSE
+install -m 0644 "${notices_path}" %{buildroot}/usr/share/licenses/${name}/THIRD_PARTY_NOTICES.md
 
 %files
 /usr/bin/${binary}
 %doc /usr/share/doc/${name}/README.md
 %license /usr/share/licenses/${name}/LICENSE
+%license /usr/share/licenses/${name}/THIRD_PARTY_NOTICES.md
 SPEC
 
 	rpmbuild --define "_topdir ${topdir}" --target "${rpm_arch}" -bb "$spec"
