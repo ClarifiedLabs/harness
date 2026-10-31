@@ -92,7 +92,7 @@ func TestReleasePackagesInstallDependencyNotices(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"github.com/ClarifiedLabs/mdcli", "Permission is hereby granted", "THE SOFTWARE IS PROVIDED"} {
+	for _, want := range []string{"github.com/ClarifiedLabs/mdcli", "github.com/coder/websocket", "Copyright (c) 2025 Coder", "Permission to use, copy, modify, and distribute", "Permission is hereby granted", "THE SOFTWARE IS PROVIDED"} {
 		if !strings.Contains(string(notices), want) {
 			t.Errorf("dependency notices missing %q", want)
 		}

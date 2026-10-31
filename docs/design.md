@@ -861,7 +861,14 @@ maintenance queue and is installed on the owner goroutine only if the epoch,
 session, transcript length/fingerprint, and empty-current-anchor checks still
 hold. A real turn therefore wins the race. The WebSocket client continuously
 drains frames and answers ping heartbeats between model requests; a close frame
-or transport EOF makes its last response ID unavailable.
+or transport EOF makes its last response ID unavailable. `internal/ws` delegates
+handshakes, framing, fragmentation, and control frames to `github.com/coder/websocket`
+(with no transitive dependencies). Its bounded read pump keeps per-request read
+cancellation separate from connection lifetime; cancelled writes abort the
+connection. Messages are limited to 64 MiB, compression is disabled, and local
+close shuts down the transport immediately without waiting for a peer handshake.
+Failed upgrades retain up to 1 MiB of response text for provider error decoding;
+HTTP redirects, environment proxies, and automatic gzip decompression are disabled.
 
 The CLI owns every continuation as a previous response/interaction ID, anchor
 message count, and SHA-256 of the exact provider-neutral anchor prefix.
