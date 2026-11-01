@@ -37,10 +37,12 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`. The workflow builds:
 
 It publishes tarballs, per-binary `.deb` and `.rpm` packages, per-binary GHCR
 container images, a signed and notarized macOS `.pkg`, Homebrew bottles for
-macOS arm64, macOS Intel, Linux amd64, and Linux arm64, SHA-256 checksums, and
-GitHub artifact attestations. On `v*` tag builds the `.rpm` packages are
-GPG-signed in `build-linux` before attestation and upload, so the GitHub
-release assets, `checksums.txt`, attestations, and the package repositories
+macOS arm64, Linux amd64, and Linux arm64, SHA-256 checksums, and GitHub
+artifact attestations. Intel macOS (amd64) has no CI builds or distributed
+bottles; Homebrew installs build from source on Intel Macs. On `v*` tag builds
+the `.rpm` packages are GPG-signed in `build-linux` before attestation and
+upload, so the GitHub release assets, `checksums.txt`, attestations, and the
+package repositories
 below all serve identical signed files. RPMs are signed with the packages key
 on every run, including dry runs, so `release-ci` exercises the real signing
 path; only the macOS `.pkg` stays unsigned in dry runs, keeping Apple
