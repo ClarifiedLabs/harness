@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"harness/internal/modelproxy"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -28,7 +29,7 @@ func TestClientEndpointRequestHeaders(t *testing.T) {
 	}{
 		{
 			name: "Catalog", method: http.MethodGet, path: "/v1/models",
-			status: http.StatusOK, response: protocol.Catalog{},
+			status: http.StatusOK, response: modelproxy.Catalog{},
 			call: func(ctx context.Context, c *Client) error {
 				_, err := c.Catalog(ctx)
 				return err

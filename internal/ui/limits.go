@@ -8,24 +8,24 @@ import (
 	"strings"
 	"time"
 
-	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelproxy"
 )
 
 // LimitsCommandTimeout includes a reset and its best-effort status refreshes.
 const LimitsCommandTimeout = 45 * time.Second
 
 // FormatLimits is shared by CLI and REPL; unknown values stay unknown.
-func FormatLimits(report protocol.LimitsReport, now time.Time) string {
+func FormatLimits(report modelproxy.LimitsReport, now time.Time) string {
 	var b strings.Builder
-	providers := append([]protocol.ProviderLimits(nil), report.Providers...)
+	providers := append([]modelproxy.ProviderLimits(nil), report.Providers...)
 	sort.SliceStable(providers, func(i, j int) bool { return providers[i].Provider < providers[j].Provider })
 	if len(providers) == 0 {
 		b.WriteString("No supported subscription providers configured.\n")
 	}
 	for _, p := range providers {
-		fmt.Fprintf(&b, "%s", protocol.LimitsLabel(p.Provider))
+		fmt.Fprintf(&b, "%s", modelproxy.LimitsLabel(p.Provider))
 		if p.Plan != "" {
-			fmt.Fprintf(&b, " — %s", protocol.LimitsLabel(p.Plan))
+			fmt.Fprintf(&b, " — %s", modelproxy.LimitsLabel(p.Plan))
 		}
 		fmt.Fprintf(&b, " (fetched %s)\n", limitsTime(p.FetchedAt))
 		limitsErrors(&b, p.Error, p.Warnings)
@@ -77,12 +77,12 @@ func FormatLimits(report protocol.LimitsReport, now time.Time) string {
 	return b.String()
 }
 
-func FormatResetCredits(credits protocol.ResetCredits) string {
+func FormatResetCredits(credits modelproxy.ResetCredits) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s reset credits (fetched %s)\navailable: %s\n", protocol.LimitsLabel(credits.Provider), limitsTime(credits.FetchedAt), limitsCount(credits.AvailableCount))
+	fmt.Fprintf(&b, "%s reset credits (fetched %s)\navailable: %s\n", modelproxy.LimitsLabel(credits.Provider), limitsTime(credits.FetchedAt), limitsCount(credits.AvailableCount))
 	limitsErrors(&b, credits.Error, credits.Warnings)
 	for _, c := range credits.Credits {
-		fmt.Fprintf(&b, "  %s: %s; scope %s", protocol.LimitsLabel(c.ID), protocol.LimitsLabel(c.Status), protocol.LimitsLabel(c.ResetType))
+		fmt.Fprintf(&b, "  %s: %s; scope %s", modelproxy.LimitsLabel(c.ID), modelproxy.LimitsLabel(c.Status), modelproxy.LimitsLabel(c.ResetType))
 		if c.Redeemable != nil {
 			fmt.Fprintf(&b, "; redeemable: %t", *c.Redeemable)
 		}
@@ -95,45 +95,45 @@ func FormatResetCredits(credits protocol.ResetCredits) string {
 			fmt.Fprintf(&b, "; granted %s", limitsTime(*c.GrantedAt))
 		}
 		if c.Title != "" {
-			fmt.Fprintf(&b, "; %s", protocol.LimitsLabel(c.Title))
+			fmt.Fprintf(&b, "; %s", modelproxy.LimitsLabel(c.Title))
 		}
 		if c.Description != "" {
-			fmt.Fprintf(&b, "; %s", protocol.LimitsLabel(c.Description))
+			fmt.Fprintf(&b, "; %s", modelproxy.LimitsLabel(c.Description))
 		}
 		b.WriteByte('\n')
 	}
 	return b.String()
 }
 
-func FormatResetResult(result protocol.ResetResult, now time.Time) string {
+func FormatResetResult(result modelproxy.ResetResult, now time.Time) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s reset: %s\ncredit: %s\nrequest ID: %s\nfetched: %s\n", protocol.LimitsLabel(result.Provider), protocol.LimitsLabel(result.Outcome), protocol.LimitsLabel(result.CreditID), protocol.LimitsLabel(result.RequestID), limitsTime(result.FetchedAt))
+	fmt.Fprintf(&b, "%s reset: %s\ncredit: %s\nrequest ID: %s\nfetched: %s\n", modelproxy.LimitsLabel(result.Provider), modelproxy.LimitsLabel(result.Outcome), modelproxy.LimitsLabel(result.CreditID), modelproxy.LimitsLabel(result.RequestID), limitsTime(result.FetchedAt))
 	limitsErrors(&b, result.Error, result.Warnings)
 	if result.WindowsReset != nil {
 		fmt.Fprintf(&b, "windows reset: %d\n", *result.WindowsReset)
 	}
 	if result.Status != nil {
-		b.WriteString(FormatLimits(protocol.LimitsReport{Providers: []protocol.ProviderLimits{*result.Status}}, now))
+		b.WriteString(FormatLimits(modelproxy.LimitsReport{Providers: []modelproxy.ProviderLimits{*result.Status}}, now))
 	}
 	if result.Credits != nil {
 		b.WriteString(FormatResetCredits(*result.Credits))
 	}
 	if ResetIsIndeterminate(result) {
-		b.WriteString(ResetRetryCommands(protocol.ResetRequest{Provider: result.Provider, CreditID: result.CreditID, RequestID: result.RequestID}))
+		b.WriteString(ResetRetryCommands(modelproxy.ResetRequest{Provider: result.Provider, CreditID: result.CreditID, RequestID: result.RequestID}))
 	}
 	return b.String()
 }
 
 // ResetRetryCommands prints both complete public-surface commands. Validation
 // ensures opaque identifiers cannot introduce shell syntax or control bytes.
-func ResetRetryCommands(request protocol.ResetRequest) string {
+func ResetRetryCommands(request modelproxy.ResetRequest) string {
 	if request.Validate() != nil {
 		return ""
 	}
 	return fmt.Sprintf("The credit may have been consumed. Retry only with the same provider, credit, and request ID:\n  harness limits reset %s %s -request-id %s\n  /limits reset %s %s %s\n", request.Provider, request.CreditID, request.RequestID, request.Provider, request.CreditID, request.RequestID)
 }
 
-func ResetIsIndeterminate(result protocol.ResetResult) bool {
+func ResetIsIndeterminate(result modelproxy.ResetResult) bool {
 	if result.Error != nil && result.Error.Indeterminate {
 		return true
 	}
@@ -149,20 +149,20 @@ func ResetIsIndeterminate(result protocol.ResetResult) bool {
 
 // NormalizeResetResult covers callback/transport failures as well as future
 // outcomes. It never changes the caller's retry identity or hides an outcome.
-func NormalizeResetResult(request protocol.ResetRequest, result protocol.ResetResult, err error) protocol.ResetResult {
+func NormalizeResetResult(request modelproxy.ResetRequest, result modelproxy.ResetResult, err error) modelproxy.ResetResult {
 	result.Provider, result.CreditID, result.RequestID = request.Provider, request.CreditID, request.RequestID
 	if result.Error == nil && err != nil {
-		var detail *protocol.LimitsError
+		var detail *modelproxy.LimitsError
 		if errors.As(err, &detail) {
 			copy := *detail
 			result.Error = &copy
 		} else {
-			result.Error = &protocol.LimitsError{Code: "transport", Message: "reset request failed; the credit may have been consumed", Indeterminate: true}
+			result.Error = &modelproxy.LimitsError{Code: "transport", Message: "reset request failed; the credit may have been consumed", Indeterminate: true}
 		}
 	}
 	if ResetIsIndeterminate(result) {
 		if result.Error == nil {
-			result.Error = &protocol.LimitsError{Code: "indeterminate", Message: "reset outcome is unknown; the credit may have been consumed"}
+			result.Error = &modelproxy.LimitsError{Code: "indeterminate", Message: "reset outcome is unknown; the credit may have been consumed"}
 		}
 		copy := *result.Error
 		copy.Indeterminate = true
@@ -174,7 +174,7 @@ func NormalizeResetResult(request protocol.ResetRequest, result protocol.ResetRe
 	return result
 }
 
-func ResetExitCode(result protocol.ResetResult) int {
+func ResetExitCode(result modelproxy.ResetResult) int {
 	if result.Error != nil || ResetIsIndeterminate(result) {
 		return ExitRuntime
 	}
@@ -185,19 +185,19 @@ func ResetExitCode(result protocol.ResetResult) int {
 	return ExitRuntime
 }
 
-func limitsErrors(b *strings.Builder, err *protocol.LimitsError, warnings []protocol.LimitsError) {
+func limitsErrors(b *strings.Builder, err *modelproxy.LimitsError, warnings []modelproxy.LimitsError) {
 	if err != nil {
-		fmt.Fprintf(b, "  error [%s]: %s\n", protocol.LimitsLabel(err.Code), protocol.LimitsLabel(err.Message))
+		fmt.Fprintf(b, "  error [%s]: %s\n", modelproxy.LimitsLabel(err.Code), modelproxy.LimitsLabel(err.Message))
 	}
 	for _, w := range warnings {
-		fmt.Fprintf(b, "  warning [%s]: %s\n", protocol.LimitsLabel(w.Code), protocol.LimitsLabel(w.Message))
+		fmt.Fprintf(b, "  warning [%s]: %s\n", modelproxy.LimitsLabel(w.Code), modelproxy.LimitsLabel(w.Message))
 	}
 }
 func limitsName(name, fallback string) string {
 	if name == "" {
 		name = fallback
 	}
-	return protocol.LimitsLabel(name)
+	return modelproxy.LimitsLabel(name)
 }
 func limitsCount(n *int64) string {
 	if n == nil {
@@ -259,7 +259,7 @@ func (app *App) limitsCommand(arg string) {
 			fmt.Fprintln(app.Errw, "[subscription limits unavailable]")
 			return
 		}
-		var report protocol.LimitsReport
+		var report modelproxy.LimitsReport
 		report, err = app.Limits(ctx, provider)
 		if err == nil || report.Providers != nil {
 			fmt.Fprint(app.Errw, FormatLimits(report, app.clock()()))
@@ -269,7 +269,7 @@ func (app *App) limitsCommand(arg string) {
 			fmt.Fprintln(app.Errw, "[reset credits unavailable]")
 			return
 		}
-		var credits protocol.ResetCredits
+		var credits modelproxy.ResetCredits
 		credits, err = app.ResetCredits(ctx, provider)
 		if err == nil || credits.Provider != "" {
 			fmt.Fprint(app.Errw, FormatResetCredits(credits))
@@ -279,7 +279,7 @@ func (app *App) limitsCommand(arg string) {
 			fmt.Fprintln(app.Errw, "[reset credits unavailable]")
 			return
 		}
-		request := protocol.ResetRequest{Provider: provider, CreditID: args[2]}
+		request := modelproxy.ResetRequest{Provider: provider, CreditID: args[2]}
 		if len(args) == 4 {
 			request.RequestID = args[3]
 		}
@@ -291,7 +291,7 @@ func (app *App) limitsCommand(arg string) {
 			}
 			request = *pending
 		} else if request.RequestID == "" {
-			request.RequestID, err = protocol.NewResetRequestID()
+			request.RequestID, err = modelproxy.NewResetRequestID()
 			if err != nil {
 				break
 			}
@@ -300,7 +300,7 @@ func (app *App) limitsCommand(arg string) {
 			usage()
 			break
 		}
-		var result protocol.ResetResult
+		var result modelproxy.ResetResult
 		result, err = app.ResetLimits(ctx, request)
 		result = NormalizeResetResult(request, result, err)
 		if ResetIsIndeterminate(result) {
@@ -312,6 +312,6 @@ func (app *App) limitsCommand(arg string) {
 		return
 	}
 	if err != nil {
-		fmt.Fprintf(app.Errw, "[limits: %s]\n", protocol.LimitsLabel(err.Error()))
+		fmt.Fprintf(app.Errw, "[limits: %s]\n", modelproxy.LimitsLabel(err.Error()))
 	}
 }

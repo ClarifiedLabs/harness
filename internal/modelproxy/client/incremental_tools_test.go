@@ -2,17 +2,16 @@ package client
 
 import (
 	"encoding/json"
+	"harness/internal/modelproxy"
 	"testing"
-
-	"harness/internal/modelproxy/protocol"
 )
 
 func TestRegistryPreservesIncrementalToolsCapability(t *testing.T) {
-	var catalog protocol.Catalog
+	var catalog modelproxy.Catalog
 	if err := json.Unmarshal([]byte(`{"targets":[{"id":"openai:gpt-5.6","aliases":["gpt-5.6"],"incremental_tools":true},{"id":"openai:gpt-5.5"}]}`), &catalog); err != nil {
 		t.Fatal(err)
 	}
-	registry := Registry(catalog)
+	registry := modelproxy.Registry(catalog)
 	for _, tc := range []struct {
 		model string
 		want  bool

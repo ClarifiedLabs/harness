@@ -27,7 +27,7 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/inputimage"
 	"harness/internal/llm"
-	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelproxy"
 	"harness/internal/otel"
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
@@ -220,10 +220,10 @@ type App struct {
 	ControlLSP func(action, agentName string) (LSPSelection, error)
 
 	// Account-wide subscription operations; never model calls or session usage.
-	Limits            func(context.Context, string) (protocol.LimitsReport, error)
-	ResetCredits      func(context.Context, string) (protocol.ResetCredits, error)
-	ResetLimits       func(context.Context, protocol.ResetRequest) (protocol.ResetResult, error)
-	pendingLimitReset *protocol.ResetRequest
+	Limits            func(context.Context, string) (modelproxy.LimitsReport, error)
+	ResetCredits      func(context.Context, string) (modelproxy.ResetCredits, error)
+	ResetLimits       func(context.Context, modelproxy.ResetRequest) (modelproxy.ResetResult, error)
+	pendingLimitReset *modelproxy.ResetRequest
 
 	todoPromptStatusBeforeUsage       bool
 	todoPromptStatusBeforeUsagePrompt int

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"harness/internal/modelproxy"
 	"testing"
 	"time"
 
@@ -75,7 +76,7 @@ func TestPricingInfoStale(t *testing.T) {
 	base := time.Date(2026, 6, 19, 12, 0, 0, 0, time.UTC)
 	tests := []struct {
 		name    string
-		pricing *PricingInfo
+		pricing *modelproxy.PricingInfo
 		now     time.Time
 		want    bool
 	}{
@@ -87,37 +88,37 @@ func TestPricingInfoStale(t *testing.T) {
 		},
 		{
 			name:    "no source date never stale",
-			pricing: &PricingInfo{MaxAgeSeconds: 3600},
+			pricing: &modelproxy.PricingInfo{MaxAgeSeconds: 3600},
 			now:     base,
 			want:    false,
 		},
 		{
 			name:    "no max age never stale",
-			pricing: &PricingInfo{SourceDate: base.Add(-1000 * time.Hour)},
+			pricing: &modelproxy.PricingInfo{SourceDate: base.Add(-1000 * time.Hour)},
 			now:     base,
 			want:    false,
 		},
 		{
 			name:    "within ttl is fresh",
-			pricing: &PricingInfo{SourceDate: base, MaxAgeSeconds: int64((24 * time.Hour).Seconds())},
+			pricing: &modelproxy.PricingInfo{SourceDate: base, MaxAgeSeconds: int64((24 * time.Hour).Seconds())},
 			now:     base.Add(23 * time.Hour),
 			want:    false,
 		},
 		{
 			name:    "past ttl is stale",
-			pricing: &PricingInfo{SourceDate: base, MaxAgeSeconds: int64((24 * time.Hour).Seconds())},
+			pricing: &modelproxy.PricingInfo{SourceDate: base, MaxAgeSeconds: int64((24 * time.Hour).Seconds())},
 			now:     base.Add(25 * time.Hour),
 			want:    true,
 		},
 		{
 			name:    "absolute expiry takes precedence while fresh",
-			pricing: &PricingInfo{SourceDate: base.Add(-48 * time.Hour), MaxAgeSeconds: 1, ExpiresAt: base.Add(time.Hour)},
+			pricing: &modelproxy.PricingInfo{SourceDate: base.Add(-48 * time.Hour), MaxAgeSeconds: 1, ExpiresAt: base.Add(time.Hour)},
 			now:     base,
 			want:    false,
 		},
 		{
 			name:    "absolute expiry takes precedence when stale",
-			pricing: &PricingInfo{ExpiresAt: base.Add(-time.Second)},
+			pricing: &modelproxy.PricingInfo{ExpiresAt: base.Add(-time.Second)},
 			now:     base,
 			want:    true,
 		},

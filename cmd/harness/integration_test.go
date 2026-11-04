@@ -46,6 +46,8 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/factory"
 	modelclient "harness/internal/modelproxy/client"
+	modelconfig "harness/internal/modelproxy/config"
+	modelruntime "harness/internal/modelproxy/runtime"
 	modelserver "harness/internal/modelproxy/server"
 	"harness/internal/session"
 	"harness/internal/tools"
@@ -375,9 +377,9 @@ func startModelProxyCluster(t *testing.T, baseURL string, options ...modelProxyC
 	cluster := &modelProxyCluster{}
 	for replica := 0; replica < opts.replicas; replica++ {
 		replica := replica
-		handlerOpts := modelserver.Options{
+		handlerOpts := modelruntime.Options{
 			ConfigDir: dir,
-			Config: modelserver.Config{
+			Config: modelconfig.Config{
 				ProviderConfigs:      []string{"openai.json"},
 				DefaultContextWindow: 128000,
 			},

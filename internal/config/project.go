@@ -99,6 +99,8 @@ func mergeFileConfig(global, project fileConfig, globalPath, projectPath string)
 	var out fileConfig
 
 	out.Model = mergeOpt(global.Model, project.Model, globalPath, projectPath, "model", sourceMap)
+	out.ModelBackend = mergeOpt(global.ModelBackend, project.ModelBackend, globalPath, projectPath, "model_backend", sourceMap)
+	out.ModelConfig = mergeOpt(global.ModelConfig, project.ModelConfig, globalPath, projectPath, "model_config", sourceMap)
 	out.ModelProxyURL = mergeOpt(global.ModelProxyURL, project.ModelProxyURL, globalPath, projectPath, "model_proxy_url", sourceMap)
 	out.ModelProxyAPIKey = mergeOpt(global.ModelProxyAPIKey, project.ModelProxyAPIKey, globalPath, projectPath, "model_proxy_api_key", sourceMap)
 	out.TraceProxy = mergeOpt(global.TraceProxy, project.TraceProxy, globalPath, projectPath, "trace_proxy", sourceMap)

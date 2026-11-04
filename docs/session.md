@@ -41,6 +41,28 @@ extracted sessions; `ResponseState`, `ProxySessionID`, and `CacheAffinityID`
 carry provider continuation and cache identity; `Plan`, `Todos`, and `Goal`
 persist coordination state; `Usage`/`UsageByModel` aggregate spend.
 
+## Backend and continuation ownership
+
+Local and remote model access share the same session contract. The agent/session
+owns the authoritative transcript, continuation anchors, prefix fingerprints,
+and stable cache-affinity identity. The shared model runtime owns provider-facing
+cache-key derivation, pooled connections, transport availability, live steering,
+and execution accounting; dialects own opaque provider replay items and cache
+hints. Internal session/cache IDs are stripped before upstream dispatch.
+
+Connections are not persisted or transferred between local and remote runtimes.
+A restart, pool eviction, or backend switch can invalidate a saved continuation
+ID; Harness uses the existing anchor reset/full-history recovery path after
+availability checks. Matching target/replay domains and transcript fingerprints
+are still required: a backend switch must not silently reuse an incompatible
+anchor. Stable cache affinity does not promise an upstream cache hit, and older
+release continuation state is not guaranteed usable.
+
+The application owns backend cleanup; delegates borrow the backend rather than
+creating a pool per turn or child. Cancelling a turn leaves the backend usable;
+application exit stops owned refresh work and closes runtime resources after
+admitted work/session cleanup.
+
 ## Saving and recovery
 
 Chronological tool catalogs, enabled by default on supported targets, are stored
@@ -95,7 +117,8 @@ windows rebuild the current catalog as described in [compaction.md](compaction.m
 - Gemini Interactions uses the same CLI-owned continuation contract.
   `interactions_stateful` controls the target's catalog capability; sessions
   retain signed thought and Google Search steps so a missing/rejected stored
-  interaction can be replayed from complete history through any proxy replica.
+  interaction can be replayed from complete history through either backend
+  (including another proxy replica).
 - Image bytes are embedded in `tree.ndjson` as provider-neutral base64 blocks
   so resume is self-contained; `raw.ndjson` records only image metadata for
   replay.
@@ -131,7 +154,7 @@ identical `raw.ndjson` output.
   is kept separately from prompt context and retired when the recovered model
   round completes, rather than replayed throughout the continuation.
 - `maintenance_usage` accounts for compaction, prewarming and branch-summary
-  calls without creating turns. `model_request` records proxy/request
+  calls without creating turns. `model_request` records backend/request
   lifecycle and every API issue with timing, parsed error, and correlation
   metadata; these events are replay/analysis data only and never become
   conversation-tree entries or model context. `checkpoint` records the

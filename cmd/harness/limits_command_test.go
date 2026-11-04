@@ -12,12 +12,12 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelproxy"
 	"harness/internal/ui"
 )
 
 func TestLimitsJSONEscapesTerminalControls(t *testing.T) {
-	value := protocol.LimitsReport{Providers: []protocol.ProviderLimits{{Provider: "openai-codex", Plan: "\u009b31mred\u009dhyperlink"}}}
+	value := modelproxy.LimitsReport{Providers: []modelproxy.ProviderLimits{{Provider: "openai-codex", Plan: "\u009b31mred\u009dhyperlink"}}}
 	var out bytes.Buffer
 	if err := writeLimitsJSON(&out, value); err != nil {
 		t.Fatal(err)
@@ -25,7 +25,7 @@ func TestLimitsJSONEscapesTerminalControls(t *testing.T) {
 	if strings.ContainsAny(out.String(), "\u009b\u009d") || !strings.Contains(out.String(), `\u009b`) {
 		t.Fatal(out.String())
 	}
-	var got protocol.LimitsReport
+	var got modelproxy.LimitsReport
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil || got.Providers[0].Plan != value.Providers[0].Plan {
 		t.Fatalf("got=%+v err=%v", got, err)
 	}
@@ -52,7 +52,7 @@ func TestLimitsCLIFormatsAndNoModelStartup(t *testing.T) {
 				t.Fatal(out.String())
 			}
 			if format == "json" {
-				var report protocol.LimitsReport
+				var report modelproxy.LimitsReport
 				if json.Unmarshal(out.Bytes(), &report) != nil || len(report.Providers) != 1 {
 					t.Fatal(out.String())
 				}
@@ -75,12 +75,12 @@ func TestLimitsCLIResetOutcomesAndRequestIdentity(t *testing.T) {
 				var calls atomic.Int32
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					calls.Add(1)
-					var request protocol.ResetRequest
+					var request modelproxy.ResetRequest
 					_ = json.NewDecoder(r.Body).Decode(&request)
 					if r.Method != "POST" || r.URL.Path != "/v1/limits/reset" || request.Provider != "openai-codex" || request.CreditID != "credit" || request.RequestID != "stable" {
 						t.Errorf("request=%s %+v", r.URL, request)
 					}
-					_ = json.NewEncoder(w).Encode(protocol.ResetResult{Provider: request.Provider, CreditID: request.CreditID, RequestID: request.RequestID, Outcome: tc.outcome, Warnings: []protocol.LimitsError{{Code: "refresh", Message: "refresh failed"}}})
+					_ = json.NewEncoder(w).Encode(modelproxy.ResetResult{Provider: request.Provider, CreditID: request.CreditID, RequestID: request.RequestID, Outcome: tc.outcome, Warnings: []modelproxy.LimitsError{{Code: "refresh", Message: "refresh failed"}}})
 				}))
 				defer srv.Close()
 				env, out, stderr := configCommandEnv(t, []string{"limits", "reset", "openai-codex", "credit", "-request-id", "stable", "-format", format, "-model-proxy-url", srv.URL}, nil)
@@ -97,7 +97,7 @@ func TestLimitsCLIResetOutcomesAndRequestIdentity(t *testing.T) {
 					}
 				}
 				if format == "json" {
-					var result protocol.ResetResult
+					var result modelproxy.ResetResult
 					if json.Unmarshal(out.Bytes(), &result) != nil || result.RequestID != "stable" || result.Outcome != tc.outcome {
 						t.Fatal(out.String())
 					}
@@ -137,14 +137,14 @@ func TestLimitsCLIFlagsBeforeSubcommand(t *testing.T) {
 					if r.Method != "POST" || r.URL.Path != "/v1/limits/reset" {
 						t.Error(r.Method, r.URL.Path)
 					}
-					var req protocol.ResetRequest
+					var req modelproxy.ResetRequest
 					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 						t.Error(err)
 					}
 					if req.CreditID != "credit" || req.RequestID != "stable" {
 						t.Errorf("request %+v", req)
 					}
-					_ = json.NewEncoder(w).Encode(protocol.ResetResult{Provider: req.Provider, CreditID: req.CreditID, RequestID: req.RequestID, Outcome: "nothing_to_reset"})
+					_ = json.NewEncoder(w).Encode(modelproxy.ResetResult{Provider: req.Provider, CreditID: req.CreditID, RequestID: req.RequestID, Outcome: "nothing_to_reset"})
 				}
 			}))
 			defer srv.Close()
@@ -216,7 +216,7 @@ func TestLimitsCLITransportAmbiguityAndInterrupt(t *testing.T) {
 			var calls atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls.Add(1)
-				var request protocol.ResetRequest
+				var request modelproxy.ResetRequest
 				_ = json.NewDecoder(r.Body).Decode(&request)
 				if interrupt {
 					signals <- os.Interrupt
@@ -236,7 +236,7 @@ func TestLimitsCLITransportAmbiguityAndInterrupt(t *testing.T) {
 			if code := run(env); code != want || calls.Load() != 1 {
 				t.Fatalf("code=%d calls=%d out=%s err=%s", code, calls.Load(), out, stderr)
 			}
-			var result protocol.ResetResult
+			var result modelproxy.ResetResult
 			if json.Unmarshal(out.Bytes(), &result) != nil || result.RequestID == "" || result.Error == nil || !result.Error.Indeterminate || !strings.Contains(stderr.String(), "-request-id "+result.RequestID) {
 				t.Fatalf("out=%s err=%s", out, stderr)
 			}

@@ -47,7 +47,7 @@ import (
 	"harness/internal/llm"
 	"harness/internal/logging"
 	"harness/internal/mcptools"
-	modelclient "harness/internal/modelproxy/client"
+	"harness/internal/modelproxy"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/plan"
 	"harness/internal/reasoningprofile"
@@ -118,6 +118,8 @@ type environment struct {
 	// promptFinished is a test/embedding hook invoked after a prompt's final
 	// session save, including after run has returned for a forced exit.
 	promptFinished func()
+	// openModelBackend is an injectable application-construction seam.
+	openModelBackend func(context.Context, config.Config, *slog.Logger, *tracing.Tracer) (*openedModelBackend, error)
 	// acpRootFactory is a command-level test seam. Production leaves it nil.
 	acpRootFactory func(cli.Invocation) acpagent.Factory
 }
@@ -305,19 +307,22 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			return fail(stderr, ui.ExitRuntime, "trace proxy: %v", err)
 		}
 	}
-	proxyURL := cfg.ModelProxyURL
-	if proxyURL == "" {
-		proxyURL = protocol.DefaultURL
-	}
-	proxyClient, err := modelclient.New(proxyURL, nil, modelclient.WithAPIKey(cfg.ModelProxyAPIKey), modelclient.WithTracer(proxyTracer))
-	if err != nil {
-		return fail(stderr, ui.ExitUsage, "%v", err)
-	}
 	if !jsonRunMode {
 		startupCtx, stopStartup, startupInterrupted = signalCancelContext(env.sigCh)
 		defer stopStartup()
 	}
-	if code, handled := runRootInformational(startupCtx, stdout, stderr, cfg, runOptions, proxyClient, startupInterrupted); handled {
+	if runOptions.ShowAgents || runOptions.ShowModels || runOptions.CheckModelProxy {
+		var models *openedModelBackend
+		// Agent listing is offline. Only model-dependent informational commands
+		// open the backend, and never create a session or a tool runtime.
+		if !runOptions.ShowAgents || runOptions.ShowModels {
+			models, err = openModelBackend(startupCtx, env, cfg, nil, proxyTracer)
+			if err != nil {
+				return modelProxyFailure(stderr, startupInterrupted, err)
+			}
+			defer models.Close()
+		}
+		code, _ := runRootInformational(startupCtx, stdout, stderr, cfg, runOptions, models, startupInterrupted)
 		return code
 	}
 	// The JSON run modes give stdout exclusively to the NDJSON event stream:
@@ -385,11 +390,16 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		return fail(stderr, ui.ExitUsage, "agent %q is not available for interactive selection (available: %s)", agentName, strings.Join(agentdef.InteractiveNames(agents), ", "))
 	}
 
-	catalog, err := proxyClient.Catalog(startupCtx)
+	models, err := openModelBackend(startupCtx, env, cfg, logger, proxyTracer)
 	if err != nil {
 		return modelProxyFailure(stderr, startupInterrupted, err)
 	}
-	modelRegistry := modelclient.Registry(catalog)
+	defer models.Close()
+	catalog, err := models.Catalog(startupCtx)
+	if err != nil {
+		return modelProxyFailure(stderr, startupInterrupted, err)
+	}
+	modelRegistry := modelproxy.Registry(catalog)
 	modelRegistry.SetDefaultContextWindow(cfg.DefaultContextWindow)
 	reasoning := llm.ReasoningConfig{
 		Profile: cfg.Reasoning,
@@ -623,7 +633,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	// startup does, instead of failing Subset during the async discovery window.
 	var pendingMCP *asyncMCPRegistration
 	resolveDelegate := func(runtime delegate.Runtime, name string) (delegate.Launch, error) {
-		return resolveDelegateLaunch(runtime, name, agents, toolCatalog, pendingMCP, catalog, proxyClient, buildSystem, cfg)
+		return resolveDelegateLaunch(runtime, name, agents, toolCatalog, pendingMCP, catalog, models.Backend, buildSystem, cfg)
 	}
 	var delegateActivity *delegate.ActivityRegistry
 	var delegateFeed *delegate.ActivityFeed
@@ -884,7 +894,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			return ui.AgentSelection{}, err
 		}
 		system := buildSystem(a.Prompt)
-		runtime := proxyClient.Provider(next.Provider)
+		runtime := models.Provider(next.Provider)
 		snap.Provider = runtime
 		snap.ProviderName = next.Provider
 		snap.Model = next.Model
@@ -908,7 +918,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 				Provider:              next.Provider,
 				Model:                 next.Model,
 				RegistryModel:         next.RegistryModel,
-				BaseURL:               proxyClient.URL(),
+				BaseURL:               models.Label(),
 				Runtime:               runtime,
 				ContextWindow:         cfg.ContextWindow,
 				Reasoning:             nextReasoning,
@@ -999,7 +1009,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 	}
 
-	provider := proxyClient.Provider(cfg.Provider)
+	provider := models.Provider(cfg.Provider)
 
 	switchModel := func(input string, nextReasoning llm.ReasoningConfig) (ui.ModelSelection, error) {
 		input = strings.TrimSpace(input)
@@ -1031,7 +1041,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		if err := validateReasoningConfig(modelRegistry, next.RegistryModel, mode, nextReasoning); err != nil {
 			return ui.ModelSelection{}, err
 		}
-		runtime := proxyClient.Provider(next.Provider)
+		runtime := models.Provider(next.Provider)
 		snap := delegateState.Snapshot()
 		snap.Provider = runtime
 		snap.ProviderName = next.Provider
@@ -1051,7 +1061,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 			Provider:              next.Provider,
 			Model:                 next.Model,
 			RegistryModel:         next.RegistryModel,
-			BaseURL:               proxyClient.URL(),
+			BaseURL:               models.Label(),
 			Runtime:               runtime,
 			ContextWindow:         cfg.ContextWindow,
 			Reasoning:             nextReasoning,
@@ -1200,7 +1210,7 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		Provider:               cfg.Provider,
 		Model:                  cfg.Model,
 		RegistryModel:          registryModel,
-		BaseURL:                proxyClient.URL(),
+		BaseURL:                models.Label(),
 		Registry:               modelRegistry,
 		System:                 systemPrompt,
 		Reasoning:              reasoning,
@@ -1242,9 +1252,9 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		SwitchAgent:                  interactiveSwitchAgent,
 		HandoffSwitchAgent:           switchAgent,
 		ControlLSP:                   controlLSP,
-		Limits:                       proxyClient.Limits,
-		ResetCredits:                 proxyClient.ResetCredits,
-		ResetLimits:                  proxyClient.ResetLimits,
+		Limits:                       models.Limits,
+		ResetCredits:                 models.ResetCredits,
+		ResetLimits:                  models.ResetLimits,
 		Todos:                        todoStore,
 		Plans:                        planStore,
 		Goal:                         goalStore,
@@ -1773,6 +1783,7 @@ type infoOutput struct {
 	ProviderCount int              `json:"provider_count,omitempty"`
 	ModelCount    int              `json:"model_count,omitempty"`
 	Models        []modelListEntry `json:"models,omitempty"`
+	ModelBackend  string           `json:"model_backend,omitempty"`
 	ModelProxyURL string           `json:"model_proxy_url,omitempty"`
 }
 
@@ -1822,13 +1833,13 @@ func buildAgentsListOutput(cfg config.Config) (*agentsListOutput, error) {
 	return out, nil
 }
 
-func checkModelProxy(ctx context.Context, proxyClient *modelclient.Client) (protocol.Catalog, error) {
+func checkModelProxy(ctx context.Context, backend modelproxy.Backend) (modelproxy.Catalog, error) {
 	ctx, cancel := context.WithTimeout(ctx, modelProxyCheckTimeout)
 	defer cancel()
-	return proxyClient.Catalog(ctx)
+	return backend.Catalog(ctx)
 }
 
-func catalogModelCount(catalog protocol.Catalog) int {
+func catalogModelCount(catalog modelproxy.Catalog) int {
 	return len(catalog.Targets)
 }
 
@@ -1860,7 +1871,7 @@ type modelListEntry struct {
 	Reasoning                bool       `json:"reasoning"`
 }
 
-func buildModelsListOutput(catalog protocol.Catalog) *modelsListOutput {
+func buildModelsListOutput(catalog modelproxy.Catalog) *modelsListOutput {
 	models := catalogModelListRows(catalog)
 	return &modelsListOutput{
 		ProviderCount: 0,
@@ -1913,7 +1924,7 @@ func formatModelsListText(out modelsListOutput) string {
 	return b.String()
 }
 
-func catalogModelListRows(catalog protocol.Catalog) []modelListEntry {
+func catalogModelListRows(catalog modelproxy.Catalog) []modelListEntry {
 	var rows []modelListEntry
 	for _, target := range catalog.Targets {
 		if target.ID == "" {
@@ -2275,7 +2286,7 @@ type catalogSelection struct {
 	FastTargetID          string
 }
 
-func catalogSelectionForTarget(catalog protocol.Catalog, target protocol.Target) catalogSelection {
+func catalogSelectionForTarget(catalog modelproxy.Catalog, target modelproxy.Target) catalogSelection {
 	baseTargetID := target.BaseTargetID
 	if baseTargetID == "" {
 		baseTargetID = target.ID
@@ -2303,12 +2314,12 @@ func agentModelInputs(def agentdef.Definition, provider, model string) (string, 
 	return provider, model
 }
 
-func resolveAgentCatalogSelection(catalog protocol.Catalog, def agentdef.Definition, provider, model string) (catalogSelection, error) {
+func resolveAgentCatalogSelection(catalog modelproxy.Catalog, def agentdef.Definition, provider, model string) (catalogSelection, error) {
 	nextProvider, nextModel := agentModelInputs(def, provider, model)
 	return resolveCatalogSelection(catalog, nextProvider, nextModel, provider)
 }
 
-func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[string]agentdef.Definition, catalog *tools.Registry, pending *asyncMCPRegistration, modelCatalog protocol.Catalog, proxyClient *modelclient.Client, buildSystem func(string) string, cfg config.Config) (delegate.Launch, error) {
+func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[string]agentdef.Definition, catalog *tools.Registry, pending *asyncMCPRegistration, modelCatalog modelproxy.Catalog, models modelproxy.Backend, buildSystem func(string) string, cfg config.Config) (delegate.Launch, error) {
 	target := strings.TrimSpace(name)
 	omittedAgent := target == ""
 	if target == "" {
@@ -2371,14 +2382,14 @@ func resolveDelegateLaunch(runtime delegate.Runtime, name string, agents map[str
 		model = next.Model
 		reasoningReplayDomain = next.ReasoningReplayDomain
 		serverTools = webSearchServerToolsForModel(next.Provider, runtime.Registry, next.RegistryModel, cfg.WebSearch)
-		provider = proxyClient.Provider(next.Provider)
+		provider = models.Provider(next.Provider)
 		system = buildSystem(def.Prompt)
 	}
 	if system == "" {
 		system = buildSystem(def.Prompt)
 	}
 	if provider == nil && providerName != "" {
-		provider = proxyClient.Provider(providerName)
+		provider = models.Provider(providerName)
 	}
 	return delegate.Launch{
 		ContextManagement:      contextManagementForProvider(cfg, modelCatalog, providerName),
@@ -2442,7 +2453,7 @@ func agentSummaries(agents map[string]agentdef.Definition, parentTools []string)
 	return out
 }
 
-func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferredProvider string) (catalogSelection, error) {
+func resolveCatalogSelection(catalog modelproxy.Catalog, provider, model, preferredProvider string) (catalogSelection, error) {
 	provider = strings.TrimSpace(provider)
 	model = strings.TrimSpace(model)
 	if model == "" && provider != "" {
@@ -2478,7 +2489,7 @@ func resolveCatalogSelection(catalog protocol.Catalog, provider, model, preferre
 // model ids: exact match wins, then a unique prefix, then a unique substring
 // (case-insensitive). It returns the matched id, or the candidate list when the
 // match is ambiguous so the caller can surface "did you mean …?" (r24).
-func fuzzyMatchModel(catalog protocol.Catalog, input string) (match string, candidates []string) {
+func fuzzyMatchModel(catalog modelproxy.Catalog, input string) (match string, candidates []string) {
 	input = strings.ToLower(strings.TrimSpace(input))
 	if input == "" {
 		return "", nil
@@ -2525,17 +2536,17 @@ func clampStrings(s []string, max int) []string {
 	return s
 }
 
-func catalogTarget(catalog protocol.Catalog, id string) (protocol.Target, bool) {
+func catalogTarget(catalog modelproxy.Catalog, id string) (modelproxy.Target, bool) {
 	id = strings.TrimSpace(id)
 	for _, target := range catalog.Targets {
 		if catalogTargetMatches(target, id) {
 			return target, true
 		}
 	}
-	return protocol.Target{}, false
+	return modelproxy.Target{}, false
 }
 
-func catalogTargetForProvider(catalog protocol.Catalog, provider, id string) (protocol.Target, bool) {
+func catalogTargetForProvider(catalog modelproxy.Catalog, provider, id string) (modelproxy.Target, bool) {
 	id = strings.TrimSpace(id)
 	prefix := strings.TrimSpace(provider) + ":"
 	for _, target := range catalog.Targets {
@@ -2543,10 +2554,10 @@ func catalogTargetForProvider(catalog protocol.Catalog, provider, id string) (pr
 			return target, true
 		}
 	}
-	return protocol.Target{}, false
+	return modelproxy.Target{}, false
 }
 
-func catalogTargetMatches(target protocol.Target, id string) bool {
+func catalogTargetMatches(target modelproxy.Target, id string) bool {
 	if target.ID == id {
 		return true
 	}
@@ -2558,7 +2569,7 @@ func catalogTargetMatches(target protocol.Target, id string) bool {
 	return false
 }
 
-func fastTargetID(catalog protocol.Catalog, baseTargetID string) string {
+func fastTargetID(catalog modelproxy.Catalog, baseTargetID string) string {
 	for _, target := range catalog.Targets {
 		if target.BaseTargetID == baseTargetID && strings.EqualFold(target.Variant, "fast") {
 			return target.ID
@@ -2567,11 +2578,11 @@ func fastTargetID(catalog protocol.Catalog, baseTargetID string) string {
 	return ""
 }
 
-func reasoningModeForProvider(catalog protocol.Catalog, providerID string) string {
+func reasoningModeForProvider(catalog modelproxy.Catalog, providerID string) string {
 	return "model-proxy"
 }
 
-func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
+func responsesStatefulForProvider(cfg config.Config, catalog modelproxy.Catalog, providerID string) bool {
 	if !cfg.ResponsesStateful {
 		return false
 	}
@@ -2579,12 +2590,12 @@ func responsesStatefulForProvider(cfg config.Config, catalog protocol.Catalog, p
 	return ok && target.ContinuationStateful
 }
 
-func nativeCompactionForProvider(catalog protocol.Catalog, providerID string) bool {
+func nativeCompactionForProvider(catalog modelproxy.Catalog, providerID string) bool {
 	target, ok := catalogTarget(catalog, providerID)
 	return ok && target.NativeCompaction
 }
 
-func contextPolicy(cfg config.Config, catalog protocol.Catalog, providerID string) taskcontext.Policy {
+func contextPolicy(cfg config.Config, catalog modelproxy.Catalog, providerID string) taskcontext.Policy {
 	identity := providerID
 	if target, ok := catalogTarget(catalog, providerID); ok {
 		identity = target.ID
@@ -2612,7 +2623,7 @@ func contextManagementToolsEnabled(cfg config.Config) bool {
 // Context management is local and provider-neutral. Auto mode follows the
 // resolved target's catalog capability; aliases and service tiers inherit it.
 // Explicit on remains available for models without that capability.
-func contextManagementForProvider(cfg config.Config, catalog protocol.Catalog, providerID string) bool {
+func contextManagementForProvider(cfg config.Config, catalog modelproxy.Catalog, providerID string) bool {
 	if !contextManagementToolsEnabled(cfg) {
 		return false
 	}
@@ -2626,7 +2637,7 @@ func contextManagementForProvider(cfg config.Config, catalog protocol.Catalog, p
 	return target.SupportsExperimentalContext
 }
 
-func contextToolDefinitionsForProvider(catalog protocol.Catalog, providerID string) map[string]llm.ContextToolDefinition {
+func contextToolDefinitionsForProvider(catalog modelproxy.Catalog, providerID string) map[string]llm.ContextToolDefinition {
 	target, ok := catalogTarget(catalog, providerID)
 	if !ok {
 		return nil
@@ -2634,7 +2645,7 @@ func contextToolDefinitionsForProvider(catalog protocol.Catalog, providerID stri
 	return target.ContextToolDefinitions
 }
 
-func prewarmForProvider(catalog protocol.Catalog, providerID string) bool {
+func prewarmForProvider(catalog modelproxy.Catalog, providerID string) bool {
 	target, ok := catalogTarget(catalog, providerID)
 	return ok && target.Prewarm
 }
@@ -2667,7 +2678,7 @@ func webSearchServerToolsForModel(provider string, registry *llm.Registry, model
 	return nil
 }
 
-func sessionResponseStateCompatible(cfg config.Config, catalog protocol.Catalog, s session.Session, provider, model string) bool {
+func sessionResponseStateCompatible(cfg config.Config, catalog modelproxy.Catalog, s session.Session, provider, model string) bool {
 	if !responsesStatefulForProvider(cfg, catalog, provider) ||
 		s.Provider != provider ||
 		s.Model != model ||
@@ -2696,11 +2707,11 @@ func effectiveReasoningSummary(configured, mode string, interactive, suppressOut
 	return ""
 }
 
-func providerForReasoningModel(catalog protocol.Catalog, fallbackProvider, model string) string {
+func providerForReasoningModel(catalog modelproxy.Catalog, fallbackProvider, model string) string {
 	return strings.TrimSpace(model)
 }
 
-func catalogModelPicker(catalog protocol.Catalog) func(ui.PickerIO) (string, error) {
+func catalogModelPicker(catalog modelproxy.Catalog) func(ui.PickerIO) (string, error) {
 	targets := catalogTargetPickerEntries(catalog)
 	if len(targets) == 0 {
 		return nil
@@ -2727,7 +2738,7 @@ func catalogModelPicker(catalog protocol.Catalog) func(ui.PickerIO) (string, err
 	}
 }
 
-func pickStartupModel(readLine func(string) (string, error), w io.Writer, catalog protocol.Catalog, pageSize int) (catalogSelection, error) {
+func pickStartupModel(readLine func(string) (string, error), w io.Writer, catalog modelproxy.Catalog, pageSize int) (catalogSelection, error) {
 	picker := catalogModelPicker(catalog)
 	if picker == nil {
 		return catalogSelection{}, fmt.Errorf("model proxy catalog has no selectable models")
@@ -2808,12 +2819,12 @@ func saveSelectedModel(path, provider, model string, reasoning llm.ReasoningConf
 }
 
 type catalogModelPick struct {
-	target protocol.Target
+	target modelproxy.Target
 }
 
 type catalogTargetPick = catalogModelPick
 
-func catalogTargetPickerEntries(catalog protocol.Catalog) []catalogModelPick {
+func catalogTargetPickerEntries(catalog modelproxy.Catalog) []catalogModelPick {
 	entries := make([]catalogModelPick, 0, len(catalog.Targets))
 	for _, target := range catalog.Targets {
 		if target.ID == "" {

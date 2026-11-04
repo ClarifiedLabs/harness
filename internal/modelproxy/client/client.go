@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"harness/internal/modelproxy"
 	"io"
 	"iter"
 	"net/http"
@@ -103,66 +104,28 @@ func (c *Client) setTrace(req *http.Request) {
 
 func (c *Client) URL() string { return c.baseURL }
 
-func (c *Client) Catalog(ctx context.Context) (protocol.Catalog, error) {
+func (c *Client) Catalog(ctx context.Context) (modelproxy.Catalog, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, "/v1/models", nil)
 	if err != nil {
-		return protocol.Catalog{}, err
+		return modelproxy.Catalog{}, err
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return protocol.Catalog{}, err
+		return modelproxy.Catalog{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return protocol.Catalog{}, readHTTPError(resp)
+		return modelproxy.Catalog{}, readHTTPError(resp)
 	}
-	var catalog protocol.Catalog
+	var catalog modelproxy.Catalog
 	if err := json.NewDecoder(resp.Body).Decode(&catalog); err != nil {
-		return protocol.Catalog{}, fmt.Errorf("model proxy catalog: %w", err)
+		return modelproxy.Catalog{}, fmt.Errorf("model proxy catalog: %w", err)
 	}
 	return catalog, nil
 }
 
 func (c *Client) Provider(targetID string) llm.Provider {
 	return &Provider{client: c, targetID: targetID}
-}
-
-// Registry builds a local model metadata registry from a proxy catalog.
-func Registry(catalog protocol.Catalog) *llm.Registry {
-	models := map[string]llm.ModelInfo{}
-	for _, target := range catalog.Targets {
-		if target.ID == "" {
-			continue
-		}
-		info := llm.ModelInfo{
-			IncrementalTools: target.IncrementalTools,
-			ReasoningUpdates: target.ReasoningUpdates,
-			AsyncTools:       target.AsyncTools,
-			NativeSteering:   target.NativeSteering,
-			ContextWindow:    target.ContextWindow,
-			OutputLimit:      target.OutputLimit,
-			InputModalities:  append([]string(nil), target.InputModalities...),
-			ServerTools:      llm.NormalizeServerTools(target.ServerTools),
-			Price:            target.Price,
-			Reasoning:        proxyTargetReasoning(target),
-		}
-		models[target.ID] = info
-		for _, alias := range target.Aliases {
-			if alias != "" {
-				models[alias] = info
-			}
-		}
-	}
-	return llm.NewRegistry(models)
-}
-
-func proxyTargetReasoning(target protocol.Target) *llm.ReasoningInfo {
-	if !target.Reasoning {
-		return &llm.ReasoningInfo{Supported: false}
-	}
-	return &llm.ReasoningInfo{
-		Supported: true,
-	}
 }
 
 type Provider struct {
@@ -177,9 +140,9 @@ func (p *Provider) Name() string {
 	return "model-proxy"
 }
 
-func callerAttempt(ctx context.Context) *protocol.CallerAttempt {
+func callerAttempt(ctx context.Context) *modelproxy.CallerAttempt {
 	meta := llm.AttemptMetadataFromContext(ctx)
-	origin := (protocol.CallerAttempt{Cause: meta.Cause, RetryLayer: meta.RetryLayer}).Normalized()
+	origin := (modelproxy.CallerAttempt{Cause: meta.Cause, RetryLayer: meta.RetryLayer}).Normalized()
 	if origin.Cause == llm.AttemptInitial && origin.RetryLayer == llm.RetryLayerNone {
 		return nil
 	}

@@ -3,6 +3,7 @@ package subscription
 import (
 	"context"
 	"crypto/tls"
+	"harness/internal/modelproxy"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -12,7 +13,6 @@ import (
 	"time"
 
 	"harness/internal/llm"
-	"harness/internal/modelproxy/protocol"
 )
 
 func TestCredentialResolutionHasBoundedContext(t *testing.T) {
@@ -53,7 +53,7 @@ func TestResetRedirectIsIndeterminate(t *testing.T) {
 		r.Header.Set("Location", "https://chatgpt.com/done")
 		return r, nil
 	})
-	got, err := a.Reset(context.Background(), protocol.ResetRequest{Provider: "openai-codex", CreditID: "selected", RequestID: "same-request"})
+	got, err := a.Reset(context.Background(), modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "selected", RequestID: "same-request"})
 	if !limitsError(t, err, "redirect").Indeterminate || got.Outcome != "indeterminate" || calls != 1 {
 		t.Fatalf("redirect %+v calls %d", got, calls)
 	}

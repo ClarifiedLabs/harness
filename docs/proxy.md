@@ -8,6 +8,21 @@ live in [usage.md](usage.md#model-proxy); usage aggregation, pricing, and
 cost-budget semantics live in
 [usage.md](usage.md#usage-pricing-and-budgets).
 
+## Local execution versus standalone serving
+
+`harness -model-backend local` uses the same runtime and provider configuration
+as this service without a proxy listener, internal HTTP/wire serialization,
+proxy subprocess, or metrics endpoint. It does not load the proxy API-key file
+or run its key watcher. Provider credentials live in the Harness process; local
+mode still makes outbound provider connections. Configured local MCP children
+and native LSP are unaffected. See [backend selection](usage.md#model-backends).
+
+The standalone binary remains the deployment option for a shared service and
+process-level credential separation. Remote mode (the Harness default) uses
+endpoint/client credentials only and does not load provider secrets locally.
+Listener, probes, draining, proxy authentication, and metrics settings below
+apply to standalone serving, not local model access.
+
 ## Serving, probes, and rolling updates
 
 The model proxy exposes unauthenticated process probes on its API listener,
@@ -128,15 +143,18 @@ independent replicas is unsupported because their read-modify-write cycles are
 not coordinated. `/v1/usage` includes `instance` and `since` so that per-pod
 reports are explicit.
 
-The continuation ownership change is a coordinated cutover: old and new
-CLI/proxy combinations are not wire-compatible. Finish active CLI turns, stop
-the CLIs, deploy the complete new proxy fleet without sending traffic through
-a mixed-version Service, wait for every pod to become ready, and only then
-start/update the CLI. Validate one HTTP stateful session and one Codex
-WebSocket session through a forced pod replacement. Future proxy-only rollouts
-can use the normal readiness-driven rolling strategy.
+Use the CLI and proxy shipped in the same release; mixed-version wire
+compatibility is not guaranteed. Finish active turns and update the CLI and
+proxy fleet together rather than routing through a mixed-version Service.
+Validate HTTP and Codex WebSocket continuation recovery after replacement;
+older persisted continuation state is not a compatibility guarantee.
 
 ## Harness-to-proxy authentication
+
+This boundary applies only to remote access. The HTTP adapter binds the
+authenticated caller identity for per-key budgets and connection isolation;
+local execution uses a local identity, not a fabricated proxy access key. Local
+mode does not inherit proxy per-key budgets; Harness prompt limits still apply.
 
 Model-proxy API-key authentication is disabled by default and becomes required
 as soon as the first key is stored in the proxy's dedicated API-key file. The
@@ -192,7 +210,8 @@ provider selection returns 400; a wrong method returns 405. Reset request bodies
 are bounded to 4 KiB. The normalized response contract is in
 [design §7.1](design.md#71-subscription-quota-contract).
 
-Provider credentials are resolved only in the proxy, using the existing shared
+In standalone serving, provider credentials are resolved only in the proxy;
+local mode resolves them in Harness. Both use the shared
 sources: dynamic `auth.Source.Headers` > configured `api_key_env` values >
 existing dialect environment fallback > inline API key. Each operation captures
 one provider/auth snapshot, including its best-effort refreshes; it does not

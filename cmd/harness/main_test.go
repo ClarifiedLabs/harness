@@ -26,6 +26,7 @@ import (
 	"harness/internal/goal"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
+	"harness/internal/modelproxy"
 	"harness/internal/modelproxy/protocol"
 	"harness/internal/plan"
 	"harness/internal/runstream"
@@ -105,7 +106,7 @@ type fakeModelProxy struct {
 	t               *testing.T
 	fp              *llmtest.FakeProvider
 	server          *httptest.Server
-	catalog         protocol.Catalog
+	catalog         modelproxy.Catalog
 	requests        []protocol.StreamRequest
 	catalogRequests int
 	catalogTraces   []string
@@ -117,8 +118,8 @@ func newFakeModelProxy(t *testing.T, fp *llmtest.FakeProvider) *fakeModelProxy {
 	proxy := &fakeModelProxy{
 		t:  t,
 		fp: fp,
-		catalog: protocol.Catalog{
-			Targets: []protocol.Target{
+		catalog: modelproxy.Catalog{
+			Targets: []modelproxy.Target{
 				{
 					ID:              "anthropic:claude-opus-4-8",
 					Aliases:         []string{"anthropic:claude-opus-4-8", "claude-opus-4-8"},
@@ -218,7 +219,7 @@ func (p *fakeModelProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (p *fakeModelProxy) catalogTarget(id string) (protocol.Target, bool) {
+func (p *fakeModelProxy) catalogTarget(id string) (modelproxy.Target, bool) {
 	for _, target := range p.catalog.Targets {
 		if target.ID == id {
 			return target, true
@@ -229,10 +230,10 @@ func (p *fakeModelProxy) catalogTarget(id string) (protocol.Target, bool) {
 			}
 		}
 	}
-	return protocol.Target{}, false
+	return modelproxy.Target{}, false
 }
 
-func (p *fakeModelProxy) addTarget(target protocol.Target) {
+func (p *fakeModelProxy) addTarget(target modelproxy.Target) {
 	if target.DisplayName == "" {
 		target.DisplayName = target.ModelLabel
 	}
@@ -1303,7 +1304,7 @@ func TestRunREPLModelCommandPromptsProfileAfterProfileFlag(t *testing.T) {
 		fp,
 		"/model\nopenrouter:z-ai/glm-5.1\nhigh\ny\nhello\n/exit\n",
 	)
-	proxy.addTarget(protocol.Target{
+	proxy.addTarget(modelproxy.Target{
 		ID:            "openrouter:z-ai/glm-5.1",
 		Aliases:       []string{"openrouter:z-ai/glm-5.1", "z-ai/glm-5.1"},
 		DisplayName:   "z-ai/glm-5.1",
@@ -1356,7 +1357,7 @@ func TestRunREPLModelCommandDropsUnsupportedReasoningProfile(t *testing.T) {
 		fp,
 		"/model\nxiaomi-token-plan-sgp:mimo-v2.5-pro\ny\nhello\n/exit\n",
 	)
-	proxy.addTarget(protocol.Target{
+	proxy.addTarget(modelproxy.Target{
 		ID:            "xiaomi-token-plan-sgp:mimo-v2.5-pro",
 		Aliases:       []string{"xiaomi-token-plan-sgp:mimo-v2.5-pro", "mimo-v2.5-pro"},
 		DisplayName:   "mimo-v2.5-pro",
@@ -1615,7 +1616,7 @@ func TestRunDebugRequestDisablesContinuation(t *testing.T) {
 }
 
 func TestResponsesStatefulForProviderUsesCatalogAndConfig(t *testing.T) {
-	catalog := protocol.Catalog{Targets: []protocol.Target{
+	catalog := modelproxy.Catalog{Targets: []modelproxy.Target{
 		{
 			ID:                   "openai:gpt-5.5",
 			Aliases:              []string{"gpt-5.5"},
@@ -1649,7 +1650,7 @@ func TestResponsesStatefulForProviderUsesCatalogAndConfig(t *testing.T) {
 }
 
 func TestNativeCompactionForProviderRequiresCatalogCapability(t *testing.T) {
-	catalog := protocol.Catalog{Targets: []protocol.Target{
+	catalog := modelproxy.Catalog{Targets: []modelproxy.Target{
 		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}, NativeCompaction: true},
 		{ID: "openai-codex:gpt-5.5"},
 	}}
@@ -1666,7 +1667,7 @@ func TestNativeCompactionForProviderRequiresCatalogCapability(t *testing.T) {
 }
 
 func TestPrewarmForProviderRequiresAdvertisedSafeSupport(t *testing.T) {
-	catalog := protocol.Catalog{Targets: []protocol.Target{
+	catalog := modelproxy.Catalog{Targets: []modelproxy.Target{
 		{ID: "openai-codex:gpt-5.5", Aliases: []string{"gpt-5.5"}, Prewarm: true},
 		{ID: "anthropic:claude-opus-4-8"},
 	}}
@@ -1687,7 +1688,7 @@ func TestSessionResponseStateCompatibilityRequiresExactFingerprintAndTarget(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	catalog := protocol.Catalog{Targets: []protocol.Target{{
+	catalog := modelproxy.Catalog{Targets: []modelproxy.Target{{
 		ID:                   "openai:gpt-5.5",
 		APIType:              "responses",
 		ContinuationStateful: true,
@@ -1793,14 +1794,14 @@ func TestRunAgentsFlagListsConfiguredAgentsWithoutProxy(t *testing.T) {
 func TestRunModelsFlagListsCatalogAndExits(t *testing.T) {
 	fp := llmtest.New("fake")
 	env, out, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"--models"}, fp, "")
-	proxy.addTarget(protocol.Target{
+	proxy.addTarget(modelproxy.Target{
 		ID:            "openrouter:z-ai/glm-5.1",
 		DisplayName:   "z-ai/glm-5.1",
 		ProviderLabel: "OpenRouter",
 		ModelLabel:    "z-ai/glm-5.1",
 		Reasoning:     true,
 	})
-	proxy.addTarget(protocol.Target{
+	proxy.addTarget(modelproxy.Target{
 		ID:            "openai:gemini-2.5-flash",
 		DisplayName:   "gemini-2.5-flash",
 		ProviderLabel: "OpenAI",
@@ -2405,7 +2406,7 @@ func TestRunOneShotUnavailableConfiguredSelectionDoesNotPrompt(t *testing.T) {
 func TestRunReasoningProfileRejectedWhenProxyCatalogSaysUnsupported(t *testing.T) {
 	fp := llmtest.New("fake")
 	env, _, errw, _, proxy := fakeProviderEnvWithProxy(t, []string{"-model", "openai:gpt-4o", "-reasoning", "high", "-p", "hi"}, fp, "")
-	proxy.addTarget(protocol.Target{
+	proxy.addTarget(modelproxy.Target{
 		ID:            "openai:gpt-4o",
 		DisplayName:   "gpt-4o",
 		ProviderLabel: "OpenAI",
@@ -5367,7 +5368,7 @@ func TestRunDoesNotManageResponsesStateInHarness(t *testing.T) {
 
 	fp = llmtest.New("fake", okStepWithUsage(1, 1))
 	env, _, errw, _, proxy = fakeProviderEnvWithProxy(t, []string{"-model", "openai-codex:gpt-5.5", "-p", "hi"}, fp, "")
-	proxy.addTarget(protocol.Target{
+	proxy.addTarget(modelproxy.Target{
 		ID:            "openai-codex:gpt-5.5",
 		DisplayName:   "gpt-5.5",
 		ProviderLabel: "OpenAI Codex",
@@ -5506,7 +5507,7 @@ func TestResolveDelegateLaunchToleratesPendingMCPTool(t *testing.T) {
 	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
 	rt := delegate.Runtime{Agent: "worker", System: "sys", ToolNames: []string{"read"}}
 
-	launch, err := resolveDelegateLaunch(rt, "worker", agents, catalog, pending, protocol.Catalog{}, nil, func(s string) string { return s }, config.Config{})
+	launch, err := resolveDelegateLaunch(rt, "worker", agents, catalog, pending, modelproxy.Catalog{}, nil, func(s string) string { return s }, config.Config{})
 	if err != nil {
 		t.Fatalf("delegate to subagent with not-yet-discovered MCP tool should not fail: %v", err)
 	}
@@ -5724,7 +5725,7 @@ func TestAgentSummariesIncludeNonInteractiveAgentsWithoutAffectingDelegation(t *
 }
 
 func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {
-	catalog := protocol.Catalog{Targets: []protocol.Target{
+	catalog := modelproxy.Catalog{Targets: []modelproxy.Target{
 		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}},
 		{ID: "openrouter:gpt-5.5", Aliases: []string{"gpt-5.5"}, ReasoningReplayDomain: "openrouter:gpt-family"},
 		{ID: "openrouter:openai/gpt-5.5", Aliases: []string{"openai/gpt-5.5"}},
@@ -5753,7 +5754,7 @@ func TestResolveCatalogSelectionHonorsExplicitProvider(t *testing.T) {
 }
 
 func TestResolveCatalogSelectionRejectsProviderAliasConflict(t *testing.T) {
-	catalog := protocol.Catalog{Targets: []protocol.Target{
+	catalog := modelproxy.Catalog{Targets: []modelproxy.Target{
 		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}},
 	}}
 
@@ -5764,7 +5765,7 @@ func TestResolveCatalogSelectionRejectsProviderAliasConflict(t *testing.T) {
 }
 
 func TestFuzzyMatchModel(t *testing.T) {
-	catalog := protocol.Catalog{Targets: []protocol.Target{
+	catalog := modelproxy.Catalog{Targets: []modelproxy.Target{
 		{ID: "anthropic:claude-opus-4-8", Aliases: []string{"claude-opus-4-8"}},
 		{ID: "anthropic:claude-sonnet-4-8", Aliases: []string{"claude-sonnet-4-8"}},
 		{ID: "openai:gpt-5.5", Aliases: []string{"gpt-5.5"}},

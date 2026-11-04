@@ -4,10 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"harness/internal/modelproxy"
 	"net/http"
 	"strings"
-
-	"harness/internal/modelproxy/protocol"
 )
 
 type kimiDetail struct {
@@ -37,12 +36,12 @@ type kimiLimit struct {
 	Detail *kimiDetail `json:"detail"`
 }
 
-func (a *Account) kimi(ctx context.Context) (protocol.ProviderLimits, error) {
+func (a *Account) kimi(ctx context.Context) (modelproxy.ProviderLimits, error) {
 	var raw struct {
 		Usage  *kimiDetail `json:"usage"`
 		Limits []kimiLimit `json:"limits"`
 	}
-	var out protocol.ProviderLimits
+	var out modelproxy.ProviderLimits
 	usagesURL := a.usagesURL
 	if usagesURL == "" {
 		usagesURL = "https://api.kimi.com/coding/v1/usages"
@@ -50,7 +49,7 @@ func (a *Account) kimi(ctx context.Context) (protocol.ProviderLimits, error) {
 	if err := a.request(ctx, http.MethodGet, usagesURL, nil, &raw); err != nil {
 		return out, err
 	}
-	pool := protocol.LimitPool{ID: "coding", Name: "Coding Plan"}
+	pool := modelproxy.LimitPool{ID: "coding", Name: "Coding Plan"}
 	if raw.Usage != nil {
 		w, err := parseKimi(*raw.Usage, "weekly", "Weekly limit")
 		if err != nil {
@@ -101,12 +100,12 @@ func (a *Account) kimi(ctx context.Context) (protocol.ProviderLimits, error) {
 			out.Warnings = append(out.Warnings, countsWarning())
 		}
 	}
-	out.Pools = []protocol.LimitPool{pool}
+	out.Pools = []modelproxy.LimitPool{pool}
 	return out, nil
 }
 
-func parseKimi(d kimiDetail, id, name string) (protocol.LimitWindow, error) {
-	w := protocol.LimitWindow{ID: id, Name: label(name, d.Name, d.Title, d.Scope), Unit: "quota units", Limit: number(d.Limit), Used: number(d.Used), Remaining: number(d.Remaining)}
+func parseKimi(d kimiDetail, id, name string) (modelproxy.LimitWindow, error) {
+	w := modelproxy.LimitWindow{ID: id, Name: label(name, d.Name, d.Title, d.Scope), Unit: "quota units", Limit: number(d.Limit), Used: number(d.Used), Remaining: number(d.Remaining)}
 	if !hasQuota(w) {
 		return w, invalidPayload()
 	}
@@ -204,6 +203,6 @@ func unknownKimiUnit(detail kimiDetail) bool {
 	return presentJSON(detail.Window) && json.Unmarshal(detail.Window, &window) == nil && window.TimeUnit != nil && kimiUnitMultiplier(*window.TimeUnit) == 0
 }
 
-func kimiUnitWarning() protocol.LimitsError {
+func kimiUnitWarning() modelproxy.LimitsError {
 	return *safeError("unknown_quota_unit", "provider returned an unrecognized quota duration unit")
 }

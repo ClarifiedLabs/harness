@@ -9,20 +9,53 @@ For tool behavior, see [tools.md](tools.md). For MCP and LSP, see
 
 ## Model Selection
 
-`harness` fetches configured model targets from `harness-model-proxy`. A model
-value like `openrouter:openai/gpt-5.5` selects that exact proxy target. Model
-selection belongs to `harness`: use `-model`, `HARNESS_MODEL`, config `model`,
-or `/model` in the REPL. Model values use the proxy's `<provider>:<model>`
-target IDs.
+`harness` reads configured model targets from the selected model backend. A
+value like `openrouter:openai/gpt-5.5` selects that exact target. Model selection
+belongs to `harness`: use `-model`, `HARNESS_MODEL`, config `model`, or `/model`
+in the REPL. Both backends use the same `<provider>:<model>` target IDs.
+
+### Model backends
+
+Select `-model-backend local|remote`, `HARNESS_MODEL_BACKEND`, or config
+`model_backend`. The default is `remote`; there is no reachability-based
+autodetection or fallback. Backend location is separate from API dialect and
+provider profile: local model access still makes outbound provider API calls.
+
+- **Local:** `harness -model-backend local -model <provider>:<model>` loads the
+  same model-proxy/provider configuration and executes the shared model runtime
+  in-process. It starts no model-proxy listener, internal HTTP hop, proxy
+  subprocess, or metrics endpoint. It needs no proxy API-key file or key watcher.
+  Provider credentials are available to the agent process. Existing opt-in CLI
+  telemetry export remains independent.
+- **Remote:** `harness -model-backend remote -model <provider>:<model>` connects
+  to a separately managed `harness-model-proxy`. It loads only endpoint/client
+  credentials, not local provider configuration or secrets, and starts no local
+  runtime maintenance jobs. Use this deployment for process-level credential
+  separation.
+
+For local mode, `-model-config path`, `HARNESS_MODEL_CONFIG`, or config
+`model_config` selects the model-proxy configuration file, not the ordinary
+Harness settings file (`-config`). An empty value uses the existing model-proxy
+default path discovery. Relative `model_config` paths supplied in a settings
+file resolve beside that file; flag/environment relative paths resolve from the
+working directory. Normal flag > environment > project file > global file >
+default precedence applies. Provider data stays in the provider files; it is
+not merged into Harness settings. Setup and auth commands remain available in
+the standalone `harness-model-proxy` binary.
+
+Local MCP and native LSP are unchanged. A configured local MCP command may still
+start a child process; it is one command slot, not the standalone MCP proxy's
+multi-server aggregator. Neither model backend starts an MCP proxy.
 
 Use `harness -model-proxy-url http://host:port` when the proxy runs somewhere
 other than `127.0.0.1:8765`. When `-model-proxy-url` /
 `HARNESS_MODEL_PROXY_URL` is left unset, harness applies the effective default
 `http://127.0.0.1:8765`.
 
-Use `harness --check-model-proxy` to verify that the configured proxy is
-reachable. It sends `GET /v1/models`, prints a short success line on stdout, and
-exits before creating a session or starting the REPL.
+Use `harness --check-model-proxy` to check the selected backend catalog. Remote
+mode sends `GET /v1/models`; local mode reads the shared runtime catalog. Output
+identifies the backend mode and includes an endpoint only for remote mode. The
+command exits before creating a session or starting the REPL.
 
 Use `harness --models` to print the targets and whether they support portable
 reasoning profiles. Use `harness --agents` to print the resolved built-in and
@@ -36,7 +69,7 @@ config-defined agents. Both commands exit before creating a session.
 `-web-search auto` lets harness declare the provider-hosted web search tool for
 model calls. The default is `off`.
 
-The reasoning-update, async-tool, and native-steering booleans report proxy
+The reasoning-update, async-tool, and native-steering booleans report target
 capabilities explicitly, including `false`; they do not mean that an
 experimental feature is enabled in the current Harness configuration.
 
@@ -248,7 +281,9 @@ value placeholders remain hand-maintained.
 ```text
 -p <prompt|->     one-shot mode; "-" or piped stdin reads the prompt from stdin
 -i, -initial-prompt <prompt>   run an initial prompt, then continue in the REPL
--model <provider>:<model>   model proxy target id
+-model <provider>:<model>   configured model target id
+-model-backend <local|remote>   model access backend (default remote; also HARNESS_MODEL_BACKEND)
+-model-config <path>   local model configuration (empty uses model-proxy discovery; also HARNESS_MODEL_CONFIG)
 -model-proxy-url <url>   harness-model-proxy URL (default http://127.0.0.1:8765)
 -model-proxy-api-key <key>   API key for harness-model-proxy (also HARNESS_MODEL_PROXY_API_KEY)
 -mcp-proxy-api-key <key>   API key for harness-mcp-proxy (also HARNESS_MCP_PROXY_API_KEY)
@@ -314,7 +349,7 @@ value placeholders remain hand-maintained.
 --debug-request  dump the first provider-neutral model request as JSON and exit without calling the model
 --agents         list configured agents and exit
 --models         list configured providers and models and exit
---check-model-proxy    check harness-model-proxy reachability and exit
+--check-model-proxy    check the selected model backend catalog and exit
 -hooks <file>    replace configured hooks with this hook config file
 -otel-enabled, -otel-endpoint, -otel-protocol, -otel-timeout, -otel-service-name, -otel-hostname
                   OTLP/HTTP metrics export controls (see the configuration parameters matrix)
@@ -528,8 +563,9 @@ When only a project config is present, `check` reports `config ok: <path>
 `/model` and REPL edit-mode saves always write to `Result.ConfigPath`—the
 global or explicitly selected file—never to the project config.
 
-Project configs can define hooks, `hook_configs`, MCP local commands, LSP
-servers, and other command-bearing settings that harness will load
+Project configs can select local model execution and its provider/auth config,
+and define hooks, `hook_configs`, MCP local commands, LSP servers, and other
+command-bearing settings that harness will load
 automatically when invoked inside that project tree. Treat the project config
 as trusted code: only run harness in projects you trust and review
 `.harness/config.json` before executing untrusted clones.
@@ -541,8 +577,9 @@ it. Boolean, integer, and number text must use the documented syntax; invalid
 known environment values are errors rather than fallbacks. `HARNESS_NO_COLOR`
 is an ordinary strict boolean, while standard `NO_COLOR` is presence-based and
 disables ANSI when non-empty. `HARNESS_LOG_LEVEL` controls harness diagnostics.
-Provider API-key environment variables and model-proxy configuration remain
-owned by `harness-model-proxy`.
+Provider API-key environment variables and provider configuration are resolved
+by the shared model runtime: in `harness` for local mode, in the standalone
+model proxy for remote mode.
 
 Defaults marked *derived* below are injected from the runtime context: the model
 and MCP proxy URLs, history path, default agent, and whether Harness is running
@@ -678,6 +715,8 @@ environment variables, JSON paths, types, and defaults. The concise
 | Key | Type | Accepted | Flags | Environment | JSON path | Default | Sensitive | Description |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | `model` | `string` | - | `-model` | `HARNESS_MODEL` | `model` | unset (provider/model selected elsewhere) | no | Harness model setting. |
+| `model_backend` | `string` | `local`, `remote` | `-model-backend` | `HARNESS_MODEL_BACKEND` | `model_backend` | "remote" | no | Harness model backend setting. |
+| `model_config` | `string` | - | `-model-config` | `HARNESS_MODEL_CONFIG` | `model_config` | model-proxy config discovery (local backend only) | no | Harness model config setting. |
 | `model_proxy_url` | `string` | - | `-model-proxy-url` | `HARNESS_MODEL_PROXY_URL` | `model_proxy_url` | derived: runtime model proxy URL | no | Harness model proxy url setting. |
 | `model_proxy_api_key` | `string` | - | `-model-proxy-api-key` | `HARNESS_MODEL_PROXY_API_KEY` | `model_proxy_api_key` | unset | yes | Harness model proxy api key setting. |
 | `trace_proxy` | `boolean` | `true`, `false` | `-trace-proxy` | `HARNESS_TRACE_PROXY` | `trace_proxy` | false | no | Harness trace proxy setting. |
@@ -782,20 +821,20 @@ environment variables, JSON paths, types, and defaults. The concise
 <!-- harness-config-parameters:end -->
 
 `HARNESS_WEB_SEARCH=auto` is equivalent to `-web-search auto`; `off` disables it.
-`auto` only declares web search when the selected model-proxy target advertises
+`auto` only declares web search when the selected catalog target advertises
 `server_tools:["web_search"]`.
 
 - `--debug-request` prints the first provider-neutral `llm.Request`, context
   estimate, active tools, reasoning settings, and request byte counts. It
-  resolves the model proxy catalog, then exits before prewarm, session hooks,
+  resolves the selected backend catalog, then exits before prewarm, session hooks,
   session writes, or any model stream.
 - `--agents` prints the resolved agent list without contacting the model proxy.
   Text output marks interactive-selectable agents with `[interactive]`; JSON
   output includes `interactive_selectable` for every agent. `--models` prints
-  the configured proxy model catalog. Use `--format json` with
+  the selected backend model catalog. Use `--format json` with
   `--agents`, `--models`, or `--check-model-proxy` for structured output.
 - `context_management` is a top-level config-file setting: `"auto"` (default)
-  enables notes-based context management only when the resolved model-proxy
+  enables notes-based context management only when the resolved catalog
   target advertises `supports_experimental_context:true`. Aliases and service
   tiers inherit that capability; an absent field means false. `"on"` explicitly
   opts in any model/provider; `"off"` restores ordinary compaction. For example,
@@ -929,13 +968,13 @@ environment variables, JSON paths, types, and defaults. The concise
   harness surfaces `[stopped: model reached max tokens]`. Provider configs may
   set `min_output_tokens` for endpoints that reject very small output caps. If
   an OpenAI-compatible endpoint rejects a request with a parseable minimum
-  `max_tokens` error, the model proxy retries once at the inferred floor and logs
+  `max_tokens` error, the shared runtime retries once at the inferred floor and logs
   the inferred/configured values. First-party Chat Completions requests to
   `api.openai.com` encode the cap as `max_completion_tokens`; custom and
   compatible endpoints continue to use `max_tokens`.
 - Before normal model requests, harness resolves input tokens in tiers:
   provider-specific count APIs for OpenAI Responses and Anthropic Messages when
-  available through `harness-model-proxy`; a local `o200k_base` BPE estimate for
+  available through the selected backend; a local `o200k_base` BPE estimate for
   OpenAI/OpenRouter Chat Completions; then the coarse byte-based heuristic.
   Once a turn reports real usage, the *reported* context (`turn_attempt_start`
   and `/context`) anchors to that actual input (uncached plus cache read/write)
@@ -952,7 +991,7 @@ Missing files are ignored; unreadable existing files fail startup.
 
 Reasoning selection is opt-in via `reasoning` / `HARNESS_REASONING` /
 `-reasoning`. Accepted profiles are `default`, `none`, `minimal`, `low`,
-`medium`, `high`, `xhigh`, and `max`. The model proxy maps those profiles to the
+`medium`, `high`, `xhigh`, and `max`. The shared runtime maps those profiles to the
 closest provider/model-specific effort value or, for budget-token models, to a
 percentage of the supported maximum budget. Responses API reasoning summaries
 are controlled separately by `reasoning_summary` /
@@ -968,8 +1007,8 @@ requested. On Responses, `none` omits reasoning controls; it cannot turn off
 reasoning on models such as Astra that always reason. Use `low` for an explicit
 low-effort request.
 
-Responses continuation is on by default for proxy providers that report both
-provider continuation support and `continuation_stateful:true` in the proxy
+Responses continuation is on by default for targets that report both provider
+continuation support and `continuation_stateful:true` in the selected backend
 catalog. This includes supported Responses and Gemini Interactions targets.
 Disable it with
 `responses_stateful:false`, `HARNESS_RESPONSES_STATEFUL=false`, or
@@ -981,7 +1020,7 @@ malformed, out-of-range, or fingerprint-mismatched anchor is discarded before
 the request and the complete transcript is sent safely.
 
 Responses provider configs can opt into native compaction with
-`responses_compaction:true`. The model proxy advertises this capability per
+`responses_compaction:true`. The shared runtime advertises this capability per
 target; Harness does not infer it from `api_type:"responses"` alone. Managed
 providers using the canonical official OpenAI API or ChatGPT Codex identity and
 base URL default on, while `responses_compaction:false` explicitly disables the
@@ -1017,20 +1056,20 @@ bytes (default 800, `HARNESS_RETENTION_RESULT_HEAD_BYTES`, clamped to the
 4096-byte eligibility threshold) plus a typed recovery hint pointing at the
 archived original.
 
-The model proxy is a stateless continuation pass-through: it never stores,
-reconstructs, trims, or resets a continuation, and it never retries a
-continuation suffix. It ordinarily forwards the CLI-supplied messages, `store`,
+The shared runtime holds no authoritative session continuation state: it never
+reconstructs or trims the transcript, and never retries a continuation suffix.
+It ordinarily forwards the CLI-supplied messages, `store`,
 and previous-response/interaction ID unchanged. An unsupported target rejects
 continuation with `continuation_unsupported`. A connection-affine WebSocket
 provider can reject a known-unavailable ID before streaming with
 `previous_response_unavailable`; an upstream previous-ID rejection is also
 passed through unchanged. The exception is a Responses WebSocket
-`websocket_connection_limit_reached` error before output: the proxy normalizes it to
+`websocket_connection_limit_reached` error before output: the runtime normalizes it to
 `previous_response_unavailable` for a socket-scoped continuation, or retries it
 once when the request has no previous ID and already contains full context. In
 the continuation case harness clears its local anchor and performs one
-full-context resend. A miss that recovers is retained in proxy logs, metrics,
-and session diagnostics but is not rendered as a terminal model error; the
+full-context resend. A miss that recovers is retained in runtime logs, configured
+metrics, and session diagnostics but is not rendered as a terminal model error; the
 normal state-reset notice remains visible unless quiet mode suppresses it. If
 the resend fails, harness still renders the final error normally.
 
@@ -1041,16 +1080,16 @@ provider/model continuation chain. `-responses-stateful=false` sends complete
 messages without `store` or a previous ID on every request.
 
 Responses provider configs may also set `responses_websocket:true` to have the
-model proxy use the Responses WebSocket transport instead of HTTP SSE. The proxy
-defaults this on for public OpenAI Astra targets and `codex_oauth` Responses
+shared runtime use the Responses WebSocket transport instead of HTTP SSE. The
+runtime defaults this on for public OpenAI Astra targets and `codex_oauth` Responses
 providers, and preserves an explicit `responses_websocket:false` override.
 Other models on the same public OpenAI provider keep their existing transport
-default. WebSocket connections live in a bounded per-pod lease pool. The
+default. WebSocket connections live in a bounded per-runtime lease pool. The
 Responses transport rotates sockets between requests after 55 minutes, before
 OpenAI's 60-minute limit; an expired continuation uses the reset-and-resend path
 above. Rotation never interrupts an active response. If a response crosses the
 upstream limit after output has begun, the error still surfaces rather than
-risking duplicate output. Harness sends its opaque session ID as
+risking duplicate output. In remote mode, Harness sends its opaque session ID as
 `X-Harness-Session`, allowing a load balancer to keep that connection-affine
 traffic on one pod as a performance optimization. Correctness does not depend
 on stickiness: a pod/socket miss produces the reset-and-resend path above.
@@ -1060,9 +1099,10 @@ Gemini Interactions targets are continuation-capable by default; set
 continuation for that target. The CLI owns and persists
 `previous_interaction_id` under the same fingerprint contract. Signed `thought`,
 Google Search call, and Google Search result steps remain in the invisible
-provider-neutral transcript so a full-history fallback is valid after a proxy
-restart. Stored interactions remain subject to the provider account's
-applicable retention policy.
+provider-neutral transcript so a full-history fallback is valid after a runtime
+restart or backend switch. Live connections are never transferred between
+backends; a compatible target and replay domain are still required. Stored
+interactions remain subject to the provider account's applicable retention policy.
 
 ## ACP Agent Server
 
@@ -1078,6 +1118,8 @@ It accepts no positional arguments. The accepted configuration flags are exactly
 ```text
 -config <path>
 -model <string>
+-model-backend <local|remote>
+-model-config <path>
 -model-proxy-url <string>
 -model-proxy-api-key <string>
 -trace-proxy
@@ -1182,6 +1224,12 @@ for durability details; outbound configured ACP targets and interactive delegate
 sessions are covered in [tools.md](tools.md#reusable-agent-sessions-and-acp).
 
 ## Model Proxy
+
+The provider configuration below is shared by local model execution and the
+standalone service. Setup/auth/config commands belong to `harness-model-proxy`;
+serving-only authentication, probes, metrics listeners, and API-key budgets do
+not apply to `harness -model-backend local`. Once configuration is prepared,
+local execution needs only `harness`.
 
 ### Commands and configuration inspection
 
@@ -1573,7 +1621,7 @@ input modalities with `input_modalities`; use `["text"]` for text-only models
 and `["text", "image"]` for models that accept image attachments.
 
 Provider config files written by `setup` and `refresh-models` are managed
-(`"managed": true`) and store no per-model prices. The proxy resolves their
+(`"managed": true`) and store no per-model prices. The shared runtime resolves their
 prices and missing metadata from authenticated provider catalogs and models.dev,
 so cache refreshes update served metadata without re-running setup or restarting.
 A fresh, complete provider response controls availability. A failed provider
@@ -1582,7 +1630,7 @@ auto-detected 404/405 falls back to models.dev availability only until that
 endpoint has returned a successful snapshot; later 404/405 responses preserve
 the cached snapshot like other transient failures. Background refresh only hides
 confirmed-absent targets in memory and never rewrites provider files.
-A hand-written config without `"managed": true` is manual: the proxy does not
+A hand-written config without `"managed": true` is manual: the runtime does not
 edit it and uses its own `price` and `input_modalities` entries. A managed config
 may set `price_source` to resolve prices from a different models.dev provider
 ID; it does not change availability or capability metadata.
@@ -1591,9 +1639,9 @@ ID; it does not change availability or capability metadata.
 the metadata harness consumes, at
 `~/.config/harness-model-proxy/models.dev.api.json`. `setup` uses the cache
 when present; if there is no cache, or the cache cannot be parsed, it fetches and
-rewrites the cache before using the vendored fallback snapshot. While serving,
-the proxy refreshes this cache when it is older than `24h` by default. Set
-`models_dev_cache_ttl` in the proxy config, or pass
+rewrites the cache before using the vendored fallback snapshot. Shared bootstrap
+refreshes this cache for local execution and standalone serving when it is older
+than `24h` by default. Set `models_dev_cache_ttl` in the proxy config, or pass
 `-models-dev-cache-ttl <duration>`, to override the interval; use `0` to disable
 periodic serving-time refreshes. Cache updates are parsed and sanity-checked
 before replacing the old file; a candidate catalog with no providers/models, or
@@ -1637,6 +1685,11 @@ behavior, request tracing, and multimodal compatibility diagnostics are
 documented in [proxy.md](proxy.md).
 
 ### Usage, pricing, and budgets
+
+Pricing and execution accounting run in the shared runtime for both backends;
+session `/usage` and Harness prompt limits work in either mode. The HTTP usage
+endpoint and proxy access-key budgets below are standalone service features,
+not local listeners or local access-key requirements.
 
 The read-only `GET /v1/usage` endpoint aggregates token and cost totals per model
 target for the serving process, including delegate child-agent spend. Its
@@ -1687,8 +1740,8 @@ token charges remain included.
 ## Subscription Limits
 
 `harness limits` queries account-wide subscription quotas on demand through the
-model proxy. Supported configured providers are those with a subscription
-profile — `codex` (managed setup
+selected backend, using the same account operations in local and remote modes.
+Supported configured providers are those with a subscription profile — `codex` (managed setup
 names it `openai-codex`), `kimi-code-plan`, or `zai-coding-plan` — or the
 canonical provider names, which detect the same profiles. These are provider names, not model target
 IDs. Without a provider argument, it queries all configured supported providers
@@ -1722,6 +1775,8 @@ Flags may appear before or after the positional arguments within each command:
 | Flag | Behavior |
 |---|---|
 | `-config <file>` | Select the Harness config file; otherwise use `HARNESS_CONFIG` and normal config discovery. |
+| `-model-backend local\|remote` | Select `HARNESS_MODEL_BACKEND` / `model_backend`; default `remote`. |
+| `-model-config <path>` | Select `HARNESS_MODEL_CONFIG` / `model_config` for local mode; empty uses model-proxy default path discovery. |
 | `-model-proxy-url <url>` | Override `HARNESS_MODEL_PROXY_URL` / `model_proxy_url`; default `http://127.0.0.1:8765`. |
 | `-model-proxy-api-key <key>` | Override `HARNESS_MODEL_PROXY_API_KEY` / `model_proxy_api_key`; this authenticates to the proxy, not the provider. |
 | `-format text\|json` | Text by default; JSON emits one normalized result object, not the model-run NDJSON stream. |
@@ -1732,9 +1787,10 @@ Connection settings follow **flag > environment > project config > global
 config > default**, with the normal configuration validation rules. `-format`
 and `-request-id` are command-local flags, not new environment/config settings.
 Unknown flags and invalid syntax are errors, not ignored options. Provider
-credentials stay in `harness-model-proxy`; no new login flow is introduced.
-These commands do not start a model session, tools, MCP/LSP, model discovery, or
-prewarming. Requests have a 45-second command bound and can be interrupted.
+credentials are resolved in the selected runtime process; no new login flow is
+introduced. These commands do not start a model session, tools, MCP/LSP, or
+prewarming; local backend startup may refresh its catalog. Requests have a
+45-second command bound and can be interrupted.
 
 Status shows the fetch time, plan when reported, independent pools/windows,
 available counts and percentages, and automatic reset timestamps/countdowns.

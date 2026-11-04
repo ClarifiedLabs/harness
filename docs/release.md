@@ -6,6 +6,15 @@ Release builds produce the three shipped binaries:
 - `harness-model-proxy`
 - `harness-mcp-proxy`
 
+The `harness` binary includes the local model runtime; executing
+`harness -model-backend local` with prepared provider configuration does not
+require either proxy binary to be installed or running. The standalone proxies
+remain independently runnable deployment options, not Harness subcommands.
+Remote model access remains the default.
+
+Ship CLI and proxy from the same release: mixed-version wire compatibility and
+older persisted continuation state are not guaranteed.
+
 The apps support `--version` (the proxies also accept a `version` subcommand):
 
 ```sh
@@ -16,8 +25,31 @@ harness-mcp-proxy --version
 
 Release builds inject the repository tag (`v*`) into those commands. The MCP
 protocol version is separate and is shown by both MCP-proxy version spellings
-and by `harness lsp version`. Persisted session `state.json` files use schema
-version `3`. Earlier schemas are rejected rather than migrated.
+and by `harness lsp version`. Persisted session `state.json` files use a
+versioned schema (see [session internals](session.md#state-files)); unsupported
+schemas are rejected
+rather than migrated.
+
+## Consolidated-backend release checks
+
+Before tagging, build all three binaries with `make`, then run
+`go build ./... && go vet ./... && go test ./...` and `make test-integration`.
+Include targeted race checks for runtime pooling, observation, and lifecycle.
+Packaging/smoke verification must cover:
+
+- A packaged `harness -model-backend local` using fixture provider configuration
+  and a mock upstream, with neither proxy binary installed/running. Check
+  one-shot/JSON, ACP, delegates, selection, counting/compaction, and account paths.
+- No model-proxy or metrics listener, internal HTTP transport, proxy subprocess,
+  or proxy API-key file/watcher in local mode. Outbound provider connections and
+  explicitly configured MCP children are still expected.
+- Remote access against the same-release standalone model proxy, including
+  authentication, per-key budgets, probes/drain, and continuation recovery.
+- Existing single-command local MCP, native LSP, and standalone MCP-proxy paths.
+
+Use hermetic fakes/fixtures and mock servers, not live provider credentials.
+These are release acceptance checks; do not assume a package dependency or a
+service supervisor is needed for local execution.
 
 ## Dependency notices
 

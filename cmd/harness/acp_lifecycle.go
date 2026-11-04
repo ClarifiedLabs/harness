@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -10,7 +12,85 @@ import (
 	"harness/internal/acpagent"
 	"harness/internal/config"
 	"harness/internal/logging"
+	"harness/internal/tracing"
 )
+
+// Backend configuration is process-owned once opened. Keep credentials in the
+// comparison, never in an error or diagnostic representation.
+type acpBackendConfig struct {
+	mode, path, endpoint, credential string
+	trace                            bool
+}
+
+func backendConfigForACP(cfg config.Config) acpBackendConfig {
+	mode := cfg.ModelBackend
+	if mode == "" {
+		mode = "remote"
+	}
+	return acpBackendConfig{mode: mode, path: cfg.ModelConfig, endpoint: cfg.ModelProxyURL, credential: cfg.ModelProxyAPIKey, trace: cfg.TraceProxy}
+}
+
+// Called under constructor serialization. The backend belongs to the factory,
+// not to the session/new request context (which is canceled after construction).
+func (f *acpRootFactory) backendFor(ctx context.Context, cfg config.Config) (*openedModelBackend, error) {
+	key := backendConfigForACP(cfg)
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return nil, errors.New("ACP root factory is closed")
+	}
+	if f.backend != nil {
+		backend, previous := f.backend, f.backendConfig
+		f.mu.Unlock()
+		if key != previous {
+			return nil, errors.New("ACP model backend configuration cannot change after opening; restart the ACP process")
+		}
+		return backend, nil
+	}
+	f.mu.Unlock()
+	var tracer *tracing.Tracer
+	var err error
+	if cfg.TraceProxy {
+		tracer, err = tracing.NewTracer(true)
+		if err != nil {
+			return nil, fmt.Errorf("trace proxy: %w", err)
+		}
+	}
+	backend, err := openACPModelBackend(ctx, f.env, cfg, f.logger, tracer)
+	if err != nil {
+		return nil, err
+	}
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		_ = backend.Close()
+		return nil, errors.New("ACP root factory closed during model backend construction")
+	}
+	f.backend, f.backendConfig = backend, key
+	f.mu.Unlock()
+	return backend, nil
+}
+
+func openACPModelBackend(ctx context.Context, env environment, cfg config.Config, logger *slog.Logger, tracer *tracing.Tracer) (*openedModelBackend, error) {
+	lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, cancel)
+	backend, err := openModelBackend(lifetime, env, cfg, logger, tracer)
+	stop()
+	if err == nil {
+		err = ctx.Err()
+	}
+	if err != nil {
+		cancel()
+		if backend != nil {
+			_ = backend.Close()
+		}
+		return nil, err
+	}
+	return &openedModelBackend{Backend: backend.Backend, Accounts: backend.Accounts, Mode: backend.Mode, Endpoint: backend.Endpoint, close: func() error {
+		cancel()
+		return backend.Close()
+	}}, nil
+}
 
 // A protocol close timeout does not mean the root stopped executing. Retain
 // completion independently of the ACP server's bounded close result, so the
@@ -252,12 +332,46 @@ func (f *acpRootFactory) close(ctx context.Context) {
 	roots := f.roots
 	f.roots = nil
 	telemetry := f.telemetry
+	backend := f.backend
 	pending := make([]*acpConstruction, 0, len(f.pending))
 	for construction := range f.pending {
 		pending = append(pending, construction)
 	}
 	f.mu.Unlock()
 	defer close(done)
+	// Never tear down a process backend beneath an admitted constructor or a
+	// still-running root. A stuck preflight/prompt keeps ownership alive without
+	// extending the existing bounded factory settlement wait.
+	if backend != nil {
+		defer func() {
+			var joins []<-chan struct{}
+			for _, construction := range pending {
+				if construction.owned {
+					joins = append(joins, construction.done)
+				}
+			}
+			for _, root := range roots {
+				joins = append(joins, root.settled)
+			}
+			closeBackend := func() {
+				for _, joined := range joins {
+					<-joined
+				}
+				if err := backend.Close(); err != nil && f.logger != nil {
+					f.logger.Warn("ACP model backend close failed", "err", err)
+				}
+			}
+			for _, joined := range joins {
+				select {
+				case <-joined:
+				default:
+					go closeBackend()
+					return
+				}
+			}
+			closeBackend()
+		}()
+	}
 
 	for _, construction := range pending {
 		construction.cancel()

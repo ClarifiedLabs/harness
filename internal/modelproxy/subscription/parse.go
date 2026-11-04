@@ -3,11 +3,10 @@ package subscription
 import (
 	"bytes"
 	"encoding/json"
+	"harness/internal/modelproxy"
 	"math"
 	"strconv"
 	"time"
-
-	"harness/internal/modelproxy/protocol"
 )
 
 // Kimi represents quota numbers both as JSON numbers and numeric strings.
@@ -100,7 +99,7 @@ func duration(n *int64, multiplier int64) (*int64, error) {
 func label(fallback string, values ...*string) string {
 	for _, s := range values {
 		if s != nil {
-			if v := protocol.LimitsLabel(*s); v != "" {
+			if v := modelproxy.LimitsLabel(*s); v != "" {
 				return v
 			}
 		}
@@ -110,12 +109,12 @@ func label(fallback string, values ...*string) string {
 func presentJSON(b json.RawMessage) bool {
 	return len(b) > 0 && !bytes.Equal(bytes.TrimSpace(b), []byte("null"))
 }
-func hasQuota(w protocol.LimitWindow) bool {
+func hasQuota(w modelproxy.LimitWindow) bool {
 	return w.Limit != nil || w.Used != nil || w.Remaining != nil || w.UsedPercent != nil || w.RemainingPercent != nil
 }
-func inconsistent(w protocol.LimitWindow) bool {
+func inconsistent(w modelproxy.LimitWindow) bool {
 	return w.Limit != nil && (w.Used != nil && *w.Used > *w.Limit || w.Remaining != nil && *w.Remaining > *w.Limit || w.Used != nil && w.Remaining != nil && *w.Used+*w.Remaining != *w.Limit)
 }
-func countsWarning() protocol.LimitsError {
+func countsWarning() modelproxy.LimitsError {
 	return *safeError("inconsistent_counts", "provider quota counts are inconsistent; reported values are preserved")
 }

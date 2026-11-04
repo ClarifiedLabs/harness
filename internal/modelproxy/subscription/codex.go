@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"harness/internal/modelproxy"
 	"net/http"
-
-	"harness/internal/modelproxy/protocol"
 )
 
 const codexBase = "https://chatgpt.com/backend-api/wham"
@@ -25,7 +24,7 @@ type codexRateLimit struct {
 	Secondary    *codexWindow `json:"secondary_window"`
 }
 
-func (a *Account) codex(ctx context.Context) (protocol.ProviderLimits, error) {
+func (a *Account) codex(ctx context.Context) (modelproxy.ProviderLimits, error) {
 	var raw struct {
 		Plan       *string         `json:"plan_type"`
 		RateLimit  *codexRateLimit `json:"rate_limit"`
@@ -38,7 +37,7 @@ func (a *Account) codex(ctx context.Context) (protocol.ProviderLimits, error) {
 			Available *int64 `json:"available_count"`
 		} `json:"rate_limit_reset_credits"`
 	}
-	var out protocol.ProviderLimits
+	var out modelproxy.ProviderLimits
 	if err := a.request(ctx, http.MethodGet, codexBase+"/usage", nil, &raw); err != nil {
 		return out, err
 	}
@@ -64,7 +63,7 @@ func (a *Account) codex(ctx context.Context) (protocol.ProviderLimits, error) {
 		if !validInts(raw.Credits.Available) {
 			return out, invalidPayload()
 		}
-		out.ResetCredits = &protocol.ResetCreditSummary{AvailableCount: raw.Credits.Available}
+		out.ResetCredits = &modelproxy.ResetCreditSummary{AvailableCount: raw.Credits.Available}
 	}
 	if len(out.Pools) == 0 {
 		if out.Plan == "" && (out.ResetCredits == nil || out.ResetCredits.AvailableCount == nil) {
@@ -75,8 +74,8 @@ func (a *Account) codex(ctx context.Context) (protocol.ProviderLimits, error) {
 	return out, nil
 }
 
-func parseCodexPool(raw codexRateLimit, id, name string) (protocol.LimitPool, error) {
-	pool := protocol.LimitPool{ID: id, Name: name, Allowed: raw.Allowed, LimitReached: raw.LimitReached}
+func parseCodexPool(raw codexRateLimit, id, name string) (modelproxy.LimitPool, error) {
+	pool := modelproxy.LimitPool{ID: id, Name: name, Allowed: raw.Allowed, LimitReached: raw.LimitReached}
 	for i, rawWindow := range []*codexWindow{raw.Primary, raw.Secondary} {
 		if rawWindow == nil {
 			continue
@@ -84,7 +83,7 @@ func parseCodexPool(raw codexRateLimit, id, name string) (protocol.LimitPool, er
 		if !validNumbers(rawWindow.UsedPercent) || !validInts(rawWindow.Duration, rawWindow.ResetAfter, rawWindow.ResetAt) {
 			return pool, invalidPayload()
 		}
-		w := protocol.LimitWindow{ID: []string{"primary", "secondary"}[i], Name: []string{"Primary window", "Secondary window"}[i], UsedPercent: rawWindow.UsedPercent, DurationSeconds: rawWindow.Duration, ResetAfterSeconds: rawWindow.ResetAfter}
+		w := modelproxy.LimitWindow{ID: []string{"primary", "secondary"}[i], Name: []string{"Primary window", "Secondary window"}[i], UsedPercent: rawWindow.UsedPercent, DurationSeconds: rawWindow.Duration, ResetAfterSeconds: rawWindow.ResetAfter}
 		if w.UsedPercent == nil && w.DurationSeconds == nil && w.ResetAfterSeconds == nil && rawWindow.ResetAt == nil {
 			return pool, invalidPayload()
 		}
@@ -116,8 +115,8 @@ type codexCredit struct {
 	Description *string `json:"description"`
 }
 
-func (a *Account) ResetCredits(ctx context.Context) (protocol.ResetCredits, error) {
-	out := protocol.ResetCredits{Provider: a.provider, FetchedAt: a.client.now().UTC(), Credits: []protocol.ResetCredit{}}
+func (a *Account) ResetCredits(ctx context.Context) (modelproxy.ResetCredits, error) {
+	out := modelproxy.ResetCredits{Provider: a.provider, FetchedAt: a.client.now().UTC(), Credits: []modelproxy.ResetCredit{}}
 	if a.kind != QuotaCodex {
 		return out, safeError("unsupported_provider", "reset credits are supported only for codex-profile providers")
 	}
@@ -135,7 +134,7 @@ func (a *Account) ResetCredits(ctx context.Context) (protocol.ResetCredits, erro
 	out.AvailableCount = raw.Available
 	seen := make(map[string]bool)
 	for _, credit := range *raw.Credits {
-		if !protocol.ValidLimitsID(credit.ID) || credit.ResetType == "" || credit.Status == "" || credit.GrantedAt == nil || seen[credit.ID] {
+		if !modelproxy.ValidLimitsID(credit.ID) || credit.ResetType == "" || credit.Status == "" || credit.GrantedAt == nil || seen[credit.ID] {
 			return out, invalidPayload()
 		}
 		seen[credit.ID] = true
@@ -148,8 +147,8 @@ func (a *Account) ResetCredits(ctx context.Context) (protocol.ResetCredits, erro
 			return out, err
 		}
 		redeemable := credit.ResetType == "codex_rate_limits" && credit.Status == "available" && (expires == nil || expires.After(out.FetchedAt))
-		out.Credits = append(out.Credits, protocol.ResetCredit{
-			ID: credit.ID, ResetType: protocol.LimitsLabel(credit.ResetType), Status: protocol.LimitsLabel(credit.Status), GrantedAt: granted, ExpiresAt: expires,
+		out.Credits = append(out.Credits, modelproxy.ResetCredit{
+			ID: credit.ID, ResetType: modelproxy.LimitsLabel(credit.ResetType), Status: modelproxy.LimitsLabel(credit.Status), GrantedAt: granted, ExpiresAt: expires,
 			Title: label("", credit.Title), Description: label("", credit.Description), Redeemable: &redeemable,
 		})
 	}
@@ -159,8 +158,8 @@ func (a *Account) ResetCredits(ctx context.Context) (protocol.ResetCredits, erro
 // Reset sends exactly the selected credit and request identity. No preflight,
 // fallback selection, automatic retry, or refresh occurs here: the backend owns
 // eligibility and idempotency, even when a previously consumed credit disappears.
-func (a *Account) Reset(ctx context.Context, request protocol.ResetRequest) (protocol.ResetResult, error) {
-	out := protocol.ResetResult{Provider: a.provider, CreditID: request.CreditID, RequestID: request.RequestID, FetchedAt: a.client.now().UTC()}
+func (a *Account) Reset(ctx context.Context, request modelproxy.ResetRequest) (modelproxy.ResetResult, error) {
+	out := modelproxy.ResetResult{Provider: a.provider, CreditID: request.CreditID, RequestID: request.RequestID, FetchedAt: a.client.now().UTC()}
 	if err := request.Validate(); err != nil {
 		return out, err
 	}
@@ -193,7 +192,7 @@ func (a *Account) Reset(ctx context.Context, request protocol.ResetRequest) (pro
 		}
 	}
 	if err != nil {
-		var e *protocol.LimitsError
+		var e *modelproxy.LimitsError
 		if !errors.As(err, &e) {
 			e = safeError("unknown_outcome", "provider reset outcome could not be determined")
 		}

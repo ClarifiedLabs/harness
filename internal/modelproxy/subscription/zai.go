@@ -3,10 +3,9 @@ package subscription
 import (
 	"context"
 	"fmt"
+	"harness/internal/modelproxy"
 	"net/http"
 	"time"
-
-	"harness/internal/modelproxy/protocol"
 )
 
 type zaiLimit struct {
@@ -24,7 +23,7 @@ type zaiLimit struct {
 	} `json:"usageDetails"`
 }
 
-func (a *Account) zai(ctx context.Context) (protocol.ProviderLimits, error) {
+func (a *Account) zai(ctx context.Context) (modelproxy.ProviderLimits, error) {
 	var raw struct {
 		Success *bool  `json:"success"`
 		Code    *int64 `json:"code"`
@@ -37,7 +36,7 @@ func (a *Account) zai(ctx context.Context) (protocol.ProviderLimits, error) {
 			Limits      []zaiLimit `json:"limits"`
 		} `json:"data"`
 	}
-	var out protocol.ProviderLimits
+	var out modelproxy.ProviderLimits
 	if err := a.request(ctx, http.MethodGet, "https://api.z.ai/api/monitor/usage/quota/limit", nil, &raw); err != nil {
 		return out, err
 	}
@@ -68,7 +67,7 @@ func (a *Account) zai(ctx context.Context) (protocol.ProviderLimits, error) {
 		default:
 			out.Warnings = append(out.Warnings, *safeError("unknown_quota_type", "provider returned an unrecognized quota type"))
 		}
-		w := protocol.LimitWindow{ID: fmt.Sprintf("window-%d", i+1), Name: name, Unit: unit, Limit: limit.Usage, Used: limit.Current, Remaining: limit.Remaining, UsedPercent: limit.Percentage}
+		w := modelproxy.LimitWindow{ID: fmt.Sprintf("window-%d", i+1), Name: name, Unit: unit, Limit: limit.Usage, Used: limit.Current, Remaining: limit.Remaining, UsedPercent: limit.Percentage}
 		if !hasQuota(w) {
 			return out, invalidPayload()
 		}
@@ -106,7 +105,7 @@ func (a *Account) zai(ctx context.Context) (protocol.ProviderLimits, error) {
 		if inconsistent(w) {
 			out.Warnings = append(out.Warnings, countsWarning())
 		}
-		out.Pools = append(out.Pools, protocol.LimitPool{ID: fmt.Sprintf("quota-%d", i+1), Name: name, Windows: []protocol.LimitWindow{w}})
+		out.Pools = append(out.Pools, modelproxy.LimitPool{ID: fmt.Sprintf("quota-%d", i+1), Name: name, Windows: []modelproxy.LimitWindow{w}})
 	}
 	return out, nil
 }

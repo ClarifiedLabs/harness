@@ -21,7 +21,7 @@ var invocationCLIFlags = []cli.Flag{
 	{ID: "debug_request", Names: []string{"debug-request"}, Kind: cli.BoolFlag, Description: "dump the first model request and exit"},
 	{ID: "show_agents", Names: []string{"agents"}, Kind: cli.BoolFlag, Description: "list configured agents and exit"},
 	{ID: "show_models", Names: []string{"models"}, Kind: cli.BoolFlag, Description: "list configured models and exit"},
-	{ID: "check_model_proxy", Names: []string{"check-model-proxy"}, Kind: cli.BoolFlag, Description: "check model proxy reachability and exit"},
+	{ID: "check_model_proxy", Names: []string{"check-model-proxy"}, Kind: cli.BoolFlag, Description: "check the selected model backend and exit"},
 }
 
 // SettingCLIFlags projects every catalog-backed command-line setting exactly

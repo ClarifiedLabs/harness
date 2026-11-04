@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"harness/internal/modelproxy"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,7 +22,7 @@ func TestCatalogSendsAuthorizationHeader(t *testing.T) {
 	var auth string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth = r.Header.Get("Authorization")
-		_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+		_ = json.NewEncoder(w).Encode(modelproxy.Catalog{})
 	}))
 	defer srv.Close()
 
@@ -44,7 +45,7 @@ func TestDefaultClientStoresProxyCookies(t *testing.T) {
 		switch r.URL.Path {
 		case "/v1/models":
 			http.SetCookie(w, &http.Cookie{Name: "harness_proxy_affinity", Value: affinityCookie})
-			_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+			_ = json.NewEncoder(w).Encode(modelproxy.Catalog{})
 		case "/v1/stream":
 			if cookie, err := r.Cookie("harness_proxy_affinity"); err == nil {
 				streamCookie = cookie.Value
@@ -77,8 +78,8 @@ func TestCatalogAndRegistry(t *testing.T) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(protocol.Catalog{
-			Targets: []protocol.Target{{
+		_ = json.NewEncoder(w).Encode(modelproxy.Catalog{
+			Targets: []modelproxy.Target{{
 				ID:              "openrouter:openai/gpt-5.5",
 				Aliases:         []string{"openai/gpt-5.5"},
 				ContextWindow:   1_050_000,
@@ -101,7 +102,7 @@ func TestCatalogAndRegistry(t *testing.T) {
 	if len(catalog.Targets) != 1 || catalog.Targets[0].ID != "openrouter:openai/gpt-5.5" {
 		t.Fatalf("catalog targets = %+v", catalog.Targets)
 	}
-	registry := Registry(catalog)
+	registry := modelproxy.Registry(catalog)
 	if got := registry.ContextWindow("openrouter:openai/gpt-5.5"); got != 1_050_000 {
 		t.Fatalf("qualified context window = %d, want 1050000", got)
 	}
@@ -114,8 +115,8 @@ func TestCatalogAndRegistry(t *testing.T) {
 }
 
 func TestRegistryUsesTargetReasoningSupport(t *testing.T) {
-	registry := Registry(protocol.Catalog{
-		Targets: []protocol.Target{{
+	registry := modelproxy.Registry(modelproxy.Catalog{
+		Targets: []modelproxy.Target{{
 			ID:        "openrouter:z-ai/glm-5.1",
 			Reasoning: true,
 		}},
@@ -475,7 +476,7 @@ func TestClientTraceHeaders(t *testing.T) {
 	var catalogTrace string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		catalogTrace = r.Header.Get(tracing.TraceparentHeader)
-		_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+		_ = json.NewEncoder(w).Encode(modelproxy.Catalog{})
 	}))
 	defer srv.Close()
 
@@ -547,7 +548,7 @@ func TestClientNoTraceHeaderWhenTracerNil(t *testing.T) {
 	var trace string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		trace = r.Header.Get(tracing.TraceparentHeader)
-		_ = json.NewEncoder(w).Encode(protocol.Catalog{})
+		_ = json.NewEncoder(w).Encode(modelproxy.Catalog{})
 	}))
 	defer srv.Close()
 

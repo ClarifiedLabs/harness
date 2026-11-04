@@ -18,12 +18,12 @@ codebase works today and evolves as harness gains capabilities.
   CLI, run it through `shell` instead of reimplementing optimized search or
   command semantics. Keep a dedicated wrapper only where Harness owns a
   distinct workflow contract.
-- **Provider and MCP access are isolated.** `harness` uses one provider-neutral
-  message/streaming model and talks to `harness-model-proxy` over HTTP. The model
-  proxy owns API keys, provider configs, model metadata, and concrete provider
-  dialects. Optional remote MCP access similarly runs through
-  `harness-mcp-proxy`, keeping provider and MCP credentials outside the agent
-  process.
+- **Provider-neutral access, optional process separation.** `harness` uses one
+  message/streaming contract with local and remote model backends. Local mode
+  executes the shared runtime in-process with provider credentials; remote mode
+  accesses that runtime through `harness-model-proxy` without loading local
+  provider secrets. Standalone model/MCP proxies can retain upstream credentials
+  outside the agent process. Internal interfaces are not a security boundary.
 - **No sandboxing or permission prompts.** The harness assumes it is launched inside an
   already-sandboxed environment. Tools run with the process's privileges, immediately.
 - **First-class git.** Git branch context in the system prompt; git itself runs
@@ -37,13 +37,18 @@ codebase works today and evolves as harness gains capabilities.
 | Dependencies | standard library plus `github.com/ClarifiedLabs/mdcli` for terminal rendering |
 | Module / binary | `module harness`, binary built from `cmd/harness` |
 | Interface | line-oriented plain text; basic Markdown on terminal output; optional ANSI color only when stdout is a TTY; `NO_COLOR` and `-no-color` disable color; `color_theme=dark|light` selects a palette without probing the terminal background |
-| Secrets | API keys live in `harness-model-proxy`; the `harness` process talks to it over HTTP |
+| Secrets | Local model credentials live in `harness`; remote model credentials live in the standalone proxy. Remote MCP credentials stay in its proxy; configured local children inherit the local deployment boundary. |
 
 ## 3. Architecture
 
-At the deployment level, the unrestricted agent CLI can run in an isolated
-workspace while separate model and MCP services retain credentials in a trusted
-environment:
+Local model access runs the shared runtime directly in the unrestricted agent
+process. It has no model-proxy listener, internal HTTP/wire serialization, proxy
+subprocess, or metrics endpoint; outbound provider connections remain. Remote
+access (the default) uses a standalone service running the same runtime.
+
+For process-level credential separation, the CLI can instead run in an isolated
+workspace while separate model and MCP services retain upstream credentials in
+a trusted environment:
 
 ```text
                                +-----------------------+
@@ -63,43 +68,38 @@ Both proxies support optional API keys for CLI-to-proxy access. They are
 intended to listen only on localhost or a trusted local network; proxy
 authentication does not make an otherwise untrusted deployment safe.
 
-Within the main CLI, prompts flow through the provider-neutral agent loop while
-tool calls dispatch against the local registry:
+Within CLI/ACP/delegates, the provider-neutral agent loop dispatches tool calls
+against the local registry. Application wiring selects model access:
 
-```
-                 ┌────────────────────────────────────────────┐
- stdin ──────►   │ internal/ui        REPL / one-shot driver  │
-                 │   meta-commands, rendering, usage line     │
-                 └──────────────┬─────────────────────────────┘
-                                │ user prompt
-                 ┌──────────────▼─────────────────────────────┐
-                 │ internal/agent     turn loop               │
-                 │   interrupt handling, compaction           │
-                 └────┬──────────────────────────┬────────────┘
-                      │ Request                  │ ToolCall
-        ┌─────────────▼────────────┐   ┌─────────▼────────────┐
-        │ modelproxy/client        │   │ internal/tools       │
-        │   HTTP catalog + stream  │   │   registry+dispatch  │
-        └─────────────┬────────────┘   │   built-in tools     │
-                      │                └──────────────────────┘
-        ┌─────────────▼────────────┐
-        │ harness-model-proxy      │
-        │   llm factory + dialects │
-        └─────────────┬────────────┘
-              │ provider HTTP + SSE (internal/sse, internal/retry)
-              ▼
-        provider endpoint
+```text
+CLI / ACP / delegates
+        |
+        v
+modelproxy.Backend -- Provider(targetID) --> llm.Provider --> agent loop
+        |
+        +-- runtime -------------------------+
+        |                                    |
+        +-- client -- HTTP -- server -- same runtime
+                                             |
+                                      factory / dialects
+                                             |
+                                       provider APIs
 ```
 
 ### Package layout
 
 ```
-cmd/harness              config/session/limits/LSP/ACP command dispatch, config load, proxy catalog wiring, signals, and REPL-vs-oneshot execution
+cmd/harness              config/session/limits/LSP/ACP dispatch, backend selection/lifetime, config load, catalog wiring, signals, and REPL-vs-oneshot execution
 cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; generated command dispatch plus config inspection
 internal/cli             immutable nested command/flag catalogs, presence-aware parsing, and deterministic scoped help
-internal/modelproxy      proxy protocol (including normalized subscription DTOs), client Provider/account operations, server handler
+internal/modelproxy      transport-neutral Backend/Accounts contracts, catalog/account domain types, errors, cloning, and catalog-to-llm.Registry conversion
+internal/modelproxy/runtime shared model execution, catalog/targets, auth, pricing/retries, accounting/diagnostics, pooling/steering, counting/compaction, and account operations
+internal/modelproxy/client remote Backend/Accounts adapter and HTTP transport
+internal/modelproxy/server network boundary: parsing/limits, API-key auth, status/encoding, probes, and caller admission into runtime
+internal/modelproxy/protocol wire-only envelopes and transport details; no duplicate domain models or compatibility aliases
+internal/modelbootstrap   shared config/runtime startup, cached catalogs, provider discovery/refresh jobs, and owned cleanup for CLI and standalone server
 internal/modelproxy/subscription isolated Kimi/Z.ai/Codex account-quota adapters and explicit Codex reset-credit redemption; injected HTTP/clock/credential resolver
-internal/modelproxy/config model-proxy top-level setting catalog, source resolution, and safe projections
+internal/modelproxy/config persisted schema, setting catalog, loading/source resolution/validation, and safe projections; runtime options separate from server/listener options; no server dependency
 internal/modelproxy/pricing generic request-cost pricers: flat llm.Price plus provider-specific dynamic models
 internal/llm             provider-agnostic types, canonical message/tool-declaration cloning and additive usage accounting, Provider interface, model/price registry, and content-free physical attempt/retry/discard source facts
 internal/execution       neutral typed Observer/Scope for model, work, prompt, context, turn, and skill observations; ModelCall owns exact physical usage/discard lineage and legacy response segments; Group tracks actual workers and complete owners without wrapping Provider capabilities
@@ -135,7 +135,7 @@ internal/todo            advisory update_todos store and renderer (§9.13)
 internal/plan            immutable record_plan artifact and latest-plan store (§9.17)
 internal/handoff         /handoff request DTO shared by the interactive drivers (§14)
 internal/goal            `/goal` session state, prompt binding, and continuation rendering (§10)
-internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the model proxy
+internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the shared model runtime
 cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with generated command dispatch
 internal/mcp             tools-only MCP slice: schema, client, server, stdio + streamable-HTTP transports
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
@@ -159,16 +159,72 @@ may use a temporary Go workspace, never a committed sibling-directory `replace`.
 The dependency license is recorded in `THIRD_PARTY_NOTICES.md` and shipped with
 binary distributions.
 
-`internal/llm` is the shared contract between the agent loop and any model provider.
-In the main CLI, the only runtime provider is `modelproxy/client.Provider`; concrete
-OpenAI/Anthropic dialects are constructed inside `harness-model-proxy` via
-`internal/llm/factory`.
+`internal/llm` is the shared contract between the agent loop and any model
+provider. The agent imports neither backend implementations nor factory/dialects.
+Core `llm` must not import dialects or factory; core `mcp`/`mcp/jsonrpc` must not
+import `llm` or `tools`. Both model paths construct the same dialects through the
+shared runtime and `internal/llm/factory`.
+
+### Model backend contract and lifecycle
+
+The root `internal/modelproxy` package owns the neutral contracts and must not
+import runtime, server, client, factory, or dialect implementations:
+
+```go
+type Backend interface {
+    Catalog(context.Context) (Catalog, error)
+    Provider(targetID string) llm.Provider
+}
+
+type Accounts interface {
+    Limits(context.Context, string) (LimitsReport, error)
+    ResetCredits(context.Context, string) (ResetCredits, error)
+    ResetLimits(context.Context, ResetRequest) (ResetResult, error)
+}
+```
+
+`Provider` is a lightweight target-bound handle, not a pinned conversation or
+connection. Resolve targets and optional `llm.InputTokenCounter`,
+`llm.ContextCompactor`, and `llm.LiveSteerer` capabilities through the shared
+catalog/runtime, preserving unsupported-operation errors. Backend location, API
+dialect, and configured provider profile are independent choices. Setup, auth,
+and credential editing are application/configuration operations, not inference
+methods.
+
+The runtime owns semantic validation even for direct calls; HTTP decoding, body
+limits, authentication/status mapping, affinity cookies, and wire encoding stay
+in adapters. Explicit execution metadata supplies identity: authenticated proxy
+identity for remote calls, deliberate local identity for direct calls. Local
+mode creates neither a fake API key nor an `http.Request`, and does not load or
+watch the proxy key file. Standalone per-key budgets and principal/session pool
+isolation remain intact.
+
+`internal/modelbootstrap` shares startup and catalog refresh orchestration.
+Application wiring opens one owned backend for its lifetime; delegates borrow
+it, and ACP owns it across served sessions rather than rebuilding per prompt.
+Turn cancellation does not close the backend. Application exit cancels/joins
+refresh jobs and closes resources after admitted work and session cleanup.
+Offline help/config/agent-list/replay commands do not open a model runtime.
+Remote mode opens only the client, without local provider secrets or runtime
+refresh jobs. Local mode ignores listener/metrics/API-key serving settings.
+
+Direct execution removes the JSON copy boundary: clone mutable requests and
+catalog data at ownership boundaries, honor cancellation/early iterator break,
+and release leases without mutating caller-owned history. Local physical-attempt
+observers receive facts once; remote access encodes/decodes the same facts.
+Session state stays authoritative in the agent; runtime pools and live sockets
+are not transferred on backend switch. Reset/full-history recovery and replay
+compatibility checks remain required.
+
+Local model mode does not start or embed an MCP proxy. Existing single-command
+local MCP, native LSP, and separately configured remote MCP paths are unchanged.
 
 Execution telemetry is a separate, frontend-independent observation path.
 `internal/llm` owns physical attempt facts at transport/provider boundaries;
-`internal/modelproxy/server` prices complete snapshots with the resolved target
-and forwards them through `internal/modelproxy/protocol`/`client`. The proxy
-connection is not an invented upstream request. Its `attemptWriter` coalesces
+`internal/modelproxy/runtime` prices complete snapshots with the resolved target.
+Local calls deliver them directly; the remote adapter forwards them through
+`internal/modelproxy/protocol`/`client`. The proxy connection is not an invented
+upstream request. The wire adapter's `attemptWriter` coalesces
 interim usage by sequence within an ordering segment and caps pending interim
 entries at 256 across all segments, plus at most one envelope in flight. This
 is not a cap on the whole queue: authoritative finishes and control/lifecycle
@@ -342,7 +398,7 @@ Design notes:
   written by an older harness version that did not record the distinction.
 - **Provider-hosted tools are separate from local tools.** `Request.Tools` carries
   function schemas backed by `internal/tools`; `Request.ServerTools` carries neutral
-  provider-hosted declarations such as `web_search`. The model proxy resolves those
+  provider-hosted declarations such as `web_search`. The shared runtime resolves those
   neutral declarations into provider-specific wire shapes before calling a dialect.
 - **Rich tool results remain one logical result.** `ResultText` is always present for
   ordinary summaries and compatibility. Optional `ResultContent` is shallow and may
@@ -353,9 +409,9 @@ Design notes:
   top-level and nested images require supported MIME/detail values, valid base64 whose
   magic matches the declared type, nonnegative metadata, and no foreign union fields.
   Actual encoded lengths are authoritative. The agent gates the complete retained
-  transcript before counting, compaction, prewarm, and provider streams, and both
-  model-proxy request endpoints repeat the gate before resolving or constructing a
-  provider.
+  transcript before counting, compaction, prewarm, and provider streams, and the
+  shared runtime repeats semantic validation before resolving or constructing a
+  provider for either direct or HTTP access.
 
 Two small seam types carry tool traffic between the agent loop and the tool layer;
 they are flat views of the corresponding content blocks:
@@ -804,9 +860,9 @@ fails before output, the provider falls back to stateless HTTP with `store:false
 and suppresses that HTTP response ID so the next request resends full context and
 can re-establish WebSocket continuation. A request carrying a socket-scoped
 previous response never crosses transports. When the upstream WebSocket reports
-`websocket_connection_limit_reached` before output, the model proxy retries an
+`websocket_connection_limit_reached` before output, the shared runtime retries an
 already-full request once after the Responses provider closes the expired socket.
-For a continuation suffix, which the proxy cannot safely replay by itself, it
+For a continuation suffix, which the runtime cannot safely replay by itself, it
 returns `previous_response_unavailable`; Harness clears the socket-scoped anchor
 and immediately retries the same logical turn with full transcript context.
 If a provider rejects a request with a parseable
@@ -814,8 +870,8 @@ context-overflow error, the agent records the smaller reported window for the
 session, rebuilds the request, and retries once before surfacing the error.
 
 **Prompt cache and proxy session mapping.** Harness deliberately uses two opaque
-local keys. `Request.ProxySessionID` is a transport-affinity identity: the proxy
-uses it in the bounded Responses WebSocket connection key, and the proxy client
+local keys. `Request.ProxySessionID` is a transport-affinity identity: the runtime
+uses it in the bounded Responses WebSocket connection key, and the remote client
 sends it as `X-Harness-Session` so a load balancer can consistently hash stream
 traffic. It is not authoritative continuation state. Compaction, branch
 navigation, and real model/agent changes rotate it; a base ↔ fast variant switch
@@ -851,7 +907,7 @@ cache shard without letting it reuse or compete with the main conversation's
 WebSocket/continuation chain. Prewarm intentionally retains the main session
 identities.
 
-The proxy catalog advertises `prewarm:true` only for Responses WebSocket
+The shared catalog advertises `prewarm:true` only for Responses WebSocket
 targets that can send an empty `response.create` with `generate:false`; the CLI
 does not issue speculative generated completions to other targets. Only this
 path marks its terminal event with an explicit response-ID anchor at transcript
@@ -883,11 +939,11 @@ requires exact saved/current provider and model identity plus a
 continuation-capable catalog target. Clone/fork extraction deliberately clears
 the anchor.
 
-The model proxy holds no authoritative per-session continuation or cache-policy
-state. It rejects continuation on an unsupported target, leases a provider,
-optionally rejects a connection-affine previous ID with 409
-`previous_response_unavailable` before writing status/events, and otherwise
-forwards messages, `store`, and the previous ID unchanged. It does not retry
+The shared runtime holds no authoritative per-session continuation or cache-policy
+state. It rejects continuation on an unsupported target, leases a provider, and
+may reject a connection-affine previous ID with `previous_response_unavailable`
+(mapped to HTTP 409 remotely) before streaming. Otherwise it forwards messages,
+`store`, and the previous ID unchanged. It does not retry
 previous/store rejections. The agent recognizes local or upstream previous-ID
 rejections, clears its anchor, and performs one full-history resend. Thus HTTP
 stored continuation is replica-independent, while Codex `store:false` uses
@@ -933,7 +989,7 @@ other Responses backends.
 
 Astra effort updates are advertised through proxy target and core model
 metadata. Each user boundary may carry transcript-only `ReasoningState` with
-baseline, active effort, and replay domain; the proxy maps portable profiles
+baseline, active effort, and replay domain; the runtime maps portable profiles
 and Responses alone projects it into configuration updates. Full replay and
 continuation deltas retain the same request baseline. A native v2 checkpoint
 reasserts active effort after the canonical compacted window. Configuration
@@ -997,7 +1053,7 @@ count and maintenance requests omit markers and cache mode/TTL options.
 `https://api.openai.com/v1` with `gpt-5.6` and `gpt-6-astra` (including their valid
 `-YYYY-MM-DD` date snapshots), plus the exact model ID `gpt-6.1-sol`. Provider config
 `prompt_cache.incremental_tools:false` disables it; explicit `true` does not
-widen the support gate. The proxy catalog exposes the gated `incremental_tools`
+widen the support gate. The shared catalog exposes the gated `incremental_tools`
 capability. Codex, custom endpoints, other
 models, and requests with hosted server tools or deferred tool groups keep the
 ordinary layout. Explicit-breakpoint opt-in does not widen this capability gate.
@@ -1136,7 +1192,7 @@ context-tier, service-tier, and speed-specific prices remain authoritative.
 
 `internal/llm/registry.go` holds a small registry. Its structs (`Price`,
 `PriceTier`, `ModelInfo`, `ProviderConfig`, `ModelEntry`) carry JSON tags so
-they double as the proxy catalog's on-disk schema: `Price` is USD per 1M
+they double as the shared model configuration's on-disk schema: `Price` is USD per 1M
 tokens across input/output/cache/reasoning/audio dimensions, and `PriceTier`
 adds context-length rate steps on the same dimensions. `Cost` prices a usage
 record and reports whether the cost is known, `ContextWindow` falls back to a
@@ -1236,7 +1292,7 @@ output caps. Responses requests default this floor to 16 for
 `max_output_tokens`; Chat Completions requests keep tiny caps such as the
 `max_tokens:1` prewarm unless a provider config opts into a floor. If an
 OpenAI-compatible provider rejects a pre-stream request with a parseable
-minimum-token error, the proxy retries once at the inferred floor and logs a
+minimum-token error, the runtime retries once at the inferred floor and logs a
 `retrying model request with higher output token floor` warning with the
 configured and inferred values so configs can be updated deliberately.
 
@@ -1253,7 +1309,7 @@ web search when the selected target advertises it and the harness config sets
 `web_search:"auto"` / `HARNESS_WEB_SEARCH=auto` / `-web-search auto`. The proxy
 also infers `web_search` for known endpoints: OpenAI Responses, Meta Responses,
 Anthropic, Sakana, OpenRouter, MiMo, Kimi, Z.AI, and native Google Interactions. If a provider rejects a server-tool
-field before streaming any events, the proxy retries the request once without
+field before streaming any events, the runtime retries the request once without
 server tools so stale metadata does not fail the turn.
 
 Provider and model entries may also set typed `service_tiers` objects to
@@ -1327,19 +1383,19 @@ large enough to rule out normal small-catalog churn; the old cache remains in
 place. Successful replacements first save the previous cache as
 `models.dev.api.json.bak`, overwriting that single backup on each update.
 
-Harness only uses models exposed by `harness-model-proxy`; arbitrary
-provider-local model names are rejected unless they are configured in the proxy
-catalog. Configured models whose request usage has no known cost display token
-counts without a dollar figure; dynamic pricers can still produce `cost_usd` for
+Harness only uses models exposed by the selected backend catalog; arbitrary
+provider-local model names are rejected unless configured there. Configured
+models whose request usage has no known cost display token counts without a
+dollar figure; dynamic pricers can still produce `cost_usd` for
 models that omit a flat catalog `Target.Price`. Configured models without
 context-window metadata use a
 conservative 256k default, configurable with `-default-context-window` and
 overridable for a run with `-context-window`. Model prices, context windows,
 output limits, reasoning support, and provider-local opaque-reasoning replay
-domains are loaded from the model proxy catalog.
+domains are loaded from the selected backend catalog.
 Harness presents reasoning as the portable profile list `default`, `none`,
 `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`. The CLI sends the
-selected profile to the model proxy, and the proxy maps it to the closest supported
+selected profile to the shared runtime, which maps it to the closest supported
 provider/model control. For effort-based models, `minimal` is the lowest
 supported non-`none` value and `max` is the highest. For budget-token models,
 profiles map to percentages of the configured maximum budget: `minimal` 5%,
@@ -1436,7 +1492,13 @@ migration details, and the parameter matrix in
 harness diagnostics; `HARNESS_TIMESTAMPS` accepts only `short`, `full`, or `none`.
 `HARNESS_NO_COLOR` is a strict boolean, while non-empty standard `NO_COLOR` is a
 presence-based override. Provider API keys and provider base URLs are resolved
-only by `harness-model-proxy`. The generated parameter matrix in
+by the shared runtime in Harness (local) or the standalone proxy (remote).
+`model_backend` / `HARNESS_MODEL_BACKEND` / `-model-backend` selects `local` or
+`remote` (default), without silent fallback. `model_config` /
+`HARNESS_MODEL_CONFIG` / `-model-config` selects local model configuration; empty
+uses existing model-proxy discovery. File-sourced relative paths resolve beside
+the owning settings file; flag/environment paths resolve from cwd. The
+generated parameter matrix in
 [usage.md](usage.md#harness-configuration-parameters) is the canonical source
 for exact setting surfaces and defaults; `examples/harness/config.json` is a
 strictly valid, intentionally concise example rather than a duplicate schema.
@@ -1470,7 +1532,7 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   generated from the selected catalog with only enabled models for that provider:
   base URL, api_type (`responses`, `openai`, `anthropic`, or `interactions`), key env vars, context windows,
   output limits, input modalities, and reasoning metadata. It is written as a **managed** config (`"managed": true`)
-  with **no per-model prices** — the proxy resolves managed prices live from the
+  with **no per-model prices** — the shared runtime resolves managed prices live from the
   models.dev cache (see *Managed vs manual provider configs*). Without `-force`,
   setup refuses to overwrite provider files that are not already referenced by the
   proxy config.
@@ -1500,13 +1562,13 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   `drain_delay`, `shutdown_timeout`, and `instance_id` use serve
   flag > environment > config > default precedence. Defaults are `5s`, `5m`, and
   a random 16-byte hex ID; instance IDs validate against
-  `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. The ownership flip is a coordinated
-  breaking cutover: the initial deployment must not route CLI traffic through a
-  mixed old/new proxy fleet. Once complete, the stateless wire contract supports
-  normal proxy-only rolling updates.
-- **Bounded Responses WebSocket pool.** The proxy keys pooled transports by
-  separately hashed connection configuration, `ProxySessionID`, and authenticated
-  API-key identity. Defaults are
+  `[A-Za-z0-9][A-Za-z0-9._-]{0,127}`. Ship CLI and proxy from the same release;
+  mixed-version wire compatibility is not required. Do not route through a mixed
+  old/new proxy fleet during a breaking cutover.
+- **Bounded Responses WebSocket pool.** The runtime keys pooled transports by
+  separately hashed connection configuration, `ProxySessionID`, and caller
+  principal (authenticated API-key identity remotely, deliberate local identity
+  in-process). Defaults are
   64 connections, a one-hour idle TTL, no pool-entry absolute-age cap, and a
   30-second janitor tick. Independently, the Responses transport rotates actual
   sockets at 55 minutes between requests. Acquisitions lease an entry; idle capacity pressure evicts LRU,
@@ -1734,43 +1796,46 @@ strictly valid, intentionally concise example rather than a duplicate schema.
   `models.dev.api.json` in the image or a read-only volume and set
   `models_dev_cache_ttl:0`; a catalog change is a deployment, not an independent
   per-pod refresh.
-- **Selection rule:** `harness` fetches `GET /v1/models` from the proxy. Model
-  selection resolves provider-qualified proxy target IDs, not arbitrary
-  provider-local names. The target comes from `-model`, `HARNESS_MODEL`, config
+- **Selection rule:** `harness` calls `Backend.Catalog`; remote access sends
+  `GET /v1/models`, local access uses the runtime directly. Selection resolves
+  provider-qualified catalog target IDs, not arbitrary provider-local names. The target comes from `-model`, `HARNESS_MODEL`, config
   `model`, an agent override, or `/model`.
-- `harness --check-model-proxy` reuses the catalog request as a bounded
-  reachability check and exits before session creation, tool setup, hooks, model
-  selection prompts, or `/v1/stream`.
-- `internal/config` resolves only user-facing settings. Provider connection settings
-  are resolved by `harness-model-proxy` from its config and environment.
+- `harness --check-model-proxy` checks the selected backend catalog and exits
+  before session creation, tool setup, hooks, selection prompts, or streaming.
+  Informational output identifies backend mode, with an endpoint only for remote.
+- `internal/config` resolves only user-facing settings. Provider connection
+  settings are resolved through `internal/modelproxy/config` and the runtime,
+  not merged into ordinary CLI settings.
 - The optional config-file `mcp` and `lsp` blocks (proxy/local MCP and LSP servers)
   are documented with their subsystems in §15 and §15a.
 
 ### 7.1 Subscription quota contract
 
 Account-wide subscription quotas are a separate data path, not `llm.Usage`,
-`protocol.UsageReport`, pricing, budgets, or generation metrics.
+`modelproxy.UsageReport`, pricing, budgets, or generation metrics.
 `internal/modelproxy/subscription` owns provider-private decoding and upstream
-calls; `internal/modelproxy/server/limits.go` owns configured-provider selection,
+calls; `internal/modelproxy/runtime/limits.go` owns configured-provider selection,
 bounded all-provider fan-out, shared credential resolution, and best-effort
 post-reset refreshes. Providers resolve to a quota integration through
 `subscription.QuotaKind`: an explicit profile wins for all three subscription
 services, so every account reports under its own provider name; absent a
 profile, legacy name/URL/auth detection applies. `internal/modelproxy/client/limits.go` uses the existing
-authenticated proxy transport without loading provider secrets. `cmd/harness/limits_command.go` runs without model/session/tool
-startup; `internal/ui/limits.go` provides shared text rendering and REPL callbacks.
+authenticated proxy transport without loading provider secrets. `cmd/harness/limits_command.go` opens the selected backend without
+model-session/tool startup; `internal/ui/limits.go` provides shared text rendering and REPL callbacks.
 There is no new model-facing tool, dialect dependency in core `llm`, or
-quota-derived admission enforcement. `cmd/harness-model-proxy` owns cancellable,
-non-overlapping quota polling for metrics (default five minutes after each cycle;
-minimum positive interval one minute; disabled with metrics or a zero interval). It reuses the handler's status fetch and auth rather
-than creating independent sources. `internal/modelproxy/server/subscription_metrics.go`
+quota-derived admission enforcement. Standalone wiring uses `internal/modelbootstrap`
+for cancellable, non-overlapping quota polling for metrics (default five minutes
+after each cycle; minimum positive interval one minute; disabled with metrics
+or a zero interval). It reuses the runtime's status fetch and auth rather
+than creating independent sources. `internal/modelproxy/runtime/subscription_metrics.go`
 keeps only last-good numeric snapshots for gauges; `internal/metrics.Gauge.Replace`
 removes vanished series on a successful refresh. Scrapes make no upstream calls.
 Failed refreshes retain the snapshot with explicit failure/freshness gauges;
 manual status queries remain uncached. Polling never lists or consumes credits. Commands do not alter
 history, totals, model selection, or continuation state.
 
-`internal/modelproxy/protocol/limits.go` is the normalized wire contract:
+`internal/modelproxy/limits.go` owns the normalized account domain contract;
+`internal/modelproxy/protocol` owns only its transport envelopes:
 
 | DTO | Contract |
 |---|---|
@@ -3824,8 +3889,8 @@ prints the provider-neutral `llm.Request`, context estimate, active tools,
 reasoning settings, and request byte counts. It exits before prewarm,
 `SessionStart` hooks, session writes, or any model stream.
 
-`-agents` prints a readable resolved agent list without contacting the model
-proxy. `-models` reuses the bounded proxy catalog request and prints configured
+`-agents` prints a readable resolved agent list without opening a model
+backend. `-models` reads the selected backend catalog and prints configured
 model target rows before session creation. `-format json` is supported by
 `-agents`, `-models`, and `-check-model-proxy`; JSON output is versioned with
 `"version": 1`.

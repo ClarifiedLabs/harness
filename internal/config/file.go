@@ -44,6 +44,8 @@ type fileConfig struct {
 	CodexExperimentalContextManagement optional[bool]                       `json:"codex_experimental_context_management"`
 	ContextManagement                  optional[string]                     `json:"context_management"`
 	Model                              optional[string]                     `json:"model"`
+	ModelBackend                       optional[string]                     `json:"model_backend"`
+	ModelConfig                        optional[string]                     `json:"model_config"`
 	ModelProxyURL                      optional[string]                     `json:"model_proxy_url"`
 	ModelProxyAPIKey                   optional[string]                     `json:"model_proxy_api_key"`
 	TraceProxy                         optional[bool]                       `json:"trace_proxy"`
@@ -208,6 +210,9 @@ func requireJSONEOF(decoder *json.Decoder) error {
 }
 
 func normalizeConfigAtFileRefs(fc *fileConfig, baseDir string) {
+	if fc.ModelConfig.Set {
+		fc.ModelConfig.Value = normalizeConfigPathRef(fc.ModelConfig.Value, baseDir)
+	}
 	if fc.SystemPrompt.Set {
 		fc.SystemPrompt.Value = normalizeConfigAtFileRef(fc.SystemPrompt.Value, baseDir)
 	}

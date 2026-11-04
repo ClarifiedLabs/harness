@@ -1,27 +1,33 @@
 # harness
 
 A minimal agentic coding harness in Go: a plain-text, line-oriented CLI that
-supports basic tool use, delegate sub-agents, skills, and MCP.
+supports basic tool use, delegate sub-agents, skills, and MCP. Run model access
+in-process or through a separately managed proxy.
 
 ## Design Invariants
 
 - **Minimal dependencies.** Keep the tool simple and lightweight.
 - **No sandbox.** `harness` assumes it is launched in an environment that is
   already sandboxed enough; tools run with the process's privileges.
-- **Isolated provider and MCP access.** `harness` uses separate services for
-  model providers and MCP. Those services can run outside the agent's sandbox, so
-  API keys, OAuth tokens, and MCP credentials do not need to be available to the
-  agent process.
+- **Provider-neutral access, optional credential separation.** Local model access
+  uses the shared runtime inside `harness`, with provider credentials in the agent
+  process. Separate model and MCP services can instead keep their upstream
+  credentials outside the agent process; internal interfaces are not a security
+  boundary.
 
 **Important Note:** There are no built in protections in harness unlike other
 popular agentic coding tools. You are in full control.
 
 ## Basic Architecture
 
-Harness uses an unrestricted agent CLI tool combined with separate service
-that enable access to AI models and MCP services. This architecture enables
-running the coding agent in a sandboxed environment that doesn't have access
-to credentials that are usable outside of your local machine/network[^1].
+Harness is an unrestricted agent CLI with two model backends: `local` calls
+provider APIs directly through an in-process runtime; `remote` (the default)
+uses the standalone model proxy and the same runtime. Local mode needs no proxy
+listener or subprocess. Optional local MCP and native LSP remain independent.
+
+For credential-separated deployment, run the model and MCP proxies outside the
+agent's sandbox[^1], as illustrated below. Local mode does not provide that
+process boundary.
 
 [^1]: The Model & MCP proxies both support optional API keys for Harness CLI -> Proxy access. These services are intended to be exposed only on localhost or within a trusted local network.
 
@@ -90,24 +96,25 @@ Multi-architecture images are available for Linux amd64 and arm64:
 - [`ghcr.io/clarifiedlabs/harness-mcp-proxy:0.5.63`](https://github.com/ClarifiedLabs/harness/pkgs/container/harness-mcp-proxy)
 <!-- release-artifacts:end -->
 
-### Configure the model proxy
+### Configure model access
 
-Choose a provider, authenticate, select the models to expose, and start the
-proxy:
+Choose a provider, authenticate, and select the models to expose:
 
 ```sh
 harness-model-proxy setup
-harness-model-proxy
 ```
 
-Then run the CLI in another shell:
+Use that configuration directly, without starting a proxy:
 
 ```sh
-harness -model <provider>:<model>
-harness -model <provider>:<model> -p "summarize README.md"
+harness -model-backend local -model <provider>:<model>
+harness -model-backend local -model <provider>:<model> -p "summarize README.md"
 ```
 
-The proxy listens on `127.0.0.1:8765` by default. See the
+Local execution needs only the `harness` binary once provider configuration is
+prepared. For a separate service, start `harness-model-proxy` and omit
+`-model-backend local`; remote remains the default and connects to
+`127.0.0.1:8765`. See [backend selection](docs/usage.md#model-backends) and the
 [model proxy documentation](docs/usage.md#model-proxy) for advanced provider,
 authentication, pricing, budget, metrics, and tracing configuration. MCP is
 optional; see [MCP servers](docs/mcp.md).
@@ -133,8 +140,8 @@ One-shot mode sends a single prompt and exits:
 harness -model openrouter:openai/gpt-5.5 -p "summarize README.md"
 ```
 
-`provider:model` selects a configured model-proxy target. You can also configure
-the default target as `model` in `~/.config/harness/config.json` or with
+`provider:model` selects a configured target in the chosen backend. You can also
+configure the default target as `model` in `~/.config/harness/config.json` or with
 `HARNESS_MODEL`.
 
 ## Highlights

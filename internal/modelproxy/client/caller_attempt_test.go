@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"harness/internal/modelproxy"
 	"strings"
 	"testing"
 
@@ -14,12 +15,12 @@ func TestCallerAttemptPayloadIsOptionalNarrowAndBounded(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		meta llm.AttemptMetadata
-		want *protocol.CallerAttempt
+		want *modelproxy.CallerAttempt
 	}{
 		{name: "legacy-default"},
 		{name: "explicit-default", meta: llm.AttemptMetadata{Cause: llm.AttemptInitial, RetryLayer: llm.RetryLayerNone}},
 		{name: "unknown-values", meta: llm.AttemptMetadata{Cause: "unbounded-cause", RetryLayer: "unbounded-layer"}},
-		{name: "agent-retry", meta: llm.AttemptMetadata{Provider: "private-provider", API: "private-api", Model: "private-model", Purpose: "private-purpose", Cause: llm.AttemptRetry, RetryLayer: llm.RetryLayerAgent}, want: &protocol.CallerAttempt{Cause: llm.AttemptRetry, RetryLayer: llm.RetryLayerAgent}},
+		{name: "agent-retry", meta: llm.AttemptMetadata{Provider: "private-provider", API: "private-api", Model: "private-model", Purpose: "private-purpose", Cause: llm.AttemptRetry, RetryLayer: llm.RetryLayerAgent}, want: &modelproxy.CallerAttempt{Cause: llm.AttemptRetry, RetryLayer: llm.RetryLayerAgent}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := callerAttempt(llm.WithAttemptMetadata(context.Background(), tc.meta))

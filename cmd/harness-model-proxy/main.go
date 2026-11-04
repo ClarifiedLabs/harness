@@ -23,11 +23,12 @@ import (
 	"harness/internal/buildinfo"
 	"harness/internal/cli"
 	"harness/internal/httpserve"
-	"harness/internal/llm"
 	"harness/internal/logging"
 	"harness/internal/metrics"
+	"harness/internal/modelbootstrap"
 	"harness/internal/modelcatalog"
 	modelconfig "harness/internal/modelproxy/config"
+	modelruntime "harness/internal/modelproxy/runtime"
 	"harness/internal/modelproxy/server"
 	"harness/internal/term"
 )
@@ -135,13 +136,11 @@ func runServe(env environment, invocation cli.Invocation) int {
 	}
 
 	configDir := filepath.Dir(path)
-	initialCatalog, initialSourceDate := loadModelsDevCacheForServe(configDir)
-	_, configuredProviders, err := llm.LoadProviderConfigs(configDir, cfg.ProviderConfigs, func(msg string) { logger.Warn(msg) })
+	initial, err := modelbootstrap.Initialize(configDir, cfg.ProviderConfigs, providerModelsTTL, bootstrapDependencies(env), logger)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
-	initialProviderCatalogs := loadProviderModelCaches(configDir, configuredProviders, currentTime(env), providerModelsTTL, logger)
 	metricsEnabled := cfg.Metrics.Enabled == nil || *cfg.Metrics.Enabled
 	metricsSettings := metrics.Settings{
 		Enabled:        metricsEnabled,
@@ -149,15 +148,15 @@ func runServe(env environment, invocation cli.Invocation) int {
 		ListenExplicit: resolved.MetricsListenExplicit,
 	}
 	reg := newMetricsRegistry(metricsSettings.Enabled)
-	handler, err := server.NewHandler(server.Options{
+	backend, err := modelruntime.New(modelruntime.Options{
 		ConfigDir:            configDir,
 		Config:               cfg,
 		Getenv:               env.getenv,
 		Logger:               logger,
 		PricingMaxAge:        modelsTTL,
-		ModelsDevCatalog:     initialCatalog,
-		ModelsDevSourceDate:  initialSourceDate,
-		ProviderCatalogs:     initialProviderCatalogs,
+		ModelsDevCatalog:     initial.ModelsDevCatalog,
+		ModelsDevSourceDate:  initial.ModelsDevSourceDate,
+		ProviderCatalogs:     initial.ProviderCatalogs,
 		ProviderModelsMaxAge: providerModelsTTL,
 		Now:                  env.now,
 		Metrics:              reg,
@@ -170,37 +169,42 @@ func runServe(env environment, invocation cli.Invocation) int {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
-	logger = logger.With("proxy_instance_id", handler.InstanceID())
+	handler := server.New(backend, configDir)
+	logger = logger.With("proxy_instance_id", backend.InstanceID())
 	addr := cliLast(invocation.Flags, "listen", defaultListen)
 	if addr == "" {
 		addr = defaultListen
 	}
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
 	defer cancelBackground()
-	startModelsDevCacheRefresh(backgroundCtx, env, configDir, modelsTTL, logger, func(catalog *modelcatalog.Catalog, sourceDate time.Time) {
-		handler.UpdateModelsDevCatalog(catalog, sourceDate)
+	refresh := modelbootstrap.StartRefresh(backgroundCtx, modelbootstrap.RefreshOptions{
+		ConfigDir: configDir, Initial: initial, ModelsDevTTL: modelsTTL,
+		ProviderModelsTTL: providerModelsTTL, Dependencies: bootstrapDependencies(env), Logger: logger,
+		SubscriptionEnabled: metricsSettings.Enabled, SubscriptionInterval: cfg.SubscriptionPollInterval.Duration,
+		UpdateModelsDevCatalog:     backend.UpdateModelsDevCatalog,
+		UpdateProviderCatalogs:     backend.UpdateProviderCatalogs,
+		RefreshSubscriptionMetrics: backend.RefreshSubscriptionMetrics,
 	})
-	startProviderModelRefresh(backgroundCtx, env, configDir, configuredProviders, initialProviderCatalogs, providerModelsTTL, logger, handler.UpdateProviderCatalogs)
+	defer refresh.Close()
 	go apikey.WatchFile(backgroundCtx, keyFile, keyFileState, 2*time.Second, authStore, func(err error) {
 		logger.Warn("reload api keys failed", "path", keyFile, "err", err)
 	})
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
-		_ = handler.Close()
+		refresh.Close()
+		_ = backend.Close()
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
 	metricsEndpoint, err := metrics.StartEndpoint(context.Background(), logger, reg, metricsSettings)
 	if err != nil {
 		ln.Close()
-		_ = handler.Close()
+		refresh.Close()
+		_ = backend.Close()
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
-
-	quotaPollingDone := startSubscriptionPolling(backgroundCtx, metricsSettings.Enabled, cfg.SubscriptionPollInterval.Duration, env.subscriptionAfter, handler.RefreshSubscriptionMetrics)
-	defer func() { cancelBackground(); <-quotaPollingDone }()
 
 	protected := server.ObserveAuth(handler, authStore, authStore.Middleware(handler))
 	lifecycle := server.NewLifecycle(protected)
@@ -251,9 +255,9 @@ func runServe(env environment, invocation cli.Invocation) int {
 	}
 	lifecycle.BeginTeardown()
 	cancelBackground()
-	<-quotaPollingDone
+	refresh.Close()
 	cancelWork()
-	closeErr := handler.Close()
+	closeErr := backend.Close()
 	metricsCtx, cancelMetrics := context.WithTimeout(context.Background(), httpserve.DefaultShutdownTimeout)
 	metricsErr := metricsEndpoint.Shutdown(metricsCtx)
 	cancelMetrics()
@@ -295,7 +299,7 @@ func runSetupCmd(env environment, invocation cli.Invocation) int {
 // runRefreshModelsCmd re-syncs configured provider files from a parsed invocation.
 func runRefreshModelsCmd(env environment, invocation cli.Invocation) int {
 	configPath, _ := invocation.Flags.Last("config")
-	path := server.ConfigPath(configPath, invocation.Flags.Has("config"), env.getenv)
+	path := modelconfig.ConfigPath(configPath, invocation.Flags.Has("config"), env.getenv)
 	if path == "" {
 		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy setup")
 		return exitUsage
@@ -342,14 +346,14 @@ func runGenerateAPIKeyCmd(env environment, invocation cli.Invocation) int {
 }
 
 func runGenerateAPIKey(env environment, argsConfigPath string, configExplicit bool, argsAPIKeysFile, ttlValue string, budgetUSD float64, budgetPeriodValue string, budgetRejectUnpriced bool, name string) int {
-	configPath := server.ConfigPath(argsConfigPath, configExplicit, env.getenv)
+	configPath := modelconfig.ConfigPath(argsConfigPath, configExplicit, env.getenv)
 	if configPath == "" {
 		configPath = filepath.Join(defaultConfigDir(env.getenv), "config.json")
 	}
-	var cfg server.Config
+	var cfg modelconfig.Config
 	if _, err := os.Stat(configPath); err == nil {
 		var loadErr error
-		cfg, loadErr = server.LoadConfig(configPath)
+		cfg, loadErr = modelconfig.LoadConfig(configPath)
 		if loadErr != nil {
 			fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", loadErr)
 			return exitRuntime
@@ -358,7 +362,7 @@ func runGenerateAPIKey(env environment, argsConfigPath string, configExplicit bo
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
 		return exitRuntime
 	}
-	keyFile := server.ResolveAPIKeysFile(configPath, cfg.APIKeysFile, argsAPIKeysFile)
+	keyFile := modelconfig.ResolveAPIKeysFile(configPath, cfg.APIKeysFile, argsAPIKeysFile)
 	ttl, err := parseAPIKeyTTL(ttlValue)
 	if err != nil {
 		fmt.Fprintf(env.stderr, "harness-model-proxy: %v\n", err)
@@ -460,21 +464,21 @@ func setupModelsDevCacheTTL(env environment, flagValue string, flagSet bool) (ti
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, err
 	}
-	return modelsDevCacheTTLFromConfig(server.Config{}, flagValue, flagSet)
+	return modelsDevCacheTTLFromConfig(modelconfig.Config{}, flagValue, flagSet)
 }
 
 func configuredModelsDevCacheTTL(path string, env environment, flagValue string, flagSet bool) (time.Duration, error) {
 	if path == "" {
-		return modelsDevCacheTTLFromConfig(server.Config{}, flagValue, flagSet)
+		return modelsDevCacheTTLFromConfig(modelconfig.Config{}, flagValue, flagSet)
 	}
-	cfg, err := server.LoadConfig(path)
+	cfg, err := modelconfig.LoadConfig(path)
 	if err != nil {
 		return 0, err
 	}
 	return modelsDevCacheTTLFromConfig(cfg, flagValue, flagSet)
 }
 
-func modelsDevCacheTTLFromConfig(cfg server.Config, flagValue string, flagSet bool) (time.Duration, error) {
+func modelsDevCacheTTLFromConfig(cfg modelconfig.Config, flagValue string, flagSet bool) (time.Duration, error) {
 	ttl := defaultModelsDevTTL
 	if cfg.ModelsDevCacheTTL.Set {
 		ttl = cfg.ModelsDevCacheTTL.Duration
@@ -507,7 +511,7 @@ func parseModelsDevCacheTTLFlag(value string) (time.Duration, error) {
 func setupProviderModelsCacheTTL(env environment, flagValue string, flagSet bool) (time.Duration, error) {
 	ttl := time.Hour
 	configPath := filepath.Join(defaultConfigDir(env.getenv), "config.json")
-	if cfg, err := server.LoadConfig(configPath); err == nil && cfg.ProviderModelsCacheTTL.Set {
+	if cfg, err := modelconfig.LoadConfig(configPath); err == nil && cfg.ProviderModelsCacheTTL.Set {
 		ttl = cfg.ProviderModelsCacheTTL.Duration
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return 0, err
@@ -545,7 +549,7 @@ func newMetricsRegistry(enabled bool) *metrics.Registry {
 }
 
 func defaultConfigDir(getenv func(string) string) string {
-	return server.DefaultConfigDir(getenv)
+	return modelconfig.DefaultConfigDir(getenv)
 }
 
 func defaultModelsDevCatalog(ctx context.Context) (*modelcatalog.Catalog, error) {

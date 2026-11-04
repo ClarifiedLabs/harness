@@ -9,8 +9,7 @@ import (
 	"time"
 
 	"harness/internal/config"
-	modelclient "harness/internal/modelproxy/client"
-	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelproxy"
 	"harness/internal/session"
 	"harness/internal/ui"
 )
@@ -31,18 +30,18 @@ func modelProxyFailure(stderr io.Writer, interrupted func() bool, err error) int
 	return fail(stderr, ui.ExitRuntime, "model proxy: %v", err)
 }
 
-func informationalModelCatalog(ctx context.Context, stderr io.Writer, proxyClient *modelclient.Client, interrupted func() bool) (protocol.Catalog, int) {
-	catalog, err := checkModelProxy(ctx, proxyClient)
+func informationalModelCatalog(ctx context.Context, stderr io.Writer, backend modelproxy.Backend, interrupted func() bool) (modelproxy.Catalog, int) {
+	catalog, err := checkModelProxy(ctx, backend)
 	if err != nil {
-		return protocol.Catalog{}, modelProxyFailure(stderr, interrupted, err)
+		return modelproxy.Catalog{}, modelProxyFailure(stderr, interrupted, err)
 	}
 	if interrupted() {
-		return protocol.Catalog{}, ui.ExitInterrupt
+		return modelproxy.Catalog{}, ui.ExitInterrupt
 	}
 	return catalog, ui.ExitOK
 }
 
-func runRootInformational(ctx context.Context, stdout, stderr io.Writer, cfg config.Config, opts config.RunOptions, proxyClient *modelclient.Client, interrupted func() bool) (int, bool) {
+func runRootInformational(ctx context.Context, stdout, stderr io.Writer, cfg config.Config, opts config.RunOptions, backend *openedModelBackend, interrupted func() bool) (int, bool) {
 	if !opts.ShowAgents && !opts.ShowModels && !opts.CheckModelProxy {
 		return ui.ExitOK, false
 	}
@@ -57,7 +56,7 @@ func runRootInformational(ctx context.Context, stdout, stderr io.Writer, cfg con
 		}
 		var models *modelsListOutput
 		if opts.ShowModels {
-			catalog, code := informationalModelCatalog(ctx, stderr, proxyClient, interrupted)
+			catalog, code := informationalModelCatalog(ctx, stderr, backend, interrupted)
 			if code != ui.ExitOK {
 				return code, true
 			}
@@ -71,6 +70,8 @@ func runRootInformational(ctx context.Context, stdout, stderr io.Writer, cfg con
 				out.Agents = agents.Agents
 			}
 			if models != nil {
+				out.ModelBackend = backend.Mode
+				out.ModelProxyURL = backend.Endpoint
 				out.ProviderCount = models.ProviderCount
 				out.ModelCount = models.ModelCount
 				out.Models = sortedModelListEntries(models.Models)
@@ -92,14 +93,15 @@ func runRootInformational(ctx context.Context, stdout, stderr io.Writer, cfg con
 		return ui.ExitOK, true
 	}
 
-	catalog, code := informationalModelCatalog(ctx, stderr, proxyClient, interrupted)
+	catalog, code := informationalModelCatalog(ctx, stderr, backend, interrupted)
 	if code != ui.ExitOK {
 		return code, true
 	}
 	if opts.OutputFormat == "json" {
 		out := infoOutput{
 			Version:       1,
-			ModelProxyURL: proxyClient.URL(),
+			ModelBackend:  backend.Mode,
+			ModelProxyURL: backend.Endpoint,
 			ProviderCount: 0,
 			ModelCount:    catalogModelCount(catalog),
 		}
@@ -107,7 +109,11 @@ func runRootInformational(ctx context.Context, stdout, stderr io.Writer, cfg con
 			return fail(stderr, ui.ExitRuntime, "model proxy: %v", err), true
 		}
 	} else {
-		fmt.Fprintf(stdout, "model proxy ok: %s (%d targets)\n", proxyClient.URL(), catalogModelCount(catalog))
+		if backend.Mode == "local" {
+			fmt.Fprintf(stdout, "model backend ok: local (%d targets)\n", catalogModelCount(catalog))
+		} else {
+			fmt.Fprintf(stdout, "model proxy ok: %s (remote, %d targets)\n", backend.Endpoint, catalogModelCount(catalog))
+		}
 	}
 	return ui.ExitOK, true
 }

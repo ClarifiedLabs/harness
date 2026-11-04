@@ -15,6 +15,10 @@ later requests to the matching origin, allowing cookie-based affinity for an MCP
 proxy behind a load balancer. Cookies last for the harness process and are not
 persisted across restarts.
 
+Model backend selection (`local` or `remote`) does not change MCP setup. Local
+model execution starts no MCP proxy. `mcp.local` remains one configured command
+slot, not an embedded multi-server aggregator; native LSP is independent too.
+
 ## Enabling MCP
 
 MCP is opt-in and off by default. Turn it on in

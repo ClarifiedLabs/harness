@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"harness/internal/modelproxy"
 	"io"
 	"net"
 	"net/http"
@@ -17,7 +18,6 @@ import (
 
 	"harness/internal/codexclient"
 	"harness/internal/llm"
-	"harness/internal/modelproxy/protocol"
 )
 
 const (
@@ -230,8 +230,8 @@ func officialEndpoint(pc llm.ProviderConfig, kind string) bool {
 	return false
 }
 
-func (a *Account) Status(ctx context.Context) (protocol.ProviderLimits, error) {
-	var out protocol.ProviderLimits
+func (a *Account) Status(ctx context.Context) (modelproxy.ProviderLimits, error) {
+	var out modelproxy.ProviderLimits
 	var err error
 	switch a.kind {
 	case llm.ProfileKimiCodePlan:
@@ -247,13 +247,13 @@ func (a *Account) Status(ctx context.Context) (protocol.ProviderLimits, error) {
 	return out, err
 }
 
-func safeError(code, message string) *protocol.LimitsError {
-	return &protocol.LimitsError{Code: code, Message: message}
+func safeError(code, message string) *modelproxy.LimitsError {
+	return &modelproxy.LimitsError{Code: code, Message: message}
 }
-func invalidPayload() *protocol.LimitsError {
+func invalidPayload() *modelproxy.LimitsError {
 	return safeError("invalid_payload", "provider returned invalid subscription data")
 }
-func transportError(err error) *protocol.LimitsError {
+func transportError(err error) *modelproxy.LimitsError {
 	if errors.Is(err, context.Canceled) {
 		return safeError("canceled", "subscription request was canceled")
 	}

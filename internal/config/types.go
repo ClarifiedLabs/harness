@@ -100,6 +100,8 @@ type Config struct {
 	ContextManagement                  string `json:"context_management"`
 	Provider                           string `json:"-"` // derived from a provider-qualified Model
 	Model                              string `json:"model"`
+	ModelBackend                       string `json:"model_backend"`
+	ModelConfig                        string `json:"model_config"`
 	ModelProxyURL                      string `json:"model_proxy_url"`
 	ModelProxyAPIKey                   string `json:"model_proxy_api_key"`
 	TraceProxy                         bool   `json:"trace_proxy"`

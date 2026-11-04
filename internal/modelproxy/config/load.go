@@ -17,7 +17,6 @@ import (
 	"harness/internal/configmeta"
 	"harness/internal/llm"
 	"harness/internal/logging"
-	"harness/internal/modelproxy/server"
 )
 
 const (
@@ -31,9 +30,9 @@ var instanceIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 // Result is the effective model-proxy configuration and source provenance.
 // Explicitness fields retain operational distinctions not representable by
-// server.Config's effective values.
+// Config's effective values.
 type Result struct {
-	Config                server.Config
+	Config                Config
 	Path                  string
 	PathExplicit          bool
 	Sources               map[string]configmeta.Source
@@ -66,7 +65,7 @@ type LoadOptions struct {
 
 	// DeriveInstanceID overrides startup instance generation for deterministic
 	// callers and tests. Nil generates the same 32-character lowercase hex shape
-	// as the server.
+	// as the
 	DeriveInstanceID func() (string, error)
 }
 
@@ -89,7 +88,7 @@ func Load(options LoadOptions) (Result, error) {
 		PathExplicit: pathExplicit,
 		Sources:      make(map[string]configmeta.Source, catalog.Len()),
 	}
-	file := server.Config{}
+	file := Config{}
 	present := map[string]json.RawMessage{}
 	metricsPresent := map[string]json.RawMessage{}
 	if path != "" {
@@ -97,7 +96,7 @@ func Load(options LoadOptions) (Result, error) {
 		if err != nil {
 			return Result{}, configFileError(path, err)
 		}
-		file, err = server.DecodeConfig(data, path)
+		file, err = DecodeConfig(data, path)
 		if err != nil {
 			return Result{}, configFileError(path, err)
 		}
@@ -139,7 +138,7 @@ func CheckLocalReferences(result Result, getenv func(string) string, warn func(s
 	if result.Path == "" {
 		return nil
 	}
-	return server.ValidateConfigReferences(filepath.Dir(result.Path), result.Config, getenv, warn)
+	return ValidateConfigReferences(filepath.Dir(result.Path), result.Config, getenv, warn)
 }
 
 func validateIntegerDurationRanges(present map[string]json.RawMessage) error {
@@ -150,7 +149,7 @@ func validateIntegerDurationRanges(present map[string]json.RawMessage) error {
 		}
 		var number json.Number
 		if err := json.Unmarshal(raw, &number); err != nil {
-			continue // Strings and invalid unions are handled by server.DecodeConfig.
+			continue // Strings and invalid unions are handled by DecodeConfig.
 		}
 		seconds, err := number.Int64()
 		if err == nil && seconds > math.MaxInt64/int64(time.Second) {
@@ -160,7 +159,7 @@ func validateIntegerDurationRanges(present map[string]json.RawMessage) error {
 	return nil
 }
 
-func resolveFileSettings(result *Result, file server.Config, present map[string]json.RawMessage) {
+func resolveFileSettings(result *Result, file Config, present map[string]json.RawMessage) {
 	result.Config.ProviderConfigs = []string{}
 	result.Sources["provider_configs"] = defaultSource()
 	if _, ok := present["provider_configs"]; ok {
@@ -179,7 +178,7 @@ func resolveFileSettings(result *Result, file server.Config, present map[string]
 	}
 }
 
-func resolveStringSettings(result *Result, file server.Config, present map[string]json.RawMessage, flags cli.Values) error {
+func resolveStringSettings(result *Result, file Config, present map[string]json.RawMessage, flags cli.Values) error {
 	level, levelSource := "info", defaultSource()
 	if _, ok := present["log_level"]; ok {
 		level, levelSource = file.LogLevel, fileSource(result.Path)
@@ -210,19 +209,19 @@ func resolveStringSettings(result *Result, file server.Config, present map[strin
 	return nil
 }
 
-func resolveDurations(result *Result, file server.Config, flags cli.Values, getenv func(string) string) error {
+func resolveDurations(result *Result, file Config, flags cli.Values, getenv func(string) string) error {
 	modelsTTL, source, err := resolveDuration("models-dev-cache-ttl", "models_dev_cache_ttl", flags, "", file.ModelsDevCacheTTL, 24*time.Hour)
 	if err != nil {
 		return err
 	}
-	result.Config.ModelsDevCacheTTL = server.Duration{Duration: modelsTTL, Set: true}
+	result.Config.ModelsDevCacheTTL = Duration{Duration: modelsTTL, Set: true}
 	result.Sources["models_dev_cache_ttl"] = sourceForPath(source, result.Path)
 
 	providerModelsTTL, source, err := resolveDuration("provider-models-cache-ttl", "provider_models_cache_ttl", flags, "", file.ProviderModelsCacheTTL, time.Hour)
 	if err != nil {
 		return err
 	}
-	result.Config.ProviderModelsCacheTTL = server.Duration{Duration: providerModelsTTL, Set: true}
+	result.Config.ProviderModelsCacheTTL = Duration{Duration: providerModelsTTL, Set: true}
 	result.Sources["provider_models_cache_ttl"] = sourceForPath(source, result.Path)
 
 	interval, source, err := resolveDuration("subscription-poll-interval", "subscription_poll_interval", flags, getenv(subscriptionPollEnvironment), file.SubscriptionPollInterval, 5*time.Minute)
@@ -232,21 +231,21 @@ func resolveDurations(result *Result, file server.Config, flags cli.Values, gete
 	if interval > 0 && interval < time.Minute {
 		return fmt.Errorf("subscription_poll_interval must be zero (disabled) or at least 1m")
 	}
-	result.Config.SubscriptionPollInterval = server.Duration{Duration: interval, Set: true}
+	result.Config.SubscriptionPollInterval = Duration{Duration: interval, Set: true}
 	result.Sources["subscription_poll_interval"] = sourceForPath(source, result.Path)
 
 	drain, source, err := resolveDuration("drain-delay", "drain_delay", flags, getenv(drainDelayEnvironment), file.DrainDelay, 5*time.Second)
 	if err != nil {
 		return err
 	}
-	result.Config.DrainDelay = server.Duration{Duration: drain, Set: true}
+	result.Config.DrainDelay = Duration{Duration: drain, Set: true}
 	result.Sources["drain_delay"] = sourceForPath(source, result.Path)
 
 	shutdown, source, err := resolveDuration("shutdown-timeout", "shutdown_timeout", flags, getenv(shutdownTimeoutEnvironment), file.ShutdownTimeout, 5*time.Minute)
 	if err != nil {
 		return err
 	}
-	result.Config.ShutdownTimeout = server.Duration{Duration: shutdown, Set: true}
+	result.Config.ShutdownTimeout = Duration{Duration: shutdown, Set: true}
 	result.Sources["shutdown_timeout"] = sourceForPath(source, result.Path)
 	return nil
 }
@@ -256,7 +255,7 @@ type durationSource struct {
 	name string
 }
 
-func resolveDuration(flagName, key string, flags cli.Values, environmentValue string, file server.Duration, fallback time.Duration) (time.Duration, durationSource, error) {
+func resolveDuration(flagName, key string, flags cli.Values, environmentValue string, file Duration, fallback time.Duration) (time.Duration, durationSource, error) {
 	if value, ok := flags.Last(key); ok {
 		parsed, err := parseDuration(flagName, value)
 		return parsed, durationSource{kind: configmeta.SourceFlag, name: "--" + flagName}, err
@@ -302,7 +301,7 @@ func sourceForPath(source durationSource, path string) configmeta.Source {
 	return configmeta.Source{Kind: source.kind, Name: source.name}
 }
 
-func resolveInstance(result *Result, file server.Config, present map[string]json.RawMessage, flags cli.Values, getenv func(string) string, derive func() (string, error)) error {
+func resolveInstance(result *Result, file Config, present map[string]json.RawMessage, flags cli.Values, getenv func(string) string, derive func() (string, error)) error {
 	value := ""
 	source := configmeta.Source{Kind: configmeta.SourceDerived, Name: "generated instance ID"}
 	if _, ok := present["instance_id"]; ok {
@@ -347,15 +346,15 @@ func generateInstanceID() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
-func resolveAPIKeysFile(result *Result, file server.Config, flags cli.Values) {
+func resolveAPIKeysFile(result *Result, file Config, flags cli.Values) {
 	flagValue, flagSet := flags.Last("api_keys_file")
 	if flagSet && flagValue != "" {
-		result.Config.APIKeysFile = server.ResolveAPIKeysFile(result.Path, file.APIKeysFile, flagValue)
+		result.Config.APIKeysFile = ResolveAPIKeysFile(result.Path, file.APIKeysFile, flagValue)
 		result.Sources["api_keys_file"] = flagSource("api-keys-file")
 		result.APIKeysFileExplicit = true
 		return
 	}
-	result.Config.APIKeysFile = server.ResolveAPIKeysFile(result.Path, file.APIKeysFile, "")
+	result.Config.APIKeysFile = ResolveAPIKeysFile(result.Path, file.APIKeysFile, "")
 	if file.APIKeysFile != "" {
 		result.Sources["api_keys_file"] = fileSource(result.Path)
 		result.APIKeysFileExplicit = true
@@ -364,7 +363,7 @@ func resolveAPIKeysFile(result *Result, file server.Config, flags cli.Values) {
 	result.Sources["api_keys_file"] = configmeta.Source{Kind: configmeta.SourceDerived, Name: "config directory"}
 }
 
-func resolveMetrics(result *Result, file server.Config, present map[string]json.RawMessage, flags cli.Values) error {
+func resolveMetrics(result *Result, file Config, present map[string]json.RawMessage, flags cli.Values) error {
 	enabled := true
 	enabledSource := defaultSource()
 	if file.Metrics.Enabled != nil {

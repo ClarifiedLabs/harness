@@ -12,14 +12,14 @@ import (
 	"harness/internal/auth"
 	"harness/internal/cli"
 	"harness/internal/llm"
-	"harness/internal/modelproxy/server"
+	modelconfig "harness/internal/modelproxy/config"
 )
 
 func runAuthAction(env environment, invocation cli.Invocation) int {
 	action := strings.TrimPrefix(invocation.CommandID, "auth.")
 	providerName := invocation.Args[0]
 	configPath, _ := invocation.Flags.Last("config")
-	cfgPath := server.ConfigPath(configPath, invocation.Flags.Has("config"), env.getenv)
+	cfgPath := modelconfig.ConfigPath(configPath, invocation.Flags.Has("config"), env.getenv)
 	if cfgPath == "" {
 		fmt.Fprintln(env.stderr, "harness-model-proxy: no config file found; run harness-model-proxy setup")
 		return exitUsage
@@ -70,7 +70,7 @@ func runAuthAction(env environment, invocation cli.Invocation) int {
 }
 
 func authProviderConfig(configPath, providerName string) (llm.ProviderConfig, string, error) {
-	cfg, err := server.LoadConfig(configPath)
+	cfg, err := modelconfig.LoadConfig(configPath)
 	if err != nil {
 		return llm.ProviderConfig{}, "", err
 	}

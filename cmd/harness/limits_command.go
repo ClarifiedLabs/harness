@@ -11,13 +11,12 @@ import (
 
 	"harness/internal/cli"
 	"harness/internal/config"
-	modelclient "harness/internal/modelproxy/client"
-	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelproxy"
 	"harness/internal/ui"
 )
 
 func limitsCLIFlags(reset bool) []cli.Flag {
-	flags := []cli.Flag{mustConfigCLIFlag("config"), mustConfigCLIFlag("model_proxy_url"), mustConfigCLIFlag("model_proxy_api_key"), valueCLIFlag("format", []string{"format"}, "format", "output format: text or json", "text")}
+	flags := []cli.Flag{mustConfigCLIFlag("config"), mustConfigCLIFlag("model_backend"), mustConfigCLIFlag("model_config"), mustConfigCLIFlag("model_proxy_url"), mustConfigCLIFlag("model_proxy_api_key"), valueCLIFlag("format", []string{"format"}, "format", "output format: text or json", "text")}
 	if reset {
 		flags = append(flags, valueCLIFlag("request_id", []string{"request-id"}, "id", "stable reset request ID; reuse for a retry", ""))
 	}
@@ -99,12 +98,12 @@ func runLimits(env environment, invocation cli.Invocation) int {
 	}
 	// Any provider may be named for reset credits; the proxy validates that the
 	// provider resolves to the codex quota profile.
-	var request protocol.ResetRequest
+	var request modelproxy.ResetRequest
 	if invocation.CommandID == "limits.reset" {
-		request = protocol.ResetRequest{Provider: provider, CreditID: invocation.Args[1], RequestID: cliLast(invocation.Flags, "request_id", "")}
+		request = modelproxy.ResetRequest{Provider: provider, CreditID: invocation.Args[1], RequestID: cliLast(invocation.Flags, "request_id", "")}
 		if !invocation.Flags.Has("request_id") {
 			var err error
-			request.RequestID, err = protocol.NewResetRequestID()
+			request.RequestID, err = modelproxy.NewResetRequestID()
 			if err != nil {
 				fmt.Fprintln(env.stderr, "harness: limits: cannot generate request ID")
 				return ui.ExitRuntime
@@ -120,15 +119,19 @@ func runLimits(env environment, invocation cli.Invocation) int {
 		fmt.Fprintf(env.stderr, "harness: limits: %v\n", err)
 		return ui.ExitUsage
 	}
-	client, err := modelclient.New(cfg.Config.ModelProxyURL, nil, modelclient.WithAPIKey(cfg.Config.ModelProxyAPIKey))
-	if err != nil {
-		fmt.Fprintln(env.stderr, "harness: limits: invalid model proxy URL")
-		return ui.ExitUsage
-	}
 	ctx, stop, interrupted := signalCancelContext(env.sigCh)
 	defer stop()
 	ctx, cancel := context.WithTimeout(ctx, ui.LimitsCommandTimeout)
 	defer cancel()
+	models, err := openModelBackend(ctx, env, cfg.Config, nil, nil)
+	if err != nil {
+		if interrupted() {
+			return ui.ExitInterrupt
+		}
+		fmt.Fprintf(env.stderr, "harness: limits: %v\n", err)
+		return ui.ExitRuntime
+	}
+	defer models.Close()
 	now := time.Now
 	if env.now != nil {
 		now = env.now
@@ -138,22 +141,22 @@ func runLimits(env environment, invocation cli.Invocation) int {
 	code := ui.ExitOK
 	switch invocation.CommandID {
 	case "limits":
-		var report protocol.LimitsReport
-		report, err = client.Limits(ctx, provider)
+		var report modelproxy.LimitsReport
+		report, err = models.Limits(ctx, provider)
 		value = report
 		if err == nil || report.Providers != nil {
 			text = ui.FormatLimits(report, now())
 		}
 	case "limits.resets":
-		var credits protocol.ResetCredits
-		credits, err = client.ResetCredits(ctx, provider)
+		var credits modelproxy.ResetCredits
+		credits, err = models.ResetCredits(ctx, provider)
 		value = credits
 		if err == nil || credits.Provider != "" {
 			text = ui.FormatResetCredits(credits)
 		}
 	case "limits.reset":
-		var result protocol.ResetResult
-		result, err = client.ResetLimits(ctx, request)
+		var result modelproxy.ResetResult
+		result, err = models.ResetLimits(ctx, request)
 		result = ui.NormalizeResetResult(request, result, err)
 		value, text = result, ui.FormatResetResult(result, now())
 		code = ui.ResetExitCode(result)
@@ -164,12 +167,12 @@ func runLimits(env environment, invocation cli.Invocation) int {
 	if format == "json" {
 		// Preserve structured request errors even when the proxy returned no data.
 		if err != nil && text == "" {
-			var detail *protocol.LimitsError
+			var detail *modelproxy.LimitsError
 			if !errors.As(err, &detail) {
-				detail = &protocol.LimitsError{Code: "proxy_error", Message: "model proxy limits request failed"}
+				detail = &modelproxy.LimitsError{Code: "proxy_error", Message: "model proxy limits request failed"}
 			}
 			value = struct {
-				Error *protocol.LimitsError `json:"error"`
+				Error *modelproxy.LimitsError `json:"error"`
 			}{Error: detail}
 		}
 		if writeErr := writeLimitsJSON(env.stdout, value); writeErr != nil {
@@ -181,7 +184,7 @@ func runLimits(env environment, invocation cli.Invocation) int {
 		code = ui.ExitRuntime
 	}
 	if err != nil {
-		fmt.Fprintf(env.stderr, "harness: limits: %s\n", protocol.LimitsLabel(err.Error()))
+		fmt.Fprintf(env.stderr, "harness: limits: %s\n", modelproxy.LimitsLabel(err.Error()))
 		code = ui.ExitRuntime
 	}
 	if interrupted() {

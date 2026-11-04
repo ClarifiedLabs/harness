@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"harness/internal/modelproxy"
 	"reflect"
 	"strings"
 	"testing"
@@ -11,14 +12,14 @@ import (
 func TestLimitsPresenceRoundTrip(t *testing.T) {
 	zero, no, count := 0.0, false, int64(0)
 	now := time.Date(2026, 9, 16, 0, 0, 0, 123456789, time.UTC)
-	input := ProviderLimits{Provider: "openai-codex", FetchedAt: now, Pools: []LimitPool{
-		{ID: "primary", Name: "Coding", Allowed: &no, LimitReached: &no, Windows: []LimitWindow{{ID: "zero", UsedPercent: &zero, Limit: &zero, ResetAfterSeconds: &count, ResetAt: &now}, {ID: "unknown"}}},
-	}, ResetCredits: &ResetCreditSummary{AvailableCount: &count}}
+	input := modelproxy.ProviderLimits{Provider: "openai-codex", FetchedAt: now, Pools: []modelproxy.LimitPool{
+		{ID: "primary", Name: "Coding", Allowed: &no, LimitReached: &no, Windows: []modelproxy.LimitWindow{{ID: "zero", UsedPercent: &zero, Limit: &zero, ResetAfterSeconds: &count, ResetAt: &now}, {ID: "unknown"}}},
+	}, ResetCredits: &modelproxy.ResetCreditSummary{AvailableCount: &count}}
 	data, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got ProviderLimits
+	var got modelproxy.ProviderLimits
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -32,12 +33,12 @@ func TestLimitsPresenceRoundTrip(t *testing.T) {
 
 func TestResetContractRoundTrip(t *testing.T) {
 	no := false
-	input := ResetResult{Provider: "openai-codex", CreditID: "credit-1", RequestID: "req-1", Outcome: "indeterminate", Error: &LimitsError{Code: "timeout", Message: "request timed out", Indeterminate: true}, Warnings: []LimitsError{{Code: "refresh_failed", Message: "refresh failed"}}, Credits: &ResetCredits{Credits: []ResetCredit{{ID: "credit-1", Status: "future", Redeemable: &no}}}}
+	input := modelproxy.ResetResult{Provider: "openai-codex", CreditID: "credit-1", RequestID: "req-1", Outcome: "indeterminate", Error: &modelproxy.LimitsError{Code: "timeout", Message: "request timed out", Indeterminate: true}, Warnings: []modelproxy.LimitsError{{Code: "refresh_failed", Message: "refresh failed"}}, Credits: &modelproxy.ResetCredits{Credits: []modelproxy.ResetCredit{{ID: "credit-1", Status: "future", Redeemable: &no}}}}
 	data, err := json.Marshal(input)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var got ResetResult
+	var got modelproxy.ResetResult
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatal(err)
 	}
@@ -53,27 +54,27 @@ func TestLimitsLabelsAndIdentifiers(t *testing.T) {
 		{"中文\xffx", "中文x"},
 		{strings.Repeat("é", 201), strings.Repeat("é", 200)},
 	} {
-		if got := LimitsLabel(tc.in); got != tc.want {
+		if got := modelproxy.LimitsLabel(tc.in); got != tc.want {
 			t.Errorf("label %q, want %q", got, tc.want)
 		}
 	}
 	for _, s := range []string{"", "-flag", "with space", "x;echo", "\x1b", strings.Repeat("a", 129)} {
-		if ValidLimitsID(s) {
+		if modelproxy.ValidLimitsID(s) {
 			t.Errorf("unsafe identifier %q", s)
 		}
 	}
-	a, err := NewResetRequestID()
+	a, err := modelproxy.NewResetRequestID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, err := NewResetRequestID()
+	b, err := modelproxy.NewResetRequestID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if a == b || !ValidLimitsID(a) {
+	if a == b || !modelproxy.ValidLimitsID(a) {
 		t.Fatal("invalid random identifiers")
 	}
-	if err := (ResetRequest{Provider: "openai-codex", CreditID: "credit-1", RequestID: a}).Validate(); err != nil {
+	if err := (modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "credit-1", RequestID: a}).Validate(); err != nil {
 		t.Fatal(err)
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"harness/internal/modelproxy"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -13,7 +14,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"harness/internal/modelproxy/protocol"
 	"harness/internal/tracing"
 )
 
@@ -21,7 +21,7 @@ func TestLimitsRejectsUnboundedProviderBeforeRequest(t *testing.T) {
 	c, _ := New("http://127.0.0.1:1", nil)
 	for _, provider := range []string{strings.Repeat("p", 129), "bad/provider"} {
 		_, err := c.Limits(context.Background(), provider)
-		var detail *protocol.LimitsError
+		var detail *modelproxy.LimitsError
 		if !errors.As(err, &detail) || detail.Code != "invalid_request" {
 			t.Fatalf("err=%v", err)
 		}
@@ -34,7 +34,7 @@ func TestLimitsRejectsUnboundedProviderBeforeRequest(t *testing.T) {
 
 func TestLimitsRequests(t *testing.T) {
 	tracer, _ := tracing.NewTracer(true)
-	request := protocol.ResetRequest{Provider: "openai-codex", CreditID: "credit-1", RequestID: "request-1"}
+	request := modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "credit-1", RequestID: "request-1"}
 	for _, tc := range []struct{ name, method, path, query, body string }{
 		{"status", "GET", "/v1/limits", "provider=kimi-code-plan-cn", `{"providers":[{"provider":"kimi-code-plan-cn"}]}`},
 		{"all", "GET", "/v1/limits", "", `{"providers":[]}`},
@@ -52,7 +52,7 @@ func TestLimitsRequests(t *testing.T) {
 					t.Errorf("headers: %v", r.Header)
 				}
 				if tc.name == "reset" {
-					var got protocol.ResetRequest
+					var got modelproxy.ResetRequest
 					_ = json.NewDecoder(r.Body).Decode(&got)
 					if got != request {
 						t.Errorf("body: %+v", got)
@@ -90,7 +90,7 @@ func TestLimitsQueryErrorSummaryKeepsProviderDetails(t *testing.T) {
 	if err == nil || err.Error() != "3 of 3 subscription quota queries failed; see provider results" {
 		t.Fatalf("summary = %v", err)
 	}
-	var detail *protocol.LimitsError
+	var detail *modelproxy.LimitsError
 	if !errors.As(err, &detail) || detail.Code != "transport_error" || len(report.Providers) != 3 {
 		t.Fatalf("report=%+v err=%v", report, err)
 	}
@@ -118,7 +118,7 @@ func TestLimitsPartialAndStructuredErrors(t *testing.T) {
 	if credits.Error == nil || err == nil {
 		t.Fatalf("%+v %v", credits, err)
 	}
-	result, err := c.ResetLimits(context.Background(), protocol.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
+	result, err := c.ResetLimits(context.Background(), modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
 	if err == nil || result.Error == nil || result.Error.Indeterminate || result.RequestID != "r" {
 		t.Fatalf("%+v %v", result, err)
 	}
@@ -143,8 +143,8 @@ func TestLimitsInvalidResponsesAndOldProxy(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(tc.status); fmt.Fprint(w, tc.body) }))
 			defer srv.Close()
 			c, _ := New(srv.URL, srv.Client())
-			result, err := c.ResetLimits(context.Background(), protocol.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
-			var detail *protocol.LimitsError
+			result, err := c.ResetLimits(context.Background(), modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
+			var detail *modelproxy.LimitsError
 			if !errors.As(err, &detail) || detail.Code != tc.code || result.Error.Indeterminate != tc.ambiguous {
 				t.Fatalf("result=%+v err=%v detail=%+v", result, err, detail)
 			}
@@ -156,15 +156,15 @@ func TestLimitsInvalidResponsesAndOldProxy(t *testing.T) {
 }
 
 func TestResetLostResponseExplicitRetryReusesTuple(t *testing.T) {
-	var requests []protocol.ResetRequest
+	var requests []modelproxy.ResetRequest
 	var mu sync.Mutex
-	snapshot := func() []protocol.ResetRequest {
+	snapshot := func() []modelproxy.ResetRequest {
 		mu.Lock()
 		defer mu.Unlock()
-		return append([]protocol.ResetRequest(nil), requests...)
+		return append([]modelproxy.ResetRequest(nil), requests...)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var request protocol.ResetRequest
+		var request modelproxy.ResetRequest
 		_ = json.NewDecoder(r.Body).Decode(&request)
 		mu.Lock()
 		requests = append(requests, request)
@@ -175,18 +175,18 @@ func TestResetLostResponseExplicitRetryReusesTuple(t *testing.T) {
 			_ = conn.Close()
 			return
 		}
-		_ = json.NewEncoder(w).Encode(protocol.ResetResult{Provider: request.Provider, CreditID: request.CreditID, RequestID: request.RequestID, Outcome: "already_redeemed"})
+		_ = json.NewEncoder(w).Encode(modelproxy.ResetResult{Provider: request.Provider, CreditID: request.CreditID, RequestID: request.RequestID, Outcome: "already_redeemed"})
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL, srv.Client())
-	request := protocol.ResetRequest{Provider: "openai-codex", CreditID: "credit", RequestID: "stable"}
+	request := modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "credit", RequestID: "stable"}
 	first, err := c.ResetLimits(context.Background(), request)
 	if got := snapshot(); err == nil || first.Error == nil || !first.Error.Indeterminate || len(got) != 1 {
 		t.Fatalf("first=%+v err=%v requests=%v", first, err, got)
 	}
-	retry := protocol.ResetRequest{Provider: first.Provider, CreditID: first.CreditID, RequestID: first.RequestID}
+	retry := modelproxy.ResetRequest{Provider: first.Provider, CreditID: first.CreditID, RequestID: first.RequestID}
 	second, err := c.ResetLimits(context.Background(), retry)
-	if got := snapshot(); err != nil || second.Outcome != "already_redeemed" || !reflect.DeepEqual(got, []protocol.ResetRequest{request, request}) {
+	if got := snapshot(); err != nil || second.Outcome != "already_redeemed" || !reflect.DeepEqual(got, []modelproxy.ResetRequest{request, request}) {
 		t.Fatalf("second=%+v err=%v requests=%v", second, err, got)
 	}
 }
@@ -195,7 +195,7 @@ func TestResetRejectsMissingOrDifferentIdentity(t *testing.T) {
 	for _, body := range []string{`{"outcome":"reset"}`, `{"provider":"openai-codex","credit_id":"other","request_id":"r","outcome":"reset","windows_reset":2,"status":{"provider":"foreign"},"credits":{"provider":"foreign"}}`} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, body) }))
 		c, _ := New(srv.URL, srv.Client())
-		result, err := c.ResetLimits(context.Background(), protocol.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
+		result, err := c.ResetLimits(context.Background(), modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
 		srv.Close()
 		if err == nil || result.Outcome != "indeterminate" || result.CreditID != "c" || result.RequestID != "r" || result.Error == nil || !result.Error.Indeterminate || result.Status != nil || result.Credits != nil || result.WindowsReset != nil {
 			t.Fatalf("result=%+v err=%v", result, err)
@@ -209,7 +209,7 @@ func TestResetPreservesEmbeddedIndeterminateError(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL, srv.Client())
-	result, err := c.ResetLimits(context.Background(), protocol.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
+	result, err := c.ResetLimits(context.Background(), modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"})
 	if err == nil || result.Error == nil || result.Error.Code != "timeout" || !result.Error.Indeterminate || len(result.Warnings) != 1 || result.RequestID != "r" {
 		t.Fatalf("result=%+v err=%v", result, err)
 	}
@@ -224,7 +224,7 @@ func TestLimitsCancellationAndRedirectNoResend(t *testing.T) {
 	}))
 	defer srv.Close()
 	c, _ := New(srv.URL, srv.Client())
-	request := protocol.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"}
+	request := modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "c", RequestID: "r"}
 	result, err := c.ResetLimits(context.Background(), request)
 	if err == nil || calls.Load() != 1 || !result.Error.Indeterminate {
 		t.Fatalf("calls=%d result=%+v err=%v", calls.Load(), result, err)

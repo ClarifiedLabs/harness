@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"harness/internal/modelproxy"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 
 	"harness/internal/codexclient"
 	"harness/internal/llm"
-	"harness/internal/modelproxy/protocol"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -47,9 +47,9 @@ func account(t *testing.T, name string, transport roundTripFunc) *Account {
 	}
 	return a
 }
-func limitsError(t *testing.T, err error, code string) *protocol.LimitsError {
+func limitsError(t *testing.T, err error, code string) *modelproxy.LimitsError {
 	t.Helper()
-	var e *protocol.LimitsError
+	var e *modelproxy.LimitsError
 	if !errors.As(err, &e) || e.Code != code {
 		t.Fatalf("error = %v, want LimitsError %q", err, code)
 	}
@@ -372,7 +372,7 @@ func TestRedirectDoesNotForwardCredentials(t *testing.T) {
 }
 
 func TestResetIdentityRetryAndOutcomes(t *testing.T) {
-	req := protocol.ResetRequest{Provider: "openai-codex", CreditID: "selected-credit", RequestID: "stable-request"}
+	req := modelproxy.ResetRequest{Provider: "openai-codex", CreditID: "selected-credit", RequestID: "stable-request"}
 	for _, outcome := range []string{"reset", "nothing_to_reset", "no_credit", "already_redeemed"} {
 		t.Run(outcome, func(t *testing.T) {
 			calls := 0

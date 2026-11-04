@@ -19,7 +19,7 @@ import (
 	"harness/internal/acpagent"
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
-	"harness/internal/modelproxy/protocol"
+	"harness/internal/modelproxy"
 	"harness/internal/plan"
 	"harness/internal/session"
 	"harness/internal/taskcontext"
@@ -52,7 +52,7 @@ func continuityConfig(t *testing.T, mode string) string {
 }
 
 func continuityAddAstra(proxy *fakeModelProxy) {
-	proxy.catalog.Targets = append(proxy.catalog.Targets, protocol.Target{ID: continuityAstra, ProviderLabel: "openai-codex", ModelLabel: "gpt-6-astra", ContextWindow: 100000, SupportsExperimentalContext: true})
+	proxy.catalog.Targets = append(proxy.catalog.Targets, modelproxy.Target{ID: continuityAstra, ProviderLabel: "openai-codex", ModelLabel: "gpt-6-astra", ContextWindow: 100000, SupportsExperimentalContext: true})
 }
 
 func continuityRun(t *testing.T, args []string, fp *llmtest.FakeProvider, input string) {

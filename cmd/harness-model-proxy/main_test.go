@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -11,7 +12,8 @@ import (
 	"time"
 
 	"harness/internal/apikey"
-	"harness/internal/modelproxy/server"
+	"harness/internal/modelcatalog"
+	modelconfig "harness/internal/modelproxy/config"
 )
 
 func testEnv(t *testing.T, args []string) (environment, *bytes.Buffer, *bytes.Buffer) {
@@ -32,6 +34,45 @@ func testEnv(t *testing.T, args []string) (environment, *bytes.Buffer, *bytes.Bu
 		sigCh:  nil,
 		now:    time.Now,
 	}, &out, &errw
+}
+
+func TestRunServeJoinsModelRefreshOnExit(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		listen string
+		want   int
+	}{
+		{name: "startup failure", listen: "invalid-address", want: exitRuntime},
+		{name: "signal shutdown", listen: "127.0.0.1:0", want: exitOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(path, []byte(`{"provider_configs":["provider.json"],"provider_models_cache_ttl":0,"subscription_poll_interval":0,"drain_delay":0,"metrics":{"enabled":false}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "provider.json"), []byte(`{"name":"test","api_type":"openai","base_url":"https://example.invalid","api_key":"secret","models":[{"name":"test"}]}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			env, _, stderr := testEnv(t, []string{"serve", "-config", path, "-listen", tc.listen})
+			finished := make(chan struct{})
+			env.modelsDevCatalog = func(ctx context.Context) (*modelcatalog.Catalog, error) {
+				<-ctx.Done()
+				close(finished)
+				return nil, ctx.Err()
+			}
+			env.sigCh = make(chan os.Signal, 1)
+			env.sigCh <- os.Interrupt
+			if code := run(env); code != tc.want {
+				t.Fatalf("exit=%d, want %d; stderr=%q", code, tc.want, stderr.String())
+			}
+			select {
+			case <-finished:
+			default:
+				t.Fatal("serve returned before model refresh finished")
+			}
+		})
+	}
 }
 
 func TestRunAuthHelpExit0WithUsageOnStdout(t *testing.T) {
@@ -228,7 +269,7 @@ func TestRunGenerateAPIKeyCreatesDefaultKeyFileWhenNoConfigExists(t *testing.T) 
 	if !strings.HasPrefix(key, apikey.ModelProxyPrefix) {
 		t.Fatalf("key missing prefix: %q", key)
 	}
-	cfgPath := filepath.Join(server.DefaultConfigDir(env.getenv), "config.json")
+	cfgPath := filepath.Join(modelconfig.DefaultConfigDir(env.getenv), "config.json")
 	if _, err := os.Stat(cfgPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("config should not be created, stat err=%v", err)
 	}
@@ -249,7 +290,7 @@ func TestRunGenerateAPIKeyCreatesDefaultKeyFileWhenNoConfigExists(t *testing.T) 
 
 func TestRunGenerateAPIKeyWritesHashAndPrintsKey(t *testing.T) {
 	env, out, errw := testEnv(t, []string{"generate-api-key", "laptop"})
-	configDir := server.DefaultConfigDir(env.getenv)
+	configDir := modelconfig.DefaultConfigDir(env.getenv)
 	cfgPath := filepath.Join(configDir, "config.json")
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -294,7 +335,7 @@ func TestRunGenerateAPIKeyWritesBudgetMetadata(t *testing.T) {
 		t.Fatalf("exit = %d, want %d; stderr=%q", code, exitOK, errw.String())
 	}
 	key := strings.TrimSpace(out.String())
-	entries, err := apikey.LoadFile(filepath.Join(server.DefaultConfigDir(env.getenv), "api_keys.json"))
+	entries, err := apikey.LoadFile(filepath.Join(modelconfig.DefaultConfigDir(env.getenv), "api_keys.json"))
 	if err != nil {
 		t.Fatalf("load key file: %v", err)
 	}
