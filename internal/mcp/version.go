@@ -1,6 +1,6 @@
-// Package mcp implements a tools-only Model Context Protocol slice: the wire
-// schema types, version negotiation, a Client (initialize handshake, tools/list
-// pagination, tools/call with cancellation), a Server that serves one session
+// Package mcp implements the Model Context Protocol wire slice: schema types,
+// version negotiation, a Client (initialize handshake, tools/resources,
+// tools/call with cancellation), and a Server that serves one session
 // over one connection, a stdio pipe adapter, and streamable-HTTP transport. It
 // builds on internal/mcp/jsonrpc for framing and bidirectional correlation and
 // depends only on the standard library. It deliberately does not import

@@ -374,46 +374,109 @@ func mcpExposingAgentBases(agents map[string]agentdef.Definition) mcpAgentBases 
 	return bases
 }
 
-// newMCPRefresherDynamic is the runtime-aware form used by main. static is
-// evaluated only when a refresh is applied, allowing session-local LSP toggles
-// to change which first-class tools MCP-exposing agents receive.
+// mcpRefresher owns one live MCP source's previous summary. Keeping summaries
+// separate lets composed remote and local refreshers remove only their own
+// departed tools while re-deriving agents from both live surfaces.
+type mcpRefresher struct {
+	conn            *mcptools.Conn
+	catalog         *tools.Registry
+	agents          map[string]agentdef.Definition
+	bases           mcpAgentBases
+	prev            mcptools.Summary
+	static          func() mcptools.Summary
+	logger          *slog.Logger
+	pending         *asyncMCPRegistration
+	limits          mcpLimits
+	registerOptions mcptools.RegisterOptions
+}
+
+func (r *mcpRefresher) apply(discovered *tools.Registry, sum mcptools.Summary, agentName string) (*tools.Registry, string) {
+	prevNames := r.prev.Names
+	reg, notice := applyMCPRegistration(r.catalog, discovered, r.agents, r.bases, agentName, &prevNames, sum, r.static(), r.logger, r.limits)
+	r.prev = sum
+	r.prev.Names = prevNames
+	return reg, notice
+}
+
+func (r *mcpRefresher) refresh(parent context.Context, agentName string) (*tools.Registry, string) {
+	if res, ok := r.pending.take(); ok {
+		return r.apply(res.registry, res.summary, agentName)
+	}
+
+	if r.conn == nil || !r.conn.Dirty() {
+		return nil, ""
+	}
+
+	if _, ok := r.agents[agentName]; !ok {
+		return nil, ""
+	}
+
+	// Worst case, a proxy that hangs mid-re-list stalls this prompt for up to
+	// mcpRegisterTimeout (~5s) before the warn-and-keep path fires, since the
+	// re-list runs synchronously at the prompt boundary. Accepted: it only
+	// happens on a misbehaving proxy after an explicit list_changed, the
+	// bound is finite, and the alternative (background re-list racing the
+	// prompt's Specs()/Dispatch reads) is the unsafe mid-prompt swap we avoid.
+	ctx, cancel := context.WithTimeout(parent, mcpRegisterTimeout)
+	defer cancel()
+	sum, err := mcptools.RegisterWithOptions(ctx, r.catalog, r.conn, r.registerOptions)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil, ""
+		}
+		r.logger.Warn(fmt.Sprintf("mcp: tool list refresh failed: %v; keeping current tools", err), logging.Category("mcp"))
+		return nil, ""
+	}
+	r.conn.ClearDirty()
+	return r.apply(nil, sum, agentName)
+}
+
+// newMCPRefresherDynamic is the runtime-aware form used by tests and remote-only
+// callers. static is evaluated only when a refresh is applied, allowing
+// session-local LSP toggles to change which first-class tools MCP-exposing
+// agents receive.
 func newMCPRefresherDynamic(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev mcptools.Summary, static func() mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
-	prevNames := prev.Names
 	var lim mcpLimits
 	if len(limits) > 0 {
 		lim = limits[0]
 	}
-	return func(parent context.Context, agentName string) (*tools.Registry, string) {
-		if res, ok := pending.take(); ok {
-			return applyMCPRegistration(catalog, res.registry, agents, bases, agentName, &prevNames, res.summary, static(), logger, lim)
-		}
+	r := &mcpRefresher{
+		conn: conn, catalog: catalog, agents: agents, bases: bases, prev: prev,
+		static: static, logger: logger, pending: pending, limits: lim,
+		registerOptions: mcptools.RegisterOptions{TrustReadOnlyHint: true},
+	}
+	return r.refresh
+}
 
-		if !conn.Dirty() {
-			return nil, ""
+// newComposedMCPRefresherDynamic refreshes remote HTTP and local stdio MCP at
+// the same prompt boundary. Each source retains its own summary; the other's
+// current summary is static input to a refresh, so neither source can drop the
+// other's tools. Remote caps apply only to the remote surface.
+func newComposedMCPRefresherDynamic(remoteConn, localConn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, remotePrev, localPrev mcptools.Summary, static func() mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits mcpLimits) func(context.Context, string) (*tools.Registry, string) {
+	remote := &mcpRefresher{
+		conn: remoteConn, catalog: catalog, agents: agents, bases: bases, prev: remotePrev,
+		logger: logger, pending: pending, limits: limits,
+		registerOptions: mcptools.RegisterOptions{TrustReadOnlyHint: true},
+	}
+	local := &mcpRefresher{
+		conn: localConn, catalog: catalog, agents: agents, bases: bases, prev: localPrev,
+		logger:          logger,
+		registerOptions: mcptools.RegisterOptions{TrustReadOnlyHint: true, FallbackNamespace: "local"},
+	}
+	remote.static = func() mcptools.Summary {
+		return mergeMCPSummaries(local.prev, static())
+	}
+	local.static = func() mcptools.Summary {
+		names, readOnly := capRemoteMCPNames(remote.prev.Names, remote.prev.ReadOnlyNames, limits, logger)
+		return mergeMCPSummaries(mcptools.Summary{Names: names, ReadOnlyNames: readOnly}, static())
+	}
+	return func(ctx context.Context, agentName string) (*tools.Registry, string) {
+		reg, notice := remote.refresh(ctx, agentName)
+		localReg, localNotice := local.refresh(ctx, agentName)
+		if localReg != nil {
+			return localReg, localNotice
 		}
-
-		if _, ok := agents[agentName]; !ok {
-			return nil, ""
-		}
-
-		// Worst case, a proxy that hangs mid-re-list stalls this prompt for up to
-		// mcpRegisterTimeout (~5s) before the warn-and-keep path fires, since the
-		// re-list runs synchronously at the prompt boundary. Accepted: it only
-		// happens on a misbehaving proxy after an explicit list_changed, the
-		// bound is finite, and the alternative (background re-list racing the
-		// prompt's Specs()/Dispatch reads) is the unsafe mid-prompt swap we avoid.
-		ctx, cancel := context.WithTimeout(parent, mcpRegisterTimeout)
-		defer cancel()
-		sum, err := mcptools.RegisterWithOptions(ctx, catalog, conn, mcptools.RegisterOptions{TrustReadOnlyHint: true})
-		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				return nil, ""
-			}
-			logger.Warn(fmt.Sprintf("mcp: tool list refresh failed: %v; keeping current tools", err), logging.Category("mcp"))
-			return nil, ""
-		}
-		conn.ClearDirty()
-		return applyMCPRegistration(catalog, nil, agents, bases, agentName, &prevNames, sum, static(), logger, lim)
+		return reg, notice
 	}
 }
 

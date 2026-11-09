@@ -20,6 +20,13 @@ type ToolProvider interface {
 	CallTool(ctx context.Context, name string, args json.RawMessage) (*CallToolResult, error)
 }
 
+// ResourceProvider is an optional extension to ToolProvider. Providers that do
+// not implement it retain the original tools-only capability and method surface.
+type ResourceProvider interface {
+	ListResources(ctx context.Context, cursor string) (ListResourcesResult, error)
+	ReadResource(ctx context.Context, params ReadResourceParams) (*ReadResourceResult, error)
+}
+
 // ServerOptions configures a Server session.
 type ServerOptions struct {
 	Info        Implementation
@@ -87,12 +94,17 @@ func Serve(ctx context.Context, rwc io.ReadWriteCloser, opts ServerOptions) erro
 		inflight: make(map[jsonrpc.ID]context.CancelFunc),
 	}
 
+	handlers := map[string]jsonrpc.Handler{
+		MethodInitialize: s.handleInitialize,
+		MethodPing:       s.handlePing,
+		MethodListTools:  s.handleListTools,
+	}
+	if _, ok := opts.Provider.(ResourceProvider); ok {
+		handlers[MethodListResources] = s.handleListResources
+		handlers[MethodReadResource] = s.handleReadResource
+	}
 	peerOpts := jsonrpc.PeerOptions{
-		Handlers: map[string]jsonrpc.Handler{
-			MethodInitialize: s.handleInitialize,
-			MethodPing:       s.handlePing,
-			MethodListTools:  s.handleListTools,
-		},
+		Handlers: handlers,
 		HandlersWithID: map[string]jsonrpc.HandlerID{
 			MethodCallTool: s.handleCallTool,
 		},
@@ -130,7 +142,8 @@ func (s *server) handlePing(ctx context.Context, params json.RawMessage) (json.R
 
 func (s *server) handleInitialize(ctx context.Context, params json.RawMessage) (json.RawMessage, *jsonrpc.Error) {
 	// Negotiate: echo the client's version if we support it, else offer ours.
-	p, raw, jerr := initializePayload(params, s.opts.Info, s.opts.ListChanged)
+	_, hasResources := s.opts.Provider.(ResourceProvider)
+	p, raw, jerr := initializePayload(params, s.opts.Info, s.opts.ListChanged, hasResources)
 	if jerr != nil {
 		return nil, jerr
 	}
@@ -159,6 +172,20 @@ func (s *server) handleListTools(ctx context.Context, params json.RawMessage) (j
 		return nil, jsonrpc.NewError(jsonrpc.CodeInvalidRequest, "server not initialized")
 	}
 	return listToolsPayload(ctx, s.opts.Provider, params)
+}
+
+func (s *server) handleListResources(ctx context.Context, params json.RawMessage) (json.RawMessage, *jsonrpc.Error) {
+	if !s.ready() {
+		return nil, jsonrpc.NewError(jsonrpc.CodeInvalidRequest, "server not initialized")
+	}
+	return listResourcesPayload(ctx, s.opts.Provider.(ResourceProvider), params)
+}
+
+func (s *server) handleReadResource(ctx context.Context, params json.RawMessage) (json.RawMessage, *jsonrpc.Error) {
+	if !s.ready() {
+		return nil, jsonrpc.NewError(jsonrpc.CodeInvalidRequest, "server not initialized")
+	}
+	return readResourcePayload(ctx, s.opts.Provider.(ResourceProvider), params)
 }
 
 func (s *server) handleCallTool(ctx context.Context, id jsonrpc.ID, params json.RawMessage) (json.RawMessage, *jsonrpc.Error) {

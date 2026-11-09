@@ -211,6 +211,18 @@ func (h *httpHandler) handleRequest(w http.ResponseWriter, r *http.Request, msg 
 		h.handleListTools(w, r, id, msg.Params)
 	case MethodCallTool:
 		h.handleCallTool(w, r, sess, id, msg.Params)
+	case MethodListResources:
+		if provider, ok := h.provider.(ResourceProvider); ok {
+			h.handleListResources(w, r, id, msg.Params, provider)
+		} else {
+			h.writeError(w, id, jsonrpc.Errorf(jsonrpc.CodeMethodNotFound, "method not found: %s", msg.Method))
+		}
+	case MethodReadResource:
+		if provider, ok := h.provider.(ResourceProvider); ok {
+			h.handleReadResource(w, r, id, msg.Params, provider)
+		} else {
+			h.writeError(w, id, jsonrpc.Errorf(jsonrpc.CodeMethodNotFound, "method not found: %s", msg.Method))
+		}
 	default:
 		h.writeError(w, id, jsonrpc.Errorf(jsonrpc.CodeMethodNotFound, "method not found: %s", msg.Method))
 	}
@@ -244,7 +256,8 @@ func (h *httpHandler) handleInitialize(w http.ResponseWriter, id jsonrpc.ID, par
 	// Negotiate: echo the client's version if we support it, else offer ours.
 	// The client surfaces a server-selected version it cannot speak as a
 	// VersionError, so offering ours is the correct downgrade signal.
-	p, raw, jerr := initializePayload(params, h.info, false)
+	_, hasResources := h.provider.(ResourceProvider)
+	p, raw, jerr := initializePayload(params, h.info, false, hasResources)
 	if jerr != nil {
 		h.writeError(w, id, jerr)
 		return
@@ -273,6 +286,24 @@ func (h *httpHandler) handleInitialize(w http.ResponseWriter, id jsonrpc.ID, par
 
 func (h *httpHandler) handleListTools(w http.ResponseWriter, r *http.Request, id jsonrpc.ID, params json.RawMessage) {
 	raw, jerr := listToolsPayload(r.Context(), h.provider, params)
+	if jerr != nil {
+		h.writeError(w, id, jerr)
+		return
+	}
+	h.writeResult(w, id, raw)
+}
+
+func (h *httpHandler) handleListResources(w http.ResponseWriter, r *http.Request, id jsonrpc.ID, params json.RawMessage, provider ResourceProvider) {
+	raw, jerr := listResourcesPayload(r.Context(), provider, params)
+	if jerr != nil {
+		h.writeError(w, id, jerr)
+		return
+	}
+	h.writeResult(w, id, raw)
+}
+
+func (h *httpHandler) handleReadResource(w http.ResponseWriter, r *http.Request, id jsonrpc.ID, params json.RawMessage, provider ResourceProvider) {
+	raw, jerr := readResourcePayload(r.Context(), provider, params)
 	if jerr != nil {
 		h.writeError(w, id, jerr)
 		return

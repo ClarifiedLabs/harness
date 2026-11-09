@@ -207,6 +207,36 @@ agent's `allowed_tools`: the proxy rejects calls to them as unknown tools. This
 setting belongs to the proxy's `mcpServers` entries, not Harness's direct
 `mcp.local` configuration.
 
+### MCP Apps passthrough
+
+Both `serve` and `serve -stdio` preserve tool and tool-result `_meta`, including
+MCP Apps UI metadata, and preserve raw `structuredContent`. Proxy supervisor
+clients advertise the `io.modelcontextprotocol/ui` extension to downstream
+servers. Ordinary Harness MCP clients do not claim UI hosting.
+
+The proxy retains the full catalog, including tools whose
+`_meta.ui.visibility` omits `"model"`, so app hosts can authorize widget calls.
+Harness's model-facing registration omits those app-only tools. Missing
+visibility defaults to model plus app. Configured `excludedTools` and their UI
+resource routes are still omitted by the proxy.
+
+The proxy advertises resource support but intentionally returns one empty
+`resources/list` page: MCP Apps permits UI resources to be discovered only
+through tool metadata. `resources/read` routes URIs from `_meta.ui.resourceUri`
+and the deprecated `_meta["ui/resourceUri"]`. A unique URI needs no hint. When
+multiple servers advertise the same URI, `_meta.sourceTool` must contain the
+full namespaced tool name (for example, `mcp__one__show`) so the read reaches
+that exact server. Unknown and ambiguous reads fail with invalid-params errors.
+Resource HTML, MIME types, and result/content `_meta` pass through unchanged.
+The proxy does not otherwise aggregate downstream resource catalogs.
+
+Widget `tools/call` uses the same `_meta.sourceTool` hint. The proxy requires the
+source and target routes to belong to the same downstream server and requires
+`"app"` visibility on the target. Bare companion-tool names resolve only through
+that source server's exact route records, so names containing `__` cannot cause
+cross-server routing. Unknown, model-only, and cross-server app calls fail with
+invalid-params errors.
+
 ### Proxy commands and configuration inspection
 
 `harness-mcp-proxy --help` renders the generated root command catalog; use
@@ -475,7 +505,7 @@ not need it.
 
 ## V1 Non-Goals
 
-- Tools only; no MCP resources or prompts.
+- Narrow MCP Apps UI-resource passthrough only; no general resource aggregation or prompts.
 - Streamable HTTP only for remote servers; no legacy HTTP+SSE transport.
 - OAuth discovery and dynamic client registration.
 - Plain HTTP proxy listener; use a reverse proxy for TLS.

@@ -107,6 +107,26 @@ func TestRegister(t *testing.T) {
 	}
 }
 
+func TestRegisterFiltersAppOnlyToolsFromModel(t *testing.T) {
+	advertised := []mcp.Tool{
+		{Name: "mcp__app__show", Meta: json.RawMessage(`{"ui":{"visibility":["model","app"]}}`)},
+		{Name: "mcp__app__private", Meta: json.RawMessage(`{"ui":{"visibility":["app"]}}`)},
+		{Name: "mcp__app__ordinary"},
+	}
+	provider := &scriptedProvider{}
+	conn, cleanup := newScriptedConn(t, provider, advertised)
+	defer cleanup()
+	reg := &tools.Registry{}
+	sum, err := Register(context.Background(), reg, conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"mcp__app__show", "mcp__app__ordinary"}
+	if !slices.Equal(sum.Names, want) || !slices.Equal(reg.Names(), want) {
+		t.Fatalf("model tools = %v / %v, want %v", sum.Names, reg.Names(), want)
+	}
+}
+
 func TestRegisterReadOnlyHintPolicy(t *testing.T) {
 	advertised := []mcp.Tool{{
 		Name:        "mcp__local__inspect",

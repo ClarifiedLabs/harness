@@ -8,10 +8,12 @@ import (
 // Method and notification names used on the wire. Typed constants avoid
 // stringly-typed routing drift across client and server.
 const (
-	MethodInitialize = "initialize"
-	MethodPing       = "ping"
-	MethodListTools  = "tools/list"
-	MethodCallTool   = "tools/call"
+	MethodInitialize    = "initialize"
+	MethodPing          = "ping"
+	MethodListTools     = "tools/list"
+	MethodCallTool      = "tools/call"
+	MethodListResources = "resources/list"
+	MethodReadResource  = "resources/read"
 
 	NotifInitialized      = "notifications/initialized"
 	NotifToolsListChanged = "notifications/tools/list_changed"
@@ -31,6 +33,7 @@ type Implementation struct {
 // a schema change.
 type ClientCapabilities struct {
 	Experimental json.RawMessage `json:"experimental,omitempty"`
+	Extensions   json.RawMessage `json:"extensions,omitempty"`
 }
 
 // ServerCapabilities is what a server advertises. Only Tools is interpreted;
@@ -74,6 +77,7 @@ type Tool struct {
 	InputSchema  json.RawMessage `json:"inputSchema"`
 	OutputSchema json.RawMessage `json:"outputSchema,omitempty"`
 	Annotations  json.RawMessage `json:"annotations,omitempty"`
+	Meta         json.RawMessage `json:"_meta,omitempty"`
 }
 
 // MarshalJSON guarantees the required inputSchema object is never null.
@@ -107,11 +111,126 @@ func (r ListToolsResult) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias(r))
 }
 
+// Resource describes an MCP resource. UI-specific metadata remains raw.
+type Resource struct {
+	URI         string          `json:"uri"`
+	Name        string          `json:"name"`
+	Title       string          `json:"title,omitempty"`
+	Description string          `json:"description,omitempty"`
+	MimeType    string          `json:"mimeType,omitempty"`
+	Size        *int64          `json:"size,omitempty"`
+	Annotations json.RawMessage `json:"annotations,omitempty"`
+	Meta        json.RawMessage `json:"_meta,omitempty"`
+}
+
+// ListResourcesParams is the resources/list request payload.
+type ListResourcesParams struct {
+	Cursor string `json:"cursor,omitempty"`
+}
+
+// ListResourcesResult is one page of resources/list.
+type ListResourcesResult struct {
+	Resources  []Resource      `json:"resources"`
+	NextCursor string          `json:"nextCursor,omitempty"`
+	Meta       json.RawMessage `json:"_meta,omitempty"`
+}
+
+// MarshalJSON guarantees the required resources array is never null.
+func (r ListResourcesResult) MarshalJSON() ([]byte, error) {
+	type alias ListResourcesResult
+	if r.Resources == nil {
+		r.Resources = []Resource{}
+	}
+	return json.Marshal(alias(r))
+}
+
+// ResourceContents is a text or blob resource payload. Meta is passthrough raw
+// so MCP Apps metadata survives a proxy round-trip.
+type ResourceContents struct {
+	URI      string          `json:"uri"`
+	MimeType string          `json:"mimeType,omitempty"`
+	Text     string          `json:"text,omitempty"`
+	Blob     string          `json:"blob,omitempty"`
+	Meta     json.RawMessage `json:"_meta,omitempty"`
+}
+
+// ReadResourceParams is the resources/read request payload. SourceTool is the
+// optional MCP Apps routing hint at _meta.sourceTool; the original metadata is
+// retained in Meta as well.
+type ReadResourceParams struct {
+	URI        string          `json:"uri"`
+	Meta       json.RawMessage `json:"_meta,omitempty"`
+	SourceTool string          `json:"-"`
+}
+
+// UnmarshalJSON decodes the optional MCP Apps sourceTool hint while tolerating
+// unrelated metadata keys.
+func (p *ReadResourceParams) UnmarshalJSON(data []byte) error {
+	type alias ReadResourceParams
+	var decoded alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = ReadResourceParams(decoded)
+	if len(p.Meta) == 0 || bytes.Equal(bytes.TrimSpace(p.Meta), []byte("null")) {
+		return nil
+	}
+	var meta struct {
+		SourceTool string `json:"sourceTool"`
+	}
+	if err := json.Unmarshal(p.Meta, &meta); err != nil {
+		return err
+	}
+	p.SourceTool = meta.SourceTool
+	return nil
+}
+
+// ReadResourceResult is the resources/read response payload.
+type ReadResourceResult struct {
+	Contents []ResourceContents `json:"contents"`
+	Meta     json.RawMessage    `json:"_meta,omitempty"`
+}
+
+// MarshalJSON guarantees the required contents array is never null.
+func (r ReadResourceResult) MarshalJSON() ([]byte, error) {
+	type alias ReadResourceResult
+	if r.Contents == nil {
+		r.Contents = []ResourceContents{}
+	}
+	return json.Marshal(alias(r))
+}
+
 // CallToolParams is the tools/call request payload. Arguments is passthrough raw
 // JSON validated against the tool's input schema by the server, not here.
 type CallToolParams struct {
-	Name      string          `json:"name"`
-	Arguments json.RawMessage `json:"arguments,omitempty"`
+	Name       string          `json:"name"`
+	Arguments  json.RawMessage `json:"arguments,omitempty"`
+	Meta       json.RawMessage `json:"_meta,omitempty"`
+	SourceTool string          `json:"-"`
+}
+
+// UnmarshalJSON decodes the optional MCP Apps sourceTool routing hint.
+func (p *CallToolParams) UnmarshalJSON(data []byte) error {
+	var decoded struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments,omitempty"`
+		Meta      json.RawMessage `json:"_meta,omitempty"`
+	}
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = CallToolParams{Name: decoded.Name, Arguments: decoded.Arguments, Meta: decoded.Meta}
+	if len(p.Meta) == 0 || bytes.Equal(bytes.TrimSpace(p.Meta), []byte("null")) {
+		return nil
+	}
+	var meta struct {
+		SourceTool string `json:"sourceTool"`
+	}
+	if err := json.Unmarshal(p.Meta, &meta); err != nil {
+		return err
+	}
+	p.SourceTool = meta.SourceTool
+	return nil
 }
 
 // CallToolResult is the tools/call response payload. A tool-execution failure
@@ -121,6 +240,7 @@ type CallToolResult struct {
 	Content           []ContentBlock  `json:"content"`
 	StructuredContent json.RawMessage `json:"structuredContent,omitempty"`
 	IsError           bool            `json:"isError,omitempty"`
+	Meta              json.RawMessage `json:"_meta,omitempty"`
 }
 
 // MarshalJSON guarantees the required content array is never null.

@@ -836,6 +836,93 @@ func TestMCPRefresherAddsAndRemovesTools(t *testing.T) {
 	}
 }
 
+func TestMCPLocalRefresherAddsLateTools(t *testing.T) {
+	provider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__local__alpha")}}
+	g := startFakeProxy(t, provider)
+	catalog := tools.CatalogWithOptions(tools.Options{})
+	conn := mcptools.NewConn(mcptools.Options{Dial: g.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
+	defer conn.Close()
+	initial, err := mcptools.RegisterWithOptions(context.Background(), catalog, conn, mcptools.RegisterOptions{
+		TrustReadOnlyHint: true,
+		FallbackNamespace: "local",
+	})
+	if err != nil {
+		t.Fatalf("initial local register: %v", err)
+	}
+	agents := map[string]agentdef.Definition{
+		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__local__alpha"}, MCPTools: agentdef.MCPToolsAll},
+	}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
+	refresh := newComposedMCPRefresherDynamic(nil, conn, catalog, agents, bases, mcptools.Summary{}, initial,
+		func() mcptools.Summary { return mcptools.Summary{} }, slog.New(slog.DiscardHandler), nil, mcpLimits{})
+
+	provider.setTools([]mcp.Tool{mcpTool("mcp__local__alpha"), mcpTool("mcp__local__late")})
+	g.notifyListChanged(t, conn)
+	sel, notice := refresh(context.Background(), "auto")
+	if sel == nil {
+		t.Fatal("local Dirty refresh returned a nil registry")
+	}
+	for _, name := range []string{"mcp__local__alpha", "mcp__local__late"} {
+		if !slices.Contains(sel.Names(), name) {
+			t.Errorf("local tool %s missing from selected registry: %v", name, sel.Names())
+		}
+		if _, ok := catalog.Lookup(name); !ok {
+			t.Errorf("local tool %s missing from shared catalog", name)
+		}
+	}
+	if !strings.Contains(notice, "tool list updated") || conn.Dirty() {
+		t.Errorf("local refresh notice=%q dirty=%v, want update notice and clean conn", notice, conn.Dirty())
+	}
+}
+
+func TestMCPRefresherComposesRemoteAndLocalSummaries(t *testing.T) {
+	remoteProvider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__remote__alpha")}}
+	localProvider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__local__alpha")}}
+	remoteProxy := startFakeProxy(t, remoteProvider)
+	localProxy := startFakeProxy(t, localProvider)
+	catalog := tools.CatalogWithOptions(tools.Options{})
+	catalog.Register(asyncMCPTestTool{name: "lsp_static"})
+	remoteConn := mcptools.NewConn(mcptools.Options{Dial: remoteProxy.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
+	localConn := mcptools.NewConn(mcptools.Options{Dial: localProxy.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
+	defer remoteConn.Close()
+	defer localConn.Close()
+	remoteSummary, err := mcptools.Register(context.Background(), catalog, remoteConn)
+	if err != nil {
+		t.Fatalf("initial remote register: %v", err)
+	}
+	localSummary, err := mcptools.RegisterWithOptions(context.Background(), catalog, localConn, mcptools.RegisterOptions{
+		TrustReadOnlyHint: true,
+		FallbackNamespace: "local",
+	})
+	if err != nil {
+		t.Fatalf("initial local register: %v", err)
+	}
+	agents := map[string]agentdef.Definition{
+		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__remote__alpha", "mcp__local__alpha", "lsp_static"}, MCPTools: agentdef.MCPToolsAll},
+	}
+	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
+	static := mcptools.Summary{Names: []string{"lsp_static"}, Total: 1}
+	refresh := newComposedMCPRefresherDynamic(remoteConn, localConn, catalog, agents, bases, remoteSummary, localSummary,
+		func() mcptools.Summary { return static }, slog.New(slog.DiscardHandler), nil, mcpLimits{})
+
+	remoteProvider.setTools([]mcp.Tool{mcpTool("mcp__remote__alpha"), mcpTool("mcp__remote__late")})
+	localProvider.setTools([]mcp.Tool{mcpTool("mcp__local__alpha"), mcpTool("mcp__local__late")})
+	remoteProxy.notifyListChanged(t, remoteConn)
+	localProxy.notifyListChanged(t, localConn)
+	sel, _ := refresh(context.Background(), "auto")
+	if sel == nil {
+		t.Fatal("composed refresh returned a nil registry")
+	}
+	for _, name := range []string{"mcp__remote__alpha", "mcp__remote__late", "mcp__local__alpha", "mcp__local__late", "lsp_static"} {
+		if !slices.Contains(sel.Names(), name) {
+			t.Errorf("composed registry lost %s: %v", name, sel.Names())
+		}
+		if !slices.Contains(agents["auto"].AllowedTools, name) {
+			t.Errorf("re-derived agent lost %s: %v", name, agents["auto"].AllowedTools)
+		}
+	}
+}
+
 // TestMCPRefresherSkipsUnaffectedWhitelistAgent confirms that when the current
 // agent is an explicit whitelist that exposes no MCP tools, a list_changed does
 // not produce a (misleading) swap or notice — yet the catalog and MCP-exposing

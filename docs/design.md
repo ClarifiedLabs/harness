@@ -137,7 +137,7 @@ internal/handoff         /handoff request DTO shared by the interactive drivers 
 internal/goal            `/goal` session state, prompt binding, and continuation rendering (§10)
 internal/auth            provider auth sources (token_command, oauth2, codex_oauth) for the shared model runtime
 cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with generated command dispatch
-internal/mcp             tools-only MCP slice: schema, client, server, stdio + streamable-HTTP transports
+internal/mcp             MCP slice: schema, client, server, tools + narrow MCP Apps UI resources, stdio + streamable-HTTP transports
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
 internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
 internal/procgroup       protocol-neutral owned process-group lifecycle: non-reaping exit observation, bounded TERM/KILL escalation, and final Wait (shared by LSP, MCP children, and proxy supervisors)
@@ -4257,7 +4257,13 @@ Architecture rules:
   colliding with an advertised excluded tool is also omitted, so an exclusion
   cannot redirect the old identity to another server. See [mcp.md](mcp.md) for
   configuration semantics.
-- The proxy's HTTP handler is tools-only and JSON-only (never
+- The proxy preserves the full catalog, including app-only tools, for app hosts;
+  `internal/mcptools` applies model visibility at Harness's registration boundary.
+  UI `resources/read` and widget `tools/call` route by tool metadata, using
+  `_meta.sourceTool` to disambiguate identical URIs/names on different servers
+  and to enforce same-server, app-visible widget calls without parsing `__`.
+- The proxy's HTTP handler supports tools plus narrow MCP Apps UI
+  `resources/list`/`resources/read` and is JSON-only (never
   `text/event-stream`); sessions are carried by `Mcp-Session-Id` with a
   30-minute idle TTL (distinct from the HTTP server's 120 s connection
   IdleTimeout), `DELETE` ends a session, and with no server-push channel

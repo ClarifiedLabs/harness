@@ -439,6 +439,252 @@ func TestSupervisorHTTPVersionErrorTerminal(t *testing.T) {
 	}
 }
 
+// controlledHTTPMCP gates connection and expiry responses so concurrency tests
+// can exercise overlapping Supervisor calls without timing sleeps.
+type controlledHTTPMCP struct {
+	mu               sync.Mutex
+	initCount        int
+	deleted          []string
+	initialRelease   <-chan struct{}
+	reconnectRelease <-chan struct{}
+	initialStarted   chan<- int
+	reconnectStarted chan<- int
+	expireSession    string
+	staleArrived     chan<- string
+	staleToolRelease <-chan struct{}
+	staleReadRelease <-chan struct{}
+}
+
+func (f *controlledHTTPMCP) handler() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			f.mu.Lock()
+			f.deleted = append(f.deleted, r.Header.Get("Mcp-Session-Id"))
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var msg jsonrpc.Message
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch msg.Method {
+		case mcp.MethodInitialize:
+			f.mu.Lock()
+			f.initCount++
+			n := f.initCount
+			f.mu.Unlock()
+			if n == 1 && f.initialStarted != nil {
+				f.initialStarted <- n
+			}
+			if n >= 2 && f.reconnectStarted != nil {
+				f.reconnectStarted <- n
+			}
+			release := f.reconnectRelease
+			if n == 1 {
+				release = f.initialRelease
+			}
+			if release != nil {
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			w.Header().Set("Mcp-Session-Id", sessionToken(n))
+			(&fakeHTTPMCP{}).writeJSON(w, msg, mustJSON(mcp.InitializeResult{
+				ProtocolVersion: mcp.ProtocolVersion,
+				Capabilities:    mcp.ServerCapabilities{Tools: &mcp.ToolsCapability{}},
+				ServerInfo:      mcp.Implementation{Name: "controlled-http", Version: "1"},
+			}))
+		case mcp.NotifInitialized:
+			w.WriteHeader(http.StatusAccepted)
+		case mcp.MethodListTools:
+			(&fakeHTTPMCP{}).writeJSON(w, msg, mustJSON(mcp.ListToolsResult{
+				Tools: []mcp.Tool{{Name: "echo", InputSchema: json.RawMessage(`{"type":"object"}`)}},
+			}))
+		case mcp.MethodCallTool:
+			if f.expireSession != "" && r.Header.Get("Mcp-Session-Id") == f.expireSession {
+				f.staleArrived <- "tool"
+				select {
+				case <-f.staleToolRelease:
+				case <-r.Context().Done():
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			var params mcp.CallToolParams
+			_ = json.Unmarshal(msg.Params, &params)
+			(&fakeHTTPMCP{}).writeJSON(w, msg, mustJSON(mcp.CallToolResult{
+				Content: []mcp.ContentBlock{{Type: "text", Text: string(params.Arguments)}},
+			}))
+		case mcp.MethodReadResource:
+			if f.expireSession != "" && r.Header.Get("Mcp-Session-Id") == f.expireSession {
+				f.staleArrived <- "resource"
+				select {
+				case <-f.staleReadRelease:
+				case <-r.Context().Done():
+					return
+				}
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			var params mcp.ReadResourceParams
+			_ = json.Unmarshal(msg.Params, &params)
+			(&fakeHTTPMCP{}).writeJSON(w, msg, mustJSON(mcp.ReadResourceResult{
+				Contents: []mcp.ResourceContents{{URI: params.URI, Text: "resource"}},
+			}))
+		default:
+			w.WriteHeader(http.StatusAccepted)
+		}
+	}
+}
+
+func TestSupervisorHTTPInitialCallsSingleFlight(t *testing.T) {
+	initialRelease := make(chan struct{})
+	initialStarted := make(chan int, 4)
+	fake := &controlledHTTPMCP{initialRelease: initialRelease, initialStarted: initialStarted}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+	sup := newHTTPSupervisor(t, srv.URL)
+	sup.Start(t.Context())
+	defer sup.Shutdown(context.Background())
+	select {
+	case n := <-initialStarted:
+		if n != 1 {
+			t.Fatalf("first initialize = %d, want 1", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial initialize did not start")
+	}
+
+	start := make(chan struct{})
+	var callersReady sync.WaitGroup
+	callersReady.Add(2)
+	type callOutcome struct {
+		name string
+		err  error
+	}
+	done := make(chan callOutcome, 2)
+	go func() {
+		<-start
+		callersReady.Done()
+		_, err := sup.CallTool(context.Background(), "echo", json.RawMessage(`{}`))
+		done <- callOutcome{name: "CallTool", err: err}
+	}()
+	go func() {
+		<-start
+		callersReady.Done()
+		_, err := sup.ReadResource(context.Background(), "ui://test")
+		done <- callOutcome{name: "ReadResource", err: err}
+	}()
+	close(start)
+	callersReady.Wait()
+	close(initialRelease)
+	for range 2 {
+		select {
+		case outcome := <-done:
+			if outcome.err != nil {
+				t.Errorf("%s: %v", outcome.name, outcome.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent initial calls did not finish")
+		}
+	}
+	fake.mu.Lock()
+	inits := fake.initCount
+	fake.mu.Unlock()
+	if inits != 1 {
+		t.Fatalf("concurrent initial calls initialized %d sessions, want 1", inits)
+	}
+}
+
+func TestSupervisorHTTPStaleCallsReuseReplacement(t *testing.T) {
+	reconnectRelease := make(chan struct{})
+	reconnectStarted := make(chan int, 4)
+	staleArrived := make(chan string, 2)
+	staleToolRelease := make(chan struct{})
+	staleReadRelease := make(chan struct{})
+	fake := &controlledHTTPMCP{
+		reconnectRelease: reconnectRelease,
+		reconnectStarted: reconnectStarted,
+		expireSession:    "session-1",
+		staleArrived:     staleArrived,
+		staleToolRelease: staleToolRelease,
+		staleReadRelease: staleReadRelease,
+	}
+	srv := httptest.NewServer(fake.handler())
+	defer srv.Close()
+	sup := newHTTPSupervisor(t, srv.URL)
+	ready := make(chan struct{})
+	sup.onToolsChanged = func() { close(ready) }
+	sup.Start(t.Context())
+	defer sup.Shutdown(context.Background())
+	select {
+	case <-ready:
+	case <-time.After(5 * time.Second):
+		t.Fatal("initial session did not become ready")
+	}
+
+	type callOutcome struct {
+		name string
+		err  error
+	}
+	done := make(chan callOutcome, 2)
+	go func() {
+		_, err := sup.CallTool(context.Background(), "echo", json.RawMessage(`{}`))
+		done <- callOutcome{name: "CallTool", err: err}
+	}()
+	go func() {
+		_, err := sup.ReadResource(context.Background(), "ui://test")
+		done <- callOutcome{name: "ReadResource", err: err}
+	}()
+	for range 2 {
+		select {
+		case <-staleArrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("stale calls did not reach the server")
+		}
+	}
+	// Let one caller start the replacement handshake while the other old-session
+	// request is still in flight. Both stale callers must ultimately use session 2.
+	close(staleToolRelease)
+	select {
+	case n := <-reconnectStarted:
+		if n != 2 {
+			t.Fatalf("replacement initialize = %d, want 2", n)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("replacement initialize did not start")
+	}
+	close(staleReadRelease)
+	close(reconnectRelease)
+	for range 2 {
+		select {
+		case outcome := <-done:
+			if outcome.err != nil {
+				t.Errorf("%s after expiry: %v", outcome.name, outcome.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("stale calls did not finish after reconnect")
+		}
+	}
+	fake.mu.Lock()
+	inits := fake.initCount
+	deleted := append([]string(nil), fake.deleted...)
+	fake.mu.Unlock()
+	if inits != 2 {
+		t.Fatalf("two stale callers initialized %d sessions, want 2 total", inits)
+	}
+	for _, session := range deleted {
+		if session == "session-2" {
+			t.Fatalf("replacement session was closed by the second stale caller; deletes=%v", deleted)
+		}
+	}
+}
+
 func TestSupervisorHTTPPropagatesTraceContextToDownstreamCall(t *testing.T) {
 	parent := tracing.Context{TraceID: "4bf92f3577b34da6a3ce929d0e0e4736", SpanID: "00f067aa0ba902b7", Sampled: true}
 	gotTrace := make(chan tracing.Context, 1)

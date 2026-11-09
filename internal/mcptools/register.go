@@ -62,6 +62,9 @@ func RegisterWithOptions(ctx context.Context, reg *tools.Registry, conn *Conn, o
 	sum := Summary{Servers: make(map[string]int)}
 	targets := make(map[string]string, len(defs))
 	for _, d := range defs {
+		if !visibleToModel(d) {
+			continue
+		}
 		namespace := strings.TrimSpace(opts.Namespace)
 		if namespace == "" && !strings.HasPrefix(d.Name, namePrefix) {
 			namespace = opts.FallbackNamespace
@@ -96,6 +99,30 @@ func RegisterWithOptions(ctx context.Context, reg *tools.Registry, conn *Conn, o
 		sum.Total++
 	}
 	return sum, nil
+}
+
+func visibleToModel(d mcp.Tool) bool {
+	if len(d.Meta) == 0 {
+		return true
+	}
+	var meta struct {
+		UI struct {
+			Visibility json.RawMessage `json:"visibility"`
+		} `json:"ui"`
+	}
+	if err := json.Unmarshal(d.Meta, &meta); err != nil || len(meta.UI.Visibility) == 0 {
+		return true
+	}
+	var visibility []string
+	if err := json.Unmarshal(meta.UI.Visibility, &visibility); err != nil {
+		return false
+	}
+	for _, audience := range visibility {
+		if audience == "model" {
+			return true
+		}
+	}
+	return false
 }
 
 func readOnlyHint(d mcp.Tool) bool {

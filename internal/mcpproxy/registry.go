@@ -31,6 +31,12 @@ const qualifiedPrefix = "mcp__"
 type route struct {
 	supervisor *Supervisor
 	bareName   string
+	tool       mcp.Tool
+}
+
+type resourceRoute struct {
+	supervisor *Supervisor
+	tool       string
 }
 
 type registryMetrics struct {
@@ -64,9 +70,10 @@ type Registry struct {
 	logger      *slog.Logger
 	metrics     *registryMetrics
 
-	mu     sync.RWMutex
-	tools  []mcp.Tool       // merged, namespaced, sorted by name
-	routes map[string]route // qualified name -> dispatch target
+	mu             sync.RWMutex
+	tools          []mcp.Tool       // merged, namespaced, sorted by name
+	routes         map[string]route // qualified name -> dispatch target
+	resourceRoutes map[string][]resourceRoute
 
 	sessions map[*mcp.ServerSession]struct{}
 }
@@ -83,11 +90,12 @@ func newRegistryWithMetrics(servers []*Supervisor, logger *slog.Logger, collecto
 		logger = slog.New(slog.DiscardHandler)
 	}
 	r := &Registry{
-		supervisors: servers,
-		logger:      logger,
-		metrics:     collectors,
-		routes:      map[string]route{},
-		sessions:    map[*mcp.ServerSession]struct{}{},
+		supervisors:    servers,
+		logger:         logger,
+		metrics:        collectors,
+		routes:         map[string]route{},
+		resourceRoutes: map[string][]resourceRoute{},
+		sessions:       map[*mcp.ServerSession]struct{}{},
 	}
 	for _, s := range servers {
 		s.onToolsChanged = r.onSupervisorToolsChanged
@@ -141,7 +149,7 @@ func (r *Registry) rebuild() {
 			nt := t
 			nt.Name = qualified
 			tools = append(tools, nt)
-			routes[qualified] = route{supervisor: sup, bareName: t.Name}
+			routes[qualified] = route{supervisor: sup, bareName: t.Name, tool: nt}
 		}
 	}
 
@@ -168,8 +176,19 @@ func (r *Registry) rebuild() {
 		}
 	})
 
+	resourceRoutes := map[string][]resourceRoute{}
+	for _, t := range tools {
+		uri, _ := toolUIMetadata(t)
+		if uri == "" {
+			continue
+		}
+		rt := routes[t.Name]
+		resourceRoutes[uri] = append(resourceRoutes[uri], resourceRoute{supervisor: rt.supervisor, tool: t.Name})
+	}
+
 	r.tools = tools
 	r.routes = routes
+	r.resourceRoutes = resourceRoutes
 }
 
 // ListTools returns one page of the merged namespaced list, paginated by an
@@ -197,13 +216,76 @@ func (r *Registry) ListTools(ctx context.Context, cursor string) (mcp.ListToolsR
 	return result, nil
 }
 
+// ListResources returns a valid empty page. MCP Apps UI resources are discovered
+// through tool metadata and need not appear in a downstream resources/list.
+func (r *Registry) ListResources(ctx context.Context, cursor string) (mcp.ListResourcesResult, error) {
+	if cursor != "" {
+		return mcp.ListResourcesResult{}, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "invalid cursor")
+	}
+	return mcp.ListResourcesResult{Resources: []mcp.Resource{}}, nil
+}
+
+// ReadResource routes a UI resource read using an optional namespaced sourceTool
+// to disambiguate identical URIs advertised by different downstream servers.
+func (r *Registry) ReadResource(ctx context.Context, params mcp.ReadResourceParams) (*mcp.ReadResourceResult, error) {
+	r.mu.RLock()
+	candidates := append([]resourceRoute(nil), r.resourceRoutes[params.URI]...)
+	r.mu.RUnlock()
+
+	if params.SourceTool != "" {
+		for _, candidate := range candidates {
+			if candidate.tool == params.SourceTool {
+				return candidate.supervisor.ReadResource(ctx, params.URI)
+			}
+		}
+		return nil, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "unknown resource %q for source tool %q", params.URI, params.SourceTool)
+	}
+	if len(candidates) == 0 {
+		return nil, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "unknown resource: %s", params.URI)
+	}
+	if len(candidates) > 1 {
+		return nil, jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "ambiguous resource %q: sourceTool is required", params.URI)
+	}
+	return candidates[0].supervisor.ReadResource(ctx, params.URI)
+}
+
+// toolUIMetadata extracts current and deprecated MCP Apps resource URIs.
+// Visibility filtering belongs to model-facing clients, not this aggregation
+// boundary: app hosts still need app-only tools and their resource routes.
+func toolUIMetadata(t mcp.Tool) (uri string, modelVisible bool) {
+	modelVisible = true
+	if len(t.Meta) == 0 {
+		return "", modelVisible
+	}
+	var meta map[string]json.RawMessage
+	if json.Unmarshal(t.Meta, &meta) != nil {
+		return "", modelVisible
+	}
+	if raw, ok := meta["ui"]; ok {
+		var ui map[string]json.RawMessage
+		if json.Unmarshal(raw, &ui) == nil {
+			_ = json.Unmarshal(ui["resourceUri"], &uri)
+			if visibility, ok := ui["visibility"]; ok && string(visibility) != "null" {
+				var values []string
+				if json.Unmarshal(visibility, &values) == nil {
+					modelVisible = slices.Contains(values, "model")
+				}
+			}
+		}
+	}
+	if uri == "" {
+		_ = json.Unmarshal(meta["ui/resourceUri"], &uri)
+	}
+	return uri, modelVisible
+}
+
 // CallTool routes a qualified call to the owning supervisor and returns its
 // result verbatim. An unknown tool is a CodeInvalidParams jsonrpc error (the
 // model should not have called it); a known tool's result (including IsError) is
 // passed straight through.
 func (r *Registry) CallTool(ctx context.Context, qualified string, args json.RawMessage) (*mcp.CallToolResult, error) {
 	start := time.Now()
-	sup, bare, ok := r.route(qualified)
+	sup, bare, ok := r.routeForCall(ctx, qualified)
 	if !ok {
 		err := jsonrpc.Errorf(jsonrpc.CodeInvalidParams, "unknown tool: %s", qualified)
 		duration := time.Since(start)
@@ -279,6 +361,61 @@ func (r *Registry) logToolCall(ctx context.Context, qualified, server, tool stri
 		return
 	}
 	r.logger.Info("mcp tool request completed", attrs...)
+}
+
+// routeForCall enforces same-server app calls using exact route records, never
+// string parsing. Bare companion names resolve only on the source supervisor.
+func (r *Registry) routeForCall(ctx context.Context, requested string) (*Supervisor, string, bool) {
+	source := mcp.SourceToolFromContext(ctx)
+	if source == "" {
+		return r.route(requested)
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	sourceRoute, ok := r.routes[source]
+	if !ok {
+		return nil, "", false
+	}
+	if target, exact := r.routes[requested]; exact {
+		if target.supervisor != sourceRoute.supervisor || !visibleToApp(target.tool) {
+			return nil, "", false
+		}
+		return target.supervisor, target.bareName, true
+	}
+	var target route
+	found := false
+	for _, candidate := range r.routes {
+		if candidate.supervisor == sourceRoute.supervisor && candidate.bareName == requested {
+			if found {
+				return nil, "", false
+			}
+			target = candidate
+			found = true
+		}
+	}
+	if !found || !visibleToApp(target.tool) {
+		return nil, "", false
+	}
+	return target.supervisor, target.bareName, true
+}
+
+func visibleToApp(t mcp.Tool) bool {
+	if len(t.Meta) == 0 {
+		return true
+	}
+	var meta struct {
+		UI struct {
+			Visibility json.RawMessage `json:"visibility"`
+		} `json:"ui"`
+	}
+	if err := json.Unmarshal(t.Meta, &meta); err != nil || len(meta.UI.Visibility) == 0 {
+		return true
+	}
+	var visibility []string
+	if err := json.Unmarshal(meta.UI.Visibility, &visibility); err != nil {
+		return false
+	}
+	return slices.Contains(visibility, "app")
 }
 
 // route resolves a qualified name to its supervisor and bare tool name via the

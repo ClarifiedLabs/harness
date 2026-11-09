@@ -93,6 +93,10 @@ type Supervisor struct {
 	// the raw stdio connection.
 	wrapConn func(io.ReadWriteCloser) io.ReadWriteCloser
 
+	// httpMu serializes HTTP handshakes independently of mu, which must not be
+	// held across network requests.
+	httpMu sync.Mutex
+
 	mu      sync.Mutex
 	state   State
 	tools   []mcp.Tool
@@ -233,6 +237,7 @@ func (s *Supervisor) startChild() (*procgroup.Process, *mcp.Client, io.ReadWrite
 		Info:           proxyClientInfo(),
 		OnToolsChanged: s.handleDownstreamListChanged,
 		Logger:         s.logger,
+		Extensions:     json.RawMessage(`{"io.modelcontextprotocol/ui":{}}`),
 	})
 	s.mu.Lock()
 	s.process = process
@@ -362,7 +367,7 @@ func (s *Supervisor) runHTTP(ctx context.Context) {
 	// already set StateFailed); any other failure is retried on next use, so mark
 	// the server restarting and move on. There is no restart loop because the
 	// process is not ours.
-	if err := s.connectHTTP(ctx); err != nil {
+	if err := s.connectHTTP(ctx, nil); err != nil {
 		var ve *mcp.VersionError
 		if !errors.As(err, &ve) {
 			s.setState(StateRestarting)
@@ -387,12 +392,25 @@ func (s *Supervisor) runHTTP(ctx context.Context) {
 
 // connectHTTP builds a fresh transport/client pair, initializes, and caches
 // tools. It is reused for the initial connect and for session-expiry recovery.
-func (s *Supervisor) connectHTTP(ctx context.Context) error {
+// stale is nil for initial/lazy connects, or the client whose request observed
+// session expiry. A non-nil stale client reconnects only if it is still current.
+func (s *Supervisor) connectHTTP(ctx context.Context, stale *mcp.Client) error {
+	s.httpMu.Lock()
+	defer s.httpMu.Unlock()
+
 	s.mu.Lock()
 	closing := s.closing || (s.ctx != nil && s.ctx.Err() != nil)
+	current := s.client
+	state := s.state
 	s.mu.Unlock()
 	if closing {
 		return context.Canceled
+	}
+	// Initial/lazy connectors share a ready connection. A stale caller also
+	// reuses a replacement installed while its old request was failing instead
+	// of initializing again and closing the replacement under active retries.
+	if current != nil && state == StateReady && (stale == nil || current != stale) {
+		return nil
 	}
 	initCtx, cancel := context.WithTimeout(ctx, initTimeout)
 	defer cancel()
@@ -412,8 +430,9 @@ func (s *Supervisor) connectHTTP(ctx context.Context) error {
 		Logger:       s.logger,
 	})
 	client := mcp.NewClientTransport(transport, mcp.ClientOptions{
-		Info:   proxyClientInfo(),
-		Logger: s.logger,
+		Info:       proxyClientInfo(),
+		Logger:     s.logger,
+		Extensions: json.RawMessage(`{"io.modelcontextprotocol/ui":{}}`),
 	})
 	installed := false
 	defer func() {
@@ -438,6 +457,10 @@ func (s *Supervisor) connectHTTP(ctx context.Context) error {
 	if s.closing || (s.ctx != nil && s.ctx.Err() != nil) {
 		s.mu.Unlock()
 		return context.Canceled
+	}
+	if stale != nil && s.client != stale && s.client != nil && s.state == StateReady {
+		s.mu.Unlock()
+		return nil
 	}
 	prev := s.client
 	prevTransport := s.http
@@ -572,7 +595,7 @@ func (s *Supervisor) CallTool(ctx context.Context, name string, args json.RawMes
 	// restart loop to do it eagerly). A terminal StateFailed (e.g. a version
 	// error that will never change) skips the attempt — it would just fail again.
 	if client == nil && state != StateFailed && s.cfg.Transport == TransportHTTP {
-		if err := s.connectHTTP(ctx); err != nil {
+		if err := s.connectHTTP(ctx, nil); err != nil {
 			s.logger.Warn("http lazy connect failed", logging.Category(categoryServer), "err", err)
 			return unavailableResult(s.cfg.Name, s.State()), nil
 		}
@@ -594,7 +617,7 @@ func (s *Supervisor) CallTool(ctx context.Context, name string, args json.RawMes
 	// HTTP session expiry: rebuild a fresh transport/client pair, re-initialize,
 	// and retry the call once.
 	if s.cfg.Transport == TransportHTTP && errors.Is(err, mcp.ErrSessionExpired) {
-		if rerr := s.connectHTTP(ctx); rerr != nil {
+		if rerr := s.connectHTTP(ctx, client); rerr != nil {
 			s.logger.Warn("http reconnect after session expiry failed", logging.Category(categoryServer), "err", rerr)
 			return unavailableResult(s.cfg.Name, s.State()), nil
 		}
@@ -604,6 +627,50 @@ func (s *Supervisor) CallTool(ctx context.Context, name string, args json.RawMes
 		return client.CallTool(ctx, name, args)
 	}
 
+	return nil, err
+}
+
+// ReadResource reads a downstream UI resource. HTTP lazy connection and one
+// session-expiry reconnect mirror CallTool; unavailable servers return an error
+// because resources/read has no isError result form.
+func (s *Supervisor) ReadResource(ctx context.Context, uri string) (*mcp.ReadResourceResult, error) {
+	s.mu.Lock()
+	client := s.client
+	state := s.state
+	closing := s.closing || (s.ctx != nil && s.ctx.Err() != nil)
+	s.mu.Unlock()
+	if closing {
+		return nil, context.Canceled
+	}
+
+	if client == nil && state != StateFailed && s.cfg.Transport == TransportHTTP {
+		if err := s.connectHTTP(ctx, nil); err != nil {
+			s.logger.Warn("http lazy connect failed", logging.Category(categoryServer), "err", err)
+			return nil, fmt.Errorf("mcp server %s is unavailable (%s)", s.cfg.Name, s.State())
+		}
+		s.mu.Lock()
+		client = s.client
+		state = s.state
+		s.mu.Unlock()
+	}
+	if client == nil || state != StateReady {
+		return nil, fmt.Errorf("mcp server %s is unavailable (%s)", s.cfg.Name, state)
+	}
+
+	res, err := client.ReadResource(ctx, uri)
+	if err == nil {
+		return res, nil
+	}
+	if s.cfg.Transport == TransportHTTP && errors.Is(err, mcp.ErrSessionExpired) {
+		if rerr := s.connectHTTP(ctx, client); rerr != nil {
+			s.logger.Warn("http reconnect after session expiry failed", logging.Category(categoryServer), "err", rerr)
+			return nil, fmt.Errorf("mcp server %s is unavailable (%s)", s.cfg.Name, s.State())
+		}
+		s.mu.Lock()
+		client = s.client
+		s.mu.Unlock()
+		return client.ReadResource(ctx, uri)
+	}
 	return nil, err
 }
 

@@ -761,18 +761,18 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 		}
 	}
 	// Local MCP service: when explicitly enabled, harness spawns the configured
-	// local stdio MCP child and registers its tools too. Its surface is static,
-	// so it needs no live refresh: the refresh hook below is wired only to the
-	// HTTP conn, whose transport never pushes list_changed.
+	// local stdio MCP child and registers its tools too. Interactive runs retain
+	// the conn so downstream list_changed notifications refresh late-arriving tools.
+	var localConn *mcptools.Conn
 	var localSummary mcptools.Summary
 	if localMCPEnabled(cfg.MCP.Local, runOptions.PromptSet) {
-		_, summary, cleanup, ok := setupLocalMCP(startupCtx, cfg.MCP.Local, cfg.MCP.Local.EnableSet, toolCatalog, logger)
+		conn, summary, cleanup, ok := setupLocalMCP(startupCtx, cfg.MCP.Local, cfg.MCP.Local.EnableSet, toolCatalog, logger)
 		defer cleanup()
 		if startupInterrupted() {
 			return ui.ExitInterrupt
 		}
 		if ok {
-			localSummary = summary
+			localConn, localSummary = conn, summary
 		}
 	}
 	var lspSummary mcptools.Summary
@@ -1310,11 +1310,11 @@ func runRoot(env environment, invocation cli.Invocation) (exitCode int) {
 	}
 	// Wire the MCP tool-list refresh hook for the interactive REPL only: one-shot
 	// runs a single prompt with tools discovered before the request, so it needs no hook.
-	if mcpConn != nil && !runOptions.PromptSet {
+	if (mcpConn != nil || localConn != nil) && !runOptions.PromptSet {
 		staticSummary := func() mcptools.Summary {
-			return mergeMCPSummaries(localSummary, lspSummary, serenaSummary)
+			return mergeMCPSummaries(lspSummary, serenaSummary)
 		}
-		refreshMCP := newMCPRefresherDynamic(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, staticSummary, logger, pendingMCP, mcpLim)
+		refreshMCP := newComposedMCPRefresherDynamic(mcpConn, localConn, toolCatalog, agents, mcpBases, mcpSummary, localSummary, staticSummary, logger, pendingMCP, mcpLim)
 		app.RefreshMCP = func(ctx context.Context, agentName string) (*tools.Registry, string) {
 			reg, notice := refreshMCP(ctx, agentName)
 			if reg != nil {

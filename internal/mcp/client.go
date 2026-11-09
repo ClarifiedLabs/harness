@@ -30,6 +30,7 @@ type Client struct {
 	logger    *slog.Logger
 
 	info           Implementation
+	extensions     json.RawMessage
 	onToolsChanged func()
 
 	mu                sync.Mutex
@@ -43,6 +44,9 @@ type ClientOptions struct {
 	Info           Implementation
 	OnToolsChanged func()
 	Logger         *slog.Logger
+	// Extensions is copied verbatim into initialize capabilities.extensions.
+	// Ordinary Harness clients leave it nil and do not claim extension hosting.
+	Extensions json.RawMessage
 }
 
 // NewClient wires a jsonrpc.Peer over rwc and returns a Client. The peer
@@ -85,6 +89,7 @@ func NewClientTransport(t Transport, opts ClientOptions) *Client {
 		transport:      t,
 		logger:         logger,
 		info:           opts.Info,
+		extensions:     append(json.RawMessage(nil), opts.Extensions...),
 		onToolsChanged: opts.OnToolsChanged,
 	}
 }
@@ -138,7 +143,7 @@ func (c *Client) Initialize(ctx context.Context) (*InitializeResult, error) {
 
 	params := InitializeParams{
 		ProtocolVersion: ProtocolVersion,
-		Capabilities:    ClientCapabilities{Experimental: json.RawMessage(`{}`)},
+		Capabilities:    ClientCapabilities{Experimental: json.RawMessage(`{}`), Extensions: c.extensions},
 		ClientInfo:      c.info,
 	}
 	raw, err := json.Marshal(params)
@@ -263,6 +268,67 @@ func (c *Client) ListTools(ctx context.Context) ([]Tool, error) {
 		}
 		cursor = result.NextCursor
 	}
+}
+
+// ListResources returns all advertised resources, following pagination. It
+// returns nil without error when the server has no resources capability.
+func (c *Client) ListResources(ctx context.Context) ([]Resource, error) {
+	c.mu.Lock()
+	hasResources := len(c.serverCaps.Resources) > 0 && string(c.serverCaps.Resources) != "null"
+	c.mu.Unlock()
+	if !hasResources {
+		return nil, nil
+	}
+
+	var all []Resource
+	cursor := ""
+	cumulativeBytes := 0
+	for page := 0; ; page++ {
+		if page >= maxListToolsPages {
+			return nil, fmt.Errorf("mcp: resources/list exceeded %d pages (non-advancing cursor?)", maxListToolsPages)
+		}
+		raw, err := json.Marshal(ListResourcesParams{Cursor: cursor})
+		if err != nil {
+			return nil, fmt.Errorf("mcp: marshal resources/list params: %w", err)
+		}
+		resRaw, err := c.transport.Call(ctx, MethodListResources, raw)
+		if err != nil {
+			return nil, fmt.Errorf("mcp: resources/list: %w", err)
+		}
+		cumulativeBytes += len(resRaw)
+		if cumulativeBytes > maxListToolsBytes {
+			return nil, fmt.Errorf("mcp: resources/list exceeded %d cumulative response bytes", maxListToolsBytes)
+		}
+		var result ListResourcesResult
+		if err := json.Unmarshal(resRaw, &result); err != nil {
+			return nil, fmt.Errorf("mcp: decode resources/list result: %w", err)
+		}
+		if len(result.Resources) > maxListToolsCount-len(all) {
+			return nil, fmt.Errorf("mcp: resources/list exceeded %d resources", maxListToolsCount)
+		}
+		all = append(all, result.Resources...)
+		if result.NextCursor == "" {
+			return all, nil
+		}
+		cursor = result.NextCursor
+	}
+}
+
+// ReadResource reads a resource by URI, preserving resource and content metadata.
+func (c *Client) ReadResource(ctx context.Context, uri string) (*ReadResourceResult, error) {
+	raw, err := json.Marshal(ReadResourceParams{URI: uri})
+	if err != nil {
+		return nil, fmt.Errorf("mcp: marshal resources/read params: %w", err)
+	}
+	resRaw, err := c.call(ctx, MethodReadResource, raw)
+	if err != nil {
+		return nil, err
+	}
+	var result ReadResourceResult
+	if err := json.Unmarshal(resRaw, &result); err != nil {
+		return nil, fmt.Errorf("mcp: decode resources/read result: %w", err)
+	}
+	return &result, nil
 }
 
 // CallTool invokes one tool. A JSON-RPC error (unknown tool, bad params) is
