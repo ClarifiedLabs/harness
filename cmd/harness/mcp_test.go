@@ -31,8 +31,17 @@ import (
 	"harness/internal/ui"
 )
 
-func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev, static mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
-	return newMCPRefresherDynamic(conn, catalog, agents, bases, prev, func() mcptools.Summary { return static }, logger, pending, limits...)
+func newMCPRefresher(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev, static mcptools.Summary, logger *slog.Logger, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
+	// Legacy fixtures specify automatic bases separately from whitelist agents.
+	for name, base := range snapshotMCPAgentBases(agents) {
+		if _, ok := bases[name]; !ok {
+			if bases == nil {
+				bases = make(mcpAgentBases)
+			}
+			bases[name] = base
+		}
+	}
+	return newMCPRefresherDynamic(conn, catalog, agents, bases, prev, func() mcptools.Summary { return static }, logger, limits...)
 }
 
 // echoProvider is an mcp.ToolProvider that advertises a mutable tool list and
@@ -219,7 +228,7 @@ func mcpToolCallStep(id, name, args string) llmtest.Step {
 // mcp__test__echo, and the echoed result must flow back into the next request's
 // transcript.
 func TestSetupMCPRegistersToolsAndOneShotCalls(t *testing.T) {
-	url, _ := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{echoTool()}})
+	url, _ := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{mcpTool("echo")}})
 
 	fp := llmtest.New("fake",
 		mcpToolCallStep("call_1", "mcp__test__echo", `{"text":"hi"}`),
@@ -230,7 +239,7 @@ func TestSetupMCPRegistersToolsAndOneShotCalls(t *testing.T) {
 	)
 
 	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "echo it"}, fp, "")
-	env.getenv = withMCPEnv(env.getenv, url)
+	env.args = append(env.args, "-config", writeHarnessConfig(t, url, ""))
 
 	if code := run(env); code != ui.ExitOK {
 		t.Fatalf("run exit = %d, want 0; errw=%q", code, errw.String())
@@ -246,43 +255,6 @@ func TestSetupMCPRegistersToolsAndOneShotCalls(t *testing.T) {
 	}
 	if !strings.Contains(errw.String(), "mcp: connected") {
 		t.Errorf("expected mcp connected notice on stderr, got %q", errw.String())
-	}
-}
-
-// TestSetupMCPRejectsNonHTTPProxyAndContinues enables MCP with a non-HTTP
-// proxy value. Startup must proceed, emit a single [warn] [mcp] line naming
-// the bad proxy, register zero mcp__ tools, and return a no-op cleanup.
-func TestSetupMCPRejectsNonHTTPProxyAndContinues(t *testing.T) {
-	catalog := tools.CatalogWithOptions(tools.Options{})
-	before := len(catalog.Names())
-
-	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: "/no/such.sock"}, catalog, logger, nil)
-	defer cleanup()
-
-	if ok || conn != nil {
-		t.Fatalf("setupMCP should fail soft: ok=%v conn=%v", ok, conn != nil)
-	}
-	if got := len(catalog.Names()); got != before {
-		t.Errorf("catalog grew from %d to %d; no MCP tools should register", before, got)
-	}
-	if !strings.Contains(errw.String(), "[warn]") || !strings.Contains(errw.String(), "[mcp]") {
-		t.Errorf("expected [warn] [mcp] line, got %q", errw.String())
-	}
-	if !strings.Contains(errw.String(), "/no/such.sock") || !strings.Contains(errw.String(), "http(s) URL") {
-		t.Errorf("warning should name the invalid proxy, got %q", errw.String())
-	}
-	if strings.Count(errw.String(), "[warn]") != 1 {
-		t.Errorf("expected exactly one warning, got %q", errw.String())
-	}
-	for _, n := range catalog.Names() {
-		if strings.HasPrefix(n, "mcp__") {
-			t.Errorf("unexpected mcp tool registered: %q", n)
-		}
 	}
 }
 
@@ -349,7 +321,7 @@ func writeHarnessConfig(t *testing.T, proxyURL, authHeader string) string {
 	t.Helper()
 	dir := t.TempDir()
 	p := filepath.Join(dir, "config.json")
-	body := fmt.Sprintf(`{"mcp":{"enable":true,"proxy":%q,"headers":{"Authorization":%q}}}`, proxyURL, authHeader)
+	body := fmt.Sprintf(`{"mcp":{"servers":{"test":{"url":%q,"headers":{"Authorization":%q}}}}}`, proxyURL, authHeader)
 	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
@@ -363,7 +335,7 @@ func writeHarnessConfig(t *testing.T, proxyURL, authHeader string) string {
 // request's transcript, and the configured header must have reached the proxy
 // on every request.
 func TestSetupMCPHTTPProxyRoundTrip(t *testing.T) {
-	url, mw := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{echoTool()}})
+	url, mw := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{mcpTool("echo")}})
 	cfgPath := writeHarnessConfig(t, url, "Bearer secret-tok")
 
 	fp := llmtest.New("fake",
@@ -398,7 +370,7 @@ func TestSetupMCPHTTPProxyRoundTrip(t *testing.T) {
 }
 
 func TestSetupMCPTrustsRemoteReadOnlyHint(t *testing.T) {
-	url, _ := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{readOnlyMCPTool("mcp__test__inspect")}})
+	url, _ := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{readOnlyMCPTool("inspect")}})
 
 	catalog := tools.CatalogWithOptions(tools.Options{})
 	var errw strings.Builder
@@ -406,7 +378,7 @@ func TestSetupMCPTrustsRemoteReadOnlyHint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, sum, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: url}, catalog, logger, nil)
+	conn, sum, cleanup, ok := setupMCPServices(context.Background(), []mcpproxy.ResolvedServer{{Name: "test", Transport: mcpproxy.TransportHTTP, URL: url}}, catalog, logger, nil)
 	defer cleanup()
 
 	if !ok || conn == nil {
@@ -421,286 +393,14 @@ func TestSetupMCPTrustsRemoteReadOnlyHint(t *testing.T) {
 	}
 }
 
-// TestSetupMCPHTTPUnreachableWarnsAndContinues points the proxy URL at a
-// closed port: setup must fail soft on the Register attempt, emit a single
-// MCP-unavailable warning naming the URL, and let the run continue.
-func TestSetupMCPHTTPUnreachableWarnsAndContinues(t *testing.T) {
-	oldTimeout := mcpRegisterTimeout
-	mcpRegisterTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { mcpRegisterTimeout = oldTimeout })
+type mcpTestTool struct{ name string }
 
-	// Bind then immediately close a listener to obtain a definitely-dead URL.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	deadURL := "http://" + ln.Addr().String()
-	_ = ln.Close()
-
-	catalog := tools.CatalogWithOptions(tools.Options{})
-	before := len(catalog.Names())
-
-	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: deadURL}, catalog, logger, nil)
-	defer cleanup()
-
-	if ok || conn != nil {
-		t.Fatalf("setupMCP should fail soft: ok=%v conn=%v", ok, conn != nil)
-	}
-	if got := len(catalog.Names()); got != before {
-		t.Errorf("catalog grew from %d to %d; no MCP tools should register", before, got)
-	}
-	if !strings.Contains(errw.String(), "cannot connect to proxy at "+deadURL) {
-		t.Errorf("warning should name the dead URL, got %q", errw.String())
-	}
-	if strings.Count(errw.String(), "[warn]") != 1 {
-		t.Errorf("expected exactly one warning, got %q", errw.String())
-	}
-}
-
-func TestRunInteractiveMCPRegistrationDoesNotBlockStartup(t *testing.T) {
-	oldTimeout := mcpRegisterTimeout
-	mcpRegisterTimeout = 3 * time.Second
-	t.Cleanup(func() { mcpRegisterTimeout = oldTimeout })
-
-	release := make(chan struct{})
-	var releaseOnce sync.Once
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case <-release:
-		case <-r.Context().Done():
-		}
-	}))
-	t.Cleanup(func() {
-		releaseOnce.Do(func() { close(release) })
-		proxy.Close()
-	})
-
-	fp := llmtest.New("fake")
-	env, _, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8"}, fp, "/exit\n")
-	env.getenv = withMCPEnv(env.getenv, proxy.URL)
-
-	codeCh := make(chan int, 1)
-	go func() { codeCh <- run(env) }()
-
-	select {
-	case code := <-codeCh:
-		if code != ui.ExitOK {
-			t.Fatalf("run exit = %d, want 0; stderr=%q", code, errw.String())
-		}
-	case <-time.After(time.Second):
-		releaseOnce.Do(func() { close(release) })
-		t.Fatal("interactive startup blocked on MCP registration")
-	}
-}
-
-type asyncMCPTestTool struct{ name string }
-
-func (t asyncMCPTestTool) Name() string                  { return t.name }
-func (t asyncMCPTestTool) Description() string           { return "async mcp test tool" }
-func (t asyncMCPTestTool) Schema() json.RawMessage       { return json.RawMessage(`{"type":"object"}`) }
-func (t asyncMCPTestTool) ReadOnly(json.RawMessage) bool { return false }
-func (t asyncMCPTestTool) Run(context.Context, json.RawMessage) (string, error) {
+func (t mcpTestTool) Name() string                  { return t.name }
+func (t mcpTestTool) Description() string           { return "mcp test tool" }
+func (t mcpTestTool) Schema() json.RawMessage       { return json.RawMessage(`{"type":"object"}`) }
+func (t mcpTestTool) ReadOnly(json.RawMessage) bool { return false }
+func (t mcpTestTool) Run(context.Context, json.RawMessage) (string, error) {
 	return "ok", nil
-}
-
-func TestMCPRefresherAppliesAsyncRegistration(t *testing.T) {
-	catalog := tools.CatalogWithOptions(tools.Options{})
-	discovered := &tools.Registry{}
-	discovered.Register(asyncMCPTestTool{name: "mcp__test__async"})
-	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
-	pending.results <- asyncMCPResult{
-		registry: discovered,
-		summary: mcptools.Summary{
-			Servers: map[string]int{"test": 1},
-			Names:   []string{"mcp__test__async"},
-			Total:   1,
-		},
-	}
-
-	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
-	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll},
-	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-
-	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	refresh := newMCPRefresher(conn, catalog, agents, bases, mcptools.Summary{}, mcptools.Summary{}, logger, pending)
-
-	sel, notice := refresh(context.Background(), "auto")
-	if sel == nil {
-		t.Fatalf("async registration should swap current tools")
-	}
-	if !slices.Contains(sel.Names(), "mcp__test__async") {
-		t.Fatalf("async MCP tool missing from selected registry: %v", sel.Names())
-	}
-	if _, ok := catalog.Lookup("mcp__test__async"); !ok {
-		t.Fatalf("async MCP tool was not copied into catalog")
-	}
-	if !slices.Contains(agents["auto"].AllowedTools, "mcp__test__async") {
-		t.Fatalf("agent allowed tools not re-derived: %v", agents["auto"].AllowedTools)
-	}
-	if !strings.Contains(notice, "tool list updated") {
-		t.Fatalf("notice = %q, want update notice", notice)
-	}
-	if !strings.Contains(errw.String(), "mcp: connected") {
-		t.Fatalf("connected notice not logged: %q", errw.String())
-	}
-	if !pending.applied.Load() {
-		t.Fatalf("pending registration should be marked applied")
-	}
-}
-
-func TestAsyncMCPRegistrationRestoresExplicitWhitelistTool(t *testing.T) {
-	catalog := tools.CatalogWithOptions(tools.Options{})
-	agents := map[string]agentdef.Definition{
-		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__async"}},
-	}
-	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
-	initial, err := subsetForAgentTools(catalog, agents["locked"].AllowedTools, pending)
-	if err != nil {
-		t.Fatalf("initial subset with pending MCP should not fail: %v", err)
-	}
-	if slices.Contains(initial.Names(), "mcp__test__async") {
-		t.Fatalf("undiscovered MCP tool should not be in initial subset: %v", initial.Names())
-	}
-
-	discovered := &tools.Registry{}
-	discovered.Register(asyncMCPTestTool{name: "mcp__test__async"})
-	pending.results <- asyncMCPResult{
-		registry: discovered,
-		summary: mcptools.Summary{
-			Servers: map[string]int{"test": 1},
-			Names:   []string{"mcp__test__async"},
-			Total:   1,
-		},
-	}
-
-	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
-	refresh := newMCPRefresher(conn, catalog, agents, mcpAgentBases{}, mcptools.Summary{}, mcptools.Summary{}, slog.New(slog.DiscardHandler), pending)
-	sel, notice := refresh(context.Background(), "locked")
-	if sel == nil {
-		t.Fatalf("async registration should restore explicit whitelist MCP tool")
-	}
-	if !slices.Contains(sel.Names(), "mcp__test__async") {
-		t.Fatalf("explicit MCP tool missing after async registration: %v", sel.Names())
-	}
-	if !strings.Contains(notice, "tool list updated") {
-		t.Fatalf("notice = %q, want update notice", notice)
-	}
-}
-
-// TestAsyncMCPRegistrationRegistersToolsForUnknownAgent guards against losing a
-// consumed async result. take() drains the one-shot channel and marks the
-// registration applied, so if applyMCPRegistration bailed before registering the
-// discovered tools (e.g. the refresh fired for an agent name absent from the map),
-// the tools would be stranded forever. The discovered tools must land in the
-// catalog and every MCP-exposing agent must still be re-derived regardless of which
-// agent is current.
-func TestAsyncMCPRegistrationRegistersToolsForUnknownAgent(t *testing.T) {
-	catalog := tools.CatalogWithOptions(tools.Options{})
-	discovered := &tools.Registry{}
-	discovered.Register(asyncMCPTestTool{name: "mcp__test__async"})
-	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
-	pending.results <- asyncMCPResult{
-		registry: discovered,
-		summary: mcptools.Summary{
-			Servers: map[string]int{"test": 1},
-			Names:   []string{"mcp__test__async"},
-			Total:   1,
-		},
-	}
-
-	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
-	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll},
-	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-	refresh := newMCPRefresher(conn, catalog, agents, bases, mcptools.Summary{}, mcptools.Summary{}, slog.New(slog.DiscardHandler), pending)
-
-	// The refresh fires for an agent the map does not contain.
-	sel, _ := refresh(context.Background(), "ghost")
-	if sel != nil {
-		t.Fatalf("unknown current agent should not yield a subset, got %v", sel.Names())
-	}
-	if _, ok := catalog.Lookup("mcp__test__async"); !ok {
-		t.Fatalf("discovered MCP tool was stranded: not registered into catalog")
-	}
-	if !slices.Contains(agents["auto"].AllowedTools, "mcp__test__async") {
-		t.Fatalf("MCP-exposing agent not re-derived: %v", agents["auto"].AllowedTools)
-	}
-	if !pending.applied.Load() {
-		t.Fatalf("pending registration should be marked applied")
-	}
-}
-
-// TestAsyncMCPRegistrationPrunesUnknownWhitelistTool guards the typo path: an
-// explicit-whitelist agent that names an mcp__ tool the proxy never exposes must
-// have that name pruned (with a warning logged) once discovery completes, so a
-// later /agent switch does not fail catalog.Subset on a name the catalog will never
-// have. This restores parity with the one-shot path, which fails fast on the typo.
-func TestAsyncMCPRegistrationPrunesUnknownWhitelistTool(t *testing.T) {
-	catalog := tools.CatalogWithOptions(tools.Options{})
-	agents := map[string]agentdef.Definition{
-		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__async", "mcp__typo__missing"}},
-	}
-	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
-	discovered := &tools.Registry{}
-	discovered.Register(asyncMCPTestTool{name: "mcp__test__async"})
-	pending.results <- asyncMCPResult{
-		registry: discovered,
-		summary: mcptools.Summary{
-			Servers: map[string]int{"test": 1},
-			Names:   []string{"mcp__test__async"},
-			Total:   1,
-		},
-	}
-
-	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
-	refresh := newMCPRefresher(conn, catalog, agents, mcpAgentBases{}, mcptools.Summary{}, mcptools.Summary{}, logger, pending)
-
-	sel, _ := refresh(context.Background(), "locked")
-	if sel == nil {
-		t.Fatalf("async registration should restore the discovered whitelist tool")
-	}
-	if !slices.Contains(sel.Names(), "mcp__test__async") {
-		t.Fatalf("discovered MCP tool missing from subset: %v", sel.Names())
-	}
-	if slices.Contains(agents["locked"].AllowedTools, "mcp__typo__missing") {
-		t.Fatalf("undiscovered whitelist tool should be pruned: %v", agents["locked"].AllowedTools)
-	}
-	if !strings.Contains(errw.String(), "mcp__typo__missing") {
-		t.Fatalf("expected a warning naming the unknown MCP tool, got: %q", errw.String())
-	}
-	// Discovery is applied, so a later /agent switch goes through plain Subset; the
-	// pruned allowed list must not error on the bogus name.
-	if _, err := subsetForAgentTools(catalog, agents["locked"].AllowedTools, pending); err != nil {
-		t.Fatalf("subset after prune should not fail: %v", err)
-	}
-}
-
-// TestMCPRetryDelayHasFloor guards the background reconnect cadence: retry.Next
-// applies full jitter from zero, so without a floor a run of small draws could spin
-// the loop against a fast-failing proxy. The delay must never drop below the floor.
-func TestMCPRetryDelayHasFloor(t *testing.T) {
-	for attempt := 0; attempt < 8; attempt++ {
-		if d := mcpRetryDelay(attempt); d < mcpBackgroundRetryFloor {
-			t.Fatalf("mcpRetryDelay(%d) = %s, want >= %s", attempt, d, mcpBackgroundRetryFloor)
-		}
-	}
 }
 
 func TestRunSigintDuringMCPRegistration(t *testing.T) {
@@ -720,7 +420,7 @@ func TestRunSigintDuringMCPRegistration(t *testing.T) {
 
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	env, out, errw, _ := fakeProviderEnv(t, []string{"-model", "claude-opus-4-8", "-p", "hello"}, fp, "")
-	env.getenv = withMCPEnv(env.getenv, proxy.URL)
+	env.args = append(env.args, "-config", writeHarnessConfig(t, proxy.URL, ""))
 	env.sigCh = make(chan os.Signal, 1)
 
 	codeCh := make(chan int, 1)
@@ -746,19 +446,6 @@ func TestRunSigintDuringMCPRegistration(t *testing.T) {
 	}
 	if out.Len() != 0 {
 		t.Fatalf("interrupted startup should not write stdout; stdout=%q", out.String())
-	}
-}
-
-// TestResolveMCPProxy verifies an empty value resolves to the shared default
-// HTTP URL and an http(s) URL passes through verbatim.
-func TestResolveMCPProxy(t *testing.T) {
-	if got := resolveMCPProxy(""); got != mcpproxy.DefaultURL() {
-		t.Errorf("resolveMCPProxy(\"\") = %q, want %q", got, mcpproxy.DefaultURL())
-	}
-	for _, url := range []string{"http://127.0.0.1:8080/mcp", "https://proxy.example/mcp", "HTTP://up.example"} {
-		if got := resolveMCPProxy(url); got != url {
-			t.Errorf("resolveMCPProxy(%q) = %q, want verbatim pass-through", url, got)
-		}
 	}
 }
 
@@ -798,7 +485,7 @@ func TestMCPRefresherAddsAndRemovesTools(t *testing.T) {
 		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__test__alpha", "mcp__test__beta"}, MCPTools: agentdef.MCPToolsAll},
 	}
 	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
+	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler))
 
 	// No change yet: not dirty.
 	if sel, notice := refresh(context.Background(), "auto"); sel != nil || notice != "" {
@@ -853,8 +540,7 @@ func TestMCPLocalRefresherAddsLateTools(t *testing.T) {
 		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__local__alpha"}, MCPTools: agentdef.MCPToolsAll},
 	}
 	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-	refresh := newComposedMCPRefresherDynamic(nil, conn, catalog, agents, bases, mcptools.Summary{}, initial,
-		func() mcptools.Summary { return mcptools.Summary{} }, slog.New(slog.DiscardHandler), nil, mcpLimits{})
+	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler))
 
 	provider.setTools([]mcp.Tool{mcpTool("mcp__local__alpha"), mcpTool("mcp__local__late")})
 	g.notifyListChanged(t, conn)
@@ -872,54 +558,6 @@ func TestMCPLocalRefresherAddsLateTools(t *testing.T) {
 	}
 	if !strings.Contains(notice, "tool list updated") || conn.Dirty() {
 		t.Errorf("local refresh notice=%q dirty=%v, want update notice and clean conn", notice, conn.Dirty())
-	}
-}
-
-func TestMCPRefresherComposesRemoteAndLocalSummaries(t *testing.T) {
-	remoteProvider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__remote__alpha")}}
-	localProvider := &echoProvider{tools: []mcp.Tool{mcpTool("mcp__local__alpha")}}
-	remoteProxy := startFakeProxy(t, remoteProvider)
-	localProxy := startFakeProxy(t, localProvider)
-	catalog := tools.CatalogWithOptions(tools.Options{})
-	catalog.Register(asyncMCPTestTool{name: "lsp_static"})
-	remoteConn := mcptools.NewConn(mcptools.Options{Dial: remoteProxy.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
-	localConn := mcptools.NewConn(mcptools.Options{Dial: localProxy.dial, Info: mcp.Implementation{Name: "harness", Version: "test"}})
-	defer remoteConn.Close()
-	defer localConn.Close()
-	remoteSummary, err := mcptools.Register(context.Background(), catalog, remoteConn)
-	if err != nil {
-		t.Fatalf("initial remote register: %v", err)
-	}
-	localSummary, err := mcptools.RegisterWithOptions(context.Background(), catalog, localConn, mcptools.RegisterOptions{
-		TrustReadOnlyHint: true,
-		FallbackNamespace: "local",
-	})
-	if err != nil {
-		t.Fatalf("initial local register: %v", err)
-	}
-	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__remote__alpha", "mcp__local__alpha", "lsp_static"}, MCPTools: agentdef.MCPToolsAll},
-	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-	static := mcptools.Summary{Names: []string{"lsp_static"}, Total: 1}
-	refresh := newComposedMCPRefresherDynamic(remoteConn, localConn, catalog, agents, bases, remoteSummary, localSummary,
-		func() mcptools.Summary { return static }, slog.New(slog.DiscardHandler), nil, mcpLimits{})
-
-	remoteProvider.setTools([]mcp.Tool{mcpTool("mcp__remote__alpha"), mcpTool("mcp__remote__late")})
-	localProvider.setTools([]mcp.Tool{mcpTool("mcp__local__alpha"), mcpTool("mcp__local__late")})
-	remoteProxy.notifyListChanged(t, remoteConn)
-	localProxy.notifyListChanged(t, localConn)
-	sel, _ := refresh(context.Background(), "auto")
-	if sel == nil {
-		t.Fatal("composed refresh returned a nil registry")
-	}
-	for _, name := range []string{"mcp__remote__alpha", "mcp__remote__late", "mcp__local__alpha", "mcp__local__late", "lsp_static"} {
-		if !slices.Contains(sel.Names(), name) {
-			t.Errorf("composed registry lost %s: %v", name, sel.Names())
-		}
-		if !slices.Contains(agents["auto"].AllowedTools, name) {
-			t.Errorf("re-derived agent lost %s: %v", name, agents["auto"].AllowedTools)
-		}
 	}
 }
 
@@ -946,7 +584,7 @@ func TestMCPRefresherSkipsUnaffectedWhitelistAgent(t *testing.T) {
 		"auto":   {Name: "auto", AllowedTools: []string{"read", "mcp__test__alpha", "mcp__test__beta"}, MCPTools: agentdef.MCPToolsAll},
 	}
 	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
+	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler))
 
 	// Swap beta for gamma and fire list_changed.
 	provider.setTools([]mcp.Tool{mcpTool("mcp__test__alpha"), mcpTool("mcp__test__gamma")})
@@ -984,7 +622,7 @@ func TestMCPRefresherSwapsWhitelistAgentLosingTool(t *testing.T) {
 	agents := map[string]agentdef.Definition{
 		"locked": {Name: "locked", AllowedTools: []string{"read", "mcp__test__beta"}},
 	}
-	refresh := newMCPRefresher(conn, catalog, agents, mcpAgentBases{}, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
+	refresh := newMCPRefresher(conn, catalog, agents, mcpAgentBases{}, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler))
 
 	provider.setTools([]mcp.Tool{mcpTool("mcp__test__alpha")}) // beta removed
 	g.notifyListChanged(t, conn)
@@ -1020,7 +658,7 @@ func TestMCPRefresherFailedRefreshKeepsDirtyForRetry(t *testing.T) {
 		"auto": {Name: "auto", AllowedTools: []string{"read", "mcp__test__alpha"}, MCPTools: agentdef.MCPToolsAll},
 	}
 	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
+	refresh := newMCPRefresher(conn, catalog, agents, bases, initial, mcptools.Summary{}, slog.New(slog.DiscardHandler))
 
 	provider.setTools([]mcp.Tool{mcpTool("mcp__test__beta")})
 	provider.failOnce()
@@ -1060,7 +698,7 @@ func TestMCPRefresherNotDirtyFastPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	agents := map[string]agentdef.Definition{"auto": {Name: "auto", AllowedTools: catalog.Names()}}
-	refresh := newMCPRefresher(conn, catalog, agents, mcpAgentBases{}, sum, mcptools.Summary{}, slog.New(slog.DiscardHandler), nil)
+	refresh := newMCPRefresher(conn, catalog, agents, mcpAgentBases{}, sum, mcptools.Summary{}, slog.New(slog.DiscardHandler))
 	if sel, notice := refresh(context.Background(), "auto"); sel != nil || notice != "" {
 		t.Fatalf("clean conn should yield no change, got sel=%v notice=%q", sel != nil, notice)
 	}
@@ -1153,30 +791,23 @@ func TestMCPLimitsFromConfig(t *testing.T) {
 	}
 }
 
-// TestMCPRefresherAppliesToolCap confirms the cap reaches the async/interactive
+// TestMCPRefresherAppliesToolCap confirms the cap reaches the interactive
 // refresh path: every discovered tool lands in the catalog, but an mcp_tools=all
 // agent auto-exposes at most max_tools of them.
 func TestMCPRefresherAppliesToolCap(t *testing.T) {
 	catalog := tools.CatalogWithOptions(tools.Options{})
-	discovered := &tools.Registry{}
-	discovered.Register(asyncMCPTestTool{name: "mcp__test__one"})
-	discovered.Register(asyncMCPTestTool{name: "mcp__test__two"})
-	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
-	pending.results <- asyncMCPResult{
-		registry: discovered,
-		summary: mcptools.Summary{
-			Servers: map[string]int{"test": 2},
-			Names:   []string{"mcp__test__one", "mcp__test__two"},
-			Total:   2,
-		},
+	provider := &echoProvider{}
+	g := startFakeProxy(t, provider)
+	conn := mcptools.NewConn(mcptools.Options{Dial: g.dial})
+	defer conn.Close()
+	initial, err := mcptools.Register(t.Context(), catalog, conn)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: "test"}})
-	agents := map[string]agentdef.Definition{
-		"auto": {Name: "auto", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll},
-	}
-	bases := mcpAgentBases{"auto": {Allowed: []string{"read"}, Mode: agentdef.MCPToolsAll}}
-	refresh := newMCPRefresher(conn, catalog, agents, bases, mcptools.Summary{}, mcptools.Summary{}, slog.New(slog.DiscardHandler), pending, mcpLimits{maxTools: 1})
+	agents := map[string]agentdef.Definition{"auto": {Name: "auto", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll}}
+	refresh := newMCPRefresher(conn, catalog, agents, snapshotMCPAgentBases(agents), initial, mcptools.Summary{}, slog.New(slog.DiscardHandler), mcpLimits{maxTools: 1})
+	provider.setTools([]mcp.Tool{mcpTool("mcp__test__one"), mcpTool("mcp__test__two")})
+	g.notifyListChanged(t, conn)
 
 	sel, _ := refresh(context.Background(), "auto")
 	if sel == nil {
@@ -1198,19 +829,6 @@ func TestMCPRefresherAppliesToolCap(t *testing.T) {
 
 // --- helpers ---
 
-func withMCPEnv(base func(string) string, proxy string) func(string) string {
-	return func(k string) string {
-		switch k {
-		case "HARNESS_MCP_ENABLE":
-			return "true"
-		case "HARNESS_MCP_PROXY":
-			return proxy
-		default:
-			return base(k)
-		}
-	}
-}
-
 // transcriptHasToolResult reports whether any message carries a tool_result
 // block whose text contains sub.
 func transcriptHasToolResult(msgs []llm.Message, sub string) bool {
@@ -1222,42 +840,4 @@ func transcriptHasToolResult(msgs []llm.Message, sub string) bool {
 		}
 	}
 	return false
-}
-
-func TestSetupMCPSendsTraceparentHeaders(t *testing.T) {
-	url, mw := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{echoTool()}})
-	catalog := &tools.Registry{}
-	var errw strings.Builder
-	logger, err := logging.NewLogger(&errw, logging.LevelInfo)
-	if err != nil {
-		t.Fatalf("logger: %v", err)
-	}
-	tracer, err := tracing.NewTracer(true)
-	if err != nil {
-		t.Fatalf("NewTracer: %v", err)
-	}
-	conn, _, cleanup, ok := setupMCP(context.Background(), config.MCPConfig{Enable: true, Proxy: url}, catalog, logger, tracer)
-	defer cleanup()
-	if !ok || conn == nil {
-		t.Fatalf("setupMCP failed: ok=%v conn=%v stderr=%q", ok, conn != nil, errw.String())
-	}
-	var traceID string
-	traces := mw.traceHeaders()
-	if len(traces) == 0 {
-		t.Fatalf("no MCP HTTP requests captured")
-	}
-	for i, raw := range traces {
-		tc, ok := tracing.ParseTraceparent(raw)
-		if !ok {
-			t.Fatalf("trace[%d] = %q, want valid traceparent", i, raw)
-		}
-		if traceID == "" {
-			traceID = tc.TraceID
-		} else if tc.TraceID != traceID {
-			t.Fatalf("trace[%d] trace id = %q, want %q", i, tc.TraceID, traceID)
-		}
-	}
-	if traceID != tracer.TraceID() {
-		t.Fatalf("trace id = %q, want tracer root %q", traceID, tracer.TraceID())
-	}
 }

@@ -11,8 +11,8 @@ import (
 	"harness/internal/llm"
 )
 
-// ToolCatalogName is the explicit discovery tool installed when optional MCP
-// and LSP schemas exceed the prompt budget.
+// ToolCatalogName is the explicit discovery tool installed when optional tool
+// schemas exceed the prompt budget.
 const ToolCatalogName = "tool_catalog"
 
 const lazyCatalogSchema = `{
@@ -135,9 +135,6 @@ func deferredToolGroupIdentity(toolName string) (string, string) {
 		}
 		return name, fmt.Sprintf("Tools provided by the %s MCP server.", server)
 	}
-	if strings.HasPrefix(toolName, "lsp_") {
-		return "lsp", "Language-server code navigation, analysis, diagnostics, and refactoring tools."
-	}
 	return "optional_tools", "Optional project and integration tools."
 }
 
@@ -146,7 +143,7 @@ type lazyCatalogTool struct{ state *lazyCatalogState }
 func (*lazyCatalogTool) Name() string { return ToolCatalogName }
 
 func (*lazyCatalogTool) Description() string {
-	return "List, inspect, or activate optional MCP/LSP tools before calling them directly."
+	return "List, inspect, or activate optional integration tools before calling them directly."
 }
 
 func (*lazyCatalogTool) Schema() json.RawMessage { return json.RawMessage(lazyCatalogSchema) }

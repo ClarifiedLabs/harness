@@ -15,17 +15,17 @@ func TestEnableLazyToolSpecsListsDescribesAndActivates(t *testing.T) {
 	r := &Registry{}
 	r.Register(newOK("read", "core"))
 	r.Register(newOK("mcp__demo__search", "search"))
-	r.Register(newOK("lsp_definition", "definition"))
-	if !EnableLazyToolSpecs(r, []string{"mcp__demo__search", "lsp_definition"}, 1) {
+	r.Register(newOK("project_definition", "definition"))
+	if !EnableLazyToolSpecs(r, []string{"mcp__demo__search", "project_definition"}, 1) {
 		t.Fatal("EnableLazyToolSpecs = false")
 	}
 	if got := specNamesForTest(r.Specs()); !slices.Equal(got, []string{"read", ToolCatalogName}) {
 		t.Fatalf("initial specs = %v", got)
 	}
 	groups := r.DeferredToolGroups()
-	if len(groups) != 2 || groups[0].Name != "mcp_demo" || groups[1].Name != "lsp" ||
+	if len(groups) != 2 || groups[0].Name != "mcp_demo" || groups[1].Name != "optional_tools" ||
 		!slices.Equal(specNamesForTest(groups[0].Tools), []string{"mcp__demo__search"}) ||
-		!slices.Equal(specNamesForTest(groups[1].Tools), []string{"lsp_definition"}) {
+		!slices.Equal(specNamesForTest(groups[1].Tools), []string{"project_definition"}) {
 		t.Fatalf("deferred groups = %+v", groups)
 	}
 	// Returned schemas are immutable snapshots.
@@ -37,22 +37,22 @@ func TestEnableLazyToolSpecsListsDescribesAndActivates(t *testing.T) {
 	listed := r.Dispatch(context.Background(), llm.ToolCall{
 		ID: "list", Name: ToolCatalogName, Input: json.RawMessage(`{"action":"list","query":"search"}`),
 	})
-	if listed.IsError || !strings.Contains(listed.Text, "mcp__demo__search") || strings.Contains(listed.Text, "lsp_definition") {
+	if listed.IsError || !strings.Contains(listed.Text, "mcp__demo__search") || strings.Contains(listed.Text, "project_definition") {
 		t.Fatalf("list result = %+v", listed)
 	}
 	described := r.Dispatch(context.Background(), llm.ToolCall{
-		ID: "describe", Name: ToolCatalogName, Input: json.RawMessage(`{"action":"describe","names":["lsp_definition"]}`),
+		ID: "describe", Name: ToolCatalogName, Input: json.RawMessage(`{"action":"describe","names":["project_definition"]}`),
 	})
 	if described.IsError || !strings.Contains(described.Text, `"parameters"`) || !strings.Contains(described.Text, `"_stage"`) {
 		t.Fatalf("describe result = %+v", described)
 	}
 	activated := r.Dispatch(context.Background(), llm.ToolCall{
-		ID: "activate", Name: ToolCatalogName, Input: json.RawMessage(`{"action":"activate","names":["lsp_definition"]}`),
+		ID: "activate", Name: ToolCatalogName, Input: json.RawMessage(`{"action":"activate","names":["project_definition"]}`),
 	})
 	if activated.IsError {
 		t.Fatalf("activate result = %+v", activated)
 	}
-	if got := specNamesForTest(r.Specs()); !slices.Equal(got, []string{"read", "lsp_definition", ToolCatalogName}) {
+	if got := specNamesForTest(r.Specs()); !slices.Equal(got, []string{"read", "project_definition", ToolCatalogName}) {
 		t.Fatalf("activated specs = %v", got)
 	}
 	if _, ok := r.Lookup("mcp__demo__search"); !ok {

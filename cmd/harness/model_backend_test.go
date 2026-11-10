@@ -43,7 +43,7 @@ func modelBackendEnvironment(t *testing.T, args ...string) (environment, *bytes.
 	dir := t.TempDir()
 	t.Chdir(dir)
 	cfg := filepath.Join(dir, "harness.json")
-	modelBackendWrite(t, cfg, `{"mcp":{"enable":false,"local":{"enable":false}},"lsp":{"enable":false},"no_env":true}`)
+	modelBackendWrite(t, cfg, `{"mcp":{"servers":{}},"no_env":true}`)
 	out, errout := new(bytes.Buffer), new(bytes.Buffer)
 	return environment{
 		args:  append([]string{"-config", cfg}, args...),

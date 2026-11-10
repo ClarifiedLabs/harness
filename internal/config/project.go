@@ -1,10 +1,11 @@
 package config
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+
+	"harness/internal/mcpproxy"
 )
 
 // findProjectConfig walks from startDir upward and returns the first
@@ -175,12 +176,10 @@ func mergeFileConfig(global, project fileConfig, globalPath, projectPath string)
 	// The merge helpers for hook_configs ensure relative paths were absolutized per file at decode time.
 	out.Hooks = mergeOpt(global.Hooks, project.Hooks, globalPath, projectPath, "hooks", sourceMap)
 	out.HookConfigs = mergeOpt(global.HookConfigs, project.HookConfigs, globalPath, projectPath, "hook_configs", sourceMap)
-	_ = json.RawMessage{} // ensure json import used
 	out.HistFile = mergeOpt(global.HistFile, project.HistFile, globalPath, projectPath, "histfile", sourceMap)
 	out.HistFileSize = mergeOpt(global.HistFileSize, project.HistFileSize, globalPath, projectPath, "histfilesize", sourceMap)
 	out.HistSize = mergeOpt(global.HistSize, project.HistSize, globalPath, projectPath, "histsize", sourceMap)
 	out.MCP = mergeMCPOpt(global.MCP, project.MCP, globalPath, projectPath, sourceMap)
-	out.LSP = mergeLSPOpt(global.LSP, project.LSP, globalPath, projectPath, sourceMap)
 	out.ACP = mergeACPOpt(global.ACP, project.ACP, globalPath, projectPath, sourceMap)
 	out.OTel = mergeOTelOpt(global.OTel, project.OTel, globalPath, projectPath, sourceMap)
 	return out, sourceMap
@@ -190,75 +189,41 @@ func mergeMCPOpt(global, project optional[fileMCPConfig], globalPath, projectPat
 	if !global.Set && !project.Set {
 		return optional[fileMCPConfig]{}
 	}
-	var gVal, pVal fileMCPConfig
-	if global.Set {
-		gVal = global.Value
+	g, p := global.Value, project.Value
+	g, p = mergeLegacyMCP(g, p, globalPath, projectPath, sourceMap)
+	merged := fileMCPConfig{
+		legacy:          g.legacy,
+		MaxTools:        mergeOpt(g.MaxTools, p.MaxTools, globalPath, projectPath, "mcp.max_tools", sourceMap),
+		DisabledServers: mergeOpt(g.DisabledServers, p.DisabledServers, globalPath, projectPath, "mcp.disabled_servers", sourceMap),
 	}
-	if project.Set {
-		pVal = project.Value
+	if p.legacy != nil {
+		merged.legacy = p.legacy
 	}
-	var merged fileMCPConfig
-	merged.Enable = mergeOpt(gVal.Enable, pVal.Enable, globalPath, projectPath, "mcp.enable", sourceMap)
-	merged.Proxy = mergeOpt(gVal.Proxy, pVal.Proxy, globalPath, projectPath, "mcp.proxy", sourceMap)
-	merged.APIKey = mergeOpt(gVal.APIKey, pVal.APIKey, globalPath, projectPath, "mcp.api_key", sourceMap)
-	merged.Headers = mergeOpt(gVal.Headers, pVal.Headers, globalPath, projectPath, "mcp.headers", sourceMap)
-	merged.MaxTools = mergeOpt(gVal.MaxTools, pVal.MaxTools, globalPath, projectPath, "mcp.max_tools", sourceMap)
-	merged.DisabledServers = mergeOpt(gVal.DisabledServers, pVal.DisabledServers, globalPath, projectPath, "mcp.disabled_servers", sourceMap)
-	// Local is optional nested; merge with dedicated helper
-	merged.Local = mergeLocalMCPOpt(gVal.Local, pVal.Local, globalPath, projectPath, sourceMap)
-	// Consider MCP set if either original had it or any leaf is set
-	hasLeaf := merged.Enable.Set || merged.Proxy.Set || merged.APIKey.Set || merged.Headers.Set || merged.MaxTools.Set || merged.DisabledServers.Set || merged.Local.Set
-	if hasLeaf || global.Set || project.Set {
-		return optional[fileMCPConfig]{Set: true, Value: merged}
+	if g.Servers.Set || p.Servers.Set {
+		merged.Servers.Set = true
+		merged.Servers.Value = cloneMCPServers(g.Servers.Value)
+		if merged.Servers.Value == nil {
+			merged.Servers.Value = make(map[string]mcpproxy.ServerConfig)
+		}
+		for name := range g.Servers.Value {
+			sourceMap["mcp.servers."+name] = globalPath
+		}
+		for name, server := range p.Servers.Value {
+			merged.Servers.Value[name] = server
+			sourceMap["mcp.servers."+name] = projectPath
+		}
+		sourceMap["mcp.servers"] = globalPath
+		if p.Servers.Set {
+			sourceMap["mcp.servers"] = projectPath
+		}
 	}
-	return optional[fileMCPConfig]{}
-}
-
-func mergeLocalMCPOpt(global, project optional[fileLocalMCPConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileLocalMCPConfig] {
-	if !global.Set && !project.Set {
-		return optional[fileLocalMCPConfig]{}
+	// An inherited local command keeps its defining file as the working directory,
+	// even when the project overrides another legacy local leaf.
+	if p.legacy != nil && p.legacy.Local.Set && !p.legacy.Local.Value.Command.Set &&
+		g.legacy != nil && g.legacy.Local.Value.Command.Set {
+		sourceMap["mcp.servers.local"] = globalPath
 	}
-	var gVal, pVal fileLocalMCPConfig
-	if global.Set {
-		gVal = global.Value
-	}
-	if project.Set {
-		pVal = project.Value
-	}
-	var merged fileLocalMCPConfig
-	merged.Enable = mergeOpt(gVal.Enable, pVal.Enable, globalPath, projectPath, "mcp.local.enable", sourceMap)
-	merged.Command = mergeOpt(gVal.Command, pVal.Command, globalPath, projectPath, "mcp.local.command", sourceMap)
-	merged.Args = mergeOpt(gVal.Args, pVal.Args, globalPath, projectPath, "mcp.local.args", sourceMap)
-	merged.Env = mergeOpt(gVal.Env, pVal.Env, globalPath, projectPath, "mcp.local.env", sourceMap)
-	hasLeaf := merged.Enable.Set || merged.Command.Set || merged.Args.Set || merged.Env.Set
-	if hasLeaf || global.Set || project.Set {
-		return optional[fileLocalMCPConfig]{Set: true, Value: merged}
-	}
-	return optional[fileLocalMCPConfig]{}
-}
-
-func mergeLSPOpt(global, project optional[fileLSPConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileLSPConfig] {
-	if !global.Set && !project.Set {
-		return optional[fileLSPConfig]{}
-	}
-	var gVal, pVal fileLSPConfig
-	if global.Set {
-		gVal = global.Value
-	}
-	if project.Set {
-		pVal = project.Value
-	}
-	var merged fileLSPConfig
-	merged.Enable = mergeOpt(gVal.Enable, pVal.Enable, globalPath, projectPath, "lsp.enable", sourceMap)
-	merged.Prewarm = mergeOpt(gVal.Prewarm, pVal.Prewarm, globalPath, projectPath, "lsp.prewarm", sourceMap)
-	merged.Tools = mergeOpt(gVal.Tools, pVal.Tools, globalPath, projectPath, "lsp.tools", sourceMap)
-	merged.Servers = mergeOpt(gVal.Servers, pVal.Servers, globalPath, projectPath, "lsp.servers", sourceMap)
-	merged.Serena = mergeSerenaOpt(gVal.Serena, pVal.Serena, globalPath, projectPath, sourceMap)
-	hasLeaf := merged.Enable.Set || merged.Prewarm.Set || merged.Tools.Set || merged.Servers.Set || merged.Serena.Set
-	if hasLeaf || global.Set || project.Set {
-		return optional[fileLSPConfig]{Set: true, Value: merged}
-	}
-	return optional[fileLSPConfig]{}
+	return optional[fileMCPConfig]{Set: true, Value: merged}
 }
 
 func mergeACPOpt(global, project optional[fileACPConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileACPConfig] {
@@ -306,27 +271,4 @@ func mergeOTelOpt(global, project optional[fileOTelConfig], globalPath, projectP
 		return optional[fileOTelConfig]{Set: true, Value: merged}
 	}
 	return optional[fileOTelConfig]{}
-}
-
-func mergeSerenaOpt(global, project optional[fileSerenaConfig], globalPath, projectPath string, sourceMap map[string]string) optional[fileSerenaConfig] {
-	if !global.Set && !project.Set {
-		return optional[fileSerenaConfig]{}
-	}
-	var gVal, pVal fileSerenaConfig
-	if global.Set {
-		gVal = global.Value
-	}
-	if project.Set {
-		pVal = project.Value
-	}
-	var merged fileSerenaConfig
-	merged.Enable = mergeOpt(gVal.Enable, pVal.Enable, globalPath, projectPath, "lsp.serena.enable", sourceMap)
-	merged.Command = mergeOpt(gVal.Command, pVal.Command, globalPath, projectPath, "lsp.serena.command", sourceMap)
-	merged.Args = mergeOpt(gVal.Args, pVal.Args, globalPath, projectPath, "lsp.serena.args", sourceMap)
-	merged.Env = mergeOpt(gVal.Env, pVal.Env, globalPath, projectPath, "lsp.serena.env", sourceMap)
-	hasLeaf := merged.Enable.Set || merged.Command.Set || merged.Args.Set || merged.Env.Set
-	if hasLeaf || global.Set || project.Set {
-		return optional[fileSerenaConfig]{Set: true, Value: merged}
-	}
-	return optional[fileSerenaConfig]{}
 }

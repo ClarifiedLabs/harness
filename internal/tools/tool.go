@@ -209,7 +209,7 @@ type Options struct {
 	ReadResultLines        int
 	Background             BackgroundJobStarter
 	// DispatchTimeout is the per-call ceiling applied by Dispatch (zero = none).
-	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch/lsp call) so
+	// It backstops tools that ignore ctx (e.g. a hung MCP/web_fetch call) so
 	// one stuck call cannot stall a turn forever. A tool that enforces its own
 	// longer deadline (see SelfTimeouter) is never cut below it.
 	DispatchTimeout               time.Duration

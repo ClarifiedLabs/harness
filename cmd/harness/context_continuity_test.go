@@ -48,7 +48,7 @@ func continuityToolStep(t *testing.T, id, name string, input any) llmtest.Step {
 
 func continuityConfig(t *testing.T, mode string) string {
 	t.Helper()
-	return writeMainConfig(t, `{"context_management":"`+mode+`","mcp":{"enable":false,"local":{"enable":false}},"lsp":{"enable":false},"stagnation_nudge":false}`)
+	return writeMainConfig(t, `{"context_management":"`+mode+`","mcp":{"servers":{}},"stagnation_nudge":false}`)
 }
 
 func continuityAddAstra(proxy *fakeModelProxy) {

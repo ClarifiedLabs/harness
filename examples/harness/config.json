@@ -18,16 +18,8 @@
     }
   },
   "mcp": {
-    "enable": false,
-    "proxy": "http://127.0.0.1:8766",
-    "local": {
-      "enable": false
-    }
-  },
-  "lsp": {
-    "enable": false,
-    "serena": {
-      "enable": false
-    }
+    "servers": {},
+    "max_tools": 0,
+    "disabled_servers": []
   }
 }

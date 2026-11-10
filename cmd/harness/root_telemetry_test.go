@@ -95,7 +95,7 @@ func TestACPOTelMultipleRootsShareProcessAndTerminalExport(t *testing.T) {
 	}))
 	defer collector.Close()
 	cfgPath := filepath.Join(workspace, "config.json")
-	data, _ := json.Marshal(map[string]any{"otel": map[string]any{"enabled": true, "endpoint": collector.URL, "hostname": "", "headers": map[string]string{"X-Telemetry-Test": "configured"}}, "mcp": map[string]any{"enable": false}, "lsp": map[string]any{"enable": false}})
+	data, _ := json.Marshal(map[string]any{"otel": map[string]any{"enabled": true, "endpoint": collector.URL, "hostname": "", "headers": map[string]string{"X-Telemetry-Test": "configured"}}, "mcp": map[string]any{"servers": map[string]any{}}})
 	if err := os.WriteFile(cfgPath, data, 0600); err != nil {
 		t.Fatal(err)
 	}

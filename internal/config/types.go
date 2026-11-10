@@ -5,15 +5,14 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 
 	"harness/internal/configmeta"
 	"harness/internal/hooks"
+	"harness/internal/mcpproxy"
 )
 
 const (
-	DefaultSerenaCommand          = "serena"
 	TimestampShort                = "short"
 	TimestampFull                 = "full"
 	TimestampNone                 = "none"
@@ -45,7 +44,6 @@ const (
 // package. They are resolved like defaults and receive derived provenance.
 type RuntimeDefaults struct {
 	ModelProxyURL string
-	MCPProxyURL   string
 	HistoryPath   string
 	Agent         string
 	HandoffAgent  string
@@ -178,7 +176,6 @@ type Config struct {
 	Hooks       hooks.Config `json:"hooks,omitempty"`
 	HookConfigs []string     `json:"hook_configs,omitempty"`
 	MCP         MCPConfig    `json:"mcp"`
-	LSP         LSPConfig    `json:"lsp"`
 	ACP         ACPConfig    `json:"acp"`
 	OTel        OTelConfig   `json:"otel"`
 }
@@ -203,21 +200,11 @@ type RunOptions struct {
 }
 
 type MCPConfig struct {
-	Enable          bool              `json:"enable"`
-	Proxy           string            `json:"proxy"`
-	APIKey          string            `json:"api_key"`
-	Headers         map[string]string `json:"headers,omitempty"`
-	MaxTools        int               `json:"max_tools"`
-	DisabledServers []string          `json:"disabled_servers,omitempty"`
-	Local           LocalMCPConfig    `json:"local"`
-}
-
-type LocalMCPConfig struct {
-	Enable    bool              `json:"enable"`
-	EnableSet bool              `json:"-"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
+	Servers map[string]mcpproxy.ServerConfig `json:"servers,omitempty"`
+	// ServerConfigDirs records the source file directory for each server.
+	ServerConfigDirs map[string]string `json:"-"`
+	MaxTools         int               `json:"max_tools"`
+	DisabledServers  []string          `json:"disabled_servers,omitempty"`
 }
 
 type ACPConfig struct {
@@ -230,31 +217,6 @@ type ACPTargetConfig struct {
 	Env             map[string]string `json:"env,omitempty"`
 	Description     string            `json:"description,omitempty"`
 	WorkspaceAccess string            `json:"workspace_access"`
-}
-
-type LSPConfig struct {
-	Enable  bool                       `json:"enable"`
-	Prewarm bool                       `json:"prewarm"`
-	Tools   []string                   `json:"tools,omitempty"`
-	Servers map[string]LSPServerConfig `json:"servers,omitempty"`
-	Serena  SerenaConfig               `json:"serena"`
-}
-
-type SerenaConfig struct {
-	Enable    bool              `json:"enable"`
-	EnableSet bool              `json:"-"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args,omitempty"`
-	Env       map[string]string `json:"env,omitempty"`
-}
-
-type LSPServerConfig struct {
-	Languages   []string          `json:"languages"`
-	RootMarkers []string          `json:"root_markers"`
-	Command     []string          `json:"command"`
-	Extensions  []string          `json:"extensions"`
-	Env         map[string]string `json:"env"`
-	InitOptions json.RawMessage   `json:"initialization_options"`
 }
 
 type FileAgentConfig struct {
@@ -283,8 +245,4 @@ type OTelConfig struct {
 	HostnameSet        bool              `json:"-"` // false means the built-in default; true includes an explicitly empty value
 	Headers            map[string]string `json:"headers,omitempty"`
 	ResourceAttributes map[string]string `json:"resource_attributes,omitempty"`
-}
-
-func DefaultSerenaArgs() []string {
-	return []string{"start-mcp-server", "--context=ide", "--project-from-cwd", "--open-web-dashboard", "False"}
 }

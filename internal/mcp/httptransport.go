@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net/http"
 	"net/http/cookiejar"
+	"net/url"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -220,7 +221,7 @@ func (t *HTTPTransport) Close() error {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return ctxErr
 		}
-		t.logger.Debug("mcp: session DELETE failed", "err", err)
+		t.logger.Debug("mcp: session DELETE failed", "err", sanitizeHTTPError(err))
 		return nil
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, httpMaxBodyBytes))
@@ -241,7 +242,7 @@ func (t *HTTPTransport) do(ctx context.Context, body []byte) (*http.Response, er
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.endpoint, bytes.NewReader(body))
 		if err != nil {
-			return nil, fmt.Errorf("mcp: build request: %w", err)
+			return nil, fmt.Errorf("mcp: build request: %w", sanitizeHTTPError(err))
 		}
 		t.mu.Lock()
 		session, version := t.sessionID, t.protocolVersion
@@ -257,7 +258,7 @@ func (t *HTTPTransport) do(ctx context.Context, body []byte) (*http.Response, er
 				return nil, ctxErr
 			}
 			if !t.backoff(ctx, attempt, 0) {
-				return nil, fmt.Errorf("mcp: POST %s: %w", t.endpoint, err)
+				return nil, fmt.Errorf("mcp: POST <redacted>: %w", sanitizeHTTPError(err))
 			}
 			continue
 		}
@@ -298,6 +299,48 @@ func (t *HTTPTransport) do(ctx context.Context, body []byte) (*http.Response, er
 		resp.Body.Close()
 		return nil, err
 	}
+}
+
+// sanitizeHTTPError copies URL errors rather than modifying errors owned by the
+// HTTP client. Redact the entire URL: credentials can live in paths as well as
+// userinfo and queries. Wrapped URL errors must not retain an outer message that
+// already formatted the raw URL (for example an invalid redirect Location).
+func sanitizeHTTPError(err error) error {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) {
+		return err
+	}
+	safe := *urlErr
+	safe.URL = "<redacted>"
+	// net/http can flatten redirect/parser errors into plain strings that quote
+	// whole URLs or fragments. There is no reliable way to separate those from
+	// diagnostics, so hide opaque cause text while retaining the error chain.
+	message := "HTTP request failed"
+	if urlErr.Op == "parse" {
+		message = "invalid URL"
+	}
+	safe.Err = &redactedHTTPError{message: message, cause: sanitizeHTTPError(urlErr.Err), original: urlErr.Err}
+	return &redactedHTTPError{message: safe.Error(), cause: &safe, original: err}
+}
+
+// Keep sentinel matching through replaced wrappers while exposing only the safe
+// URL error to errors.As. Non-URL causes retain their original concrete types.
+type redactedHTTPError struct {
+	message  string
+	cause    error
+	original error
+}
+
+func (e *redactedHTTPError) Error() string        { return e.message }
+func (e *redactedHTTPError) Unwrap() error        { return e.cause }
+func (e *redactedHTTPError) Is(target error) bool { return errors.Is(e.original, target) }
+func (e *redactedHTTPError) Timeout() bool {
+	var timeout interface{ Timeout() bool }
+	return errors.As(e.original, &timeout) && timeout.Timeout()
+}
+func (e *redactedHTTPError) Temporary() bool {
+	var temporary interface{ Temporary() bool }
+	return errors.As(e.original, &temporary) && temporary.Temporary()
 }
 
 // budgetExhausted reports whether attempt (0-based) is the last allowed one.
@@ -347,7 +390,7 @@ func (t *HTTPTransport) applyHeaders(ctx context.Context, req *http.Request, ses
 	if t.headerFn != nil {
 		headers, err := t.headerFn(ctx)
 		if err != nil {
-			return err
+			return sanitizeHTTPError(err)
 		}
 		for k, v := range headers {
 			req.Header.Set(k, v)
@@ -417,7 +460,7 @@ func (t *HTTPTransport) statusError(resp *http.Response) error {
 func (t *HTTPTransport) readJSONResult(resp *http.Response, id jsonrpc.ID) (json.RawMessage, error) {
 	data, err := io.ReadAll(io.LimitReader(resp.Body, httpMaxBodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("mcp: read response body: %w", err)
+		return nil, fmt.Errorf("mcp: read response body: %w", sanitizeHTTPError(err))
 	}
 	var msg jsonrpc.Message
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -432,7 +475,7 @@ func (t *HTTPTransport) readJSONResult(resp *http.Response, id jsonrpc.ID) (json
 func (t *HTTPTransport) readSSEResult(ctx context.Context, resp *http.Response, id jsonrpc.ID) (json.RawMessage, error) {
 	for ev, err := range sse.Read(ctx, io.LimitReader(resp.Body, sseMaxStreamBytes)) {
 		if err != nil {
-			return nil, fmt.Errorf("mcp: read SSE stream: %w", err)
+			return nil, fmt.Errorf("mcp: read SSE stream: %w", sanitizeHTTPError(err))
 		}
 		if ev.Data == "" {
 			continue

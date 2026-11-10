@@ -188,12 +188,30 @@ func TestBenchmarkEnvIsolatesGoCache(t *testing.T) {
 }
 
 func TestBenchmarkEnvDisablesIntegrations(t *testing.T) {
-	t.Setenv("HARNESS_LSP_SERENA_ENABLE", "true")
-	env := benchmarkEnv("")
-	for _, key := range []string{"HARNESS_MCP_ENABLE", "HARNESS_LSP_ENABLE", "HARNESS_LSP_SERENA_ENABLE"} {
-		if got := envValue(env, key); got != "false" {
-			t.Fatalf("%s = %q, want \"false\"", key, got)
-		}
+	keys := []string{
+		"HARNESS_MCP_ENABLE", "HARNESS_MCP_PROXY", "HARNESS_MCP_PROXY_API_KEY",
+		"HARNESS_MCP_LOCAL_ENABLE", "HARNESS_LSP_ENABLE", "HARNESS_LSP_PREWARM",
+		"HARNESS_LSP_SERENA_ENABLE",
+	}
+	for _, value := range []string{"true", "false", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			for _, key := range keys {
+				t.Setenv(key, value)
+			}
+			t.Setenv("HARNESS_MODEL_PROXY_URL", "http://model.example")
+			env := benchmarkEnv("")
+			for _, item := range env {
+				if strings.HasPrefix(item, "HARNESS_MCP_") || strings.HasPrefix(item, "HARNESS_LSP_") {
+					t.Fatalf("retired integration variable passed to child: %q", item)
+				}
+			}
+			if got := envValue(env, "HARNESS_MODEL_PROXY_URL"); got != "http://model.example" {
+				t.Fatalf("model proxy URL = %q, want inherited value", got)
+			}
+			if got := envValue(env, "NO_COLOR"); got != "1" {
+				t.Fatalf("NO_COLOR = %q, want 1", got)
+			}
+		})
 	}
 }
 

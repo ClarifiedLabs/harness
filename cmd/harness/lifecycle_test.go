@@ -17,57 +17,11 @@ import (
 	"time"
 
 	"harness/internal/agent"
-	"harness/internal/config"
 	"harness/internal/llm"
 	"harness/internal/mcp"
+	"harness/internal/mcpproxy"
 	"harness/internal/tools"
 )
-
-func TestLSPRuntimeUsesNewGenerationAfterDisable(t *testing.T) {
-	catalog := &tools.Registry{}
-	r, err := newLSPRuntime(t.Context(), config.LSPConfig{Enable: true}, catalog, slog.New(slog.DiscardHandler))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer r.Shutdown()
-	old, _ := r.snapshot()
-	tool, ok := catalog.Lookup("lsp_definition")
-	if !ok {
-		t.Fatal("LSP tool missing")
-	}
-	r.SetEnabled(false)
-	if _, err := tool.Run(t.Context(), json.RawMessage(`{}`)); err == nil {
-		t.Fatal("stale tool remained enabled")
-	}
-	r.SetEnabled(true)
-	current, enabled := r.snapshot()
-	if !enabled || current == old {
-		t.Fatal("enable reused the retired manager")
-	}
-	r.Shutdown()
-	r.SetEnabled(true)
-	if r.Enabled() {
-		t.Fatal("final shutdown allowed re-enabling")
-	}
-}
-
-func TestLSPRuntimeShutdownJoinsPrewarm(t *testing.T) {
-	t.Chdir(t.TempDir()) // No project evidence: never launch installed servers.
-	r, err := newLSPRuntime(t.Context(), config.LSPConfig{Enable: true, Prewarm: true}, &tools.Registry{}, slog.New(slog.DiscardHandler))
-	if err != nil {
-		t.Fatal(err)
-	}
-	done := r.prewarmDone
-	if done == nil {
-		t.Fatal("prewarm did not start")
-	}
-	r.Shutdown()
-	select {
-	case <-done:
-	default:
-		t.Fatal("shutdown left prewarm running")
-	}
-}
 
 func TestTerminationSignalExitsActivePrompt(t *testing.T) {
 	for _, sig := range []os.Signal{syscall.SIGTERM, syscall.SIGHUP} {
@@ -184,83 +138,70 @@ func (p *lifecycleLocalProvider) CallTool(_ context.Context, _ string, args json
 	return &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: "pong"}}}, nil
 }
 
-func TestLocalReconnectExitJoinsOldNestedOwner(t *testing.T) {
-	for _, serena := range []bool{false, true} {
-		t.Run(fmt.Sprintf("serena=%v", serena), func(t *testing.T) {
-			dir := t.TempDir()
-			eventsPath, gatePath := filepath.Join(dir, "events"), filepath.Join(dir, "gate")
-			for _, path := range []string{eventsPath, gatePath} {
-				if err := syscall.Mkfifo(path, 0600); err != nil {
-					t.Fatal(err)
-				}
-			}
-			events, err := os.OpenFile(eventsPath, os.O_RDWR, 0)
-			if err != nil {
+func TestMCPServicesShutdownJoinsNestedOwner(t *testing.T) {
+	t.Run("mcp", func(t *testing.T) {
+		dir := t.TempDir()
+		eventsPath, gatePath := filepath.Join(dir, "events"), filepath.Join(dir, "gate")
+		for _, path := range []string{eventsPath, gatePath} {
+			if err := syscall.Mkfifo(path, 0600); err != nil {
 				t.Fatal(err)
 			}
-			defer events.Close()
-			gate, err := os.OpenFile(gatePath, os.O_RDWR, 0)
-			if err != nil {
+		}
+		events, err := os.OpenFile(eventsPath, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer events.Close()
+		gate, err := os.OpenFile(gatePath, os.O_RDWR, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer gate.Close()
+		reader := bufio.NewReader(events)
+		readEvent := func(want string) (int, int) {
+			t.Helper()
+			var kind string
+			var parent, worker int
+			if _, err := fmt.Fscanln(reader, &kind, &parent, &worker); err != nil {
 				t.Fatal(err)
 			}
-			defer gate.Close()
-			reader := bufio.NewReader(events)
-			readEvent := func(want string) (int, int) {
-				t.Helper()
-				var kind string
-				var parent, worker int
-				if _, err := fmt.Fscanln(reader, &kind, &parent, &worker); err != nil {
-					t.Fatal(err)
-				}
-				if kind != want {
-					t.Fatalf("event = %q, want %s", kind, want)
-				}
-				if kind == "spawn" {
-					t.Cleanup(func() { _ = syscall.Kill(-worker, syscall.SIGKILL) })
-				}
-				return parent, worker
+			if kind != want {
+				t.Fatalf("event = %q, want %s", kind, want)
 			}
-			env := map[string]string{"HARNESS_LIFECYCLE_HELPER": "owner", "HARNESS_LIFECYCLE_EVENTS": eventsPath, "HARNESS_LIFECYCLE_GATE": gatePath}
-			catalog := &tools.Registry{}
-			logger := slog.New(slog.DiscardHandler)
-			var cleanup func()
-			var ok bool
-			toolName := "mcp__local__ping"
-			if serena {
-				_, cleanup, ok = setupSerena(t.Context(), config.SerenaConfig{Command: os.Args[0], Args: []string{"-test.run=^TestLifecycleLocalHelper$"}, Env: env}, catalog, logger)
-				toolName = "mcp__serena__ping"
-			} else {
-				_, _, cleanup, ok = setupLocalMCP(t.Context(), config.LocalMCPConfig{Command: os.Args[0], Args: []string{"-test.run=^TestLifecycleLocalHelper$"}, Env: env}, true, catalog, logger)
+			if kind == "spawn" {
+				t.Cleanup(func() { _ = syscall.Kill(-worker, syscall.SIGKILL) })
 			}
-			// Release both generations before any failure-path cleanup tries to join.
-			defer func() { _, _ = gate.Write([]byte{1, 1}); cleanup() }()
-			if !ok {
-				t.Fatal("MCP setup failed")
+			return parent, worker
+		}
+		env := map[string]string{"HARNESS_LIFECYCLE_HELPER": "owner", "HARNESS_LIFECYCLE_EVENTS": eventsPath, "HARNESS_LIFECYCLE_GATE": gatePath}
+		catalog := &tools.Registry{}
+		logger := slog.New(slog.DiscardHandler)
+		var cleanup func()
+		var ok bool
+		toolName := "mcp__local__ping"
+		_, _, cleanup, ok = setupMCPServices(t.Context(), []mcpproxy.ResolvedServer{{Name: "local", Command: os.Args[0], Args: []string{"-test.run=^TestLifecycleLocalHelper$"}, Env: env}}, catalog, logger, nil)
+		// Release both generations before any failure-path cleanup tries to join.
+		defer func() { _, _ = gate.Write([]byte{1, 1}); cleanup() }()
+		if !ok {
+			t.Fatal("MCP setup failed")
+		}
+		oldPID, oldWorker := readEvent("spawn")
+		result := catalog.Dispatch(t.Context(), llm.ToolCall{ID: "ping", Name: toolName, Input: json.RawMessage(`{}`)})
+		if result.IsError {
+			t.Fatalf("dispatch: %s", result.Text)
+		}
+		closed := make(chan struct{})
+		go func() { defer close(closed); cleanup() }()
+		readEvent("close")
+		if err := syscall.Kill(oldPID, 0); err != nil {
+			t.Fatalf("old owner killed before downstream cleanup: %v", err)
+		}
+		_, _ = gate.Write([]byte{1, 1})
+		awaitLifecycle(t, closed)
+		for _, pid := range []int{oldWorker} {
+			if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+				t.Fatalf("downstream %d survived cleanup: %v", pid, err)
 			}
-			oldPID, oldWorker := readEvent("spawn")
-			result := catalog.Dispatch(t.Context(), llm.ToolCall{ID: "drop", Name: toolName, Input: json.RawMessage(`{"disconnect":true}`)})
-			if !result.IsError {
-				t.Fatal("disconnect unexpectedly succeeded")
-			}
-			readEvent("close")
-			result = catalog.Dispatch(t.Context(), llm.ToolCall{ID: "retry", Name: toolName, Input: json.RawMessage(`{}`)})
-			if result.IsError {
-				t.Fatalf("reconnect: %s", result.Text)
-			}
-			_, newWorker := readEvent("spawn")
-			closed := make(chan struct{})
-			go func() { defer close(closed); cleanup() }()
-			readEvent("close")
-			if err := syscall.Kill(oldPID, 0); err != nil {
-				t.Fatalf("old owner killed before downstream cleanup: %v", err)
-			}
-			_, _ = gate.Write([]byte{1, 1})
-			awaitLifecycle(t, closed)
-			for _, pid := range []int{oldWorker, newWorker} {
-				if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
-					t.Fatalf("downstream %d survived cleanup: %v", pid, err)
-				}
-			}
-		})
-	}
+		}
+	})
 }

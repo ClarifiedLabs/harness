@@ -90,26 +90,40 @@ func TestRegistryInvalidQualifiedDropped(t *testing.T) {
 }
 
 func TestRegistryRoutingWithUnderscoreServerNames(t *testing.T) {
-	// Server names containing _ and __ must route correctly via the reverse map,
-	// not by string-splitting on __.
-	s1 := newFixedSupervisor("a_b", []mcp.Tool{tool("t")})
-	s2 := newFixedSupervisor("a__b", []mcp.Tool{tool("t")})
-	reg := NewRegistry([]*Supervisor{s1, s2}, slog.New(slog.DiscardHandler))
+	// Server names may contain single underscores and hyphens; downstream tool
+	// names may still contain the namespace separator and must pass through intact.
+	s1 := newFixedSupervisor("a", []mcp.Tool{tool("b__run")})
+	s2 := newFixedSupervisor("a_b", nil)
+	s3 := newFixedSupervisor("a-b", []mcp.Tool{tool("b__run")})
+	reg := NewRegistry([]*Supervisor{s1, s2, s3}, slog.New(slog.DiscardHandler))
+
+	// Late discovery in a different namespace must not replace an existing route.
+	s2.mu.Lock()
+	s2.tools = []mcp.Tool{tool("run"), tool("b__run")}
+	s2.mu.Unlock()
+	s2.onToolsChanged()
 
 	cases := []struct {
 		qualified string
 		wantSrv   string
+		wantBare  string
 	}{
-		{"mcp__a_b__t", "a_b"},
-		{"mcp__a__b__t", "a__b"},
+		{"mcp__a__b__run", "a", "b__run"},
+		{"mcp__a_b__run", "a_b", "run"},
+		{"mcp__a_b__b__run", "a_b", "b__run"},
+		{"mcp__a-b__b__run", "a-b", "b__run"},
+	}
+	res, err := reg.ListTools(t.Context(), "")
+	if err != nil || len(res.Tools) != len(cases) {
+		t.Fatalf("ListTools = (%+v, %v), want %d tools", res, err, len(cases))
 	}
 	for _, tc := range cases {
 		sup, bare, ok := reg.route(tc.qualified)
 		if !ok {
 			t.Fatalf("route(%q) not found", tc.qualified)
 		}
-		if sup.Name() != tc.wantSrv || bare != "t" {
-			t.Fatalf("route(%q) = (%s,%s), want (%s,t)", tc.qualified, sup.Name(), bare, tc.wantSrv)
+		if sup.Name() != tc.wantSrv || bare != tc.wantBare {
+			t.Fatalf("route(%q) = (%s,%s), want (%s,%s)", tc.qualified, sup.Name(), bare, tc.wantSrv, tc.wantBare)
 		}
 	}
 }

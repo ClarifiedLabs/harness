@@ -54,7 +54,7 @@ func newExporterWorkload(tb testing.TB) *exporterWorkload {
 		{"openai", "gpt-5-mini", "explore", "responses"},
 	}
 	toolCases := []struct{ name, activity string }{
-		{"read", "inspect"}, {"lsp_definition", "inspect"},
+		{"read", "inspect"}, {"mcp_example_inspect", "inspect"},
 		{"edit", "mutate"}, {"write", "mutate"},
 		{"task_notes", "coordinate"}, {"update_todos", "coordinate"},
 		{"record_plan", "coordinate"}, {"background_jobs", "wait"},

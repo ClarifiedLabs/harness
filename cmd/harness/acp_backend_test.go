@@ -38,7 +38,7 @@ func acpBackendTestFactory(t *testing.T, extra ...string) (*acpRootFactory, stri
 	launch, workspace := t.TempDir(), t.TempDir()
 	t.Chdir(launch)
 	path := filepath.Join(launch, "harness.json")
-	if err := os.WriteFile(path, []byte(`{"mcp":{"enable":false,"local":{"enable":false}},"lsp":{"enable":false},"no_env":true}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"no_env":true}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	args := append([]string{"acp", "serve", "--config", path, "--model", "fake:model"}, extra...)

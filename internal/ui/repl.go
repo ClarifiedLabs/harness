@@ -88,43 +88,6 @@ type AgentSelection struct {
 	System string
 }
 
-// LSPServerRootStatus, LSPServerStatus, and LSPStatus are UI-neutral snapshots
-// supplied by the harness runtime. Installed only means the configured command
-// is on PATH; root readiness requires successful initialization.
-type LSPServerRootStatus struct {
-	Root         string
-	Initializing bool
-	Ready        bool
-	Error        string
-	BackingOff   bool
-	RetryAt      time.Time
-}
-
-type LSPServerStatus struct {
-	Name      string
-	Languages []string
-	Command   string
-	Installed bool
-	Roots     []LSPServerRootStatus
-}
-
-type LSPStatus struct {
-	Enabled            bool
-	Tools              []string
-	InstalledLanguages []string
-	ReadyLanguages     []string
-	Servers            []LSPServerStatus
-}
-
-// LSPSelection is returned by an enable/disable command. A non-nil Tools
-// registry and non-empty System are installed together before the next prompt,
-// ensuring model disclosure and dispatch stay in sync.
-type LSPSelection struct {
-	Tools  *tools.Registry
-	System string
-	Status LSPStatus
-}
-
 // AgentSessionLifecycle is the protocol-neutral process lifetime owned alongside
 // background jobs. Implementations stop new admissions before closing or
 // resetting their reusable runtimes.
@@ -215,9 +178,6 @@ type App struct {
 	// agent's tools and notice is rendered. A nil registry means "no change".
 	// nil disables the hook (one-shot mode and tests leave it nil).
 	RefreshMCP func(ctx context.Context, agentName string) (*tools.Registry, string)
-	// ControlLSP handles session-local status/enable/disable. nil means the
-	// embedding did not wire native LSP support.
-	ControlLSP func(action, agentName string) (LSPSelection, error)
 
 	// Account-wide subscription operations; never model calls or session usage.
 	Limits            func(context.Context, string) (modelproxy.LimitsReport, error)
@@ -434,8 +394,6 @@ const helpText = `commands:
   /evidence        list or inspect bounded session evidence metadata
   /max-turns [n]   show or set turns per prompt for this session (<=0 is unlimited)
   /tools [--raw]   list available tools, or dump model-facing definitions as JSON
-  /lsp [status|enable|disable]
-                    inspect or toggle native LSP tools for this session
   /image [opts]    attach an image to the next prompt, list, or clear
   /edit [draft]    open $VISUAL/$EDITOR (or vi) for a multi-line prompt
   /save [file]     force save (optionally elsewhere)
@@ -2785,8 +2743,6 @@ func (app *App) command(line string, readCommandLine func(string) (string, error
 		fmt.Fprintln(app.Errw, app.skillsSummary())
 	case "/tools":
 		app.toolsCommand(arg)
-	case "/lsp":
-		app.lspCommand(arg)
 	case "/vi":
 		app.viCommand(arg)
 	default:
@@ -2943,7 +2899,7 @@ func (app *App) pauseGoalAtContinuationCap() bool {
 // suggestions on an unknown command (r59).
 var knownCommands = []string{
 	"/help", "/exit", "/quit", "/clear", "/continue", "/compact", "/tree", "/fork", "/clone", "/context", "/prompt", "/usage", "/limits",
-	"/evidence", "/max-turns", "/tools", "/lsp", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
+	"/evidence", "/max-turns", "/tools", "/image", "/edit", "/save", "/model", "/reasoning", "/effort", "/fast",
 	"/agent", "/mode", "/plan", "/auto", "/handoff", "/background", "/goal", "/skills", "/vi",
 }
 
@@ -5485,126 +5441,6 @@ func (app *App) toolsSummary() string {
 		return "[no tools available]"
 	}
 	return b.String()
-}
-
-func (app *App) lspCommand(arg string) {
-	if app.ControlLSP == nil {
-		fmt.Fprintln(app.Errw, "[lsp: unavailable]")
-		return
-	}
-	action := strings.ToLower(strings.TrimSpace(arg))
-	if action == "" {
-		action = "status"
-	}
-	switch action {
-	case "status", "enable", "disable":
-	default:
-		fmt.Fprintln(app.Errw, "usage: /lsp [status|enable|disable]")
-		return
-	}
-	selection, err := app.ControlLSP(action, app.AgentName)
-	if err != nil {
-		fmt.Fprintf(app.Errw, "[lsp: %v]\n", err)
-		return
-	}
-	runtimeChanged := false
-	if selection.Tools != nil {
-		app.Agent.SetTools(selection.Tools)
-		runtimeChanged = true
-	}
-	if selection.System != "" && selection.System != app.System {
-		app.System = selection.System
-		app.Agent.SetSystem(selection.System)
-		runtimeChanged = true
-	}
-	if runtimeChanged {
-		app.Agent.ResetProxySessionID()
-		app.schedulePrewarm()
-	}
-	fmt.Fprintln(app.Errw, formatLSPStatus(selection.Status))
-}
-
-func formatLSPStatus(status LSPStatus) string {
-	state := "disabled"
-	if status.Enabled {
-		state = "enabled"
-	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "lsp: %s\n", state)
-	fmt.Fprintf(&b, "  configured tools: %d\n", len(status.Tools))
-	fmt.Fprintf(&b, "  installed languages: %s\n", listOrNone(status.InstalledLanguages))
-	fmt.Fprintf(&b, "  ready languages: %s", listOrNone(status.ReadyLanguages))
-	if len(status.Servers) == 0 {
-		return b.String()
-	}
-	b.WriteString("\n  servers:")
-	for _, server := range status.Servers {
-		readyRoots := make([]string, 0, len(server.Roots))
-		initializingRoots := make([]string, 0, len(server.Roots))
-		failedRoots := make([]LSPServerRootStatus, 0, len(server.Roots))
-		backingOff := false
-		for _, root := range server.Roots {
-			switch {
-			case root.Ready:
-				readyRoots = append(readyRoots, root.Root)
-			case root.Initializing:
-				initializingRoots = append(initializingRoots, root.Root)
-			default:
-				failedRoots = append(failedRoots, root)
-				backingOff = backingOff || root.BackingOff
-			}
-		}
-
-		serverState := "idle"
-		switch {
-		case len(readyRoots) > 0 && len(failedRoots) > 0:
-			serverState = "ready (some roots failed)"
-		case len(readyRoots) > 0 && len(initializingRoots) > 0:
-			serverState = "ready (some roots initializing)"
-		case len(readyRoots) > 0:
-			serverState = "ready"
-		case len(initializingRoots) > 0 && len(failedRoots) > 0:
-			serverState = "initializing (some roots failed)"
-		case len(initializingRoots) > 0:
-			serverState = "initializing"
-		case !server.Installed:
-			serverState = "missing"
-		case len(failedRoots) > 0 && backingOff:
-			serverState = "failed (backing off)"
-		case len(failedRoots) > 0:
-			serverState = "failed"
-		}
-		fmt.Fprintf(&b, "\n    %s (%s): %s", server.Name, strings.Join(server.Languages, ", "), serverState)
-		if len(readyRoots) > 0 {
-			fmt.Fprintf(&b, " [%s]", strings.Join(readyRoots, ", "))
-		}
-		if server.Command != "" && !server.Installed {
-			fmt.Fprintf(&b, " [%s not on PATH]", server.Command)
-		}
-		for _, root := range initializingRoots {
-			fmt.Fprintf(&b, "\n      %s: initializing", root)
-		}
-		for _, root := range failedRoots {
-			fmt.Fprintf(&b, "\n      %s: failed", root.Root)
-			if root.BackingOff {
-				b.WriteString(" (backing off)")
-			}
-			if message := strings.Join(strings.Fields(root.Error), " "); message != "" {
-				fmt.Fprintf(&b, ": %s", message)
-			}
-			if root.BackingOff && !root.RetryAt.IsZero() {
-				fmt.Fprintf(&b, " [retry at %s]", root.RetryAt.Format(time.RFC3339))
-			}
-		}
-	}
-	return b.String()
-}
-
-func listOrNone(values []string) string {
-	if len(values) == 0 {
-		return "none"
-	}
-	return strings.Join(values, ", ")
 }
 
 func (app *App) backgroundCommand(arg string) {

@@ -10,6 +10,34 @@ import (
 	"harness/internal/ui"
 )
 
+// runConfigMigrate targets one file, never the merged global/project view.
+func runConfigMigrate(env environment, invocation cli.Invocation) int {
+	options := harnessLoadOptions(env, nil)
+	if path, ok := invocation.Flags.Last("config"); ok {
+		options.Args = []string{"--config", path}
+	}
+	path, err := config.ResolveConfigPath(options)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness: config migrate: %v\n", err)
+		return ui.ExitUsage
+	}
+	if path == "" {
+		fmt.Fprintln(env.stderr, "harness: config migrate: no config file; select one with -config path")
+		return ui.ExitUsage
+	}
+	backup, changed, err := config.MigrateFile(path)
+	if err != nil {
+		fmt.Fprintf(env.stderr, "harness: config migrate: %v\n", err)
+		return ui.ExitUsage
+	}
+	if changed {
+		fmt.Fprintf(env.stdout, "config migrated: %s\nbackup: %s\n", path, backup)
+	} else {
+		fmt.Fprintf(env.stdout, "config already up to date: %s\n", path)
+	}
+	return ui.ExitOK
+}
+
 func runConfigList(env environment, invocation cli.Invocation) int {
 	format := strings.ToLower(strings.TrimSpace(cliLast(invocation.Flags, "format", "text")))
 	if format != "text" && format != "json" && format != "markdown" {

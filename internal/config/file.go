@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"harness/internal/atomicfile"
+	"harness/internal/mcpproxy"
 )
 
 // optional preserves omission separately from explicit zero, false, and empty.
@@ -117,45 +118,19 @@ type fileConfig struct {
 	HistFileSize                       optional[int]                        `json:"histfilesize"`
 	HistSize                           optional[int]                        `json:"histsize"`
 	MCP                                optional[fileMCPConfig]              `json:"mcp"`
-	LSP                                optional[fileLSPConfig]              `json:"lsp"`
 	ACP                                optional[fileACPConfig]              `json:"acp"`
 	OTel                               optional[fileOTelConfig]             `json:"otel"`
 }
 
 type fileMCPConfig struct {
-	Enable          optional[bool]               `json:"enable"`
-	Proxy           optional[string]             `json:"proxy"`
-	APIKey          optional[string]             `json:"api_key"`
-	Headers         optional[map[string]string]  `json:"headers"`
-	MaxTools        optional[int]                `json:"max_tools"`
-	DisabledServers optional[[]string]           `json:"disabled_servers"`
-	Local           optional[fileLocalMCPConfig] `json:"local"`
-}
-
-type fileLocalMCPConfig struct {
-	Enable  optional[bool]              `json:"enable"`
-	Command optional[string]            `json:"command"`
-	Args    optional[[]string]          `json:"args"`
-	Env     optional[map[string]string] `json:"env"`
+	legacy          *legacyMCPConfig                           // Original field presence, retained until project merging.
+	Servers         optional[map[string]mcpproxy.ServerConfig] `json:"servers"`
+	MaxTools        optional[int]                              `json:"max_tools"`
+	DisabledServers optional[[]string]                         `json:"disabled_servers"`
 }
 
 type fileACPConfig struct {
 	Targets optional[map[string]ACPTargetConfig] `json:"targets"`
-}
-
-type fileLSPConfig struct {
-	Enable  optional[bool]                       `json:"enable"`
-	Prewarm optional[bool]                       `json:"prewarm"`
-	Tools   optional[[]string]                   `json:"tools"`
-	Servers optional[map[string]LSPServerConfig] `json:"servers"`
-	Serena  optional[fileSerenaConfig]           `json:"serena"`
-}
-
-type fileSerenaConfig struct {
-	Enable  optional[bool]              `json:"enable"`
-	Command optional[string]            `json:"command"`
-	Args    optional[[]string]          `json:"args"`
-	Env     optional[map[string]string] `json:"env"`
 }
 
 type fileOTelConfig struct {
@@ -177,17 +152,8 @@ func decodeConfigFile(path string) (fileConfig, error) {
 	if err != nil {
 		return fileConfig{}, fmt.Errorf("read config %q: %w", path, err)
 	}
-	trimmed := bytes.TrimSpace(data)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return fileConfig{}, fmt.Errorf("decode config %q: top level must be a JSON object", path)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var fc fileConfig
-	if err := decoder.Decode(&fc); err != nil {
-		return fileConfig{}, fmt.Errorf("decode config %q: %w", path, err)
-	}
-	if err := requireJSONEOF(decoder); err != nil {
+	fc, _, _, err := decodeConfigData(data)
+	if err != nil {
 		return fileConfig{}, fmt.Errorf("decode config %q: %w", path, err)
 	}
 	absPath, err := filepath.Abs(path)
@@ -196,6 +162,35 @@ func decodeConfigFile(path string) (fileConfig, error) {
 	}
 	normalizeConfigAtFileRefs(&fc, filepath.Dir(absPath))
 	return fc, nil
+}
+
+func decodeConfigData(data []byte) (fileConfig, []byte, bool, error) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return fileConfig{}, nil, false, fmt.Errorf("top level must be a JSON object")
+	}
+	original := data
+	data, changed, err := migrateMCPConfig(data)
+	if err != nil {
+		return fileConfig{}, nil, false, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var fc fileConfig
+	if err := decoder.Decode(&fc); err != nil {
+		return fileConfig{}, nil, false, err
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return fileConfig{}, nil, false, err
+	}
+	if changed {
+		var root map[string]json.RawMessage
+		_ = json.Unmarshal(original, &root)
+		var legacy legacyMCPConfig
+		_ = json.Unmarshal(root["mcp"], &legacy)
+		fc.MCP.Value.legacy = &legacy
+	}
+	return fc, data, changed, nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {
@@ -319,23 +314,6 @@ func cloneACPTargets(in map[string]ACPTargetConfig) map[string]ACPTargetConfig {
 		target.Args = append([]string(nil), target.Args...)
 		target.Env = maps.Clone(target.Env)
 		out[name] = target
-	}
-	return out
-}
-
-func cloneLSPServers(in map[string]LSPServerConfig) map[string]LSPServerConfig {
-	if in == nil {
-		return nil
-	}
-	out := make(map[string]LSPServerConfig, len(in))
-	for name, server := range in {
-		server.Languages = append([]string(nil), server.Languages...)
-		server.RootMarkers = append([]string(nil), server.RootMarkers...)
-		server.Command = append([]string(nil), server.Command...)
-		server.Extensions = append([]string(nil), server.Extensions...)
-		server.Env = maps.Clone(server.Env)
-		server.InitOptions = append(json.RawMessage(nil), server.InitOptions...)
-		out[name] = server
 	}
 	return out
 }

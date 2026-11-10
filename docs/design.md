@@ -89,7 +89,7 @@ modelproxy.Backend -- Provider(targetID) --> llm.Provider --> agent loop
 ### Package layout
 
 ```
-cmd/harness              config/session/limits/LSP/ACP dispatch, backend selection/lifetime, config load, catalog wiring, signals, and REPL-vs-oneshot execution
+cmd/harness              config/session/limits/ACP dispatch, backend selection/lifetime, config load, catalog wiring, signals, and REPL-vs-oneshot execution
 cmd/harness-model-proxy  provider setup/refresh and HTTP model proxy server; generated command dispatch plus config inspection
 internal/cli             immutable nested command/flag catalogs, presence-aware parsing, and deterministic scoped help
 internal/modelproxy      transport-neutral Backend/Accounts contracts, catalog/account domain types, errors, cloning, and catalog-to-llm.Registry conversion
@@ -109,7 +109,7 @@ internal/llm/anthropic   Messages dialect: same responsibilities
 internal/sse             generic SSE frame reader
 internal/retry           backoff + jitter + Retry-After parsing
 internal/agent           turn loop, interrupt state machine, compaction
-internal/tools           Tool interface, registry, dispatch (recover + central truncation), built-in tools; the same registry also hosts the delegate, background-job, ACP, MCP (§15), and LSP (§15a) tools
+internal/tools           Tool interface, registry, dispatch (recover + central truncation), built-in tools; the same registry also hosts the delegate, background-job, ACP, and MCP (§15) tools
 internal/delegate        configured child-agent tool; starts ordinary or reusable interactive child lineages without an import cycle
 internal/background      process-local background job manager + tools
 internal/agentsession    protocol-neutral manager for reusable process-local runtimes and their finite immutable background operations
@@ -139,16 +139,14 @@ internal/auth            provider auth sources (token_command, oauth2, codex_oau
 cmd/harness-mcp-proxy  optional MCP proxy daemon + debug/config client with generated command dispatch
 internal/mcp             MCP slice: schema, client, server, tools + narrow MCP Apps UI resources, stdio + streamable-HTTP transports
 internal/mcp/jsonrpc     JSON-RPC 2.0 framing and bidirectional request/response correlation
-internal/mcpproxy      proxy internals: config, supervisors, tool registry, daemon
-internal/procgroup       protocol-neutral owned process-group lifecycle: non-reaping exit observation, bounded TERM/KILL escalation, and final Wait (shared by LSP, MCP children, and proxy supervisors)
+internal/mcpproxy      shared in-process/standalone MCP aggregation: ServerConfig validation, supervisors, tool registry, readiness, daemon
+internal/procgroup       protocol-neutral owned process-group lifecycle: non-reaping exit observation, bounded TERM/KILL escalation, and final Wait (shared by MCP children and proxy supervisors)
 internal/metrics         shared Prometheus collectors/exposition plus endpoint config resolution and lifecycle
 internal/otel            stdlib-only cumulative OTLP/HTTP JSON exporter and execution.Observer sink; exclusive physical billing, work/context diagnostics, root-inclusive session distributions, bounded cardinality/payloads, retry/partial-response handling, and exporter self-health (see telemetry.md)
-internal/mcptools        harness-side adapter: tools.Tool over a reconnecting proxy Conn (§15)
-internal/lspproxy      LSP manager: language-server supervisors, Content-Length JSON-RPC, agent-oriented code-intelligence tools (§15a)
-internal/lsptools        harness-side adapter exposing short `lsp_*` tools over the LSP manager (§15a)
+internal/mcptools        harness-side adapter: tools.Tool over a shared aggregator Conn (§15)
 ```
 
-The block above lists the core data path plus the optional MCP/LSP surfaces; a few
+The block above lists the core data path plus the optional MCP surfaces; a few
 small leaf packages (`atomicfile`, `inputimage`, `replprompt`, `httpserve`, `httpx`,
 `mcpchild`, `term`) are omitted for brevity. Markdown, Mermaid, and syntax/diff
 rendering are owned by mdcli's public `github.com/ClarifiedLabs/mdcli/markdown`
@@ -216,8 +214,8 @@ Session state stays authoritative in the agent; runtime pools and live sockets
 are not transferred on backend switch. Reset/full-history recovery and replay
 compatibility checks remain required.
 
-Local model mode does not start or embed an MCP proxy. Existing single-command
-local MCP, native LSP, and separately configured remote MCP paths are unchanged.
+MCP setup is independent of model backend selection. Named services reuse the
+in-process aggregator regardless of whether model access is local or remote (§15).
 
 Execution telemetry is a separate, frontend-independent observation path.
 `internal/llm` owns physical attempt facts at transport/provider boundaries;
@@ -279,10 +277,10 @@ caller. ANSI escapes
 remain TTY/color-gated terminal-display output, never transcript, log, tool
 result, or model-facing text.
 
-Two optional capabilities run outside that core path. Remote MCP support lives behind
-the `harness-mcp-proxy` daemon (§15); LSP code intelligence is served by the in-process
-`internal/lspproxy` manager (registered as short `lsp_*` tools through `internal/lsptools`,
-§15a) and is also exposed as a compatibility stdio MCP shim via `harness lsp serve`.
+Optional MCP services use the shared `internal/mcpproxy` aggregator in-process
+over in-memory stdio (§15), with no proxy subprocess or listener dependency.
+The standalone `harness-mcp-proxy` remains an optional shared service or owned
+stdio command, configured like any other named MCP service.
 
 ACP has two deliberately separate directions and one protocol-neutral lifecycle seam:
 
@@ -369,7 +367,7 @@ Design notes:
   raw session transcripts retain the complete provider input, including a top-level
   `_stage`. Scheduling and execution use per-call copies with that reserved field
   removed; tool classifiers, hooks, dispatch guards, built-in implementations, and
-  MCP/LSP adapters never receive it.
+  MCP adapters never receive it.
 - **JSON tags are provider-neutral** (`kind`, `tool_use_id`, …). Opaque provider
   steps include Gemini Interactions Google Search replay, OpenAI Responses and
   Anthropic hosted tool-search replay, and a provider-native compaction window.
@@ -1437,7 +1435,7 @@ preserves absent versus explicitly empty values; an empty plain string can clear
 a setting when meaningful, while required strings/enums reject it. Strict JSON
 decoding rejects non-object input, unknown fields, trailing values, and explicit
 `null`; omission is the inheritance mechanism. Structured values such as agents,
-hooks, MCP headers/local configuration, LSP servers, and environment maps use
+hooks, named MCP servers, and environment maps use
 custom definitions because they have dynamic maps or multi-input semantics, but
 they still contribute complete catalog metadata and provenance.
 
@@ -1446,7 +1444,7 @@ settings, `RunOptions` contains invocation-only prompts, images, session/resume,
 format, quiet, debug, and informational controls, `Sources` maps stable keys to
 `default`, `derived`, `file`, `environment`, or `flag` origins, and `ConfigPath`
 records the selected file. `cmd/harness` injects contextual `RuntimeDefaults` for
-the model/MCP proxy URLs, history path, default agent, and tmux state; these are
+the model-proxy URL, history path, default agent, and tmux state; these are
 resolved during loading and marked `derived` rather than patched in afterward.
 Config path selection is centralized as `-config` > `HARNESS_CONFIG` > an
 existing conventional path; explicit paths must be non-empty and exist.
@@ -1454,8 +1452,8 @@ existing conventional path; explicit paths must be non-empty and exist.
 `harness config list`, `show`, and `check` reuse this catalog and loader and are
 strictly offline. `show` uses a catalog-driven `Projection`, not direct `Config`
 serialization: it reconstructs nested JSON paths, optionally includes provenance,
-and redacts non-empty proxy API keys, MCP headers, configured environment-map
-values, and opaque LSP initialization options with no secret-display escape hatch.
+and redacts non-empty model-proxy API keys, MCP commands/arguments/URLs/header/auth
+values, and configured environment-map values with no secret-display escape hatch.
 The projection is deterministic, versioned in JSON, limited to user settings, and
 does not embed prompts or materialize built-in agents. `check` additionally performs local semantic checks
 for agents, hooks, and `@file` references.
@@ -1806,8 +1804,8 @@ strictly valid, intentionally concise example rather than a duplicate schema.
 - `internal/config` resolves only user-facing settings. Provider connection
   settings are resolved through `internal/modelproxy/config` and the runtime,
   not merged into ordinary CLI settings.
-- The optional config-file `mcp` and `lsp` blocks (proxy/local MCP and LSP servers)
-  are documented with their subsystems in §15 and §15a.
+- Named `mcp.servers` configuration and the shared stdio/HTTP surface are
+  documented in §15.
 
 ### 7.1 Subscription quota contract
 
@@ -1989,7 +1987,7 @@ validation rollback, a disabled steer, or input recovered for the next prompt.
   `parallel_tool_batches` records a complete ordered same-stage island only
   when its graph permits concurrency; fully chained islands omit metadata. A background
   launch receipt completes its call and stage but means queued, not finished. Hidden
-  read/write, shell, git, symlink, hard-link, MCP, and LSP effects remain best-effort;
+  read/write, shell, git, symlink, hard-link, and MCP effects remain best-effort;
   use later stages when known calls require earlier side effects, `shell.steps` for a
   serial command list inside one call, background leases/jobs for detached work, or a
   separate model turn when later arguments depend on earlier output. No sandbox is added.
@@ -2371,7 +2369,7 @@ One signal receiver plus a per-prompt `context.CancelFunc`:
   `AGENTS.md`, skills, and agent prompts are still composed around it.
   `~/.agents/AGENTS.md` is appended before the current working directory's
   `AGENTS.md`; missing files are ignored and other read failures fail startup.
-  The skills catalog is rendered as `## Skills` / `### Available skills` (`name: description (file: /abs/SKILL.md)`) / `### How to use skills` with discovery, trigger (`$Name` or matching description, multiple mentions → all), missing-skill, progressive-disclosure (read `SKILL.md` completely via `read`, resolve relatives from its directory, read only routed `references/`, prefer scripts), and coordination guidance; within the always-resident catalog each description is the first sentence or 160 runes and a character budget equal to 2% of the startup model's effective context window fair-shares remaining chars round-robin (omitting extras with an omission notice); unknown windows fall back to 8,000 characters. Unlike Codex's diffed in-history developer-message catalog, Harness deliberately keeps this catalog in the static system prompt: discovery is fixed at startup, so the prefix remains byte-stable and survives compaction without putting system instructions in transcript history. Process-specific `rg`/LSP/Serena hints follow it. When ripgrep is on `PATH`, a short runtime hint recommending
+  The skills catalog is rendered as `## Skills` / `### Available skills` (`name: description (file: /abs/SKILL.md)`) / `### How to use skills` with discovery, trigger (`$Name` or matching description, multiple mentions → all), missing-skill, progressive-disclosure (read `SKILL.md` completely via `read`, resolve relatives from its directory, read only routed `references/`, prefer scripts), and coordination guidance; within the always-resident catalog each description is the first sentence or 160 runes and a character budget equal to 2% of the startup model's effective context window fair-shares remaining chars round-robin (omitting extras with an omission notice); unknown windows fall back to 8,000 characters. Unlike Codex's diffed in-history developer-message catalog, Harness deliberately keeps this catalog in the static system prompt: discovery is fixed at startup, so the prefix remains byte-stable and survives compaction without putting system instructions in transcript history. Process-specific `rg` hints follow it. When ripgrep is on `PATH`, a short runtime hint recommending
   `rg` / `rg --files` over `grep` for text and file search is appended to
   `RuntimeHints`. The
   active agent prompt is always the final section.
@@ -2465,7 +2463,7 @@ assertion at dispatch:
   and property names that happen to equal annotation keywords remain intact. The
   registry then injects the optional positive-integer `_stage` property at the root
   of every model-facing local function-tool object schema.
-  `_stage` is reserved Harness metadata: a custom, MCP, or LSP schema cannot override
+  `_stage` is reserved Harness metadata: a custom or MCP schema cannot override
   its root definition, and execution copies are stripped before any tool adapter sees
   them. Provider adapters receive the augmented `Request.Tools` schemas normally and
   do not interpret stages. Provider-hosted `Request.ServerTools` are excluded because
@@ -2501,15 +2499,14 @@ assertion at dispatch:
 - **Registry surfaces are explicit.** `DefaultWithOptions` registers `read`,
   `view_image`, `edit`, `write`, `shell`, and `web_fetch`, in that order.
   `CatalogWithOptions` currently returns the same set; agent coordination and
-  discovered MCP/LSP tools are layered on separately. The removed names `read_file`, `write_file`,
+  discovered MCP tools are layered on separately. The removed names `read_file`, `write_file`,
   `list_dir`, `glob`, `grep`, `rg`, and `apply_patch` are not constructible and
   an `allowed_tools` entry naming one fails validation.
 - **Large optional surfaces are lazy.** When the aggregate name, description, and
-  model-facing schema bytes for an agent's MCP/LSP tools exceed 32 KiB, the CLI
+  model-facing schema bytes for an agent's MCP tools exceed 32 KiB, the CLI
   installs `tool_catalog`, filters those optional schemas out of `Registry.Specs`,
   and records an immutable deferred tool inventory. MCP tools group by server;
-  native LSP tools group under `lsp`; each complete integration remains one
-  group regardless of its tool count. The tools remain registered and
+  each complete integration remains one group regardless of its tool count. The tools remain registered and
   allowlist-checked, and function names remain the exact local dispatch names.
   The neutral request carries both group metadata and the local fallback name.
   On the canonical OpenAI Responses API for GPT-5.4+ models except GPT-5.4 Nano,
@@ -3215,10 +3212,10 @@ delegates.
 
 ### 9.16 MCP tools (`internal/mcptools`)
 
-> Each tool discovered from the MCP proxy, proxying `tools/call` over a shared, reconnecting proxy connection.
+> Each tool discovered from named MCP services, routing `tools/call` over one shared aggregator connection.
 
 These are not built-in tools: they are registered dynamically at startup when MCP
-is enabled (§15), one `*mcptools.Tool` per proxy-advertised tool. The adapter
+services are configured (§15), one `*mcptools.Tool` per advertised tool. The adapter
 contract maps the MCP tool shape onto the `Tool` interface:
 
 - **Name** is the proxy's full `mcp__<server>__<tool>` already. `Register`
@@ -3248,38 +3245,12 @@ contract maps the MCP tool shape onto the `Tool` interface:
   returns the rendered text as an `error` (empty text gets a stand-in), so the
   failure flows through the normal tool-error path.
 
-The shared `*mcptools.Conn` is a lazily-reconnecting wrapper around one
-`mcp.Client` session to the proxy. It spawns no goroutines; reconnection is
-synchronous on the calling goroutine under a backoff gate, so a down proxy
-fast-fails subsequent calls rather than storming reconnects. A proxy crash
-mid-session surfaces as error tool results; the next call reconnects when the
-backoff allows.
-
-### 9.16a Native LSP tools (`internal/lsptools`)
-
-> Short `lsp_*` adapters over the in-process `internal/lspproxy.Manager`; the
-> protocol operations and lifecycle are detailed in §15a.
-
-The adapter deliberately does not weaken the generic MCP adapter's required
-`mcp__` namespace. It lists the manager's bare static surface, prefixes names
-with `lsp_`, honors the configured allowlist, and dispatches the original bare
-name back to the manager. `readOnlyHint` annotations determine scheduling and
-agent `mcp_tools` exposure; code-action apply, formatting apply, and rename apply
-are mutating. The registry owns the reserved root `_stage` property; the LSP
-adapter does not interpret it and the manager never receives it.
-
-Unlike ordinary dynamic MCP tools, an LSP adapter implements
-`SchemaDescriptionPreserver`. Position and range descriptions are part of the
-model-facing contract: they explain that lines/columns are 1-based, `symbol` is
-preferred when locating identifiers, range bounds are inclusive, and several
-fields have Harness-owned defaults. `Registry.Specs` therefore retains those
-field descriptions instead of applying its normal prose-stripping policy.
-
-Registration is anchored, not appended: `Register` inserts each `lsp_*` tool
-immediately after `view_image`, chaining each new tool after the previous one.
-The LSP block therefore stays adjacent to file inspection in both the default
-and complete catalogs; a missing anchor falls back to append. LSP tools keep
-their concise operation descriptions without adding cross-tool search steering.
+The root owns one shared `*mcptools.Conn` to the in-process aggregator. Ordinary
+delegates reuse it; they do not create another aggregator or own its cleanup.
+The connection closes permanently on root shutdown. Downstream supervisors own
+reconnect/backoff and notify catalog changes; prompt-boundary refresh updates
+registered tools and agent exposure, including late tools from an initially
+empty catalog. Remote effects are never retried as ordinary tool calls.
 
 ### 9.17 `record_plan`
 
@@ -3613,7 +3584,7 @@ Callers retain partial-override, response-state reset/retention, and prewarm pol
   message`. Default level is `info`; `--log-level` or `HARNESS_LOG_LEVEL` accepts
   `debug`, `info`, `warn`, or `error`. Normal sessions also tee JSON diagnostics to
   `diagnostics.ndjson` in the session directory; that sink accepts debug records so
-  child MCP/LSP stderr is preserved even though it is hidden from the terminal by
+  child MCP stderr is preserved even though it is hidden from the terminal by
   default and only shown with `--log-level debug`.
 - `-q`/`--quiet` suppresses bracketed status messages (tool calls, turns,
   notices), disables live tool-stream progress and the live wait counter, suppresses
@@ -4213,43 +4184,75 @@ reviewer, or a general-purpose agent without separate binaries.
   static instructions before the runtime sections are added. The active agent is
   saved with the session and restored on `-resume` (flags win).
 
-## 15. MCP proxy (optional)
+## 15. Named MCP services (optional)
 
-Remote MCP support is opt-in (`mcp.enable`, §7) and lives behind a **second
-binary**, `harness-mcp-proxy`. Harness does not talk to remote downstream MCP
-servers directly in that path: the proxy owns them and presents their merged
-tools to harness as a single MCP server over streamable HTTP (JSON-RPC 2.0,
-protocol revision `2025-06-18`; `internal/mcp`, `internal/mcp/jsonrpc`).
-Separately, `mcp.local` is an explicit local-stdio slot where harness itself
-spawns one configured command and registers its tools. The `internal/mcptools`
-adapter qualifies bare local tool names as `mcp__local__<tool>`, preserving
-already-prefixed `mcp__` names. Dispatch always uses the original advertised name;
-provider-safe charset and length validation applies before and after qualification.
-Within a registration pass, the first advertised target for a qualified name wins;
-later conflicting targets are skipped so dispatch and read-only metadata agree.
+`mcp.servers` is a name-keyed map of `internal/mcpproxy.ServerConfig` values.
+Each entry selects stdio (`command`, `args`, `env`) or Streamable HTTP (`url`,
+`headers`, `auth`); optional `type` infers HTTP from a nonempty URL, otherwise
+stdio. Multiple mixed services run simultaneously. `excludedTools` filters exact
+bare names before qualification. MCP uses JSON-RPC 2.0, protocol `2025-06-18`
+(`internal/mcp`, `internal/mcp/jsonrpc`).
 
-**Why a separate process.** The remote daemon decouples downstream-server
-lifetime from any one harness session: stdio children are spawned once and
-shared across every concurrent harness session, surviving REPL restarts. The
-harness side depends on the thin `internal/mcptools` adapter for tool dispatch
-(§9.16).
+`cmd/harness.resolveMCPServices` validates already-resolved definitions and sets
+the workspace child directory. `setupMCPServices` runs `mcpproxy.Daemon` in-process
+through `net.Pipe` using the stdio protocol, then registers tools through
+`internal/mcptools` (§9.16). No proxy subprocess, listener, API-key watcher, or
+metrics endpoint is required. The optional standalone `harness-mcp-proxy` can
+still be a named HTTP service or an owned `serve -stdio` command; a shared daemon
+is not automatically started and survives client exit.
+
+Config strings expand exactly once through `config.LoadOptions.LookupEnv`, with
+per-server owning-file provenance/config directories. Project maps merge whole
+entries by name. Runtime validation does not expand resolved values again.
+Per-entry `enabled` defaults to true; false retains the definition but skips
+expansion and startup, including same-name ACP attachments. Legacy
+`mcp.enable/proxy/api_key/headers/local` is converted in memory before strict
+decoding, preserving disabled state and credentials as named `shared`/`local`
+entries. `config migrate` explicitly persists conversion with an exclusive
+private backup and atomic replacement. Name collisions and malformed legacy
+values fail rather than overwrite definitions. All native `lsp` config and legacy
+environment settings remain rejected with migration errors; the old MCP API-key
+flag and native LSP/Serena integrations are removed. `mcp.max_tools` and
+`mcp.disabled_servers` retain auto-exposure semantics over the unified surface.
+An explicit agent allowlist bypasses exposure caps, not `excludedTools`.
+Configured explicit names are retained separately from the live subset, so
+unavailable tools disappear temporarily and recover on discovery. Exposure changes
+are synchronized with delegate resolution; candidate schemas read immutable snapshots.
+
+ACP advertises HTTP MCP support and accepts stdio/HTTP session attachments, not
+SSE. Attachment names must not conflict with each other or enabled configured
+services; conflicts fail before startup. Attachments matching a disabled configured
+service are suppressed. Attachment header values are literal, not expanded.
+All attached child commands run in the ACP workspace.
+
+`internal/procgroup` pins owned group identity with `waitid(WNOWAIT)` until
+signaling finishes, then calls `cmd.Wait`; numeric PGIDs are never signaled after
+reaping. Surviving group members are killed when their leader exits. This is
+owned-process cleanup, not recursive cleanup of arbitrary processes: nested
+owners receive graceful time to shut down their own groups. External
+SIGKILL/crashes and third-party daemons escaping their groups are not covered.
 
 Architecture rules:
 
-- Harness **never starts the remote proxy** and MCP never fails harness
-  startup: one-shot runs register under a 5 s timeout with one warning;
-  interactive runs register in the background and apply at a prompt boundary.
-- Each downstream server gets a supervisor: stdio children run in their own
-  process group with a 30 s initialize/`tools/list` timeout, restart with
-  backoff, and are permanently disabled after 5 consecutive failed (re)starts;
-  streamable-HTTP servers connect lazily (no restart loop — the process is not
-  ours) and get one transparent re-initialize on session expiry (HTTP 404). A
-  not-ready server yields an `isError` tool result, not a JSON-RPC error, so
-  the failure reaches the model as a normal tool failure.
+- Startup readiness waits for every service's first discovery attempt, within
+  one shared 5 s budget, then registers available tools. Slow/failed services
+  continue in the background; late catalogs refresh at prompt boundaries.
+- Each server gets a supervisor. Stdio children run in owned process groups with
+  a 30 s initialize/`tools/list` timeout, restart with backoff, and disable after
+  5 consecutive failed (re)starts. Remote initial discovery has at most 5
+  attempts with 30 s per attempt, and session expiry (HTTP 404) permits one
+  transparent re-initialize. A not-ready service returns an `isError` tool
+  result, not a JSON-RPC error. Existing auth is supported; no OAuth discovery
+  or dynamic client registration is added.
+- The root owns the aggregator, connection, and local children; delegates share
+  them. Shutdown closes the connection permanently and joins owned child
+  process-group cleanup. HTTP services are not owned or terminated. Generic
+  EOF/TERM/KILL cleanup and detached-descendant limits apply (see [mcp.md](mcp.md)).
 - Tools merge under `mcp__<server>__<tool>` with a reverse route map; the
   provider-safe charset check applies to the entire qualified string, and a
   failing name is dropped with a warning, never truncated (truncation could
-  collide and misroute).
+  collide and misroute). Server names cannot contain `__` or end with `_`,
+  preventing ambiguous namespace boundaries and cross-service routing collisions.
 - Per-server `excludedTools` entries match exact, case-sensitive downstream names
   before qualification. The registry omits matching tools from both discovery
   and routing on every rebuild, including after downstream refresh/reconnect;
@@ -4271,57 +4274,6 @@ Architecture rules:
 
 Configuration, serving and lifecycle operations, metrics, authentication,
 request logging, and exposure caps are documented in [mcp.md](mcp.md).
-
-## 15a. LSP code intelligence (optional)
-
-The **LSP manager** (`internal/lspproxy`) launches already-installed language
-servers on demand and exposes 21 native LSP tools: navigation, structural
-inspection, diagnostics, and change workflows (read-only action/format/rename
-plans plus mutating text-edit application). The normal path is first-class,
-not generic MCP: `lsp.enable=true` registers short `lsp_*` tools directly
-through `internal/lsptools` (§9.16a) while `internal/lspproxy` owns the
-language-server supervisors. This is distinct from the secrets-isolated remote
-`harness-mcp-proxy`, because a language server needs local filesystem access.
-
-Each LSP manager is one permanent lifecycle generation. Shutdown closes
-admission, cancels initialization and prewarm, joins admitted work, and stops
-instances concurrently under a shared graceful budget. The CLI keeps a stable
-tool-provider wrapper but replaces the manager on re-enable; stale calls cannot
-restart an old generation. Delegates share the parent's tool instances and do
-not own independent language servers. Reconnect retires a disconnected process
-before replacing it, even when the connection died but the process did not.
-
-`internal/procgroup` pins group identity using `waitid(WNOWAIT)` until all group
-signals finish, then calls `cmd.Wait`; numeric PGIDs are never signaled after
-reaping. Surviving group members are killed when their leader exits. This is
-owned-process cleanup, not a recursive kill of arbitrary processes: nested
-Harness owners receive enough graceful time to stop their own separate groups.
-External SIGKILL/crashes and third-party daemons escaping their group are not
-covered by an orderly-shutdown guarantee.
-
-- Tool annotations drive scheduling and agent exposure: read-only LSP tools
-  join the read-only gate, while `lsp_code_action`, `lsp_format_document`, and
-  `lsp_rename` are mutating.
-- `/lsp enable|disable` is a process-local runtime override that re-derives
-  every agent's allowed tools, updates registry and system prompt together,
-  and resets provider continuation state.
-- After a successful built-in `edit`/`write`, the CLI synchronizes up to eight
-  changed files through the manager's ordinary didOpen/didChange path and
-  appends fresh diagnostics to the tool result (supplemental, never failing
-  the mutation).
-- Serena support is independent of native LSP: `lsp.serena.enable=true` starts
-  a local stdio MCP child registered as `mcp__serena__<tool>`.
-- `harness lsp serve` is a compatibility stdio MCP shim over the same manager
-  for proxy-hosted setups.
-- `internal/lspproxy` is stdlib-only and hand-rolls the LSP client:
-  Content-Length JSON-RPC over stdio, per-`(server, workspace-root)`
-  supervisors with backoff and cooldown-revive, full-text sync, and async
-  publishDiagnostics. Language-server commands are never executed;
-  WorkspaceEdit file operations are rejected; mutating paths validate every
-  text range before any write.
-
-Setup, prewarming, the tool table and parameter conventions, server
-configuration, and hosting topologies are documented in [lsp.md](lsp.md).
 
 ## 16. Future work
 

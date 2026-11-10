@@ -45,7 +45,7 @@ func TestSmokeLocalBackendWithoutProxyBinaries(t *testing.T) {
 			home := t.TempDir()
 			modelConfig := modelBackendLocalConfig(t, home, provider.URL)
 			harnessConfig := filepath.Join(home, "harness.json")
-			modelBackendWrite(t, harnessConfig, `{"mcp":{"enable":false,"local":{"enable":false}},"lsp":{"enable":false},"no_env":true}`)
+			modelBackendWrite(t, harnessConfig, `{"mcp":{"servers":{}},"no_env":true}`)
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			cmd := exec.CommandContext(ctx, binary, "-config", harnessConfig, "-model-backend", "local", "-model-config", modelConfig, "-model", "fake:model", "-p", "hello", "-format", format, "-q")

@@ -24,9 +24,8 @@ harness-mcp-proxy --version
 ```
 
 Release builds inject the repository tag (`v*`) into those commands. The MCP
-protocol version is separate and is shown by both MCP-proxy version spellings
-and by `harness lsp version`. Persisted session `state.json` files use a
-versioned schema (see [session internals](session.md#state-files)); unsupported
+protocol version is separate and is shown by both MCP-proxy version spellings.
+Persisted session `state.json` files use a versioned schema (see [session internals](session.md#state-files)); unsupported
 schemas are rejected
 rather than migrated.
 
@@ -45,7 +44,8 @@ Packaging/smoke verification must cover:
   explicitly configured MCP children are still expected.
 - Remote access against the same-release standalone model proxy, including
   authentication, per-key budgets, probes/drain, and continuation recovery.
-- Existing single-command local MCP, native LSP, and standalone MCP-proxy paths.
+- Named mixed stdio/HTTP MCP services without a proxy binary or listener, plus
+  optional standalone MCP-proxy HTTP and command paths.
 
 Use hermetic fakes/fixtures and mock servers, not live provider credentials.
 These are release acceptance checks; do not assume a package dependency or a

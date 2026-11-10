@@ -50,7 +50,7 @@ func TestSessionResumeFlagsTrackRootFlagsExceptResume(t *testing.T) {
 }
 
 func TestLegacyGroupHelpAliasesIgnoreTrailingArguments(t *testing.T) {
-	for _, group := range []string{"config", "lsp"} {
+	for _, group := range []string{"config"} {
 		t.Run(group, func(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			code := run(environment{

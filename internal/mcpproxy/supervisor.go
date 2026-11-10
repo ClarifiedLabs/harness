@@ -25,12 +25,12 @@ import (
 const (
 	// initTimeout bounds the initialize + tools/list handshake.
 	initTimeout = 30 * time.Second
-	// maxRestarts caps consecutive failed (re)starts before a stdio server is
-	// disabled permanently. A successful initialize resets the counter.
+	// maxRestarts caps consecutive failed stdio (re)starts and initial HTTP
+	// connection attempts. A successful stdio initialize resets the counter.
 	maxRestarts = 5
 	// shutdownStdinWait is how long Shutdown waits after closing stdin before
 	// escalating to SIGTERM.
-	// Leave room for a nested LSP shim's 5s graceful budget and final reap.
+	// Leave room for nested services to finish graceful teardown and reap.
 	shutdownStdinWait = 8 * time.Second
 	// childOutputDrainWait bounds how long a crashed stdio child may keep stdout
 	// open after its process exits. Normally EOF is immediate; the bound prevents
@@ -116,8 +116,10 @@ type Supervisor struct {
 	// refreshing coalesces concurrent downstream list_changed refreshes.
 	refreshing bool
 
-	stopped chan struct{} // closed once the run loop exits
-	stop    context.CancelFunc
+	initialDone chan struct{} // closed after the first connection attempt
+	initialOnce sync.Once
+	stopped     chan struct{} // closed once the run loop exits
+	stop        context.CancelFunc
 }
 
 // NewSupervisor creates a supervisor for rs. Start must be called to begin the
@@ -127,10 +129,11 @@ func NewSupervisor(rs ResolvedServer, logger *slog.Logger) *Supervisor {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Supervisor{
-		cfg:     rs,
-		logger:  logger.With("server", rs.Name),
-		state:   StateStarting,
-		stopped: make(chan struct{}),
+		cfg:         rs,
+		logger:      logger.With("server", rs.Name),
+		state:       StateStarting,
+		stopped:     make(chan struct{}),
+		initialDone: make(chan struct{}),
 	}
 }
 
@@ -147,9 +150,10 @@ func (s *Supervisor) Start(ctx context.Context) {
 }
 
 // run is the lifetime loop. For stdio it spawns→initializes→serves→restarts; for
-// http it connects lazily and never restarts (the process isn't ours).
+// http it retries initial connection failures without owning a process.
 func (s *Supervisor) run(ctx context.Context) {
 	defer close(s.stopped)
+	defer s.finishInitialAttempt()
 	if s.cfg.Transport == TransportHTTP {
 		s.runHTTP(ctx)
 		return
@@ -167,6 +171,7 @@ func (s *Supervisor) runStdio(ctx context.Context) {
 		}
 		process, client, conn, err := s.startChild()
 		if err != nil {
+			s.finishInitialAttempt()
 			if !s.afterFailedStart(ctx, &attempt, "spawn", err) {
 				return
 			}
@@ -174,6 +179,7 @@ func (s *Supervisor) runStdio(ctx context.Context) {
 		}
 
 		fatal, initErr := s.initChild(ctx, client)
+		s.finishInitialAttempt()
 		if initErr != nil {
 			s.cleanupChild(client, conn, process)
 			if fatal || ctx.Err() != nil || !s.afterFailedStart(ctx, &attempt, "initialize", initErr) {
@@ -260,6 +266,7 @@ func (s *Supervisor) newCmd() *exec.Cmd {
 		cmd = exec.Command(s.cfg.Command, s.cfg.Args...) // nosemgrep: dangerous-exec-command
 		cmd.Env = ChildEnv(s.cfg.Env)
 	}
+	cmd.Dir = s.cfg.WorkDir
 	return cmd
 }
 
@@ -363,15 +370,19 @@ func (s *Supervisor) drainStderr(r io.Reader) {
 // ---- http lifecycle ----
 
 func (s *Supervisor) runHTTP(ctx context.Context) {
-	// Lazy connect: attempt once now. A version error is terminal (connectHTTP
-	// already set StateFailed); any other failure is retried on next use, so mark
-	// the server restarting and move on. There is no restart loop because the
-	// process is not ours.
-	if err := s.connectHTTP(ctx, nil); err != nil {
+	// Retry initial failures even when no tools are visible to trigger a call.
+	// Each handshake and the number of attempts are bounded; cancellation also
+	// interrupts the backoff. Protocol-version errors remain terminal.
+	attempt := 0
+	for ctx.Err() == nil {
+		err := s.connectHTTP(ctx, nil)
+		s.finishInitialAttempt()
 		var ve *mcp.VersionError
-		if !errors.As(err, &ve) {
-			s.setState(StateRestarting)
-			s.logger.Warn("http server initial connect failed; will retry on use", logging.Category(categoryServer), "err", err)
+		if err == nil || errors.As(err, &ve) || ctx.Err() != nil {
+			break
+		}
+		if !s.afterFailedStart(ctx, &attempt, "http initialize", err) {
+			break
 		}
 	}
 
@@ -549,6 +560,10 @@ func (s *Supervisor) refreshTools() {
 	}
 }
 
+func (s *Supervisor) finishInitialAttempt() {
+	s.initialOnce.Do(func() { close(s.initialDone) })
+}
+
 // ---- public API ----
 
 // Tools returns a snapshot copy of the cached tool list.
@@ -591,9 +606,9 @@ func (s *Supervisor) CallTool(ctx context.Context, name string, args json.RawMes
 	}
 
 	// HTTP lazy reconnect: an initial-connect failure leaves no client; a call
-	// attempts to connect on demand (the process is not ours, so there is no
-	// restart loop to do it eagerly). A terminal StateFailed (e.g. a version
-	// error that will never change) skips the attempt — it would just fail again.
+	// attempts to connect on demand in addition to background retries.
+	// A terminal StateFailed skips the attempt (version error or exhausted
+	// startup retry budget).
 	if client == nil && state != StateFailed && s.cfg.Transport == TransportHTTP {
 		if err := s.connectHTTP(ctx, nil); err != nil {
 			s.logger.Warn("http lazy connect failed", logging.Category(categoryServer), "err", err)

@@ -299,9 +299,14 @@ func executeOne(ctx context.Context, cfg runConfig, results string, entry matrix
 	record.StdoutPath = filepath.Join(runDir, "stdout.txt")
 	record.StderrPath = filepath.Join(runDir, "stderr.txt")
 
+	configPath := filepath.Join(runDir, "config.json")
+	if err := os.WriteFile(configPath, []byte("{}\n"), 0o600); err != nil {
+		return record, fmt.Errorf("write isolated benchmark config: %w", err)
+	}
 	runCtx, cancel := context.WithTimeout(ctx, cfg.Timeout)
 	defer cancel()
 	args := []string{
+		"-config", configPath,
 		"-model", cfg.Model,
 		"-reasoning", "low",
 		"-agent", "explore",
@@ -356,6 +361,7 @@ func executeOne(ctx context.Context, cfg runConfig, results string, entry matrix
 
 func preflightModel(ctx context.Context, harnessPath, target string, requireStateful bool) error {
 	cmd := exec.CommandContext(ctx, harnessPath, "--models", "--format", "json")
+	cmd.Env = benchmarkEnvironment()
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("model catalog preflight: %w", err)
@@ -392,10 +398,15 @@ func preflightModel(ctx context.Context, harnessPath, target string, requireStat
 }
 
 func benchmarkEnvironment() []string {
-	env := os.Environ()
-	env = setEnv(env, "HARNESS_MCP_ENABLE", "false")
-	env = setEnv(env, "HARNESS_LSP_ENABLE", "false")
-	env = setEnv(env, "HARNESS_LSP_SERENA_ENABLE", "false")
+	// Retired integration variables are rejected even when false or empty.
+	// Services stay disabled through the isolated benchmark config instead.
+	var env []string
+	for _, item := range os.Environ() {
+		if strings.HasPrefix(item, "HARNESS_MCP_") || strings.HasPrefix(item, "HARNESS_LSP_") {
+			continue
+		}
+		env = append(env, item)
+	}
 	env = setEnv(env, "NO_COLOR", "1")
 	return env
 }

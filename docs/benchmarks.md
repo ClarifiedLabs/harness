@@ -97,7 +97,7 @@ Default models (source: `defaultModels` in `scripts/pairedbench/runner.go`):
 `openrouter:anthropic/claude-sonnet-5`.
 
 Standard cases use medium reasoning, the independent agent, an empty explicit
-config, no web/MCP/LSP/Serena augmentation, an immutable target revision, and
+config, no web/MCP augmentation, an immutable target revision, and
 intentionally high limits: no prompt-token or prompt-cost caps, 200 turns, and
 five repetitions per model. Runs are rejected
 when recorded telemetry names a model target other than the requested one.
@@ -145,7 +145,7 @@ go run ./scripts/retentionbench \
   -results /tmp/harness-retention-results
 ```
 
-The default scored matrix has 18 runs: three policies × two request shapes × three rotated repetitions. Use `-stateful true` for a smaller stateful-only smoke. MCP, LSP, and Serena are disabled in child processes. All fixtures require current `api_type` continuation-control metadata from the benchmark Harness and model proxy (stateful fixtures additionally require `continuation_stateful:true`); preflight rejects older proxy protocols instead of silently measuring the wrong request shape. A policy is recommended only when every run is correct, every run actually exercised that policy, and it has the lowest median post-turn-10 uncached input among the eligible policies.
+The default scored matrix has 18 runs: three policies × two request shapes × three rotated repetitions. Use `-stateful true` for a smaller stateful-only smoke. MCP services are not configured in child processes. All fixtures require current `api_type` continuation-control metadata from the benchmark Harness and model proxy (stateful fixtures additionally require `continuation_stateful:true`); preflight rejects older proxy protocols instead of silently measuring the wrong request shape. A policy is recommended only when every run is correct, every run actually exercised that policy, and it has the lowest median post-turn-10 uncached input among the eligible policies.
 
 ## Reliability corpus comparison
 

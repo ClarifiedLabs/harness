@@ -1,13 +1,17 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,6 +66,110 @@ func (s *noSleep) recorded() []time.Duration {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]time.Duration(nil), s.calls...)
+}
+
+type failingHTTPRoundTripper struct {
+	err error
+}
+
+func (r failingHTTPRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, r.err
+}
+
+func TestHTTPTransportRedactsURLErrors(t *testing.T) {
+	const secret = "mcp-http-secret-sentinel"
+	endpoint := "https://" + secret + ":" + secret + "@example.test/mcp?token=" + secret
+	sentinel := errors.New("network failure")
+	for _, transportErr := range []error{
+		sentinel,
+		&url.Error{Op: "dial", URL: endpoint, Err: sentinel},
+		fmt.Errorf("redirect from %s: %w", endpoint, &url.Error{Op: "redirect", URL: endpoint, Err: sentinel}),
+	} {
+		t.Run(fmt.Sprintf("%T", transportErr), func(t *testing.T) {
+			var logs bytes.Buffer
+			tr := NewHTTPTransport(HTTPOptions{
+				Endpoint: endpoint,
+				Client:   &http.Client{Transport: failingHTTPRoundTripper{err: transportErr}},
+				Logger:   slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+				sleep:    func(time.Duration) {},
+			})
+			for _, call := range []func() error{
+				func() error { _, err := tr.Call(context.Background(), "tools/list", nil); return err },
+				func() error { return tr.Notify(context.Background(), "notifications/initialized", nil) },
+			} {
+				err := call()
+				if err == nil || strings.Contains(err.Error(), secret) {
+					t.Fatalf("error leaked secret: %v", err)
+				}
+				if !errors.Is(err, sentinel) {
+					t.Fatalf("error lost sentinel: %v", err)
+				}
+				var urlErr *url.Error
+				if !errors.As(err, &urlErr) || strings.Contains(urlErr.Error(), secret) || strings.Contains(urlErr.URL, secret) {
+					t.Fatalf("URL error was not preserved safely: %v", urlErr)
+				}
+			}
+			tr.sessionID = "session"
+			if err := tr.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(logs.String(), secret) {
+				t.Fatalf("DELETE log leaked secret: %s", logs.String())
+			}
+		})
+	}
+}
+
+func TestSanitizeHTTPErrorPreservesNetworkErrorSemantics(t *testing.T) {
+	cause := &net.DNSError{Err: "timeout", Name: "example.test", IsTimeout: true, IsTemporary: true}
+	original := &url.Error{Op: "Post", URL: "https://user:secret@example.test/?token=secret", Err: cause}
+	err := sanitizeHTTPError(original)
+	var urlErr *url.Error
+	var dnsErr *net.DNSError
+	if !errors.Is(err, original) || !errors.Is(err, cause) ||
+		!errors.As(err, &urlErr) || !errors.As(err, &dnsErr) || dnsErr != cause ||
+		!urlErr.Timeout() || !urlErr.Temporary() {
+		t.Fatalf("sanitization changed network error semantics: %v", err)
+	}
+	if strings.Contains(err.Error(), "secret") || strings.Contains(urlErr.Error(), "secret") {
+		t.Fatalf("sanitization leaked URL: %v", err)
+	}
+	if original.URL != "https://user:secret@example.test/?token=secret" || original.Err != cause {
+		t.Fatal("sanitization modified original URL error")
+	}
+}
+
+func TestHTTPTransportRedactsInvalidEndpointErrors(t *testing.T) {
+	const secret = "mcp-http-parse-secret"
+	for _, endpoint := range []string{
+		"https://" + secret + ":" + secret + "@example.test:bad" + secret + "/mcp?token=" + secret,
+		"https://" + secret + ":" + secret + "@example.test/mcp?token=" + secret + "\n",
+		"https://" + secret + ":" + secret + "@example.test/%zz?token=" + secret,
+	} {
+		tr := NewHTTPTransport(HTTPOptions{Endpoint: endpoint, sleep: func(time.Duration) {}})
+		_, err := tr.Call(context.Background(), "tools/list", nil)
+		if err == nil || strings.Contains(err.Error(), secret) {
+			t.Fatalf("invalid endpoint error leaked secret: %v", err)
+		}
+		var urlErr *url.Error
+		if !errors.As(err, &urlErr) || strings.Contains(urlErr.Error(), secret) {
+			t.Fatalf("parse URL error was not preserved safely: %v", urlErr)
+		}
+	}
+}
+
+func TestHTTPTransportRedactsInvalidRedirectErrors(t *testing.T) {
+	const secret = "mcp-http-redirect-secret"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://"+secret+":"+secret+"@example.test:bad"+secret+"/?token="+secret)
+		w.WriteHeader(http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	tr := NewHTTPTransport(HTTPOptions{Endpoint: srv.URL + "?token=" + secret, sleep: func(time.Duration) {}})
+	_, err := tr.Call(context.Background(), "tools/list", nil)
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("redirect error leaked secret: %v", err)
+	}
 }
 
 func TestHTTPCallJSONResponse(t *testing.T) {

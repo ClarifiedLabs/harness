@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"harness/internal/agentdef"
+	"harness/internal/mcptools"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
-	"strconv"
 	"strings"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -17,203 +21,190 @@ import (
 	"harness/internal/llm"
 	"harness/internal/llm/llmtest"
 	"harness/internal/mcp"
+	"harness/internal/mcpproxy"
 	"harness/internal/tools"
 	"harness/internal/ui"
 )
 
-// procStart anchors the fake child's optional tool-exposure delay.
-var procStart = time.Now()
+type fakeLocalProvider struct{ ready atomic.Bool }
 
-// fakeLocalProvider exposes one already-namespaced tool by default, mimicking a
-// local harness-mcp-proxy. HARNESS_LOCAL_TOOL_NAME overrides the advertised name
-// to model a direct MCP server. HARNESS_LOCAL_DELAY_MS delays tool exposure to
-// model the proxy's asynchronous downstream registration.
-type fakeLocalProvider struct{}
-
-func (fakeLocalProvider) ListTools(ctx context.Context, cursor string) (mcp.ListToolsResult, error) {
-	if ms := os.Getenv("HARNESS_LOCAL_DELAY_MS"); ms != "" {
-		if d, err := strconv.Atoi(ms); err == nil && time.Since(procStart) < time.Duration(d)*time.Millisecond {
-			return mcp.ListToolsResult{}, nil
-		}
+func (p *fakeLocalProvider) ListTools(context.Context, string) (mcp.ListToolsResult, error) {
+	if os.Getenv("HARNESS_LOCAL_EMPTY") == "1" && !p.ready.Load() {
+		return mcp.ListToolsResult{}, nil
 	}
-	name := os.Getenv("HARNESS_LOCAL_TOOL_NAME")
-	if name == "" {
-		name = "mcp__fake__ping"
-	}
-	return mcp.ListToolsResult{Tools: []mcp.Tool{{
-		Name:        name,
-		Description: "ping",
-		InputSchema: json.RawMessage(`{"type":"object"}`),
-		Annotations: json.RawMessage(`{"readOnlyHint":true}`),
-	}}}, nil
+	return mcp.ListToolsResult{Tools: []mcp.Tool{{Name: "ping", InputSchema: json.RawMessage(`{"type":"object"}`), Annotations: json.RawMessage(`{"readOnlyHint":true}`)}}}, nil
 }
-
-func (fakeLocalProvider) CallTool(ctx context.Context, name string, args json.RawMessage) (*mcp.CallToolResult, error) {
-	return &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: name}}}, nil
+func (*fakeLocalProvider) CallTool(context.Context, string, json.RawMessage) (*mcp.CallToolResult, error) {
+	wd, _ := os.Getwd()
+	return &mcp.CallToolResult{Content: []mcp.ContentBlock{{Type: "text", Text: wd}}}, nil
 }
-
-// TestHelperProcess runs a minimal stdio MCP server when HARNESS_LOCAL_HELPER is
-// set; it is the fake local MCP child spawned by the tests below. It exits via
-// os.Exit so the test harness never prints PASS to stdout (the MCP channel).
 func TestHelperProcess(t *testing.T) {
 	if os.Getenv("HARNESS_LOCAL_HELPER") == "" {
 		return
 	}
-	conn := mcp.NewStdioConn(os.Stdin, os.Stdout)
-	_ = mcp.Serve(context.Background(), conn, mcp.ServerOptions{
-		Info:     mcp.Implementation{Name: "fake", Version: "0"},
-		Provider: fakeLocalProvider{},
-	})
+	provider := &fakeLocalProvider{}
+	_ = mcp.Serve(context.Background(), mcp.NewStdioConn(os.Stdin, os.Stdout), mcp.ServerOptions{Info: mcp.Implementation{Name: "fake", Version: "0"}, Provider: provider, ListChanged: true, OnSession: func(session *mcp.ServerSession) {
+		if gatePath := os.Getenv("HARNESS_LOCAL_GATE"); gatePath != "" {
+			go func() {
+				gate, err := os.Open(gatePath)
+				if err != nil {
+					return
+				}
+				defer gate.Close()
+				var one [1]byte
+				if _, err := gate.Read(one[:]); err != nil {
+					return
+				}
+				provider.ready.Store(true)
+				_ = session.NotifyToolsListChanged()
+			}()
+		}
+	}})
 	os.Exit(0)
 }
-
-func TestSetupLocalMCPHappyPath(t *testing.T) {
-	for _, tc := range []struct {
-		name       string
-		advertised string
-		registered string
-		server     string
-	}{
-		{"qualified", "mcp__fake__ping", "mcp__fake__ping", "fake"},
-		{"bare", "list_devices", "mcp__local__list_devices", "local"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			reg := &tools.Registry{}
-			cfg := config.LocalMCPConfig{
-				Enable:  true,
-				Command: os.Args[0],
-				Args:    []string{"-test.run=TestHelperProcess$"},
-				Env: map[string]string{
-					"HARNESS_LOCAL_HELPER":    "1",
-					"HARNESS_LOCAL_TOOL_NAME": tc.advertised,
-				},
+func fakeMCPServer(name, wd string) mcpproxy.ResolvedServer {
+	return mcpproxy.ResolvedServer{Name: name, Command: os.Args[0], Args: []string{"-test.run=^TestHelperProcess$"}, Env: map[string]string{"HARNESS_LOCAL_HELPER": "1"}, WorkDir: wd}
+}
+func TestSetupMCPServicesAggregatesTransports(t *testing.T) {
+	wd, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	url, _ := startHTTPProxy(t, &echoProvider{tools: []mcp.Tool{readOnlyMCPTool("inspect")}})
+	reg := &tools.Registry{}
+	conn, sum, cleanup, ok := setupMCPServices(t.Context(), []mcpproxy.ResolvedServer{fakeMCPServer("local", wd), {Name: "remote", Transport: mcpproxy.TransportHTTP, URL: url}}, reg, slog.New(slog.DiscardHandler), nil)
+	defer cleanup()
+	if !ok || conn == nil || !slices.Equal(sum.Names, []string{"mcp__local__ping", "mcp__remote__inspect"}) {
+		t.Fatalf("ok=%v summary=%+v", ok, sum)
+	}
+	if !slices.Equal(sum.ReadOnlyNames, sum.Names) {
+		t.Fatalf("read-only names = %v", sum.ReadOnlyNames)
+	}
+	result := reg.Dispatch(t.Context(), llm.ToolCall{ID: "cwd", Name: "mcp__local__ping", Input: json.RawMessage(`{}`)})
+	if result.IsError || result.Text != wd {
+		t.Fatalf("child cwd: %+v; want %s", result, wd)
+	}
+	names, _ := capRemoteMCPNames(sum.Names, sum.ReadOnlyNames, mcpLimits{maxTools: 1}, nil)
+	if !slices.Equal(names, []string{"mcp__local__ping"}) {
+		t.Fatalf("global cap = %v", names)
+	}
+	names, _ = capRemoteMCPNames(sum.Names, sum.ReadOnlyNames, mcpLimits{disabled: map[string]bool{"local": true}}, nil)
+	if !slices.Equal(names, []string{"mcp__remote__inspect"}) {
+		t.Fatalf("disabled server = %v", names)
+	}
+	cleanup()
+	cleanup()
+	if _, err := conn.ListTools(t.Context()); err == nil {
+		t.Fatal("cleanup left connection usable")
+	}
+}
+func TestSetupMCPServicesRetainsEmptyAndFailedServices(t *testing.T) {
+	for _, mode := range []string{"empty", "failed", "none"} {
+		t.Run(mode, func(t *testing.T) {
+			var servers []mcpproxy.ResolvedServer
+			if mode != "none" {
+				server := fakeMCPServer("test", t.TempDir())
+				if mode == "empty" {
+					server.Env["HARNESS_LOCAL_EMPTY"] = "1"
+				} else {
+					server.Command = filepath.Join(t.TempDir(), "missing")
+				}
+				servers = []mcpproxy.ResolvedServer{server}
 			}
-			var logs strings.Builder
-			conn, sum, cleanup, ok := setupLocalMCP(context.Background(), cfg, true, reg, slog.New(slog.NewTextHandler(&logs, nil)))
+			conn, sum, cleanup, ok := setupMCPServices(t.Context(), servers, &tools.Registry{}, slog.New(slog.DiscardHandler), nil)
 			defer cleanup()
-			if !ok || conn == nil {
-				t.Fatalf("setupLocalMCP ok=%v conn=%v; logs=%s", ok, conn, logs.String())
+			if !ok || conn == nil || sum.Total != 0 {
+				t.Fatalf("ok=%v conn=%v summary=%+v", ok, conn, sum)
 			}
-			if sum.Total != 1 || !slices.Equal(sum.Names, []string{tc.registered}) || len(sum.Skipped) != 0 {
-				t.Fatalf("summary = %+v", sum)
-			}
-			if len(sum.Servers) != 1 || sum.Servers[tc.server] != 1 {
-				t.Fatalf("summary Servers = %v, want %s=1", sum.Servers, tc.server)
-			}
-			if !slices.Equal(sum.ReadOnlyNames, []string{tc.registered}) {
-				t.Fatalf("summary ReadOnlyNames = %v, want %s", sum.ReadOnlyNames, tc.registered)
-			}
-			if strings.Contains(logs.String(), "level=WARN") {
-				t.Fatalf("unexpected startup warning: %s", logs.String())
-			}
-			res := reg.Dispatch(context.Background(), llm.ToolCall{ID: "1", Name: tc.registered, Input: json.RawMessage(`{}`)})
-			if res.IsError || res.Text != tc.advertised {
-				t.Fatalf("dispatch = %+v, want downstream name %q", res, tc.advertised)
+			if _, err := conn.ListTools(t.Context()); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
 }
-
-func TestRunPlanAgentIncludesReadOnlyLocalMCP(t *testing.T) {
+func TestResolveMCPServicesLiteralAndWorkspace(t *testing.T) {
+	cfg := config.MCPConfig{Servers: map[string]mcpproxy.ServerConfig{"z": {URL: "https://example.test/${LITERAL}"}, "a": {Command: "${LITERAL}", Args: []string{"${ARG}"}, Env: map[string]string{"VALUE": "${VALUE}"}}}, ServerConfigDirs: map[string]string{"a": "/source/a", "z": "/source/z"}}
+	got, err := resolveMCPServices(cfg, "/workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Name != "a" || got[1].Name != "z" || got[0].Command != "${LITERAL}" || got[0].Args[0] != "${ARG}" || got[0].Env["VALUE"] != "${VALUE}" || got[1].URL != "https://example.test/${LITERAL}" {
+		t.Fatalf("resolved=%+v", got)
+	}
+	for _, server := range got {
+		if server.WorkDir != "/workspace" || server.ConfigDir != cfg.ServerConfigDirs[server.Name] {
+			t.Fatalf("server=%+v", server)
+		}
+	}
+	cfg.Servers["bad"] = mcpproxy.ServerConfig{}
+	if _, err := resolveMCPServices(cfg, ""); err == nil {
+		t.Fatal("invalid server accepted")
+	}
+}
+func TestRunPlanAgentIncludesReadOnlyMCP(t *testing.T) {
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
-	cfgPath := filepath.Join(t.TempDir(), "config.json")
-	cfg := fmt.Sprintf(`{
-		"lsp": {"enable": true},
-		"mcp": {
-			"local": {
-				"enable": true,
-				"command": %q,
-				"args": ["-test.run=TestHelperProcess$"],
-				"env": {"HARNESS_LOCAL_HELPER": "1"}
-			}
-		}
-	}`, os.Args[0])
-	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	env, _, errw, _ := fakeProviderEnv(t, []string{"-config", cfgPath, "-model", "claude-opus-4-8", "-agent", "plan", "-p", "hi"}, fp, "")
-
+	path := writeMainConfig(t, fmt.Sprintf(`{"mcp":{"servers":{"fake":{"command":%q,"args":["-test.run=^TestHelperProcess$"],"env":{"HARNESS_LOCAL_HELPER":"1"}}}}}`, os.Args[0]))
+	env, _, errw, _ := fakeProviderEnv(t, []string{"-config", path, "-model", "claude-opus-4-8", "-agent", "plan", "-p", "hi"}, fp, "")
 	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
+		t.Fatalf("exit=%d stderr=%s", code, errw)
 	}
-	if len(fp.Requests) != 1 {
-		t.Fatalf("requests = %d, want 1", len(fp.Requests))
+	if len(fp.Requests) != 1 || !slices.Contains(toolNames(fp.Requests[0]), "mcp__fake__ping") {
+		t.Fatalf("requests=%+v", fp.Requests)
 	}
-	if got := toolNames(fp.Requests[0]); !slices.Contains(got, "mcp__fake__ping") {
-		t.Fatalf("plan tools = %v, want read-only local MCP tool", got)
+	if strings.Contains(fp.Requests[0].System, "lsp_*") {
+		t.Fatal("retired LSP hint in prompt")
 	}
-	if got := toolNames(fp.Requests[0]); !slices.Contains(got, "lsp_definition") {
-		t.Fatalf("plan tools = %v, want short-name LSP tool", got)
-	}
-	if got := toolNames(fp.Requests[0]); slices.Contains(got, "mcp__lsp__definition") {
-		t.Fatalf("plan tools = %v, did not want MCP-prefixed built-in LSP tool", got)
+}
+func TestSetupMCPServicesCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	conn, _, cleanup, ok := setupMCPServices(ctx, nil, &tools.Registry{}, nil, nil)
+	cleanup()
+	cleanup()
+	if ok || conn != nil {
+		t.Fatalf("cancelled setup: ok=%v conn=%v", ok, conn)
 	}
 }
 
-func TestSetupLocalMCPWaitsForAsyncTools(t *testing.T) {
-	oldPoll := localReadyPoll
-	localReadyPoll = 5 * time.Millisecond
-	t.Cleanup(func() { localReadyPoll = oldPoll })
-
-	reg := &tools.Registry{}
-	cfg := config.LocalMCPConfig{
-		Enable:  true,
-		Command: os.Args[0],
-		Args:    []string{"-test.run=TestHelperProcess$"},
-		Env:     map[string]string{"HARNESS_LOCAL_HELPER": "1", "HARNESS_LOCAL_DELAY_MS": "25"},
+func TestMCPServicesEmptyCatalogRefreshesAtPromptBoundary(t *testing.T) {
+	gatePath := filepath.Join(t.TempDir(), "gate")
+	if err := syscall.Mkfifo(gatePath, 0600); err != nil {
+		t.Fatal(err)
 	}
-	_, sum, cleanup, ok := setupLocalMCP(context.Background(), cfg, true, reg, slog.New(slog.DiscardHandler))
+	gate, err := os.OpenFile(gatePath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer gate.Close()
+	server := fakeMCPServer("late", t.TempDir())
+	server.Env["HARNESS_LOCAL_EMPTY"] = "1"
+	server.Env["HARNESS_LOCAL_GATE"] = gatePath
+	catalog := tools.CatalogWithOptions(tools.Options{})
+	conn, sum, cleanup, ok := setupMCPServices(t.Context(), []mcpproxy.ResolvedServer{server}, catalog, slog.New(slog.DiscardHandler), nil)
 	defer cleanup()
-	if !ok {
-		t.Fatal("setupLocalMCP should succeed once the delayed tools appear")
+	if !ok || conn == nil || sum.Total != 0 {
+		t.Fatalf("initial summary=%+v ok=%v", sum, ok)
 	}
-	if sum.Total != 1 || !slices.Contains(sum.Names, "mcp__fake__ping") {
-		t.Fatalf("summary = %+v, want the tool to register after the delay", sum)
+	agents := map[string]agentdef.Definition{"all": {Name: "all", AllowedTools: []string{"read"}, MCPTools: agentdef.MCPToolsAll}}
+	refresh := newMCPRefresherDynamic(conn, catalog, agents, snapshotMCPAgentBases(agents), sum, func() mcptools.Summary { return mcptools.Summary{} }, slog.New(slog.DiscardHandler))
+	if _, err := gate.Write([]byte{1}); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func TestLocalMCPEnabled(t *testing.T) {
-	cases := []struct {
-		name    string
-		cfg     config.LocalMCPConfig
-		oneShot bool
-		want    bool
-	}{
-		{"default repl off", config.LocalMCPConfig{}, false, false},
-		{"default one-shot off", config.LocalMCPConfig{}, true, false},
-		{"explicit command still off without enable", config.LocalMCPConfig{Command: "/opt/bin/custom-mcp"}, false, false},
-		{"custom command repl off", config.LocalMCPConfig{Command: "custom-mcp"}, false, false},
-		{"explicit on in one-shot", config.LocalMCPConfig{Enable: true, EnableSet: true}, true, true},
-		{"explicit on custom command", config.LocalMCPConfig{Enable: true, EnableSet: true, Command: "custom-mcp"}, false, true},
-		{"explicit off in repl", config.LocalMCPConfig{Enable: false, EnableSet: true}, false, false},
-	}
-	for _, tc := range cases {
-		if got := localMCPEnabled(tc.cfg, tc.oneShot); got != tc.want {
-			t.Errorf("%s: localMCPEnabled = %v, want %v", tc.name, got, tc.want)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	for !conn.Dirty() {
+		select {
+		case <-ctx.Done():
+			t.Fatal("aggregator did not forward list_changed")
+		default:
+			runtime.Gosched()
 		}
 	}
-}
-
-func TestSetupLocalMCPBinaryNotFound(t *testing.T) {
-	reg := &tools.Registry{}
-	cfg := config.LocalMCPConfig{
-		Enable:  true,
-		Command: "/nonexistent/harness-xyz-does-not-exist",
-		Args:    []string{},
+	if _, found := catalog.Lookup("mcp__late__ping"); found {
+		t.Fatal("catalog changed outside prompt boundary")
 	}
-	_, _, cleanup, ok := setupLocalMCP(context.Background(), cfg, true, reg, slog.New(slog.DiscardHandler))
-	defer cleanup()
-	if ok {
-		t.Fatal("expected ok=false for a missing binary")
-	}
-}
-
-func TestSetupLocalMCPRequiresCommand(t *testing.T) {
-	reg := &tools.Registry{}
-	cfg := config.LocalMCPConfig{Enable: true}
-	_, _, cleanup, ok := setupLocalMCP(context.Background(), cfg, true, reg, slog.New(slog.DiscardHandler))
-	defer cleanup()
-	if ok {
-		t.Fatal("expected ok=false when mcp.local.command is empty")
+	reg, notice := refresh(ctx, "all")
+	if reg == nil || !slices.Contains(reg.Names(), "mcp__late__ping") || notice == "" {
+		t.Fatalf("refreshed=%v notice=%q", reg, notice)
 	}
 }

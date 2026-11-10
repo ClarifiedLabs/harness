@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -18,7 +21,6 @@ import (
 	"harness/internal/mcp"
 	"harness/internal/mcpproxy"
 	"harness/internal/mcptools"
-	"harness/internal/retry"
 	"harness/internal/tools"
 	"harness/internal/tracing"
 )
@@ -26,184 +28,115 @@ import (
 // MCP startup timing budget.
 var mcpRegisterTimeout = 5 * time.Second
 
-// optionalToolSchemaBudget keeps ordinary MCP/LSP catalogs native while moving
+// optionalToolSchemaBudget keeps ordinary MCP catalogs native while moving
 // unusually large optional surfaces behind tool_catalog. The catalog is a
 // prompt optimization, not a dispatch or permission boundary.
 const optionalToolSchemaBudget = 32 << 10
 
-// setupMCP connects to the already-running HTTP proxy, registers the
-// discovered tools into catalog, and returns the live conn plus its initial
-// registration summary and a cleanup func. It NEVER fails harness startup: if
-// the proxy is unreachable or registration fails it logs a single warning via
-// logger and returns ok=false with a nil conn and a no-op cleanup, so the caller
-// can defer cleanup unconditionally. The harness does not start the proxy;
-// that is the operator's job (run harness-mcp-proxy separately).
-//
-// The returned conn (when ok) backs tool dispatch; cleanup closes that conn (the
-// daemon itself keeps running and serving other sessions).
-// dialMCPProxy resolves the configured proxy to a dialable http(s) URL and builds
-// a lazily-connecting Conn for it (it does not connect). When the resolved proxy is
-// not an http(s) URL it logs a single warning and returns ok=false with a nil conn,
-// preserving the "MCP never fails harness startup" contract for both the sync
-// (setupMCP) and async (setupMCPAsync) callers.
-func dialMCPProxy(mcpCfg config.MCPConfig, logger *slog.Logger, tracer *tracing.Tracer) (proxy string, conn *mcptools.Conn, ok bool) {
-	proxy = resolveMCPProxy(mcpCfg.Proxy)
-	if !isHTTPProxy(proxy) {
-		logger.Warn(fmt.Sprintf("mcp: cannot connect to proxy at %s: proxy must be an http(s) URL; MCP tools unavailable", proxy), logging.Category("mcp"))
-		return proxy, nil, false
+// resolveMCPServices validates already-expanded configuration without expanding
+// literal dollar expressions a second time. Child processes run in the root workspace.
+func resolveMCPServices(cfg config.MCPConfig, workDir string) ([]mcpproxy.ResolvedServer, error) {
+	names := make([]string, 0, len(cfg.Servers))
+	for name := range cfg.Servers {
+		names = append(names, name)
 	}
-	conn = mcptools.NewConn(mcptools.Options{
-		Endpoint: proxy,
-		APIKey:   mcpCfg.APIKey,
-		Headers:  mcpCfg.Headers,
-		Info:     mcp.Implementation{Name: "harness", Version: buildinfo.Version},
-		Logger:   logger,
-		Tracer:   tracer,
-	})
-	return proxy, conn, true
+	sort.Strings(names)
+	servers := make([]mcpproxy.ResolvedServer, 0, len(names))
+	for _, name := range names {
+		if !cfg.Servers[name].IsEnabled() {
+			continue
+		}
+		server, err := mcpproxy.ValidateServer(name, cfg.Servers[name], cfg.ServerConfigDirs[name])
+		if err != nil {
+			return nil, fmt.Errorf("mcp: %w", err)
+		}
+		server.WorkDir = workDir
+		servers = append(servers, server)
+	}
+	return servers, nil
 }
 
-func setupMCP(ctx context.Context, mcpCfg config.MCPConfig, catalog *tools.Registry, logger *slog.Logger, tracer *tracing.Tracer) (conn *mcptools.Conn, summary mcptools.Summary, cleanup func(), ok bool) {
-	noop := func() {}
-	proxy, c, ok := dialMCPProxy(mcpCfg, logger, tracer)
-	if !ok {
-		return nil, mcptools.Summary{}, noop, false
+// setupMCPServices owns one in-process aggregator and its downstream services.
+// Readiness is bounded, not conditional on a nonempty tool list. A slow or failed
+// service can recover later and notify the same connection at a prompt boundary.
+func setupMCPServices(ctx context.Context, servers []mcpproxy.ResolvedServer, catalog *tools.Registry, logger *slog.Logger, tracer *tracing.Tracer) (conn *mcptools.Conn, summary mcptools.Summary, cleanup func(), ok bool) {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
-	regCtx, cancel := context.WithTimeout(ctx, mcpRegisterTimeout)
-	defer cancel()
+	runCtx, cancel := context.WithCancel(ctx)
+	clientSide, serverSide := net.Pipe()
+	daemon := mcpproxy.NewDaemon(mcpproxy.Config{Servers: servers}, logger)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if err := daemon.RunStdio(runCtx, serverSide); err != nil && runCtx.Err() == nil {
+			logger.Warn("mcp: aggregator stopped", logging.Category("mcp"), "err", err)
+		}
+	}()
+	var dialed atomic.Bool
+	c := mcptools.NewConn(mcptools.Options{
+		Info: mcp.Implementation{Name: "harness", Version: buildinfo.Version}, Logger: logger, Tracer: tracer,
+		Dial: func(ctx context.Context) (io.ReadWriteCloser, error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if !dialed.CompareAndSwap(false, true) {
+				return nil, mcptools.ErrClosed
+			}
+			return clientSide, nil
+		},
+	})
+	var once sync.Once
+	cleanup = func() {
+		once.Do(func() {
+			cancel()
+			_ = clientSide.Close()
+			_ = serverSide.Close()
+			_ = c.Close()
+			<-done
+		})
+	}
+	readyCtx, readyCancel := context.WithTimeout(ctx, mcpRegisterTimeout)
+	err := daemon.WaitReady(readyCtx)
+	readyCancel()
+	if ctx.Err() != nil {
+		cleanup()
+		return nil, mcptools.Summary{}, cleanup, false
+	}
+	if err != nil {
+		logger.Warn("mcp: initial discovery timed out; services continue in background", logging.Category("mcp"))
+	}
+	regCtx, regCancel := context.WithTimeout(ctx, mcpRegisterTimeout)
+	defer regCancel()
 	sum, err := mcptools.RegisterWithOptions(regCtx, catalog, c, mcptools.RegisterOptions{TrustReadOnlyHint: true})
 	if err != nil {
-		if errors.Is(err, context.Canceled) {
-			_ = c.Close()
-			return nil, mcptools.Summary{}, noop, false
+		if !errors.Is(err, context.Canceled) {
+			logger.Warn("mcp: cannot register services", logging.Category("mcp"), "err", err)
 		}
-		logger.Warn(fmt.Sprintf("mcp: cannot connect to proxy at %s: %v; MCP tools unavailable", proxy, err), logging.Category("mcp"))
-		_ = c.Close()
-		return nil, mcptools.Summary{}, noop, false
+		cleanup()
+		return nil, mcptools.Summary{}, cleanup, false
 	}
-
 	logger.Info(mcpConnectedLine(sum), logging.Category("mcp"))
 	for _, name := range sum.Skipped {
-		logger.Warn(fmt.Sprintf("mcp: skipping tool %q: name must match [a-zA-Z0-9_-]{1,64}", name), logging.Category("mcp"))
+		logger.Warn(fmt.Sprintf("mcp: skipping tool %q: invalid qualified name", name), logging.Category("mcp"))
 	}
-	return c, sum, func() { _ = c.Close() }, true
+	return c, sum, cleanup, true
 }
 
-type asyncMCPRegistration struct {
-	conn    *mcptools.Conn
-	results chan asyncMCPResult
-	cancel  context.CancelFunc
-	applied atomic.Bool
-}
-
-type asyncMCPResult struct {
-	registry *tools.Registry
-	summary  mcptools.Summary
-}
-
-// setupMCPAsync starts remote HTTP MCP discovery in the background for the
-// interactive REPL. The goroutine never mutates the shared catalog: it registers
-// discovered tools into a private registry, then the prompt-boundary refresh hook
-// copies those tools into the real catalog on the main REPL goroutine. This keeps
-// startup and prompt reads from blocking on an unreachable proxy while preserving
-// the existing "MCP never fails harness startup" behavior.
-func setupMCPAsync(mcpCfg config.MCPConfig, logger *slog.Logger, tracer *tracing.Tracer) (conn *mcptools.Conn, pending *asyncMCPRegistration, cleanup func(), ok bool) {
-	noop := func() {}
-	proxy, c, ok := dialMCPProxy(mcpCfg, logger, tracer)
-	if !ok {
-		return nil, nil, noop, false
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	pending = &asyncMCPRegistration{
-		conn:    c,
-		results: make(chan asyncMCPResult, 1),
-		cancel:  cancel,
-	}
-	go pending.run(ctx, proxy, logger)
-	cleanup = func() {
-		cancel()
-		_ = c.Close()
-	}
-	return c, pending, cleanup, true
-}
-
-func (a *asyncMCPRegistration) run(ctx context.Context, proxy string, logger *slog.Logger) {
-	var warned bool
-	for attempt := 0; ; attempt++ {
-		regCtx, cancel := context.WithTimeout(ctx, mcpRegisterTimeout)
-		reg := &tools.Registry{}
-		sum, err := mcptools.RegisterWithOptions(regCtx, reg, a.conn, mcptools.RegisterOptions{TrustReadOnlyHint: true})
-		cancel()
-		if err == nil {
-			select {
-			case a.results <- asyncMCPResult{registry: reg, summary: sum}:
-			case <-ctx.Done():
-			}
-			return
+// liveAgentTools omits temporarily unavailable MCP names without hiding built-in typos.
+func liveAgentTools(catalog *tools.Registry, names []string) []string {
+	return slices.DeleteFunc(slices.Clone(names), func(name string) bool {
+		if strings.HasPrefix(name, "mcp__") {
+			_, ok := catalog.Lookup(name)
+			return !ok
 		}
-		if errors.Is(err, context.Canceled) {
-			return
-		}
-		if !warned {
-			logger.Warn(fmt.Sprintf("mcp: cannot connect to proxy at %s: %v; retrying in background", proxy, err), logging.Category("mcp"))
-			warned = true
-		}
-		select {
-		case <-time.After(mcpRetryDelay(attempt)):
-		case <-ctx.Done():
-			return
-		}
-	}
-}
-
-// mcpBackgroundRetryFloor is the minimum delay between background reconnect
-// attempts. retry.Next applies full jitter from zero, so without a floor a run of
-// small draws could spin the reconnect loop against a fast-failing proxy; the floor
-// bounds the cadence while the ceiling still grows with the attempt count.
-const mcpBackgroundRetryFloor = time.Second
-
-// mcpRetryDelay is the backoff before the given background reconnect attempt
-// (0-based), never below mcpBackgroundRetryFloor.
-func mcpRetryDelay(attempt int) time.Duration {
-	return retry.Next(attempt, mcpBackgroundRetryFloor)
-}
-
-func (a *asyncMCPRegistration) take() (asyncMCPResult, bool) {
-	if a == nil {
-		return asyncMCPResult{}, false
-	}
-	select {
-	case res := <-a.results:
-		a.applied.Store(true)
-		return res, true
-	default:
-		return asyncMCPResult{}, false
-	}
-}
-
-func subsetForAgentTools(catalog *tools.Registry, names []string, pending *asyncMCPRegistration) (*tools.Registry, error) {
-	// tool_catalog is synthesized per-agent after the subset is built and is not
-	// present in the process-wide catalog. Ignore it when a live runtime tool list
-	// is reused to launch a same-agent delegate.
-	names = slices.DeleteFunc(slices.Clone(names), func(name string) bool {
-		return name == tools.ToolCatalogName
+		return false
 	})
-	var sub *tools.Registry
-	var err error
-	if pending == nil || pending.applied.Load() {
-		sub, err = catalog.Subset(names)
-	} else {
-		filtered := make([]string, 0, len(names))
-		for _, name := range names {
-			if strings.HasPrefix(name, "mcp__") {
-				if _, ok := catalog.Lookup(name); !ok {
-					continue
-				}
-			}
-			filtered = append(filtered, name)
-		}
-		sub, err = catalog.Subset(filtered)
-	}
+}
+
+func subsetForAgentTools(catalog *tools.Registry, names []string) (*tools.Registry, error) {
+	names = slices.DeleteFunc(liveAgentTools(catalog, names), func(name string) bool { return name == tools.ToolCatalogName })
+	sub, err := catalog.Subset(names)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +163,7 @@ func augmentAgentsWithMCP(agents map[string]agentdef.Definition, allNames, readO
 func enableLazyOptionalToolSpecs(registry *tools.Registry) {
 	var optional []string
 	for _, name := range registry.Names() {
-		if strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "lsp_") {
+		if strings.HasPrefix(name, "mcp__") {
 			optional = append(optional, name)
 		}
 	}
@@ -247,7 +180,7 @@ func appendMCPNames(base, extra []string) []string {
 	return out
 }
 
-// mcpLimits bounds the auto-exposed remote MCP tool surface. The zero value is
+// mcpLimits bounds the auto-exposed MCP tool surface. The zero value is
 // inactive (no cap, no disabled servers).
 type mcpLimits struct {
 	maxTools int
@@ -272,13 +205,12 @@ func mcpLimitsFromConfig(cfg config.MCPConfig) mcpLimits {
 func (l mcpLimits) active() bool { return l.maxTools > 0 || len(l.disabled) > 0 }
 
 // capRemoteMCPNames applies the configured per-server and max_tools restrictions
-// to the discovered remote MCP tool surface before it is auto-exposed to agents.
+// to the discovered MCP tool surface before it is auto-exposed to agents.
 // It returns the kept names (in discovery order) and the read-only subset
 // filtered to the kept set, logging one warning when it drops anything. It leaves
 // the inputs untouched (the catalog still holds every discovered tool, so an
 // explicit allowed_tools whitelist can still name a tool the cap excludes from
-// auto-exposure). Only the remote HTTP-proxy surface is capped; local MCP and LSP
-// tools pass through their own gating.
+// auto-exposure). All configured MCP services share these limits.
 func capRemoteMCPNames(names, readOnly []string, limits mcpLimits, logger *slog.Logger) ([]string, []string) {
 	if !limits.active() || len(names) == 0 {
 		return names, readOnly
@@ -331,52 +263,31 @@ func mcpNamesForMode(mode agentdef.MCPToolsMode, allNames, readOnlyNames []strin
 	}
 }
 
-// resolveMCPProxy turns the configured proxy value into a dialable HTTP URL.
-// An empty value resolves to the shared default proxy URL.
-func resolveMCPProxy(proxy string) string {
-	if proxy == "" {
-		return mcpproxy.DefaultURL()
-	}
-	return proxy
-}
-
-// isHTTPProxy reports whether proxy is an http(s) URL (case-insensitive
-// scheme).
-func isHTTPProxy(proxy string) bool {
-	lower := strings.ToLower(proxy)
-	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
-}
-
-// mcpAgentBase is the pre-augmentation allowed-tool list and MCP exposure mode
-// for one agent that automatically exposes MCP tools. Built once at startup, it
-// lets a refresh re-derive the full allowed list (base ∪ live MCP names) without
-// re-classifying.
+// mcpAgentBase preserves configured tools independently of discovery. Never mutate
+// Allowed: an explicitly named MCP tool can disappear and return in any mode.
 type mcpAgentBase struct {
 	Allowed []string
 	Mode    agentdef.MCPToolsMode
 }
-
-// mcpAgentBases is keyed by agents whose mcp_tools mode is not disabled. Agents
-// absent from the map do not automatically expose MCP tools, though they may
-// still explicitly whitelist mcp__ tool names.
 type mcpAgentBases map[string]mcpAgentBase
 
-// mcpExposingAgentBases returns the base allowed-tool list and exposure mode for
-// every agent that automatically exposes MCP tools. It must be called on the
-// agents BEFORE augmentAgentsWithMCP mutates them.
-func mcpExposingAgentBases(agents map[string]agentdef.Definition) mcpAgentBases {
-	bases := make(mcpAgentBases)
+func snapshotMCPAgentBases(agents map[string]agentdef.Definition) mcpAgentBases {
+	bases := make(mcpAgentBases, len(agents))
 	for name, a := range agents {
-		if a.MCPTools == agentdef.MCPToolsAll || a.MCPTools == agentdef.MCPToolsReadOnly {
-			bases[name] = mcpAgentBase{Allowed: slices.Clone(a.AllowedTools), Mode: a.MCPTools}
-		}
+		bases[name] = mcpAgentBase{Allowed: slices.Clone(a.AllowedTools), Mode: a.MCPTools}
 	}
 	return bases
 }
 
-// mcpRefresher owns one live MCP source's previous summary. Keeping summaries
-// separate lets composed remote and local refreshers remove only their own
-// departed tools while re-deriving agents from both live surfaces.
+func reconcileMCPTools(agents map[string]agentdef.Definition, bases mcpAgentBases, catalog *tools.Registry, names, readOnly []string) {
+	for name, base := range bases {
+		a := agents[name]
+		a.AllowedTools = appendMCPNames(liveAgentTools(catalog, base.Allowed), mcpNamesForMode(base.Mode, names, readOnly))
+		agents[name] = a
+	}
+}
+
+// mcpRefresher owns the aggregator's previous discovery summary.
 type mcpRefresher struct {
 	conn            *mcptools.Conn
 	catalog         *tools.Registry
@@ -385,24 +296,19 @@ type mcpRefresher struct {
 	prev            mcptools.Summary
 	static          func() mcptools.Summary
 	logger          *slog.Logger
-	pending         *asyncMCPRegistration
 	limits          mcpLimits
 	registerOptions mcptools.RegisterOptions
 }
 
-func (r *mcpRefresher) apply(discovered *tools.Registry, sum mcptools.Summary, agentName string) (*tools.Registry, string) {
+func (r *mcpRefresher) apply(sum mcptools.Summary, agentName string) (*tools.Registry, string) {
 	prevNames := r.prev.Names
-	reg, notice := applyMCPRegistration(r.catalog, discovered, r.agents, r.bases, agentName, &prevNames, sum, r.static(), r.logger, r.limits)
+	reg, notice := applyMCPRegistration(r.catalog, r.agents, r.bases, agentName, &prevNames, sum, r.static(), r.logger, r.limits)
 	r.prev = sum
 	r.prev.Names = prevNames
 	return reg, notice
 }
 
 func (r *mcpRefresher) refresh(parent context.Context, agentName string) (*tools.Registry, string) {
-	if res, ok := r.pending.take(); ok {
-		return r.apply(res.registry, res.summary, agentName)
-	}
-
 	if r.conn == nil || !r.conn.Dirty() {
 		return nil, ""
 	}
@@ -419,87 +325,35 @@ func (r *mcpRefresher) refresh(parent context.Context, agentName string) (*tools
 	// prompt's Specs()/Dispatch reads) is the unsafe mid-prompt swap we avoid.
 	ctx, cancel := context.WithTimeout(parent, mcpRegisterTimeout)
 	defer cancel()
+	// Consume before listing so notifications after the snapshot remain pending.
+	r.conn.ClearDirty()
 	sum, err := mcptools.RegisterWithOptions(ctx, r.catalog, r.conn, r.registerOptions)
 	if err != nil {
+		r.conn.MarkDirty()
 		if errors.Is(err, context.Canceled) {
 			return nil, ""
 		}
 		r.logger.Warn(fmt.Sprintf("mcp: tool list refresh failed: %v; keeping current tools", err), logging.Category("mcp"))
 		return nil, ""
 	}
-	r.conn.ClearDirty()
-	return r.apply(nil, sum, agentName)
+	return r.apply(sum, agentName)
 }
 
-// newMCPRefresherDynamic is the runtime-aware form used by tests and remote-only
-// callers. static is evaluated only when a refresh is applied, allowing
-// session-local LSP toggles to change which first-class tools MCP-exposing
-// agents receive.
-func newMCPRefresherDynamic(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev mcptools.Summary, static func() mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
+// newMCPRefresherDynamic refreshes the root-owned aggregator at prompt boundaries.
+func newMCPRefresherDynamic(conn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, prev mcptools.Summary, static func() mcptools.Summary, logger *slog.Logger, limits ...mcpLimits) func(context.Context, string) (*tools.Registry, string) {
 	var lim mcpLimits
 	if len(limits) > 0 {
 		lim = limits[0]
 	}
 	r := &mcpRefresher{
 		conn: conn, catalog: catalog, agents: agents, bases: bases, prev: prev,
-		static: static, logger: logger, pending: pending, limits: lim,
+		static: static, logger: logger, limits: lim,
 		registerOptions: mcptools.RegisterOptions{TrustReadOnlyHint: true},
 	}
 	return r.refresh
 }
 
-// newComposedMCPRefresherDynamic refreshes remote HTTP and local stdio MCP at
-// the same prompt boundary. Each source retains its own summary; the other's
-// current summary is static input to a refresh, so neither source can drop the
-// other's tools. Remote caps apply only to the remote surface.
-func newComposedMCPRefresherDynamic(remoteConn, localConn *mcptools.Conn, catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, remotePrev, localPrev mcptools.Summary, static func() mcptools.Summary, logger *slog.Logger, pending *asyncMCPRegistration, limits mcpLimits) func(context.Context, string) (*tools.Registry, string) {
-	remote := &mcpRefresher{
-		conn: remoteConn, catalog: catalog, agents: agents, bases: bases, prev: remotePrev,
-		logger: logger, pending: pending, limits: limits,
-		registerOptions: mcptools.RegisterOptions{TrustReadOnlyHint: true},
-	}
-	local := &mcpRefresher{
-		conn: localConn, catalog: catalog, agents: agents, bases: bases, prev: localPrev,
-		logger:          logger,
-		registerOptions: mcptools.RegisterOptions{TrustReadOnlyHint: true, FallbackNamespace: "local"},
-	}
-	remote.static = func() mcptools.Summary {
-		return mergeMCPSummaries(local.prev, static())
-	}
-	local.static = func() mcptools.Summary {
-		names, readOnly := capRemoteMCPNames(remote.prev.Names, remote.prev.ReadOnlyNames, limits, logger)
-		return mergeMCPSummaries(mcptools.Summary{Names: names, ReadOnlyNames: readOnly}, static())
-	}
-	return func(ctx context.Context, agentName string) (*tools.Registry, string) {
-		reg, notice := remote.refresh(ctx, agentName)
-		localReg, localNotice := local.refresh(ctx, agentName)
-		if localReg != nil {
-			return localReg, localNotice
-		}
-		return reg, notice
-	}
-}
-
-func applyMCPRegistration(catalog *tools.Registry, discovered *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, agentName string, prevNames *[]string, sum, static mcptools.Summary, logger *slog.Logger, limits mcpLimits) (*tools.Registry, string) {
-	// Async first-apply: copy the privately-discovered tools into the shared catalog,
-	// log the connection, warn on skipped names, and drop any explicit-whitelist
-	// mcp__ name the proxy never exposed. This runs BEFORE the current-agent handling
-	// below (and unconditionally on agentName) so a result already consumed by take()
-	// is never stranded: the catalog and every MCP-exposing agent stay correct even
-	// if this refresh fired for an agent not in the map.
-	if discovered != nil {
-		for _, name := range sum.Names {
-			if tool, ok := discovered.Lookup(name); ok {
-				catalog.Register(tool)
-			}
-		}
-		logger.Info(mcpConnectedLine(sum), logging.Category("mcp"))
-		for _, name := range sum.Skipped {
-			logger.Warn(fmt.Sprintf("mcp: skipping tool %q: name must match [a-zA-Z0-9_-]{1,64}", name), logging.Category("mcp"))
-		}
-		pruneUndiscoveredMCPTools(agents, bases, catalog, logger)
-	}
-
+func applyMCPRegistration(catalog *tools.Registry, agents map[string]agentdef.Definition, bases mcpAgentBases, agentName string, prevNames *[]string, sum, static mcptools.Summary, logger *slog.Logger, limits mcpLimits) (*tools.Registry, string) {
 	// Drop tools that were registered before but are gone now. Register replaces
 	// survivors in place; only departures need explicit removal.
 	removed := removedNames(*prevNames, sum.Names)
@@ -521,46 +375,13 @@ func applyMCPRegistration(catalog *tools.Registry, discovered *tools.Registry, a
 	current, agentKnown := agents[agentName]
 	oldAllowed := slices.Clone(current.AllowedTools)
 
-	// Re-derive every MCP-exposing agent's allowed list against the live tool set,
-	// so /agent switches after a tool vanishes never reference a name the catalog no
-	// longer has.
-	for name, base := range bases {
-		cleanBase := withoutNames(base.Allowed, removed)
-		if !slices.Equal(cleanBase, base.Allowed) {
-			base.Allowed = cleanBase
-			bases[name] = base
-		}
-		a := agents[name]
-		a.AllowedTools = appendMCPNames(cleanBase, mcpNamesForMode(base.Mode, allNames, readOnlyNames))
-		agents[name] = a
-	}
-
+	// Include whitelist-only agents as well as automatic exposure modes.
+	reconcileMCPTools(agents, bases, catalog, allNames, readOnlyNames)
 	if !agentKnown {
 		return nil, ""
 	}
-
-	// An explicit-whitelist agent (one not in bases) exposes no MCP tools, so a
-	// refresh leaves its subset unchanged — unless it explicitly whitelisted a tool
-	// that was just removed. In the unchanged case, skip the swap and the "tool list
-	// updated" notice, which would otherwise mislead (the agent's tools did not
-	// change). The catalog/agent re-derivation above still ran so a later /agent
-	// switch to an MCP-exposing agent is correct.
 	allowed := agents[agentName].AllowedTools
-	if _, exposesMCP := bases[agentName]; !exposesMCP {
-		if !anyRemovedInAgent(allowed, removed) && !(discovered != nil && anyNameInAgent(allowed, sum.Names)) {
-			return nil, ""
-		}
-		// The whitelist named a removed tool: drop the gone names so Subset does not
-		// error on a name the catalog no longer has.
-		allowed = withoutNames(allowed, removed)
-		a := agents[agentName]
-		a.AllowedTools = allowed
-		agents[agentName] = a
-	} else if slices.Equal(allowed, oldAllowed) && !anyNameInAgent(allowed, sum.Names) {
-		// The refreshed remote MCP list did not affect this agent's effective tools
-		// (for example, a read_only agent when only non-read-only remote tools
-		// changed). Avoid a misleading swap/notice. If the agent does use a remote
-		// MCP name, still swap so description/schema updates take effect.
+	if slices.Equal(allowed, oldAllowed) && !anyNameInAgent(allowed, sum.Names) {
 		return nil, ""
 	}
 
@@ -573,43 +394,6 @@ func applyMCPRegistration(catalog *tools.Registry, discovered *tools.Registry, a
 	return sel, fmt.Sprintf("[mcp: tool list updated; %d tools]", len(allNames))
 }
 
-// pruneUndiscoveredMCPTools removes mcp__ tool names from explicit-whitelist agents
-// (those not in bases) that the catalog does not have after discovery, logging a
-// warning for each. setupMCPAsync filters such names from the running subset before
-// discovery so an unreachable proxy never blocks startup; once discovery is applied,
-// a still-missing mcp__ name a whitelist agent referenced is a typo or a tool the
-// proxy never exposed, so dropping it both surfaces the mistake and keeps a later
-// /agent switch from failing Subset on a name the catalog will never have. Bases
-// agents derive their mcp__ names from the live catalog and are re-derived
-// separately, so they are skipped here.
-func pruneUndiscoveredMCPTools(agents map[string]agentdef.Definition, bases mcpAgentBases, catalog *tools.Registry, logger *slog.Logger) {
-	for name, a := range agents {
-		if _, exposesMCP := bases[name]; exposesMCP {
-			continue
-		}
-		kept := make([]string, 0, len(a.AllowedTools))
-		for _, tool := range a.AllowedTools {
-			if strings.HasPrefix(tool, "mcp__") {
-				if _, ok := catalog.Lookup(tool); !ok {
-					logger.Warn(fmt.Sprintf("mcp: agent %q references unknown MCP tool %q; the proxy did not expose it", name, tool), logging.Category("mcp"))
-					continue
-				}
-			}
-			kept = append(kept, tool)
-		}
-		if len(kept) != len(a.AllowedTools) {
-			a.AllowedTools = kept
-			agents[name] = a
-		}
-	}
-}
-
-// anyRemovedInAgent reports whether allowed references any of the removed tool
-// names, i.e. whether the refresh shrank an agent's effective tool set.
-func anyRemovedInAgent(allowed, removed []string) bool {
-	return anyNameInAgent(allowed, removed)
-}
-
 func anyNameInAgent(allowed, names []string) bool {
 	for _, name := range names {
 		if slices.Contains(allowed, name) {
@@ -617,19 +401,6 @@ func anyNameInAgent(allowed, names []string) bool {
 		}
 	}
 	return false
-}
-
-// withoutNames returns allowed with every entry in drop removed, preserving
-// order. It is used to drop just-removed MCP tool names from a whitelist agent's
-// allowed list so Subset does not error on a name the catalog no longer has.
-func withoutNames(allowed, drop []string) []string {
-	out := make([]string, 0, len(allowed))
-	for _, name := range allowed {
-		if !slices.Contains(drop, name) {
-			out = append(out, name)
-		}
-	}
-	return out
 }
 
 // removedNames returns the entries of prev that are absent from next, preserving

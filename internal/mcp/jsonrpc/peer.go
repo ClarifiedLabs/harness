@@ -33,8 +33,8 @@ type HandlerID func(ctx context.Context, id ID, params json.RawMessage) (json.Ra
 type NotificationHandler func(ctx context.Context, params json.RawMessage)
 
 // Reader decodes framed messages from a transport. The newline Decoder satisfies
-// it; an alternate framing (e.g. the LSP Content-Length codec) can supply its
-// own, letting the Peer drive any JSON-RPC stream.
+// it; alternate framing can supply its own, letting the Peer drive any
+// JSON-RPC stream.
 type Reader interface {
 	Decode() (Message, error)
 }
@@ -124,8 +124,8 @@ func NewPeer(rwc io.ReadWriteCloser, opts PeerOptions) *Peer {
 
 // NewPeerWithCodec is NewPeer with an injected framing. closer is closed on
 // shutdown; dec/enc must read from and write to the same underlying transport.
-// It lets a caller drive the Peer over a non-newline framing (e.g. the LSP
-// Content-Length codec) while reusing all correlation and dispatch logic.
+// It lets a caller drive the Peer over non-newline framing while reusing all
+// correlation and dispatch logic.
 func NewPeerWithCodec(closer io.Closer, dec Reader, enc Writer, opts PeerOptions) *Peer {
 	logger := opts.Logger
 	if logger == nil {

@@ -208,7 +208,7 @@ so late work is not reassigned after an identity switch. **M** adds `purpose`,
 work modes/triggers, activity classes, and errors are bounded enums. Purpose is
 `turn`, `compaction`, `prewarm`, `branch_summary`, or `unknown`. Status is an HTTP
 code from 100–599 or `0` for unknown. Built-in tool labels use an allowlist;
-MCP/LSP names collapse to `mcp`/`lsp`, unknown custom names to `other`.
+MCP names collapse to `mcp`, unknown custom names to `other`.
 
 The exporter admits up to **128 ordinary metric families**, each with at most
 **256 ordinary series**, and **8,192 ordinary series globally**. Estimated

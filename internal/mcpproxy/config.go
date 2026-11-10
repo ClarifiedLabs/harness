@@ -33,10 +33,12 @@ type FileConfig struct {
 	Proxy      ProxySettings           `json:"proxy"`
 }
 
-// ServerConfig is one downstream server entry. Type "" or "stdio" selects a
-// stdio child (Command/Args/Env); "http" selects a streamable-HTTP endpoint
-// (URL/Headers). The two variants are mutually exclusive; validation enforces it.
+// ServerConfig is one downstream server entry. Type "stdio" selects a stdio
+// child (Command/Args/Env); "http" selects a streamable-HTTP endpoint
+// (URL/Headers). An empty Type infers HTTP when URL is set, and stdio otherwise.
+// The two variants are mutually exclusive; validation enforces it.
 type ServerConfig struct {
+	Enabled *bool             `json:"enabled,omitempty"`
 	Type    string            `json:"type"`
 	Command string            `json:"command"`
 	Args    []string          `json:"args"`
@@ -47,6 +49,11 @@ type ServerConfig struct {
 
 	// ExcludedTools contains exact, case-sensitive downstream tool names.
 	ExcludedTools []string `json:"excludedTools,omitempty"`
+}
+
+// IsEnabled reports whether this server should start. Omitted enabled defaults to true.
+func (sc ServerConfig) IsEnabled() bool {
+	return sc.Enabled == nil || *sc.Enabled
 }
 
 // ProxySettings carries proxy-level overrides. Empty fields fall back to
@@ -73,7 +80,7 @@ const (
 	TransportHTTP
 )
 
-// ResolvedServer is a validated, ${VAR}-expanded server ready to supervise.
+// ResolvedServer is a validated server ready to supervise.
 type ResolvedServer struct {
 	Name      string
 	Transport Transport
@@ -81,6 +88,8 @@ type ResolvedServer struct {
 	Command string
 	Args    []string
 	Env     map[string]string
+	// WorkDir sets the child's working directory; empty inherits the parent's.
+	WorkDir string
 	// http
 	URL     string
 	Headers map[string]string
@@ -112,9 +121,14 @@ const (
 	DefaultListen = "127.0.0.1:8766"
 )
 
-// serverNameRE constrains a server name. It is the qualified-name charset, kept
-// tight because the name becomes the middle segment of mcp__<server>__<tool>.
+// serverNameRE constrains server and qualified-tool names to a provider-safe
+// charset. resolveServer separately rejects "__" in server names because it is
+// the namespace separator in mcp__<server>__<tool>. A trailing underscore is
+// also forbidden: a_ + run and a + _run would otherwise share an identity.
 var serverNameRE = regexp.MustCompile(`^[a-zA-Z0-9_-]{1,64}$`)
+
+// HTTP field names use the RFC 9110 token alphabet.
+var headerNameRE = regexp.MustCompile("^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 
 // LoadConfig reads, expands, and validates the config at path. An empty path or
 // a missing file at the DEFAULT location resolves to a valid empty config (zero
@@ -185,6 +199,14 @@ func resolve(fc FileConfig, configDir string) Config {
 
 	for _, name := range names {
 		raw := fc.MCPServers[name]
+		if !raw.IsEnabled() {
+			// Validate the stored shape, but do not expand unused credentials or
+			// include disabled servers in the daemon's startup list.
+			if _, err := ValidateServer(name, raw, configDir); err != nil {
+				cfg.Warnings = append(cfg.Warnings, err.Error())
+			}
+			continue
+		}
 		rs, warn := resolveServer(name, raw, expand, configDir)
 		if warn != "" {
 			cfg.Warnings = append(cfg.Warnings, warn)
@@ -253,11 +275,42 @@ func URLForListen(addr string) string {
 	return "http://" + net.JoinHostPort(host, port)
 }
 
+// ResolveServer expands ${VAR} and ${VAR:-default} references using the process
+// environment, then validates one server. Unset variables expand to empty strings.
+// Server names must match [a-zA-Z0-9_-]{1,64}, must not contain "__", and
+// must not end with an underscore.
+// configDir supplies the base directory for relative authentication paths.
+func ResolveServer(name string, sc ServerConfig, configDir string) (ResolvedServer, error) {
+	var exp expander
+	return validateServer(name, sc, exp.expand, configDir)
+}
+
+// ValidateServer validates one server literally, without environment expansion.
+// It applies the same server-name restrictions as ResolveServer and is suitable
+// for already-resolved attachments supplied by an embedding host.
+func ValidateServer(name string, sc ServerConfig, configDir string) (ResolvedServer, error) {
+	return validateServer(name, sc, func(s string) string { return s }, configDir)
+}
+
+func validateServer(name string, sc ServerConfig, expand func(string) string, configDir string) (ResolvedServer, error) {
+	rs, warning := resolveServer(name, sc, expand, configDir)
+	if warning != "" {
+		return ResolvedServer{}, errors.New(warning)
+	}
+	return rs, nil
+}
+
 // resolveServer expands and validates one entry. It returns either a resolved
 // server (warn == "") or a non-empty warning describing why it was skipped.
 func resolveServer(name string, sc ServerConfig, expand func(string) string, configDir string) (ResolvedServer, string) {
 	if !serverNameRE.MatchString(name) {
 		return ResolvedServer{}, fmt.Sprintf("server %q skipped: name must match [a-zA-Z0-9_-]{1,64}", name)
+	}
+	if strings.Contains(name, "__") {
+		return ResolvedServer{}, fmt.Sprintf("server %q skipped: name must not contain \"__\" (reserved namespace separator)", name)
+	}
+	if strings.HasSuffix(name, "_") {
+		return ResolvedServer{}, fmt.Sprintf("server %q skipped: name must not end with an underscore (ambiguous namespace boundary)", name)
 	}
 
 	command := expand(sc.Command)
@@ -275,15 +328,35 @@ func resolveServer(name string, sc ServerConfig, expand func(string) string, con
 		}
 	}
 
-	switch sc.Type {
+	typ := sc.Type
+	if typ == "" && sc.URL != "" {
+		typ = "http"
+	}
+	switch typ {
 	case "", "stdio":
+		if len(sc.Headers) != 0 {
+			return ResolvedServer{}, fmt.Sprintf("server %q skipped: stdio server must not set headers", name)
+		}
+		if strings.ContainsRune(command, 0) {
+			return ResolvedServer{}, fmt.Sprintf("server %q skipped: command must not contain NUL", name)
+		}
+		for _, arg := range args {
+			if strings.ContainsRune(arg, 0) {
+				return ResolvedServer{}, fmt.Sprintf("server %q skipped: args must not contain NUL", name)
+			}
+		}
+		for key, value := range env {
+			if key == "" || strings.ContainsAny(key, "=\x00") || strings.ContainsRune(value, 0) {
+				return ResolvedServer{}, fmt.Sprintf("server %q skipped: invalid environment entry %q", name, key)
+			}
+		}
 		if authCfg != nil {
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: stdio server must not set auth", name)
 		}
-		if command == "" {
+		if strings.TrimSpace(command) == "" {
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: stdio server requires a command", name)
 		}
-		if rawURL != "" {
+		if sc.URL != "" {
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: stdio server must not set url", name)
 		}
 		return ResolvedServer{
@@ -296,15 +369,28 @@ func resolveServer(name string, sc ServerConfig, expand func(string) string, con
 			ExcludedTools: slices.Clone(sc.ExcludedTools),
 		}, ""
 	case "http", "streamable-http":
+		if len(sc.Args) != 0 || len(sc.Env) != 0 {
+			return ResolvedServer{}, fmt.Sprintf("server %q skipped: http server must not set args or env", name)
+		}
+		for key, value := range headers {
+			if !headerNameRE.MatchString(key) || strings.ContainsFunc(value, func(r rune) bool {
+				return (r < 0x20 && r != '\t') || r == 0x7f
+			}) {
+				return ResolvedServer{}, fmt.Sprintf("server %q skipped: invalid HTTP header %q", name, key)
+			}
+		}
 		if rawURL == "" {
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: http server requires a url", name)
 		}
-		if command != "" {
+		if sc.Command != "" {
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: http server must not set command", name)
 		}
 		u, err := url.Parse(rawURL)
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 			return ResolvedServer{}, fmt.Sprintf("server %q skipped: url must use http or https scheme", name)
+		}
+		if u.Hostname() == "" || u.Opaque != "" {
+			return ResolvedServer{}, fmt.Sprintf("server %q skipped: url must have a host", name)
 		}
 		return ResolvedServer{
 			Name:          name,

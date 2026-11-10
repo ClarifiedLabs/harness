@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"path/filepath"
@@ -245,66 +244,12 @@ var definitions = []parameterDefinition{
 	strDef("timestamps", "timestamps", []string{"timestamps"}, []string{"HARNESS_TIMESTAMPS"}, literal(TimestampShort, "", ""), func(f fileConfig) optional[string] { return f.Timestamps }, func(c *Config, v string) { c.TimestampMode = v }, func(c Config) string { return c.TimestampMode }, NormalizeTimestampMode, []string{TimestampShort, TimestampFull, TimestampNone}, false),
 	strDef("repl_prompt", "repl_prompt", []string{"repl-prompt"}, []string{"HARNESS_REPL_PROMPT"}, literal(replprompt.DefaultFormat, "", ""), func(f fileConfig) optional[string] { return f.ReplPrompt }, func(c *Config, v string) { c.ReplPrompt = v }, func(c Config) string { return c.ReplPrompt }, canonicalReplPrompt, nil, false),
 	strDef("repl_edit_mode", "repl_edit_mode", []string{"repl-edit-mode"}, []string{"HARNESS_REPL_EDIT_MODE"}, literal(DefaultReplEditMode, "", ""), func(f fileConfig) optional[string] { return f.ReplEditMode }, func(c *Config, v string) { c.ReplEditMode = v }, func(c Config) string { return c.ReplEditMode }, canonicalReplEditMode, []string{"emacs", "vi"}, false),
-	boolDef("mcp.enable", "mcp.enable", nil, []string{"HARNESS_MCP_ENABLE"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
-		if f.MCP.Set {
-			return f.MCP.Value.Enable
-		}
-		return optional[bool]{}
-	}, func(c *Config, v bool) { c.MCP.Enable = v }, func(c Config) bool { return c.MCP.Enable }),
-	strDef("mcp.proxy", "mcp.proxy", nil, []string{"HARNESS_MCP_PROXY"}, derived(func(d RuntimeDefaults) string { return d.MCPProxyURL }, "runtime MCP proxy URL", "runtime:mcp-proxy-url"), func(f fileConfig) optional[string] {
-		if f.MCP.Set {
-			return f.MCP.Value.Proxy
-		}
-		return optional[string]{}
-	}, func(c *Config, v string) { c.MCP.Proxy = v }, func(c Config) string { return c.MCP.Proxy }, canonicalNonEmptyFor("mcp.proxy"), nil, false),
-	strDef("mcp.api_key", "mcp.api_key", []string{"mcp-proxy-api-key"}, []string{"HARNESS_MCP_PROXY_API_KEY"}, literal("", "unset", ""), func(f fileConfig) optional[string] {
-		if f.MCP.Set {
-			return f.MCP.Value.APIKey
-		}
-		return optional[string]{}
-	}, func(c *Config, v string) { c.MCP.APIKey = v }, func(c Config) string { return c.MCP.APIKey }, nil, nil, true),
 	intDef("mcp.max_tools", "mcp.max_tools", nil, nil, literal(0, "", "unlimited"), func(f fileConfig) optional[int] {
 		if f.MCP.Set {
 			return f.MCP.Value.MaxTools
 		}
 		return optional[int]{}
 	}, func(c *Config, v int) { c.MCP.MaxTools = v }, func(c Config) int { return c.MCP.MaxTools }, nonNegative("mcp.max_tools")),
-	boolDef("mcp.local.enable", "mcp.local.enable", nil, []string{"HARNESS_MCP_LOCAL_ENABLE"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
-		if f.MCP.Set && f.MCP.Value.Local.Set {
-			return f.MCP.Value.Local.Value.Enable
-		}
-		return optional[bool]{}
-	}, func(c *Config, v bool) { c.MCP.Local.Enable = v }, func(c Config) bool { return c.MCP.Local.Enable }),
-	strDef("mcp.local.command", "mcp.local.command", nil, nil, literal("", "unset", ""), func(f fileConfig) optional[string] {
-		if f.MCP.Set && f.MCP.Value.Local.Set {
-			return f.MCP.Value.Local.Value.Command
-		}
-		return optional[string]{}
-	}, func(c *Config, v string) { c.MCP.Local.Command = v }, func(c Config) string { return c.MCP.Local.Command }, nil, nil, false),
-	boolDef("lsp.enable", "lsp.enable", nil, []string{"HARNESS_LSP_ENABLE"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
-		if f.LSP.Set {
-			return f.LSP.Value.Enable
-		}
-		return optional[bool]{}
-	}, func(c *Config, v bool) { c.LSP.Enable = v }, func(c Config) bool { return c.LSP.Enable }),
-	boolDef("lsp.prewarm", "lsp.prewarm", nil, []string{"HARNESS_LSP_PREWARM"}, literal(true, "", ""), func(f fileConfig) optional[bool] {
-		if f.LSP.Set {
-			return f.LSP.Value.Prewarm
-		}
-		return optional[bool]{}
-	}, func(c *Config, v bool) { c.LSP.Prewarm = v }, func(c Config) bool { return c.LSP.Prewarm }),
-	boolDef("lsp.serena.enable", "lsp.serena.enable", nil, []string{"HARNESS_LSP_SERENA_ENABLE"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
-		if f.LSP.Set && f.LSP.Value.Serena.Set {
-			return f.LSP.Value.Serena.Value.Enable
-		}
-		return optional[bool]{}
-	}, func(c *Config, v bool) { c.LSP.Serena.Enable = v }, func(c Config) bool { return c.LSP.Serena.Enable }),
-	strDef("lsp.serena.command", "lsp.serena.command", nil, nil, literal(DefaultSerenaCommand, "", ""), func(f fileConfig) optional[string] {
-		if f.LSP.Set && f.LSP.Value.Serena.Set {
-			return f.LSP.Value.Serena.Value.Command
-		}
-		return optional[string]{}
-	}, func(c *Config, v string) { c.LSP.Serena.Command = v }, func(c Config) string { return c.LSP.Serena.Command }, canonicalNonEmptyFor("lsp.serena.command"), nil, false),
 	boolDef("otel.enabled", "otel.enabled", []string{"otel-enabled"}, []string{"HARNESS_OTEL_ENABLED"}, literal(false, "", ""), func(f fileConfig) optional[bool] {
 		if f.OTel.Set {
 			return f.OTel.Value.Enabled
@@ -395,7 +340,7 @@ var customDefinitions = []parameterDefinition{
 		}
 		return nil
 	}, func(c Config) any { return c.Agents }),
-	custom("mcp.headers", "object", "mcp.headers", true, resolveMCPHeaders, func(c Config) any { return redactStringMap(c.MCP.Headers) }),
+	custom("mcp.servers", "object", "mcp.servers", true, resolveMCPServers, func(c Config) any { return redactMCPServers(c.MCP.Servers) }),
 	custom("mcp.disabled_servers", "string[]", "mcp.disabled_servers", false, func(c *resolveContext) error {
 		if c.file.MCP.Set && c.file.MCP.Value.DisabledServers.Set {
 			c.result.Config.MCP.DisabledServers = append([]string(nil), c.file.MCP.Value.DisabledServers.Value...)
@@ -405,12 +350,6 @@ var customDefinitions = []parameterDefinition{
 		}
 		return nil
 	}, func(c Config) any { return c.MCP.DisabledServers }),
-	custom("mcp.local.args", "string[]", "mcp.local.args", false, resolveMCPLocalArgs, func(c Config) any { return c.MCP.Local.Args }),
-	custom("mcp.local.env", "object", "mcp.local.env", true, resolveMCPLocalEnv, func(c Config) any { return redactStringMap(c.MCP.Local.Env) }),
-	custom("lsp.tools", "string[]", "lsp.tools", false, resolveLSPTools, func(c Config) any { return c.LSP.Tools }),
-	custom("lsp.servers", "object", "lsp.servers", true, resolveLSPServers, func(c Config) any { return redactLSPServers(c.LSP.Servers) }),
-	custom("lsp.serena.args", "string[]", "lsp.serena.args", false, resolveSerenaArgs, func(c Config) any { return c.LSP.Serena.Args }),
-	custom("lsp.serena.env", "object", "lsp.serena.env", true, resolveSerenaEnv, func(c Config) any { return redactStringMap(c.LSP.Serena.Env) }),
 	acpTargetsDefinition(),
 	hooksCustomDefinition(),
 	custom("hook_configs", "string[]", "hook_configs", false, func(*resolveContext) error { return nil }, func(c Config) any { return c.HookConfigs }),
@@ -494,22 +433,6 @@ func redactACPTargets(values map[string]ACPTargetConfig) any {
 			}
 		}
 		out[name] = target
-	}
-	return out
-}
-
-func redactLSPServers(values map[string]LSPServerConfig) any {
-	out := cloneLSPServers(values)
-	for name, server := range out {
-		if server.Env != nil {
-			for key := range server.Env {
-				server.Env[key] = redactedValue
-			}
-		}
-		if value := strings.TrimSpace(string(server.InitOptions)); value != "" && value != "null" {
-			server.InitOptions = json.RawMessage(`"<redacted>"`)
-		}
-		out[name] = server
 	}
 	return out
 }

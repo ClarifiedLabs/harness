@@ -1,8 +1,7 @@
 // Package mcpchild spawns and reaps a local stdio MCP service as a child
 // process. It is the harness-side counterpart to the proxy's supervisor: harness
-// uses it to auto-launch a local MCP service (e.g. a local harness-mcp-proxy in
-// -stdio mode hosting the LSP shim) and drive it over the child's stdio. It
-// shares process-group ownership with LSP/proxy and uses internal/mcp's stdio adapter.
+// uses it to launch a local MCP service and drive it over the child's stdio.
+// It owns the child's process group and uses internal/mcp's stdio adapter.
 package mcpchild
 
 import (

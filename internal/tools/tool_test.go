@@ -1577,9 +1577,9 @@ func TestRegisterAfter(t *testing.T) {
 	r.Register(newOK("edit", ""))
 
 	// Insert immediately after the anchor.
-	r.RegisterAfter(newOK("lsp_definition", ""), "view_image")
-	r.RegisterAfter(newOK("lsp_hover", ""), "lsp_definition")
-	want := []string{"read", "view_image", "lsp_definition", "lsp_hover", "edit"}
+	r.RegisterAfter(newOK("project_definition", ""), "view_image")
+	r.RegisterAfter(newOK("project_details", ""), "project_definition")
+	want := []string{"read", "view_image", "project_definition", "project_details", "edit"}
 	if got := r.Names(); !slices.Equal(got, want) {
 		t.Fatalf("order = %v, want %v", got, want)
 	}
@@ -1591,7 +1591,7 @@ func TestRegisterAfter(t *testing.T) {
 	}
 
 	// Re-registration keeps the existing position.
-	r.RegisterAfter(newOK("lsp_definition", ""), "read")
+	r.RegisterAfter(newOK("project_definition", ""), "read")
 	if got := r.Names(); !slices.Equal(got, append(want, "tail_tool")) {
 		t.Fatalf("re-registration moved tool: %v", got)
 	}

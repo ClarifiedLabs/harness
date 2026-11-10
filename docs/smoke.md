@@ -11,8 +11,8 @@ The legs split into three groups:
   points at a throwaway OpenAI-compatible mock server bound to `127.0.0.1` (no
   external network, no API keys). They are automated behind the `integration`
   build tag. The proxy and mock live only in `_test.go`, so they are never
-  compiled into the shipped binaries. Real-tmux and real-`gopls` legs use those
-  optional local programs and skip when they are unavailable.
+  compiled into the shipped binaries. Real-tmux legs use that optional local
+  program and skip when it is unavailable.
 - **Opt-in automated live-model legs** drive a freshly-built `harness` binary
   through a separately running `harness-model-proxy` and make real upstream
   calls. They live behind the `livemodel` build tag and are not part of the
@@ -26,8 +26,6 @@ The legs split into three groups:
 - Go 1.26 or newer, as declared by `go.mod`.
 - `tmux` on `PATH` to run the optional real-tmux delegate legs; otherwise those
   legs skip. Each test uses its own temporary server socket and unique session.
-- `gopls` on `PATH` to run the optional real-LSP integration leg; otherwise that
-  leg skips.
 - A separately running, configured `harness-model-proxy` is needed for the
   opt-in live-model legs.
 - Provider credentials, Ollama, and a real downstream MCP server are needed only
@@ -44,7 +42,7 @@ go test -race -tags=integration ./cmd/harness/ -run TestSmoke
 ```
 
 `make test-integration` (`go test -tags=integration ./cmd/harness`) runs the
-entire integration suite, including the LSP legs below; the `-run TestSmoke`
+entire integration suite; the `-run TestSmoke`
 command above selects only the harness smoke legs in this table.
 
 | Leg | Test | What it asserts |
@@ -55,16 +53,18 @@ command above selects only the harness smoke legs in this table.
 | Delegate tmux window | `TestSmokeDelegateTmuxWindow` | A scripted foreground delegate runs with `-delegate-tmux -delegate-tmux-layout window` against a real tmux server on a private temporary socket. While the child request is gated, the server contains one detached, correctly named delegate window with `remain-on-exit=on` and `automatic-rename=off`; after completion only the base window remains. The delegate flow completes (3 mock requests) with no degradation warning. |
 | Delegate tmux pane | `TestSmokeDelegateTmuxPane` | A scripted foreground delegate runs **without** `-delegate-tmux` (the tmux auto default enables the view) against a real tmux server on a private temporary socket. While the child request is gated, the server contains a titled, right-hand split from the recorded parent pane with `remain-on-exit=on`; after completion only the base pane remains. The delegate flow completes (3 mock requests) with no degradation warning. |
 
-### MCP proxy legs (automated)
+### MCP service and proxy legs (automated)
 
-These exercise the optional MCP proxy end to end without a network or any real
-downstream server: a fake in-process proxy (or the real `harness-mcp-proxy`
+These exercise mixed named services and the optional standalone proxy without
+external network access or a real downstream service: a fake in-process proxy
+(or the real `harness-mcp-proxy`
 serve loop driven against a fake downstream) stands in. They live in
-`cmd/harness/mcp_test.go`, `cmd/harness-mcp-proxy/main_test.go`, and
+`cmd/harness/mcp_test.go`, `cmd/harness/mcp_local_test.go`,
+`cmd/harness-mcp-proxy/main_test.go`, and
 `internal/mcpproxy/daemon_test.go`, and run under `go test ./...`.
 
 ```sh
-go test ./cmd/harness/ -run TestSetupMCP -v
+go test ./cmd/harness/ -run 'TestSetupMCP|TestResolveMCPServices|TestMCPServicesEmptyCatalog' -v
 go test ./cmd/harness-mcp-proxy/ -run 'TestServe|TestTools' -v
 go test ./internal/mcpproxy/ -run TestDaemonServesHTTP -v
 ```
@@ -73,31 +73,14 @@ go test ./internal/mcpproxy/ -run TestDaemonServesHTTP -v
 |---|---|---|
 | Proxy `serve` + `tools` listing | `TestToolsListsAggregatedTools` | `runServe` binds an HTTP listener, supervises a fake downstream, and aggregates its tools; the `tools` subcommand connects and prints `2 tools` with the namespaced names `mcp__fake__echo` / `mcp__fake__ping`, descriptions collapsed to their first line. A `SIGINT` shuts the daemon down cleanly. |
 | `tools` interrupted while connecting | `TestToolsCommandSIGINTCancelsHangingProxy` | The `tools` subcommand starts an HTTP request to a hanging proxy; injected `SIGINT` cancels it immediately and exits **130**, without waiting for the command timeout. |
-| One-shot calling an `mcp__` tool | `TestSetupMCPRegistersToolsAndOneShotCalls` | With `HARNESS_MCP_ENABLE=true` and an HTTP proxy URL in env, `harness -p` discovers the proxy's tool, the model calls `mcp__test__echo`, the harness dispatches it over HTTP, and the **second** model request carries the `echo:` tool result. The assistant's text lands on **stdout**; stderr shows `mcp: connected`. |
+| One-shot calling an `mcp__` tool | `TestSetupMCPRegistersToolsAndOneShotCalls` | With a named HTTP entry under `mcp.servers`, `harness -p` discovers the proxy's tool, the model calls `mcp__test__echo`, the harness dispatches it over HTTP, and the **second** model request carries the `echo:` tool result. The assistant's text lands on **stdout**; stderr shows `mcp: connected`. |
 | MCP startup interrupted | `TestRunSigintDuringMCPRegistration` | Harness starts MCP registration against a hanging proxy; injected `SIGINT` cancels registration and exits **130** without emitting the ordinary MCP-unavailable warning. |
-| Non-HTTP proxy → warn and continue | `TestSetupMCPRejectsNonHTTPProxyAndContinues` | MCP is enabled but the proxy value is not an `http(s)` URL. Startup **proceeds** (exit 0), emits one `[warn] [mcp]` `cannot connect to proxy … MCP tools unavailable` line, registers **zero** `mcp__` tools, and returns a no-op cleanup — MCP never fails startup. |
-| HTTP proxy down → warn and continue | `TestSetupMCPHTTPUnreachableWarnsAndContinues` | With `mcp.proxy` set to a closed `http://` URL, harness attempts registration, emits one warning, and continues without MCP tools. |
 | Daemon serves HTTP | `TestDaemonServesHTTP` | With `proxy.listen` set, one daemon binds the TCP listener; an MCP client lists the aggregated tools and calls one. The HTTP side uses an `Mcp-Session-Id` session and JSON-only responses. |
 | `tools -proxy <url>` against the HTTP listener | `TestServeListenFlagAndToolsProxy` | `runServe -listen <addr>` brings up the HTTP listener; the `tools` subcommand with `-proxy http://<addr>` connects over HTTP and prints the same aggregated table. |
-
-### LSP shim integration legs (automated)
-
-These exercise the `harness lsp serve` shim (the generic LSP-to-MCP bridge) end
-to end. They live in `cmd/harness/lsp_integration_test.go` and
-`cmd/harness/lsp_chain_integration_test.go` behind the `integration` build tag,
-so they run under `make test-integration` (which also covers the harness legs
-above):
-
-```sh
-make test-integration
-# or just the LSP shim legs:
-go test -tags=integration ./cmd/harness/ -run TestIntegration -v
-```
-
-| Leg | Test | What it asserts |
-|---|---|---|
-| Real `gopls` over the shim | `TestIntegrationGopls` | Drives `harness lsp serve` against a real `gopls` over a tiny temp Go module — server selection, root detection, launch + handshake, `didOpen` — then definition (`Foo` resolves to `main.go:3`), signature-help (`Foo() int`), and diagnostics (`undefinedThing`) calls. **Skipped** when `gopls` is not on `PATH`. |
-| Production proxy chain | `TestIntegrationProxyChain` | Builds `harness` and `harness-mcp-proxy` and runs the real chain: a local `harness-mcp-proxy serve -stdio` hosts `harness lsp serve` as a downstream; the test confirms the shim's tools surface under the `mcp__lsp__` namespace (e.g. `mcp__lsp__definition`) — which is what lets harness register them. No language server is launched (`tools/list` is static), and this production stdio chain opens no metrics listener or collectors. |
+| Mixed named services | `TestSetupMCPServicesAggregatesTransports` | One in-process aggregator discovers and calls stdio and HTTP tools together. |
+| Empty and failed services | `TestSetupMCPServicesRetainsEmptyAndFailedServices` | Readiness retains configured services even with no currently available tools. |
+| Literal config and workspace | `TestResolveMCPServicesLiteralAndWorkspace` | Resolved values are not expanded again and children use the root workspace. |
+| Late tools | `TestMCPServicesEmptyCatalogRefreshesAtPromptBoundary` | An initially empty surface gains discovered tools at a prompt boundary. |
 
 ## Live-model legs (opt-in automated)
 
@@ -138,26 +121,25 @@ and rate-limit pressure.
 
 To smoke a real downstream MCP server, write a proxy config at
 `~/.config/harness-mcp-proxy/config.json` (one `mcpServers` entry, stdio or
-http; see the README), then:
+HTTP; see [mcp.md](mcp.md)), then:
 
 ```sh
 make
 
-# Start the proxy yourself — harness never spawns it. Leave it running:
+# For this shared-daemon smoke, start the optional proxy and leave it running:
 ./harness-mcp-proxy serve &
 ./harness-mcp-proxy tools          # prints the mcp__<server>__<tool> table
 curl -fsS http://127.0.0.1:9091/metrics
 
-# Drive a model through an MCP tool:
-HARNESS_MCP_ENABLE=true ./harness -model anthropic:claude-opus-4-8 \
+# Configure Harness mcp.servers.shared.url = "http://127.0.0.1:8766", then:
+./harness -model anthropic:claude-opus-4-8 \
   -p "use an MCP tool to <task>"
 ```
 
-Expect: `mcp: connected (N servers, M tools): ...` on stderr, the daemon outliving
-harness (a second harness reuses it), and downstream stderr/crashes recorded in the
-proxy log. If the proxy is **not** running, harness emits one
-`mcp: cannot connect to proxy at http://127.0.0.1:8766: …; MCP tools unavailable`
-warning and continues toolless.
+Expect `mcp: connected` on stderr, the daemon outliving Harness (a second
+session reuses it), and downstream stderr/crashes in the proxy log. A missing
+daemon produces discovery warnings; Harness continues with available tools and
+bounded remote discovery retries in the background.
 
 To smoke a non-default proxy address, set `"proxy": {"listen": "127.0.0.1:8420"}`
 in the proxy config (or pass `serve -listen 127.0.0.1:8420`), then:
@@ -166,13 +148,12 @@ in the proxy config (or pass `serve -listen 127.0.0.1:8420`), then:
 ./harness-mcp-proxy serve -listen 127.0.0.1:8420 &
 ./harness-mcp-proxy tools -proxy http://127.0.0.1:8420
 
-# Point harness at the URL (config mcp.proxy = "http://127.0.0.1:8420", or env):
-HARNESS_MCP_ENABLE=true HARNESS_MCP_PROXY=http://127.0.0.1:8420 \
-  ./harness -model anthropic:claude-opus-4-8 -p "use an MCP tool to <task>"
+# Set Harness mcp.servers.shared.url = "http://127.0.0.1:8420", then:
+./harness -model anthropic:claude-opus-4-8 -p "use an MCP tool to <task>"
 ```
 
 Expect: the same `mcp: connected` line. One-shot runs use the tool list
-discovered before the model request; in an interactive REPL, background
+available after the shared five-second readiness budget; in a REPL, background
 discovery can print `[mcp: tool list updated; N tools]` when applied at the
 next prompt boundary.
 

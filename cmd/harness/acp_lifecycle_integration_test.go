@@ -25,6 +25,7 @@ import (
 	"harness/internal/config"
 	"harness/internal/mcp"
 	"harness/internal/mcp/jsonrpc"
+	"harness/internal/mcpproxy"
 	"harness/internal/tools"
 )
 
@@ -184,7 +185,7 @@ func TestIntegrationACPRollbackStartsAllOwnersConcurrently(t *testing.T) {
 	for _, entry := range local.Env {
 		localEnv[entry.Name] = entry.Value
 	}
-	cfg.MCP.Local = config.LocalMCPConfig{Enable: true, EnableSet: true, Command: local.Command, Args: local.Args, Env: localEnv}
+	cfg.MCP.Servers = map[string]mcpproxy.ServerConfig{"configured": {Command: local.Command, Args: local.Args, Env: localEnv}}
 	client := acpLifecycleMCPServer(t, "eof", clientMarker, gate.URL+"/client")
 	client.Env = append(client.Env, acp.EnvVariable{Name: "HARNESS_ACP_LIFECYCLE_INIT_GATE", Value: gate.URL + "/init"})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -257,7 +258,6 @@ func TestIntegrationACPRootPreflightFIFOCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			cfg := config.Config{Provider: "openai", Model: "mock-model", ModelProxyURL: proxy, NoEnv: true}
-			cfg.MCP.Local.EnableSet = true // No implicit bundled services.
 			fifo := filepath.Join(workspace, "AGENTS.md")
 			switch name {
 			case "user":
@@ -433,7 +433,7 @@ func testIntegrationACPRootExitJoinsTERMCooperativeMCP(t *testing.T, constructin
 	workspace := t.TempDir()
 	marker := filepath.Join(workspace, "reaped")
 	cfg := filepath.Join(workspace, "config.json")
-	if err := os.WriteFile(cfg, []byte(`{"mcp":{"enable":false,"local":{"enable":false}},"lsp":{"enable":false}}`), 0600); err != nil {
+	if err := os.WriteFile(cfg, []byte(`{}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	proxy := startModelProxy(t, "https://example.invalid/v1")

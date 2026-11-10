@@ -158,6 +158,7 @@ func (s *server) handleInitialize(_ context.Context, params json.RawMessage) (js
 	response := acp.InitializeResponse{
 		ProtocolVersion: selected,
 		AgentCapabilities: acp.AgentCapabilities{
+			MCPCapabilities:     acp.MCPCapabilities{HTTP: true},
 			SessionCapabilities: acp.SessionCapabilities{Close: &acp.Capability{}},
 		},
 		AgentInfo: &acp.Implementation{Name: "harness", Title: "Harness", Version: buildinfo.Version},
@@ -180,8 +181,8 @@ func (s *server) handleNew(ctx context.Context, params json.RawMessage) (json.Ra
 		return nil, invalidParams("session/new", errors.New("additional directories are not supported"))
 	}
 	for _, server := range request.MCPServers {
-		if server.Type != acp.MCPTransportStdio {
-			return nil, invalidParams("session/new", fmt.Errorf("MCP server %q is not stdio", server.Name))
+		if server.Type != acp.MCPTransportStdio && server.Type != acp.MCPTransportHTTP {
+			return nil, invalidParams("session/new", fmt.Errorf("MCP server %q must use stdio or HTTP", server.Name))
 		}
 	}
 	info, err := os.Stat(request.CWD)

@@ -884,6 +884,7 @@ func requireCleanRepo(repo string) error {
 
 func preflightModels(ctx context.Context, binary string, models []string) error {
 	cmd := exec.CommandContext(ctx, binary, "--models", "--format", "json")
+	cmd.Env = benchmarkEnv("")
 	out, err := cmd.Output()
 	if err != nil {
 		return fmt.Errorf("model catalog preflight: %w", err)
@@ -955,10 +956,15 @@ func validateMetricsModel(want string, m metrics) error {
 }
 
 func benchmarkEnv(goCache string, helperBinDirs ...string) []string {
-	env := os.Environ()
-	env = setEnv(env, "HARNESS_MCP_ENABLE", "false")
-	env = setEnv(env, "HARNESS_LSP_ENABLE", "false")
-	env = setEnv(env, "HARNESS_LSP_SERENA_ENABLE", "false")
+	// Retired integration variables are rejected even when false or empty.
+	// Services stay disabled through the isolated benchmark config instead.
+	var env []string
+	for _, item := range os.Environ() {
+		if strings.HasPrefix(item, "HARNESS_MCP_") || strings.HasPrefix(item, "HARNESS_LSP_") {
+			continue
+		}
+		env = append(env, item)
+	}
 	env = setEnv(env, "NO_COLOR", "1")
 	if goCache != "" {
 		env = setEnv(env, "GOCACHE", goCache)

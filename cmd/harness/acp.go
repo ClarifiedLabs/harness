@@ -33,8 +33,7 @@ import (
 	"harness/internal/hooks"
 	"harness/internal/llm"
 	"harness/internal/logging"
-	"harness/internal/mcp"
-	"harness/internal/mcpchild"
+	"harness/internal/mcpproxy"
 	"harness/internal/mcptools"
 	"harness/internal/modelproxy"
 	"harness/internal/otel"
@@ -228,7 +227,10 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		now = time.Now
 	}
 	cfg := result.Config
-	var err error
+	servers, err := resolveACPMCPServices(cfg.MCP, request.CWD, request.MCPServers)
+	if err != nil {
+		return nil, err
+	}
 	var tracer *tracing.Tracer
 	if cfg.TraceProxy {
 		tracer, err = tracing.NewTracer(true)
@@ -286,7 +288,7 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	}
 
 	// These reads need not honor ctx (an instruction file may even be a FIFO).
-	// Keep them before any MCP/LSP ownership so a stuck read cannot strand a
+	// Keep them before any MCP ownership so a stuck read cannot strand a
 	// child when the factory's bounded construction wait expires.
 	for name, value := range agents {
 		if err := ctx.Err(); err != nil {
@@ -376,80 +378,30 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var summaries []mcptools.Summary
-	if cfg.MCP.Enable {
-		_, summary, cleanup, connected := setupMCP(ctx, cfg.MCP, toolCatalog, logger, tracer)
+	var mcpConn *mcptools.Conn
+	var mcpSummary mcptools.Summary
+	if len(servers) > 0 {
+		var cleanup func()
+		var connected bool
+		mcpConn, mcpSummary, cleanup, connected = setupACPMCPServices(ctx, servers, toolCatalog, logger, tracer)
 		cleanups = append(cleanups, func(context.Context) { cleanup() })
-		if connected {
-			summaries = append(summaries, summary)
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if localMCPEnabled(cfg.MCP.Local, true) {
-		_, summary, cleanup, connected := setupLocalMCP(ctx, cfg.MCP.Local, cfg.MCP.Local.EnableSet, toolCatalog, logger)
-		cleanups = append(cleanups, func(context.Context) { cleanup() })
-		if connected {
-			summaries = append(summaries, summary)
+		if !connected {
+			return nil, errors.New("initialize ACP MCP services")
 		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	clientSummary, clientCleanups, err := setupACPClientMCP(ctx, request.CWD, request.MCPServers, toolCatalog, logger)
-	// Partial setup returns ownership too: rollback must start these and the
-	// previously acquired local services together, not consume serial grace.
-	cleanups = append(cleanups, clientCleanups...)
-	if err != nil {
-		return nil, err
-	}
-	summaries = append(summaries, clientSummary)
-
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	var lspRuntime *lspRuntime
-	var lspSummary mcptools.Summary
-	var lspHint string
-	if cfg.LSP.Enable {
-		lspRuntime, err = newLSPRuntime(ctx, cfg.LSP, toolCatalog, logger)
-		if err != nil {
-			return nil, fmt.Errorf("lsp: %w", err)
-		}
-		cleanups = append(cleanups, func(ctx context.Context) { lspRuntime.shutdown(ctx) })
-		lspSummary, lspHint = lspRuntime.ActiveSummary(), lspRuntime.SystemHint()
-		installMutationDiagnostics(toolCatalog, lspRuntime)
 	}
 	var runtimeHints []string
 	if backend == "rg" {
 		runtimeHints = append(runtimeHints, rgSystemHint)
 	}
-	if lspHint != "" {
-		runtimeHints = append(runtimeHints, lspHint)
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	if cfg.LSP.Serena.Enable {
-		summary, cleanup, connected := setupSerena(ctx, cfg.LSP.Serena, toolCatalog, logger)
-		cleanups = append(cleanups, func(context.Context) { cleanup() })
-		if connected {
-			summaries = append(summaries, summary)
-			if summary.Total > 0 {
-				runtimeHints = append(runtimeHints, serenaSystemHint)
-			}
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
-	allMCP := mergeMCPSummaries(summaries...)
-	augmentAgentsWithMCP(agents, allMCP.Names, allMCP.ReadOnlyNames)
-	if lspRuntime != nil {
-		bases := mcpExposingAgentBases(agents)
-		applyLSPExposure(agents, lspSummary, true, captureLSPExplicitTools(agents, bases))
-	}
+	mcpBases := snapshotMCPAgentBases(agents)
+	mcpLimits := mcpLimitsFromConfig(cfg.MCP)
+	names, readOnly := capRemoteMCPNames(mcpSummary.Names, mcpSummary.ReadOnlyNames, mcpLimits, logger)
+	reconcileMCPTools(agents, mcpBases, toolCatalog, names, readOnly)
+	// Background delegates may resolve while the next prompt refreshes agents.
+	exposure := newAgentExposure(agents)
 	definition = agents[agentName]
 	buildSystem := func(agentPrompt string) string {
 		return acp.SanitizeModelFacingText(sysprompt.Build(sysprompt.Options{StaticPrompt: baseSystem, NoEnv: true, RuntimeHints: runtimeHints, AgentPrompt: agentPrompt}))
@@ -467,14 +419,16 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	buildMeta := session.BuildMetadata{Version: build.Version, Commit: build.Commit, Date: build.Date, Modified: build.Modified}
 	runtimeProfile := session.RuntimeProfile{RetentionPolicy: cfg.RetentionPolicy, ContextWindow: cfg.ContextWindow, ToolResultMaxBytes: cfg.ToolResultMaxBytes, ToolResultMaxLines: cfg.ToolResultMaxLines, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, CompactTimeoutSeconds: cfg.CompactTimeoutSeconds, ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), DelegateMaxTurns: cfg.DelegateMaxTurns, DelegateMaxActive: cfg.DelegateMaxActive, SearchBackend: backend, StagnationNudge: cfg.StagnationNudge}
 	state := delegate.NewState(delegate.Runtime{Execution: scope, ProviderName: cfg.Provider, Model: cfg.Model, ReasoningReplayDomain: selection.ReasoningReplayDomain, ContextWindow: cfg.ContextWindow, MaxOutputTokens: cfg.MaxOutputTokens, Registry: registry, Reasoning: reasoning, ServerTools: webSearchServerToolsForModel(cfg.Provider, registry, selection.RegistryModel, cfg.WebSearch), ResponsesStateful: responsesStatefulForProvider(cfg, catalog, cfg.Provider), NativeCompaction: nativeCompactionForProvider(catalog, cfg.Provider), Agent: agentName, SessionPath: sessionPath, CWD: request.CWD, MaxPromptTokens: cfg.MaxPromptTokens, MaxPromptCostUSD: cfg.MaxPromptCostUSD, Build: buildMeta, RuntimeProfile: runtimeProfile})
-	resolveDelegate := func(runtime delegate.Runtime, name string) (delegate.Launch, error) {
-		launch, err := resolveDelegateLaunch(runtime, name, agents, toolCatalog, nil, catalog, modelBackend.Backend, buildSystem, cfg)
+	resolveDelegate := exposure.resolve(func(runtime delegate.Runtime, name string) (delegate.Launch, error) {
+		launch, err := resolveDelegateLaunch(runtime, name, agents, toolCatalog, catalog, modelBackend.Backend, buildSystem, cfg)
 		if err != nil {
 			return launch, err
 		}
 		return acpDelegateLaunch(launch), nil
-	}
-	runner := delegate.NewRunner(state.Snapshot, resolveDelegate, delegate.Options{AstraNativeSteering: cfg.AstraNativeSteering, ExperimentalAsyncTools: cfg.ExperimentalAsyncTools, MaxTurns: cfg.DelegateMaxTurns, MaxDepth: cfg.DelegateMaxDepth, MaxActiveDescendants: cfg.DelegateMaxActive, CompactKeepTurns: cfg.CompactKeepTurns, CompactKeepTokens: cfg.CompactKeepTokens, CompactTriggerPercent: cfg.CompactTriggerPercent, CompactTargetPercent: cfg.CompactTargetPercent, CompactInputTokens: cfg.CompactInputTokens, CompactGrowthTokens: cfg.CompactGrowthTokens, DisableAutoCompaction: !cfg.CompactAutoEnabled, CompactSummaryMaxTokens: cfg.CompactSummaryMaxTokens, CompactTimeout: time.Duration(cfg.CompactTimeoutSeconds) * time.Second, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, RetentionKeepTurns: cfg.RetentionKeepTurns, RetentionResultHeadBytes: cfg.RetentionResultHeadBytes, RetentionPolicy: agent.RetentionPolicy(cfg.RetentionPolicy), ShowDiffs: cfg.ShowDiffs, Now: now, AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate { return delegateAgentCandidates(agents) }})
+	})
+	runner := delegate.NewRunner(state.Snapshot, resolveDelegate, delegate.Options{AstraNativeSteering: cfg.AstraNativeSteering, ExperimentalAsyncTools: cfg.ExperimentalAsyncTools, MaxTurns: cfg.DelegateMaxTurns, MaxDepth: cfg.DelegateMaxDepth, MaxActiveDescendants: cfg.DelegateMaxActive, CompactKeepTurns: cfg.CompactKeepTurns, CompactKeepTokens: cfg.CompactKeepTokens, CompactTriggerPercent: cfg.CompactTriggerPercent, CompactTargetPercent: cfg.CompactTargetPercent, CompactInputTokens: cfg.CompactInputTokens, CompactGrowthTokens: cfg.CompactGrowthTokens, DisableAutoCompaction: !cfg.CompactAutoEnabled, CompactSummaryMaxTokens: cfg.CompactSummaryMaxTokens, CompactTimeout: time.Duration(cfg.CompactTimeoutSeconds) * time.Second, CompactToolResultMaxBytes: cfg.CompactToolResultMaxBytes, RetentionKeepTurns: cfg.RetentionKeepTurns, RetentionResultHeadBytes: cfg.RetentionResultHeadBytes, RetentionPolicy: agent.RetentionPolicy(cfg.RetentionPolicy), ShowDiffs: cfg.ShowDiffs, Now: now, AgentCandidates: func(delegate.Runtime) []delegate.AgentCandidate {
+		return exposure.candidates()
+	}})
 	todos := todo.NewStore()
 	plans := plan.NewStore()
 	toolCatalog.Register(delegate.NewToolWithSessions(runner, agentSessions, jobs))
@@ -492,7 +446,7 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 		}))
 	}
 	toolCatalog.Register(agentsession.NewTool(agentSessions))
-	toolRegistry, err := subsetForAgentTools(toolCatalog, definition.AllowedTools, nil)
+	toolRegistry, err := subsetForAgentTools(toolCatalog, definition.AllowedTools)
 	if err != nil {
 		return nil, fmt.Errorf("agent %q: %w", agentName, err)
 	}
@@ -516,7 +470,18 @@ func newACPRootSession(ctx context.Context, env environment, request acpagent.Se
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return &acpRootSession{ownedBackend: ownedBackend, otel: otelSink, agent: ag, cfg: cfg, registry: registry, registryModel: selection.RegistryModel, agentName: agentName, system: systemPrompt, path: sessionPath, cwd: request.CWD, created: created, now: now, build: buildMeta, runtime: runtimeProfile, todos: todos, plans: plans, jobs: jobs, agentSessions: agentSessions, lock: lock, cleanups: cleanups}, nil
+	refreshMCP := newMCPRefresherDynamic(mcpConn, toolCatalog, agents, mcpBases, mcpSummary, func() mcptools.Summary { return mcptools.Summary{} }, logger, mcpLimits)
+	refreshTools := func(ctx context.Context) string {
+		reg, notice := exposure.refresh(refreshMCP)(ctx, agentName)
+		if reg != nil {
+			ag.SetTools(reg)
+			snapshot := state.Snapshot()
+			snapshot.ToolNames = reg.Names()
+			state.Set(snapshot)
+		}
+		return notice
+	}
+	return &acpRootSession{mcpConn: mcpConn, refreshTools: refreshTools, ownedBackend: ownedBackend, otel: otelSink, agent: ag, cfg: cfg, registry: registry, registryModel: selection.RegistryModel, agentName: agentName, system: systemPrompt, path: sessionPath, cwd: request.CWD, created: created, now: now, build: buildMeta, runtime: runtimeProfile, todos: todos, plans: plans, jobs: jobs, agentSessions: agentSessions, lock: lock, cleanups: cleanups}, nil
 }
 
 // acpDelegateLaunch extends the ACP host-boundary sanitizers to delegate child
@@ -529,90 +494,116 @@ func acpDelegateLaunch(launch delegate.Launch) delegate.Launch {
 	return launch
 }
 
-// setupACPClientMCP returns all acquired cleanup functions, including on error.
-// Its root owner starts rollback concurrently with previously acquired services.
+// Keep root-owned services alive after session/new finishes, while still rolling
+// back promptly if that request is cancelled during startup.
+func setupACPMCPServices(ctx context.Context, servers []mcpproxy.ResolvedServer, catalog *tools.Registry, logger *slog.Logger, tracer *tracing.Tracer) (*mcptools.Conn, mcptools.Summary, func(), bool) {
+	lifetime, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, cancel)
+	conn, summary, cleanup, ok := setupMCPServices(lifetime, servers, catalog, logger, tracer)
+	stop()
+	closeServices := func() { cancel(); cleanup() }
+	if ctx.Err() != nil || !ok {
+		closeServices()
+		return nil, mcptools.Summary{}, closeServices, false
+	}
+	return conn, summary, closeServices, true
+}
+
+// setupACPClientMCP is the attachment-only wrapper; roots resolve configured
+// services and attachments together before starting their single aggregator.
 func setupACPClientMCP(ctx context.Context, cwd string, servers []acp.MCPServer, catalog *tools.Registry, logger *slog.Logger) (mcptools.Summary, []func(context.Context), error) {
-	if err := validateACPClientMCP(servers); err != nil {
+	resolved, err := resolveACPMCPServices(config.MCPConfig{}, cwd, servers)
+	if err != nil {
 		return mcptools.Summary{}, nil, err
 	}
-	var summaries []mcptools.Summary
-	var cleanups []func(context.Context)
-	fail := func(err error) (mcptools.Summary, []func(context.Context), error) {
+	if len(resolved) == 0 {
+		return mcptools.Summary{}, nil, nil
+	}
+	_, summary, cleanup, ok := setupACPMCPServices(ctx, resolved, catalog, logger, nil)
+	cleanups := []func(context.Context){func(context.Context) { cleanup() }}
+	if err := ctx.Err(); err != nil {
 		return mcptools.Summary{}, cleanups, err
 	}
-	for _, spec := range servers {
-		if err := ctx.Err(); err != nil {
-			return fail(err)
-		}
-		name := spec.Name
-		env, err := acpMCPEnvironment(os.Environ(), spec.Env)
-		if err != nil {
-			return fail(fmt.Errorf("MCP server %q: %w", name, err))
-		}
-		child, err := mcpchild.SpawnInDir(spec.Command, spec.Args, env, cwd, func(line string) {
-			logger.Warn("ACP client MCP child stderr", "server", name, "line", acp.SanitizeModelFacingText(line))
-		})
-		if err != nil {
-			return fail(err)
-		}
-		var dialMu sync.Mutex
-		dialed := false
-		conn := mcptools.NewConn(mcptools.Options{Info: mcp.Implementation{Name: "harness", Version: buildinfo.Version}, Logger: logger, Dial: func(context.Context) (io.ReadWriteCloser, error) {
-			dialMu.Lock()
-			defer dialMu.Unlock()
-			if dialed {
-				return nil, errors.New("ACP MCP child cannot reconnect")
-			}
-			dialed = true
-			return child.Conn(), nil
-		}})
-		cleanup := func(context.Context) {
-			// A root/manager deadline may already be depleted. This owner needs
-			// its own EOF and TERM grace to let nested owners reap their groups.
-			closeCtx, cancel := context.WithTimeout(context.Background(), acpOwnedCleanupTimeout)
-			defer cancel()
-			_ = conn.Close()
-			child.Close(closeCtx)
-		}
-		cleanups = append(cleanups, cleanup)
-		summary, err := mcptools.RegisterWithOptions(ctx, catalog, conn, mcptools.RegisterOptions{TrustReadOnlyHint: true, Namespace: name})
-		if err != nil {
-			return fail(fmt.Errorf("initialize MCP server %q: %w", name, err))
-		}
-		summaries = append(summaries, summary)
+	if !ok {
+		return mcptools.Summary{}, cleanups, errors.New("initialize ACP MCP services")
 	}
-	return mergeMCPSummaries(summaries...), cleanups, nil
+	return summary, cleanups, nil
+}
+
+func resolveACPMCPServices(cfg config.MCPConfig, cwd string, attachments []acp.MCPServer) ([]mcpproxy.ResolvedServer, error) {
+	if len(attachments) > maxACPClientMCPServers {
+		return nil, fmt.Errorf("ACP session provides %d MCP servers; maximum is %d", len(attachments), maxACPClientMCPServers)
+	}
+	servers, err := resolveMCPServices(cfg, cwd)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(servers)+len(attachments))
+	for _, server := range servers {
+		seen[server.Name] = true
+	}
+	for _, spec := range attachments {
+		if !validACPMCPNamespace(spec.Name) {
+			return nil, fmt.Errorf("MCP server name %q must use 1-56 ASCII letters, digits, underscores, or hyphens", spec.Name)
+		}
+		if seen[spec.Name] {
+			return nil, fmt.Errorf("duplicate MCP server name %q (configured or attached)", spec.Name)
+		}
+		seen[spec.Name] = true
+		// A configured disable also suppresses same-name client attachments;
+		// an attachment must not silently re-enable a locally disabled service.
+		if configured, ok := cfg.Servers[spec.Name]; ok && !configured.IsEnabled() {
+			continue
+		}
+		sc := mcpproxy.ServerConfig{Type: string(spec.Type), Command: spec.Command, Args: spec.Args, URL: spec.URL}
+		switch spec.Type {
+		case acp.MCPTransportStdio:
+			if !filepath.IsAbs(spec.Command) {
+				return nil, fmt.Errorf("MCP server %q command must be absolute", spec.Name)
+			}
+			info, err := os.Stat(spec.Command)
+			if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
+				return nil, fmt.Errorf("MCP server %q command is not executable: %s", spec.Name, spec.Command)
+			}
+		default:
+			if spec.Type != acp.MCPTransportHTTP {
+				return nil, fmt.Errorf("MCP server %q uses unsupported transport %q", spec.Name, spec.Type)
+			}
+		}
+		if _, err := acpMCPEnvironment(nil, spec.Env); err != nil {
+			return nil, fmt.Errorf("MCP server %q: %w", spec.Name, err)
+		}
+		if len(spec.Env) > 0 {
+			sc.Env = make(map[string]string, len(spec.Env))
+			for _, entry := range spec.Env {
+				sc.Env[entry.Name] = entry.Value
+			}
+		}
+		headerNames := make(map[string]bool, len(spec.Headers))
+		if len(spec.Headers) > 0 {
+			sc.Headers = make(map[string]string, len(spec.Headers))
+			for _, header := range spec.Headers {
+				key := strings.ToLower(header.Name)
+				if headerNames[key] {
+					return nil, fmt.Errorf("MCP server %q: duplicate HTTP header %q", spec.Name, header.Name)
+				}
+				headerNames[key] = true
+				sc.Headers[header.Name] = header.Value
+			}
+		}
+		server, err := mcpproxy.ValidateServer(spec.Name, sc, cwd)
+		if err != nil {
+			return nil, err
+		}
+		server.WorkDir = cwd
+		servers = append(servers, server)
+	}
+	return servers, nil
 }
 
 func validateACPClientMCP(servers []acp.MCPServer) error {
-	if len(servers) > maxACPClientMCPServers {
-		return fmt.Errorf("ACP session provides %d MCP servers; maximum is %d", len(servers), maxACPClientMCPServers)
-	}
-	seen := make(map[string]struct{}, len(servers))
-	for _, spec := range servers {
-		name := spec.Name
-		if !validACPMCPNamespace(name) {
-			return fmt.Errorf("MCP server name %q must use 1-56 ASCII letters, digits, underscores, or hyphens", name)
-		}
-		if _, ok := seen[name]; ok {
-			return fmt.Errorf("duplicate MCP server name %q", name)
-		}
-		seen[name] = struct{}{}
-		if spec.Type != acp.MCPTransportStdio {
-			return fmt.Errorf("MCP server %q uses unsupported transport %q", name, spec.Type)
-		}
-		if !filepath.IsAbs(spec.Command) {
-			return fmt.Errorf("MCP server %q command must be absolute", name)
-		}
-		info, err := os.Stat(spec.Command)
-		if err != nil || info.IsDir() || info.Mode().Perm()&0o111 == 0 {
-			return fmt.Errorf("MCP server %q command is not executable: %s", name, spec.Command)
-		}
-		if _, err := acpMCPEnvironment(nil, spec.Env); err != nil {
-			return fmt.Errorf("MCP server %q: %w", name, err)
-		}
-	}
-	return nil
+	_, err := resolveACPMCPServices(config.MCPConfig{}, "", servers)
+	return err
 }
 
 func validACPMCPNamespace(name string) bool {
@@ -637,6 +628,9 @@ func acpMCPEnvironment(parent []string, entries []acp.EnvVariable) ([]string, er
 	}
 	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
+		if entry.Name == "" || strings.ContainsAny(entry.Name, "=\x00") || strings.ContainsRune(entry.Value, 0) {
+			return nil, fmt.Errorf("invalid environment variable %q", entry.Name)
+		}
 		if _, ok := seen[entry.Name]; ok {
 			return nil, fmt.Errorf("duplicate environment variable %q", entry.Name)
 		}
@@ -658,6 +652,8 @@ func acpMCPEnvironment(parent []string, entries []acp.EnvVariable) ([]string, er
 type acpRootSession struct {
 	mu sync.Mutex
 
+	mcpConn      *mcptools.Conn
+	refreshTools func(context.Context) string
 	cleanupOnce  sync.Once
 	cleanupDone  chan struct{}
 	cleanupErr   error               // published by closing cleanupDone
@@ -692,6 +688,11 @@ func (r *acpRootSession) Prompt(ctx context.Context, text string, updates acpage
 	defer r.mu.Unlock()
 	if r.closed {
 		return acp.StopReasonRefusal, errors.New("ACP root session is closed")
+	}
+	if r.refreshTools != nil {
+		if notice := r.refreshTools(ctx); notice != "" {
+			updates.Notice(acp.SanitizeModelFacingText(notice))
+		}
 	}
 	r.prompt++
 	sink := newACPEventSink(r, r.prompt, updates)

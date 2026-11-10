@@ -73,6 +73,18 @@ func TestSanitizeToolNamePreservesCurrentToolNames(t *testing.T) {
 	}
 }
 
+func TestSanitizeToolNameGroupsExternalTools(t *testing.T) {
+	for name, want := range map[string]string{
+		"mcp_example_inspect": "mcp",
+		"lsp_definition":      "other",
+		"external_tool":       "other",
+	} {
+		if got := sanitizeToolName(name); got != want {
+			t.Errorf("sanitizeToolName(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
 func TestSingleInspectTurnClassifiesCurrentToolNames(t *testing.T) {
 	for _, name := range []string{"read", "view_image", "web_fetch"} {
 		if !isSingleInspectTurn([]string{name}) {

@@ -290,7 +290,10 @@ func (c *Conn) drop(cl *mcp.Client) {
 // last ClearDirty. The prompt-boundary refresh consumes it.
 func (c *Conn) Dirty() bool { return c.dirty.Load() }
 
-// ClearDirty resets the dirty flag.
+// MarkDirty requests a retry after a failed tool-list refresh.
+func (c *Conn) MarkDirty() { c.dirty.Store(true) }
+
+// ClearDirty resets the dirty flag before taking a tool-list snapshot.
 func (c *Conn) ClearDirty() { c.dirty.Store(false) }
 
 // Close closes the current client if any, and the persistent HTTP transport

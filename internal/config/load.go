@@ -113,6 +113,9 @@ func LoadParsed(options LoadOptions, values cli.Values) (Result, error) {
 	if meta.Help || meta.Version {
 		return Result{Run: meta}, nil
 	}
+	if err := rejectRemovedEnvironment(lookup); err != nil {
+		return Result{}, err
+	}
 	path, err := resolveConfigPath(flags, lookup, options.DefaultConfigPath, options.ConfigBaseDir)
 	if err != nil {
 		return Result{}, err
@@ -153,8 +156,6 @@ func LoadParsed(options LoadOptions, values cli.Values) (Result, error) {
 	if provider, model, ok := SplitProviderModel(result.Config.Model); ok {
 		result.Config.Provider, result.Config.Model = provider, model
 	}
-	result.Config.MCP.Local.EnableSet = result.Sources["mcp.local.enable"].Kind != configmeta.SourceDefault
-	result.Config.LSP.Serena.EnableSet = result.Sources["lsp.serena.enable"].Kind != configmeta.SourceDefault
 	result.Config.OTel.HostnameSet = result.Sources["otel.hostname"].Kind != configmeta.SourceDefault
 	if err := validateResolved(result.Config); err != nil {
 		return Result{}, err
@@ -240,9 +241,6 @@ func validateFileConfig(file fileConfig, path string) error {
 			return err
 		}
 	}
-	if file.MCP.Set && file.MCP.Value.Local.Set && file.MCP.Value.Local.Value.Enable.Set && file.MCP.Value.Local.Value.Enable.Value && (!file.MCP.Value.Local.Value.Command.Set || strings.TrimSpace(file.MCP.Value.Local.Value.Command.Value) == "") {
-		return fmt.Errorf("config %q setting mcp.local.command: required when mcp.local.enable is true", path)
-	}
 	trigger := optionalValue(file.CompactTriggerPercent, defaultCompactTriggerPercent)
 	target := optionalValue(file.CompactTargetPercent, defaultCompactTargetPercent)
 	idleAfter := optionalValue(file.CompactIdleAfterSeconds, 0)
@@ -278,41 +276,6 @@ func collectFileReferences(file fileConfig) []configFileReference {
 	return references
 }
 
-func resolveMCPHeaders(context *resolveContext) error {
-	if context.file.MCP.Set && context.file.MCP.Value.Headers.Set {
-		values, err := expandStringMap(context.file.MCP.Value.Headers.Value, context.lookup, "mcp.headers")
-		if err != nil {
-			return context.fileError("mcp.headers", err)
-		}
-		context.result.Config.MCP.Headers = values
-		context.fileSource("mcp.headers")
-	} else {
-		context.defaultSource("mcp.headers")
-	}
-	return nil
-}
-func resolveMCPLocalArgs(context *resolveContext) error {
-	if context.file.MCP.Set && context.file.MCP.Value.Local.Set && context.file.MCP.Value.Local.Value.Args.Set {
-		context.result.Config.MCP.Local.Args = append([]string(nil), context.file.MCP.Value.Local.Value.Args.Value...)
-		context.fileSource("mcp.local.args")
-	} else {
-		context.defaultSource("mcp.local.args")
-	}
-	return nil
-}
-func resolveMCPLocalEnv(context *resolveContext) error {
-	if context.file.MCP.Set && context.file.MCP.Value.Local.Set && context.file.MCP.Value.Local.Value.Env.Set {
-		values, err := expandStringMap(context.file.MCP.Value.Local.Value.Env.Value, context.lookup, "mcp.local.env")
-		if err != nil {
-			return context.fileError("mcp.local.env", err)
-		}
-		context.result.Config.MCP.Local.Env = values
-		context.fileSource("mcp.local.env")
-	} else {
-		context.defaultSource("mcp.local.env")
-	}
-	return nil
-}
 func resolveACPTargets(context *resolveContext) error {
 	if context.file.ACP.Set && context.file.ACP.Value.Targets.Set {
 		targets := cloneACPTargets(context.file.ACP.Value.Targets.Value)
@@ -330,47 +293,6 @@ func resolveACPTargets(context *resolveContext) error {
 		context.fileSource("acp.targets")
 	} else {
 		context.defaultSource("acp.targets")
-	}
-	return nil
-}
-
-func resolveLSPTools(context *resolveContext) error {
-	if context.file.LSP.Set && context.file.LSP.Value.Tools.Set {
-		context.result.Config.LSP.Tools = append([]string(nil), context.file.LSP.Value.Tools.Value...)
-		context.fileSource("lsp.tools")
-	} else {
-		context.defaultSource("lsp.tools")
-	}
-	return nil
-}
-func resolveLSPServers(context *resolveContext) error {
-	if context.file.LSP.Set && context.file.LSP.Value.Servers.Set {
-		context.result.Config.LSP.Servers = cloneLSPServers(context.file.LSP.Value.Servers.Value)
-		context.fileSource("lsp.servers")
-	} else {
-		context.defaultSource("lsp.servers")
-	}
-	return nil
-}
-func resolveSerenaArgs(context *resolveContext) error {
-	context.result.Config.LSP.Serena.Args = DefaultSerenaArgs()
-	context.defaultSource("lsp.serena.args")
-	if context.file.LSP.Set && context.file.LSP.Value.Serena.Set && context.file.LSP.Value.Serena.Value.Args.Set {
-		context.result.Config.LSP.Serena.Args = append([]string(nil), context.file.LSP.Value.Serena.Value.Args.Value...)
-		context.fileSource("lsp.serena.args")
-	}
-	return nil
-}
-func resolveSerenaEnv(context *resolveContext) error {
-	if context.file.LSP.Set && context.file.LSP.Value.Serena.Set && context.file.LSP.Value.Serena.Value.Env.Set {
-		values, err := expandStringMap(context.file.LSP.Value.Serena.Value.Env.Value, context.lookup, "lsp.serena.env")
-		if err != nil {
-			return context.fileError("lsp.serena.env", err)
-		}
-		context.result.Config.LSP.Serena.Env = values
-		context.fileSource("lsp.serena.env")
-	} else {
-		context.defaultSource("lsp.serena.env")
 	}
 	return nil
 }

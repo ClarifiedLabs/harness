@@ -1,94 +1,170 @@
 # MCP Servers
 
-Harness can expose tools from [Model Context Protocol](https://modelcontextprotocol.io)
-servers. The usual remote path uses `harness-mcp-proxy`, which owns downstream
-MCP servers and aggregates their tools into one namespaced surface. Harness
-connects to that proxy over HTTP and registers each tool as an ordinary harness
-tool.
+Harness exposes tools from [Model Context Protocol](https://modelcontextprotocol.io)
+servers. Configure any number of named services under `mcp.servers`; local stdio
+commands and remote Streamable HTTP endpoints can run simultaneously. No enable
+switch is needed: an empty map (the default) starts no services. Each entry may
+set `"enabled": false` to keep its connection details without starting or connecting.
+Omitted `enabled` (or `true`) enables the service. Disabled entries do not expand
+environment references, so unused credentials need not be present. This works in
+both Harness's `mcp.servers` and the standalone proxy's `mcpServers`.
 
-Harness and the proxy speak MCP streamable HTTP (JSON-RPC 2.0, revision
-`2025-06-18`). The proxy is a shared daemon that many harness sessions can reuse.
-Harness never starts that daemon for you. A separate `mcp.local` path can
-explicitly spawn one configured local stdio MCP service from the harness process.
-The shared HTTP client stores reverse-proxy cookies in memory and returns them on
-later requests to the matching origin, allowing cookie-based affinity for an MCP
-proxy behind a load balancer. Cookies last for the harness process and are not
-persisted across restarts.
+Harness reuses `internal/mcpproxy` in-process over in-memory stdio. The aggregator
+needs no `harness-mcp-proxy` subprocess, TCP listener, metrics listener, or separate
+proxy config. Model backend selection (`local` or `remote`) is independent.
 
-Model backend selection (`local` or `remote`) does not change MCP setup. Local
-model execution starts no MCP proxy. `mcp.local` remains one configured command
-slot, not an embedded multi-server aggregator; native LSP is independent too.
+## Configuring Harness services
 
-## Enabling MCP
-
-MCP is opt-in and off by default. Turn it on in
-`~/.config/harness/config.json`:
+In `~/.config/harness/config.json` (or a project `.harness/config.json`):
 
 ```json
 {
   "mcp": {
-    "enable": true,
-    "proxy": ""
+    "servers": {
+      "maestro": {
+        "command": "maestro",
+        "args": ["mcp"],
+        "env": { "LOG_LEVEL": "info" },
+        "excludedTools": ["run_on_cloud"]
+      },
+      "search": {
+        "url": "https://mcp.example.com/mcp",
+        "headers": { "X-Workspace": "prod" },
+        "auth": {
+          "type": "token_command",
+          "command": "provider-cli",
+          "args": ["mcp", "token"]
+        }
+      }
+    },
+    "max_tools": 0,
+    "disabled_servers": []
   }
 }
 ```
 
-Or use environment variables:
+Each value uses the proxy's `ServerConfig` shape: `command`, `args`, and `env`
+for stdio; `url`, `headers`, and `auth` for Streamable HTTP. `type` is optional:
+a nonempty URL infers HTTP, otherwise stdio. Explicit `stdio`, `http`, and
+`streamable-http` types are accepted; stdio and HTTP fields cannot be mixed in
+one entry. Legacy HTTP+SSE is not supported. Existing `token_command` and
+`oauth2` authentication work; this adds no OAuth discovery or dynamic client
+registration. `excludedTools` uses the exact pre-namespace downstream tool names,
+with the same semantics as [proxy exclusions](#excluding-individual-tools).
+
+Command, argument, environment, URL, header, and auth strings expand `${NAME}`
+and `${NAME:-default}` once during config loading, through `LoadOptions.LookupEnv`.
+An unset reference without a default is an error; the runtime does not expand
+resolved strings again. `excludedTools` is literal. Project entries merge by
+server name: a same-name project entry replaces the whole global entry, not
+individual fields. Each server retains its owning file's provenance and config
+directory (including relative auth paths). Child processes run in the session
+workspace and inherit the environment plus their configured `env` overrides.
+Treat project configuration and commands as trusted code. `config show` redacts
+MCP commands, arguments, URLs, headers, auth, and environment values, since any of
+these can contain interpolated credentials.
+
+Tools use `mcp__<server>__<tool>` names. Invalid or overlong qualified names are
+skipped, never truncated. Dispatch routes to the original downstream name. An
+external proxy is an ordinary service: its already-qualified names receive the
+configured service prefix too (for example, `mcp__shared__mcp__fs__read`). Keep
+service names short enough for the 64-character qualified-name limit. Service
+names must use ASCII letters, digits, underscores, or hyphens; they cannot contain
+`__` or end with `_`, which would make namespace boundaries ambiguous.
+
+### Migration from older configuration
+
+Legacy `mcp.enable`, `mcp.proxy`, `mcp.api_key`, `mcp.headers`, and `mcp.local`
+are automatically converted in memory on load; the original file is not changed.
+The proxy becomes `mcp.servers.shared`, and the local command becomes
+`mcp.servers.local`. Credentials, arguments, and environment values are retained;
+a proxy API key becomes `headers.Authorization` with a `Bearer ` prefix. Legacy
+connections stay disabled unless their old `enable` was true. Existing named
+entries are never overwritten: migration rejects name collisions.
+
+To persist the conversion explicitly:
 
 ```sh
-HARNESS_MCP_ENABLE=true
-HARNESS_MCP_PROXY=http://127.0.0.1:8766
+harness config migrate -config ~/.config/harness/config.json
 ```
 
-There are no flags. An empty `proxy` resolves to `http://127.0.0.1:8766`.
-Precedence is **env > config file > default**. `proxy` must be an `http(s)://`
-URL. The separate `mcp.local.enable` setting has its own env override,
-`HARNESS_MCP_LOCAL_ENABLE`.
+The command validates the file without expanding environment references, writes
+an exact-byte private backup at `<path>.pre-mcp-migration.bak`, and atomically
+replaces the config with private permissions. It refuses an existing backup;
+already-current configs are unchanged. It prints paths, never credentials.
+Without `-config`, it selects `HARNESS_CONFIG` or the conventional global config;
+legacy project `.harness/config.json` files are refused because translating them
+alone would lose inherited global fields. Consolidate those settings into named
+entries manually. Automatic loading still merges legacy global/project fields
+before translation. Symlink paths are refused to avoid replacing a managed
+symlink; select its real target instead. `--mcp-proxy-api-key` is removed.
 
-## Local Stdio MCP
+All `lsp` config and native LSP/Serena integrations, the `harness lsp` command,
+and `/lsp` are removed. External language-tool MCP services can be configured as
+ordinary named entries; Harness no longer supplies language servers, a shim,
+prewarming, mutation diagnostics, or special runtime hints.
 
-To run one MCP server directly as a child of Harness, enable `mcp.local` and
-configure its command. For example, Maestro needs no separate proxy:
+The old environment variables are rejected with migration errors; remove them:
+`HARNESS_MCP_ENABLE`, `HARNESS_MCP_PROXY`, `HARNESS_MCP_PROXY_API_KEY`,
+`HARNESS_MCP_LOCAL_ENABLE`, `HARNESS_LSP_ENABLE`, `HARNESS_LSP_PREWARM`, and
+`HARNESS_LSP_SERENA_ENABLE`. This rejection applies even to empty values.
+`mcp.max_tools` and `mcp.disabled_servers` remain supported across the unified
+stdio/HTTP surface.
 
-```json
-{
-  "mcp": {
-    "local": {
-      "enable": true,
-      "command": "maestro",
-      "args": ["mcp"]
-    }
-  }
-}
-```
+### Discovery and readiness
 
-Local MCP is independent of the remote `mcp.enable` setting. Bare tool names such
-as `list_devices` are exposed to the model as `mcp__local__list_devices`; Harness
-still sends the original `list_devices` name to the server when calling it.
-Already-prefixed `mcp__...` names are preserved, so a local proxy remains
-compatible. Both the original and final names must match
-`[a-zA-Z0-9_-]{1,64}`; invalid or overlong names are skipped, never truncated.
-If distinct advertised names qualify to the same name, the first wins and later
-conflicting tools are skipped with a warning.
+Startup waits for all services' first discovery attempts within one shared
+five-second readiness budget, then registers currently available tools. Slow or
+failed services do not block the session indefinitely. Remote initial discovery
+retries are bounded to five attempts, with a 30-second timeout per attempt;
+these background attempts may outlive the startup budget. Late tools refresh at
+prompt boundaries, not in the middle of a model request. An empty catalog is a
+valid ready result. Invalid service configuration is an error, not a silently
+ignored server.
+
+### ACP attachments
+
+ACP `session/new` accepts up to 32 stdio or HTTP MCP attachments and advertises
+HTTP support. SSE attachments are rejected. Attachment names must be unique and
+must not conflict with configured service names; conflicts are fatal before any
+service starts. A same-name attachment for a disabled configured service is
+suppressed rather than re-enabling it. HTTP headers are literal and are not environment-expanded.
+Attachments join the same in-process aggregator, and stdio children use the ACP
+session's workspace directory.
 
 ### Owned-process cleanup
 
-Local MCP and Serena processes are owned by the Harness root, shared with its
-ordinary delegates, and shut down when that root exits—not when each delegate
-finishes. Connection closure is terminal at owner shutdown: late tool calls
-cannot reconnect. Reconnect cleanup for previous children is joined too.
+The Harness root owns the aggregator, its connection, and local stdio children;
+ordinary delegates share them. Children shut down when the root exits, not when
+each delegate finishes. Connection closure is terminal at owner shutdown: late
+calls cannot reconnect. Remote services are not owned and survive client exit.
 
-Cleanup first closes stdio, then escalates to TERM/KILL for the owned process
-group. The immediate child exiting does not leave its remaining group members
-running. A local service gets up to 15 seconds of EOF grace so a nested MCP
-proxy can finish its own concurrent downstream cleanup. The proxy allows its
-LSP shim children to shut down their separately grouped language servers before
-escalating. This can make exit take longer for an unresponsive service.
+Cleanup closes stdio, then escalates to TERM/KILL for owned process groups and
+joins reaping, including earlier reconnect cleanup. The immediate child exiting
+does not leave group members running. A local service gets up to 15 seconds of
+EOF grace so a nested proxy can finish concurrent downstream cleanup; an
+unresponsive service can delay exit. SIGKILL/crashes cannot run cleanup, and
+third-party descendants that detach need their own external supervisor.
 
-The shared HTTP MCP daemon and its servers are **not** owned by a Harness client
-and intentionally survive that client's exit. SIGKILL/crashes cannot run cleanup;
-third-party descendants that detach into another group/session must be managed
-by their own server or external supervisor.
+## Optional standalone proxy
+
+`harness-mcp-proxy` remains independently useful as a shared daemon or stdio
+service. Harness does not start a shared daemon automatically. Configure it as
+an ordinary named service, either over HTTP:
+
+```json
+{"mcp":{"servers":{"shared":{"url":"http://127.0.0.1:8766"}}}}
+```
+
+or as an owned command:
+
+```json
+{"mcp":{"servers":{"shared":{"command":"harness-mcp-proxy","args":["serve","-stdio","-config","/path/to/proxy.json"]}}}}
+```
+
+The external proxy's own downstream config and operations follow. HTTP uses MCP
+JSON-RPC 2.0 revision `2025-06-18`. The HTTP client keeps reverse-proxy cookies
+in memory for affinity and does not persist them across restarts.
 
 ## Configuring Downstream Servers
 
@@ -149,7 +225,8 @@ The shape is Claude Code-compatible:
 `127.0.0.1:8420` when you need a different port or host. Proxy logs use JSON by
 default (`proxy.logFormat: "json"`) or built-in slog text format (`"text"`).
 
-A server with no `type` or `"stdio"` is a child process. `"http"` or
+A server with `"stdio"` is a child process; omitted `type` infers HTTP when
+`url` is set and stdio otherwise. `"http"` or
 `"streamable-http"` is a streamable-HTTP endpoint. HTTP `auth` uses the same
 `token_command` and `oauth2` shapes as model providers. Run
 `harness-mcp-proxy auth login <server>`, `auth status <server>`, or
@@ -204,8 +281,7 @@ qualified name entirely rather than redirecting calls to the other tool.
 Restart the proxy after editing its config, then start a new Harness session to
 rediscover the filtered surface. Excluded tools cannot be restored through an
 agent's `allowed_tools`: the proxy rejects calls to them as unknown tools. This
-setting belongs to the proxy's `mcpServers` entries, not Harness's direct
-`mcp.local` configuration.
+setting works in both the proxy's `mcpServers` and Harness's `mcp.servers` entries.
 
 ### MCP Apps passthrough
 
@@ -299,19 +375,9 @@ harness-mcp-proxy serve
 For a persistent setup, run it from your shell profile, a launchd agent on macOS,
 or a systemd user unit on Linux.
 
-When MCP is enabled for a one-shot run, harness connects to the proxy and
-registers the proxy's tools under a 5 second timeout before the model request.
-If the connection or registration fails it emits one warning and continues with
-no MCP tools:
-
-```text
-mcp: cannot connect to proxy at http://127.0.0.1:8766: <err>; MCP tools unavailable
-```
-
-MCP never fails harness startup. In the interactive REPL, remote HTTP MCP
-discovery starts in the background; failures log a retrying warning, startup
-continues immediately, and discovered tools are applied at a later prompt
-boundary.
+Add the daemon's URL to a named Harness service as shown above. Harness's
+[discovery budget](#discovery-and-readiness) applies to that service too; a
+shared daemon and its downstream children survive a Harness client exiting.
 
 Default paths:
 
@@ -397,14 +463,17 @@ Generate and store a key, then provide it to harness:
 
 ```sh
 harness-mcp-proxy generate-api-key [-api-keys-file path] [-ttl 720h] laptop
-HARNESS_MCP_PROXY_API_KEY=<key> HARNESS_MCP_ENABLE=true harness -model <provider>:<model>
+# Configure the generated key in the named service header shown below.
+harness -model <provider>:<model>
 ```
 
-Harness also reads `mcp.api_key` from `~/.config/harness/config.json`. MCP proxy
+Configure Harness with `mcp.servers.shared.headers.Authorization` set to
+`"Bearer ${MCP_PROXY_KEY}"` and export `MCP_PROXY_KEY` before starting it. Proxy
 keys have the `hmcpp_` prefix. Only SHA-256 hashes are stored, and the plaintext
 key is printed once. Omit `-ttl` (or use `0`) for a non-expiring key. A running
-HTTP proxy polls its key file for additions and removals; harness loads its
-outgoing key at process start. The `harness-mcp-proxy tools` diagnostic command
+HTTP proxy polls its key file for additions and removals; Harness expands its
+configured outgoing header at process start. The `harness-mcp-proxy tools`
+diagnostic command
 uses `HARNESS_MCP_PROXY_API_KEY` or `tools -api-key <key>`.
 
 ## Proxy HTTP Details
@@ -425,22 +494,26 @@ in front for TLS and stronger auth. Each session is carried by an
 `Mcp-Session-Id` header with a 30-minute idle TTL. Responses are
 `application/json` only, and there is no server-push channel.
 
-On the harness side, point `mcp.proxy` at the URL. For an MCP proxy behind a
-reverse proxy that wants auth, add a config-file-only `mcp.headers` map sent on
-every request:
+On the Harness side, configure a named HTTP service. Headers are sent on every
+request, including when a reverse proxy provides auth:
 
 ```json
 {
   "mcp": {
-    "enable": true,
-    "proxy": "https://mcp.internal.example/mcp",
-    "headers": { "Authorization": "Bearer ${TOKEN}" }
+    "servers": {
+      "shared": {
+        "url": "https://mcp.internal.example/mcp",
+        "headers": { "Authorization": "Bearer ${MCP_PROXY_KEY}" }
+      }
+    }
   }
 }
 ```
 
-`headers` has no environment variable. Header values expand `${VAR}` and
-`${VAR:-default}`. An unset `${VAR}` is a config error.
+Header values follow the once-only config expansion rules above. The standalone
+`harness-mcp-proxy tools` command still accepts its own `-api-key` flag and
+`HARNESS_MCP_PROXY_API_KEY` environment variable; that variable is no longer a
+Harness CLI setting.
 
 ## Tools, Agents, And Limits
 
@@ -461,47 +534,49 @@ only text or safe image metadata, never image base64.
 
 Each agent's `mcp_tools` setting controls automatic exposure: `disabled`,
 `read_only`, or `all`. Explicit `mcp__` names in `allowed_tools` are still
-allowed as a strict whitelist. One-shot runs use the tool list discovered before
-the model request; REPL runs may gain remote MCP tools after background discovery
-succeeds.
+allowed as a strict whitelist. Temporarily unavailable explicitly allowed MCP
+tools are omitted from the live list without losing the configured whitelist;
+they return when discovery succeeds. One-shot runs use the tool list discovered before
+the model request; REPL runs may gain tools from any service after background
+discovery succeeds.
 
-When one agent's combined optional MCP/LSP declarations exceed 32 KiB, Harness
+When one agent's combined optional MCP declarations exceed 32 KiB, Harness
 keeps the tools registered but initially publishes only `tool_catalog`. Its
 `list` action filters names and descriptions, `describe` returns exact schemas,
 and sequential `activate` publishes up to 16 selected direct schemas on the next
 model turn. This reduces repeated prompt overhead; it does not bypass the agent's
 MCP policy or `allowed_tools` checks.
 
-When MCP is enabled, Harness trusts `readOnlyHint` annotations from the
+For configured services, Harness trusts `readOnlyHint` annotations from the
 configured MCP server path so advertised read-only tools can be exposed to
 `read_only` agents. All MCP calls inherit default-parallel scheduling regardless
 of that policy annotation; Harness does not infer remote side effects.
 
 Two config-file-only keys (under the harness `mcp` block, no flag or env var)
-restrict the auto-exposed remote MCP surface:
+restrict the auto-exposed unified MCP surface:
 
 ```json
 {
   "mcp": {
-    "enable": true,
     "max_tools": 64,
     "disabled_servers": ["noisy-server"]
   }
 }
 ```
 
-- `mcp.max_tools` caps how many discovered remote MCP tools are auto-exposed to
+- `mcp.max_tools` caps how many discovered MCP tools are auto-exposed to
   `read_only`/`all` agents. `0` (the default) means unlimited; a negative value is
   rejected. On overflow the surface is truncated in discovery order and a warning is
-  logged. Local (`mcp.local`) and LSP tools are not counted.
-- `mcp.disabled_servers` lists remote MCP server names (the segment between `mcp__`
+  logged. Both stdio and HTTP service tools are counted.
+- `mcp.disabled_servers` lists MCP server names (the segment between `mcp__`
   and the next `__` in a tool name) whose tools are dropped from auto-exposure.
 
-Both limits affect only automatic exposure; an explicit `mcp__…` name in an agent's
+Unlike per-entry `enabled: false`, neither limit prevents a service from starting
+or connecting. Both limits affect only automatic exposure; an explicit `mcp__…` name in an agent's
 `allowed_tools` whitelist still resolves even if the cap or disable list excluded it.
 
-Leave MCP off, the default, for latency-sensitive one-shot invocations that do
-not need it.
+Leave `mcp.servers` empty, the default, for latency-sensitive one-shot
+invocations that do not need it.
 
 ## V1 Non-Goals
 

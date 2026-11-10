@@ -19,18 +19,18 @@ This page is the operational overview.
 | `acp` | list configured ACP targets or start one as a reusable detached agent session (omitted when no targets are configured) |
 | `agent_sessions` | list or control reusable process-local agent sessions |
 | `background_jobs` | list, inspect, wait for, or cancel process-local background jobs |
-| `tool_catalog` | conditionally list, describe, and activate optional MCP/LSP tools |
+| `tool_catalog` | conditionally list, describe, and activate optional MCP tools |
 | `record_plan` | Publish an immutable plan snapshot from text or a task-notes draft |
 
 The default registry is `read`, `view_image`, `edit`, `write`, `shell`, and
 `web_fetch`, in that order; the constructible catalog is the same set.
-Coordination tools and discovered MCP/LSP tools are registered separately for
+Coordination tools and discovered MCP tools are registered separately for
 the agents that expose them.
 
-When the aggregate model-facing declarations for an agent's optional MCP/LSP
+When the aggregate model-facing declarations for an agent's optional MCP
 tools exceed 32 KiB, Harness keeps those tools registered but initially hides
-their schemas in a shared deferred inventory grouped by MCP server or LSP
-surface. Native provider tool search consumes that same inventory: OpenAI
+their schemas in a shared deferred inventory grouped by MCP server. Native
+provider tool search consumes that same inventory: OpenAI
 Responses lowers each complete group to one namespace, while Anthropic Messages
 flattens every group's complete tool set into top-level declarations marked
 `defer_loading:true`. Each dialect also declares its hosted search tool, so only
@@ -94,14 +94,10 @@ during mutation preflight, so a stale multi-file edit writes nothing and reports
 the `stale_file` error kind. Hashing the full file is opt-in; ordinary bounded
 reads retain their streaming behavior.
 
-When [MCP](mcp.md) is enabled, downstream MCP tools also appear, namespaced as
-`mcp__<server>__<tool>`. When [LSP](lsp.md) is enabled, native `lsp_*` code
-intelligence tools are registered as a contiguous block immediately after
-`view_image`. Most are read-only; `lsp_code_action`,
-`lsp_format_document`, and `lsp_rename` apply validated language-server text
-edits. All inherit default-parallel dispatch; Harness does not infer the remote
-paths an LSP operation may affect. Interactive sessions can inspect or change
-this process-local exposure with `/lsp`.
+When [MCP services](mcp.md) are configured, downstream tools also appear as
+`mcp__<server>__<tool>`. Named stdio commands and Streamable HTTP endpoints can
+run together. All inherit default-parallel dispatch; Harness does not infer
+remote paths or side effects from tool annotations.
 
 ## Session Goals
 
@@ -348,14 +344,6 @@ full-row background-erase behavior.
 For compatibility, `edit` also decodes a single-file top-level `{path, edits}`
 input. That legacy form is intentionally omitted from the model-facing schema,
 which continues to require the canonical `files:[{path,edits}]` shape.
-
-With native LSP enabled, a successful built-in `edit` or `write` also synchronizes
-each changed supported file with its configured language server and appends the
-fresh published diagnostics to the tool result. Up to eight unique paths are
-queried concurrently with a three-second wait per path, then rendered in mutation
-order. Unsupported paths and unavailable servers remain silent; a diagnostics
-failure is reported as supplemental text and never changes a successful mutation
-into a failed one. Failed mutations do not request diagnostics.
 
 ## Reusable Agent Sessions And ACP
 
@@ -678,7 +666,7 @@ stages:
 
 Harness does not start a stage until all earlier stages have returned results.
 Within one stage, co-issued registered calls are parallel-eligible by default,
-including mutating `shell`, MCP/LSP, and background
+including mutating `shell`, MCP, and background
 delegate launches. A tool may implement an input-aware sequential opt-out for
 concrete shared-state ordering; built-in examples include `update_todos`,
 `record_plan`, foreground delegates, and `background_jobs`
@@ -706,7 +694,7 @@ later work must wait for completion.
 
 Conflict detection is intentionally best-effort. It does not infer read-versus-
 write dependencies, shell-hidden paths, git effects, symlink/hard-link aliases,
-or remote MCP/LSP effects. `_stage` orders separate tool calls whose arguments
+or remote MCP effects. `_stage` orders separate tool calls whose arguments
 are already known. By contrast, `shell.steps` runs a tightly coupled serial
 command list inside one `shell` call. If a later call's arguments depend on an
 earlier result, wait for the next model turn rather than guessing them in a later
@@ -715,7 +703,7 @@ as `stop_on_failure` and compact receipts. Use explicit background leases for
 coordinated jobs.
 
 `_stage` is Harness scheduling metadata, not a tool argument. Its top-level
-property name is reserved for built-in, custom, MCP, and LSP tools and is removed
+property name is reserved for built-in, custom, and MCP tools and is removed
 before execution, so custom and discovered tools must not assign it another
 meaning.
 

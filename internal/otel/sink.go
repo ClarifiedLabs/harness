@@ -115,9 +115,6 @@ func sanitizeToolName(name string) string {
 	if strings.HasPrefix(name, "mcp_") {
 		return "mcp"
 	}
-	if strings.HasPrefix(name, "lsp_") {
-		return "lsp"
-	}
 	return "other"
 }
 

@@ -18,7 +18,7 @@ import (
 )
 
 // This agent deliberately ignores EOF but cooperates with TERM, as a delegate
-// that must tear down its own separately grouped LSP/MCP children would.
+// that must tear down its own separately grouped MCP children would.
 func TestACPCleanupProcess(t *testing.T) {
 	if os.Getenv("HARNESS_ACPCLIENT_CLEANUP_HELPER") != "1" {
 		return

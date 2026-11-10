@@ -266,9 +266,6 @@ func validACPTargetName(name string) bool {
 }
 
 func validateResolved(config Config) error {
-	if config.MCP.Local.Enable && strings.TrimSpace(config.MCP.Local.Command) == "" {
-		return fmt.Errorf("mcp.local.command is required when mcp.local.enable is true")
-	}
 	if config.OTel.Enabled && strings.TrimSpace(config.OTel.Endpoint) == "" {
 		return fmt.Errorf("otel.endpoint is required when otel.enabled is true")
 	}

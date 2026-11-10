@@ -6,7 +6,6 @@ import (
 
 	"harness/internal/cli"
 	"harness/internal/config"
-	"harness/internal/lspproxy"
 	"harness/internal/session"
 	"harness/internal/ui"
 )
@@ -21,6 +20,7 @@ var commandHandlers = map[string]commandHandler{
 	"config.list":      runConfigList,
 	"config.show":      runConfigShow,
 	"config.check":     runConfigCheck,
+	"config.migrate":   runConfigMigrate,
 	"session.ls":       runSessionList,
 	"session.resume":   runSessionResume,
 	"session.replay":   runSessionReplay,
@@ -29,8 +29,6 @@ var commandHandlers = map[string]commandHandler{
 	"session.errors":   runSessionErrors,
 	"session.evidence": runSessionEvidence,
 	"session.analyze":  runSessionAnalyze,
-	"lsp.serve":        runLSPServe,
-	"lsp.version":      runLSPVersion,
 	"acp.serve":        runACPServe,
 }
 
@@ -40,7 +38,6 @@ func commandCatalog(env environment) cli.Catalog {
 		mustConfigCLIFlag("format"),
 		boolCLIFlag("sources", []string{"sources"}, "include each setting's winning source"),
 	}, config.SettingCLIFlags()...)
-	getenv := env.lookup
 	return cli.MustCatalog(cli.Command{
 		ID:          "root",
 		Name:        "harness",
@@ -64,6 +61,7 @@ func commandCatalog(env environment) cli.Catalog {
 					{ID: "config.list", Name: "list", Summary: "List configuration metadata.", Runnable: true, Args: exactArgs(0, ""), Flags: []cli.Flag{valueCLIFlag("format", []string{"format"}, "format", "output format: text, json, or markdown", "text")}},
 					{ID: "config.show", Name: "show", Summary: "Show resolved, safely redacted configuration.", Runnable: true, Args: exactArgs(0, ""), Flags: showFlags},
 					{ID: "config.check", Name: "check", Summary: "Strictly validate configuration and local references.", Runnable: true, Args: exactArgs(0, ""), Flags: []cli.Flag{mustConfigCLIFlag("config")}},
+					{ID: "config.migrate", Name: "migrate", Summary: "Save legacy MCP configuration in the new format with a backup.", Runnable: true, Args: exactArgs(0, ""), Flags: []cli.Flag{mustConfigCLIFlag("config")}},
 				},
 			},
 			{
@@ -98,19 +96,6 @@ func commandCatalog(env environment) cli.Catalog {
 					{ID: "acp.serve", Name: "serve", Summary: "Serve Harness root sessions over ACP v1 on stdin/stdout.", Runnable: true, Args: exactArgs(0, ""), Flags: acpServeCLIFlags()},
 				},
 			},
-			{
-				ID: "lsp", Name: "lsp", Summary: "Run the generic LSP-to-MCP shim.",
-				Commands: []cli.Command{
-					{ID: "lsp.serve", Name: "serve", Summary: "Serve LSP code-intelligence tools over MCP on stdin/stdout.", Runnable: true, Args: cli.Args{Max: -1, Check: false}, Flags: []cli.Flag{
-						valueCLIFlag("config", []string{"config"}, "path", "config file path", lspproxy.DefaultConfigPath(getenv)),
-						valueCLIFlag("namespace", []string{"namespace"}, "namespace", "tool-name namespace; empty for bare names", "lsp"),
-						valueCLIFlag("log", []string{"log"}, "path", "log file path", ""),
-						valueCLIFlag("log_level", []string{"log-level"}, "level", "log level: debug|info|warn|error", "info"),
-						valueCLIFlag("log_format", []string{"log-format"}, "format", "log format: json|text", "json"),
-					}},
-					{ID: "lsp.version", Name: "version", Summary: "Print the release and MCP protocol versions.", Runnable: true, Args: cli.Args{Max: -1, Check: false}},
-				},
-			},
 		},
 	})
 }
@@ -142,12 +127,8 @@ func run(env environment) int {
 }
 
 func normalizeLegacyCommandArgs(args []string) []string {
-	if len(args) >= 2 && (args[0] == "config" || args[0] == "lsp") && args[1] == "help" {
+	if len(args) >= 2 && args[0] == "config" && args[1] == "help" {
 		return append([]string{args[0], "--help"}, args[2:]...)
-	}
-	if len(args) >= 2 && args[0] == "lsp" && args[1] == "--version" {
-		out := append([]string{"lsp", "version"}, args[2:]...)
-		return out
 	}
 	return args
 }

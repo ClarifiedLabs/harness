@@ -4,8 +4,8 @@ This page covers everyday behavior that is too detailed for the README:
 provider/model selection, interactive initial prompts, one-shot mode, flags, configuration, REPL commands,
 agents, sessions, compaction, interrupts, and hooks.
 
-For tool behavior, see [tools.md](tools.md). For MCP and LSP, see
-[mcp.md](mcp.md) and [lsp.md](lsp.md).
+For tool behavior, see [tools.md](tools.md). For MCP services, see
+[mcp.md](mcp.md).
 
 ## Model Selection
 
@@ -43,9 +43,9 @@ default precedence applies. Provider data stays in the provider files; it is
 not merged into Harness settings. Setup and auth commands remain available in
 the standalone `harness-model-proxy` binary.
 
-Local MCP and native LSP are unchanged. A configured local MCP command may still
-start a child process; it is one command slot, not the standalone MCP proxy's
-multi-server aggregator. Neither model backend starts an MCP proxy.
+MCP setup is independent of model backend selection. Named `mcp.servers` entries
+can mix local commands and HTTP endpoints through an in-process aggregator; no
+standalone MCP proxy binary or listener is required. See [MCP setup](mcp.md).
 
 Use `harness -model-proxy-url http://host:port` when the proxy runs somewhere
 other than `127.0.0.1:8765`. When `-model-proxy-url` /
@@ -286,7 +286,6 @@ value placeholders remain hand-maintained.
 -model-config <path>   local model configuration (empty uses model-proxy discovery; also HARNESS_MODEL_CONFIG)
 -model-proxy-url <url>   harness-model-proxy URL (default http://127.0.0.1:8765)
 -model-proxy-api-key <key>   API key for harness-model-proxy (also HARNESS_MODEL_PROXY_API_KEY)
--mcp-proxy-api-key <key>   API key for harness-mcp-proxy (also HARNESS_MCP_PROXY_API_KEY)
 -system-prompt <text|@file>    replace the static system prompt
 -no-env           omit the environment context block (cwd/os/date/git)
 -resume <session-dir>    load a saved session and continue
@@ -564,7 +563,7 @@ When only a project config is present, `check` reports `config ok: <path>
 global or explicitly selected file—never to the project config.
 
 Project configs can select local model execution and its provider/auth config,
-and define hooks, `hook_configs`, MCP local commands, LSP servers, and other
+and define hooks, `hook_configs`, named MCP commands/endpoints, and other
 command-bearing settings that harness will load
 automatically when invoked inside that project tree. Treat the project config
 as trusted code: only run harness in projects you trust and review
@@ -637,19 +636,30 @@ tool behavior is in [tools.md](tools.md#reusable-agent-sessions-and-acp).
 harness config list  [-format text|json|markdown]
 harness config show  [-config path] [-format text|json] [-sources] [config-setting flags]
 harness config check [-config path]
+harness config migrate [-config path]
 ```
 
-All three commands are offline: they never contact the model proxy or another
+All four commands are offline: they never contact the model proxy or another
 network service. `config list` renders the complete parameter catalog, including
 source names, types, accepted values, and default semantics. `config show`
 resolves settings and contextual defaults; `-sources` adds each winning source.
 Its stable JSON form is a versioned envelope. Output always redacts non-empty
-model/MCP proxy API keys, MCP header values, configured environment-map
-values, and opaque LSP initialization options; there is no show-secrets option.
+model-proxy API keys, MCP commands/arguments/URLs/header/auth values, and configured
+environment-map values; there is no show-secrets option.
 It contains user settings rather than a runtime dump and does not embed the
 built-in prompt or materialize built-in agents. `config check` strictly decodes and validates the selected file and local
 semantic dependencies such as agents, hooks, and `@file` references, then names
 the checked path on success. Explicitly selected missing files are errors.
+
+`config migrate` persists automatic legacy MCP conversion for one file, keeping
+disabled connections disabled and retaining their saved details. It creates an
+exclusive `<path>.pre-mcp-migration.bak` backup before atomically replacing the
+config; both files have private permissions. It leaves current-format files
+unchanged. Without `-config`, only `HARNESS_CONFIG` or the conventional global
+config is selected. Legacy project `.harness/config.json` migration is refused
+because saving it independently would lose inherited fields; consolidate its
+settings manually. Symlink paths are also refused; select the real target.
+See [MCP migration](mcp.md#migration-from-older-configuration) for mappings and limits.
 
 ### OpenTelemetry metrics
 
@@ -788,16 +798,7 @@ environment variables, JSON paths, types, and defaults. The concise
 | `timestamps` | `string` | `short`, `full`, `none` | `-timestamps` | `HARNESS_TIMESTAMPS` | `timestamps` | "short" | no | Harness timestamps setting. |
 | `repl_prompt` | `string` | - | `-repl-prompt` | `HARNESS_REPL_PROMPT` | `repl_prompt` | "[{agent}] \\u003e " | no | Harness repl prompt setting. |
 | `repl_edit_mode` | `string` | `emacs`, `vi` | `-repl-edit-mode` | `HARNESS_REPL_EDIT_MODE` | `repl_edit_mode` | "emacs" | no | Harness repl edit mode setting. |
-| `mcp.enable` | `boolean` | `true`, `false` | - | `HARNESS_MCP_ENABLE` | `mcp.enable` | false | no | Harness mcp.enable setting. |
-| `mcp.proxy` | `string` | - | - | `HARNESS_MCP_PROXY` | `mcp.proxy` | derived: runtime MCP proxy URL | no | Harness mcp.proxy setting. |
-| `mcp.api_key` | `string` | - | `-mcp-proxy-api-key` | `HARNESS_MCP_PROXY_API_KEY` | `mcp.api_key` | unset | yes | Harness mcp.api key setting. |
 | `mcp.max_tools` | `integer` | - | - | - | `mcp.max_tools` | 0 (unlimited) | no | Harness mcp.max tools setting. |
-| `mcp.local.enable` | `boolean` | `true`, `false` | - | `HARNESS_MCP_LOCAL_ENABLE` | `mcp.local.enable` | false | no | Harness mcp.local.enable setting. |
-| `mcp.local.command` | `string` | - | - | - | `mcp.local.command` | unset | no | Harness mcp.local.command setting. |
-| `lsp.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_ENABLE` | `lsp.enable` | false | no | Harness lsp.enable setting. |
-| `lsp.prewarm` | `boolean` | `true`, `false` | - | `HARNESS_LSP_PREWARM` | `lsp.prewarm` | true | no | Harness lsp.prewarm setting. |
-| `lsp.serena.enable` | `boolean` | `true`, `false` | - | `HARNESS_LSP_SERENA_ENABLE` | `lsp.serena.enable` | false | no | Harness lsp.serena.enable setting. |
-| `lsp.serena.command` | `string` | - | - | - | `lsp.serena.command` | "serena" | no | Harness lsp.serena.command setting. |
 | `otel.enabled` | `boolean` | `true`, `false` | `-otel-enabled` | `HARNESS_OTEL_ENABLED` | `otel.enabled` | false | no | Harness otel.enabled setting. |
 | `otel.endpoint` | `string` | - | `-otel-endpoint` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `HARNESS_OTEL_ENDPOINT` | `otel.endpoint` | unset | no | Harness otel.endpoint setting. |
 | `otel.protocol` | `string` | `http/json` | `-otel-protocol` | `HARNESS_OTEL_PROTOCOL` | `otel.protocol` | "http/json" | no | Harness otel.protocol setting. |
@@ -805,14 +806,8 @@ environment variables, JSON paths, types, and defaults. The concise
 | `otel.service_name` | `string` | - | `-otel-service-name` | `OTEL_SERVICE_NAME`, `HARNESS_OTEL_SERVICE_NAME` | `otel.service_name` | "harness" | no | Harness otel.service name setting. |
 | `otel.hostname` | `string` | - | `-otel-hostname` | `HARNESS_OTEL_HOSTNAME`, `OTEL_HOSTNAME` | `otel.hostname` | short hostname (empty disables host.name) | no | Harness otel.hostname setting. |
 | `agents` | `object` | - | - | - | `agents` | unset | no | Structured agents settings. |
-| `mcp.headers` | `object` | - | - | - | `mcp.headers` | unset | yes | Structured mcp.headers settings. |
+| `mcp.servers` | `object` | - | - | - | `mcp.servers` | unset | yes | Structured mcp.servers settings. |
 | `mcp.disabled_servers` | `string[]` | - | - | - | `mcp.disabled_servers` | unset | no | Structured mcp.disabled_servers settings. |
-| `mcp.local.args` | `string[]` | - | - | - | `mcp.local.args` | unset | no | Structured mcp.local.args settings. |
-| `mcp.local.env` | `object` | - | - | - | `mcp.local.env` | unset | yes | Structured mcp.local.env settings. |
-| `lsp.tools` | `string[]` | - | - | - | `lsp.tools` | unset | no | Structured lsp.tools settings. |
-| `lsp.servers` | `object` | - | - | - | `lsp.servers` | unset | yes | Structured lsp.servers settings. |
-| `lsp.serena.args` | `string[]` | - | - | - | `lsp.serena.args` | unset | no | Structured lsp.serena.args settings. |
-| `lsp.serena.env` | `object` | - | - | - | `lsp.serena.env` | unset | yes | Structured lsp.serena.env settings. |
 | `acp.targets` | `object` | - | - | - | `acp.targets` | unset | yes | Structured acp.targets settings. |
 | `hooks` | `object` | - | `-hooks` | - | `hooks` | unset | no | Structured hooks settings. |
 | `hook_configs` | `string[]` | - | - | - | `hook_configs` | unset | no | Structured hook_configs settings. |
@@ -942,20 +937,16 @@ environment variables, JSON paths, types, and defaults. The concise
   degrades to one startup warning when explicitly enabled (suppressed by
   quiet, or logged at debug level when auto-enabled), and pane layout
   degrades to windows if `TMUX_PANE` is missing.
-- Tool-surface limits for MCP and LSP are config-file-only: `mcp.max_tools` caps
-  how many discovered remote MCP tools are auto-exposed (`0` = unlimited),
-  `mcp.disabled_servers` is a list of remote MCP server names dropped from
-  auto-exposure, and `lsp.tools` registers only the listed subset of LSP tools
-  (empty = core set, `["all"]` = full surface). See [mcp.md](mcp.md) and [lsp.md](lsp.md). An explicit
-  `allowed_tools` whitelist can still name a tool that auto-exposure excluded.
-  If one agent's included MCP/LSP declarations exceed 32 KiB, Harness exposes
-  them lazily from one deferred inventory. Supported native OpenAI Responses
-  requests search complete MCP-server/LSP namespaces; supported Anthropic
-  Messages requests search top-level deferred declarations containing every
-  tool in those groups. Other request paths use `tool_catalog`, where selected
-  names can be activated for the next model turn.
-- Serena can be launched independently with `lsp.serena.enable=true` or
-  `HARNESS_LSP_SERENA_ENABLE=true`; this does not imply `lsp.enable=true`.
+- Named `mcp.servers` entries enable MCP automatically unless `enabled` is false,
+  which retains saved details without connecting. Entries can mix stdio commands
+  and Streamable HTTP endpoints. See [mcp.md](mcp.md) for setup and migration.
+  Config-file-only `mcp.max_tools` (`0` = unlimited) and `mcp.disabled_servers`
+  restrict automatic exposure across the unified surface; an explicit
+  `allowed_tools` whitelist can still name a tool excluded from auto-exposure.
+  When one agent's MCP declarations exceed 32 KiB, Harness uses a shared deferred
+  inventory: supported OpenAI Responses requests search complete server
+  namespaces, supported Anthropic Messages requests search deferred declarations,
+  and other paths use `tool_catalog` to activate tools for the next model turn.
 - A single turn's output is capped at the configured
   `max_output_tokens` value when set, otherwise at one quarter of the effective
   `context_window` (with a very high 1,000,000-token runaway ceiling). A model's
@@ -1158,7 +1149,6 @@ It accepts no positional arguments. The accepted configuration flags are exactly
 -timestamps <string>
 -repl-prompt <string>
 -repl-edit-mode <string>
--mcp-proxy-api-key <string>
 -otel-enabled
 -otel-endpoint <string>
 -otel-protocol <string>
@@ -1191,21 +1181,24 @@ process must resolve to the same physical cwd
 different physical workspaces concurrently; use a separate provider process per
 workspace.
 
-A client may attach at most 32 stdio MCP servers in `session/new`. Each name must
-use 1–56 ASCII letters, digits, underscores, or hyphens; names must be unique.
-Every command must be an existing absolute executable. Harness executes the
-client-provided command/args directly in the ACP session cwd, inherits its own
-environment, then applies the client's unique env entries as overrides. These
-are trusted local subprocesses with no sandbox or permission prompt. HTTP/SSE MCP transports and
-additional workspace directories are rejected before spawning any supplied MCP
-server.
+A client may attach at most 32 stdio or Streamable HTTP MCP servers in
+`session/new`. Names use 1–56 ASCII letters, digits, underscores, or hyphens,
+and must be unique across attachments and configured `mcp.servers`; conflicts
+fail before starting any service. Stdio commands must be existing absolute
+executables. Harness runs command/args in the ACP workspace, inheriting its
+environment plus the client's unique env overrides. HTTP attachments supply a
+URL and literal headers (no environment expansion). Both transports join the
+same in-process aggregator. These are trusted services, with no sandbox or
+permission prompt. SSE and additional workspace directories are rejected before
+starting supplied services.
 
 The stable implemented wire scope is ACP v1: `initialize`, `session/new`,
 serialized `session/prompt`, `session/update`, `session/cancel`, and
 `session/close`. The agent advertises only the optional `session/close`
-capability. It does not advertise or implement session load, list, delete,
+capability and HTTP MCP support. It does not advertise or implement session
+load, list, delete,
 resume, or additional directories; prompt image, audio, or embedded-context
-capabilities; HTTP/SSE MCP; authentication/logout; client filesystem/terminal
+capabilities; SSE MCP; authentication/logout; client filesystem/terminal
 access; or configuration-option control. Prompt text and resource links are
 flattened into one text prompt; other content is unsupported. An incompatible
 protocol offer receives Harness's v1 selection and cannot proceed. Future ACP
@@ -1494,7 +1487,7 @@ Harness enables native hosted tool search on the canonical OpenAI API for
 GPT-5.4-or-newer models including GPT-6 Astra, except GPT-5.4 Nano, and explicitly
 for GPT-5.3 Codex Spark. It is also enabled for the canonical ChatGPT Codex backend used by
 `openai-codex`, with the same Nano exclusion. Harness sends each complete
-deferred MCP-server or LSP group as
+deferred MCP-server group as
 one namespace tool, adds `{"type":"tool_search"}`, and omits the local
 `tool_catalog` plus any already activated duplicate declarations from that
 request. Set `false` to disable the native path, or `true` to opt a compatible
@@ -1517,7 +1510,7 @@ Anthropic Messages endpoint into that exact wire contract; `off` disables the
 native path. For compatibility with boolean provider files, `true` means `bm25`
 and `false` means `off`.
 
-When enabled, Harness flattens every complete deferred MCP/LSP group into the
+When enabled, Harness flattens every complete deferred MCP group into the
 top-level Anthropic `tools` array with `defer_loading:true`, appends the selected
 non-deferred `tool_search_tool_*_20251119` declaration, and omits the local
 `tool_catalog` plus activated duplicates. Anthropic's `server_tool_use` and
@@ -1788,7 +1781,7 @@ config > default**, with the normal configuration validation rules. `-format`
 and `-request-id` are command-local flags, not new environment/config settings.
 Unknown flags and invalid syntax are errors, not ignored options. Provider
 credentials are resolved in the selected runtime process; no new login flow is
-introduced. These commands do not start a model session, tools, MCP/LSP, or
+introduced. These commands do not start a model session, tools, MCP, or
 prewarming; local backend startup may refresh its catalog. Requests have a
 45-second command bound and can be interrupted.
 
@@ -1931,7 +1924,6 @@ accounting, maintenance calls, and the aggregate `[prompt: …]` usage line.
 | `/max-turns <n>` | change the turn limit for subsequent prompts in this REPL session; `n <= 0` means unlimited |
 | `/tools` | list enabled built-in and MCP tools with descriptions, plus disabled optional tools |
 | `/tools --raw` | dump the active model-facing tool definitions as provider-neutral JSON, including normalized input schemas and any provider-hosted `server_tools`; `/tools raw` is also accepted |
-| `/lsp [status\|enable\|disable]` | inspect missing commands and idle, initializing, ready, or failed language-server roots (including backoff errors), or toggle native LSP tools for this REPL session |
 | `/image` | list images queued for the next prompt |
 | `/image <path>` | attach an image to the next prompt |
 | `/image --detail <level> <path>` | attach an image with per-image detail |
@@ -2427,7 +2419,7 @@ tool failure handling section (§8.2) for the kind vocabulary and
 
 ### Session diagnostics
 
-`diagnostics.ndjson` contains JSON-line diagnostics, including MCP and LSP child
+`diagnostics.ndjson` contains JSON-line diagnostics, including MCP child
 process stderr that is hidden from the terminal by default. `raw.ndjson` is the
 chronological replay and analysis log. In addition to visible conversation
 events, it records model-request acceptance and completion, every failed
@@ -2509,7 +2501,7 @@ harness prints one warning per prompt to stderr.
 ## Interrupts
 
 - SIGTERM or SIGHUP requests process exit immediately, canceling active work and
-  running LSP/local MCP/agent-session cleanup. Unlike the first Ctrl-C, it does
+  running MCP/agent-session cleanup. Unlike the first Ctrl-C, it does
   not return to the prompt. Cleanup joins owned subprocess teardown, including
   cleanup that outlived an earlier agent-session close timeout.
 

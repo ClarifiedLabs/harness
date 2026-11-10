@@ -177,7 +177,7 @@ func TestACPOTelDelegateBillsResolvedChildExclusively(t *testing.T) {
 	cfg, _ := json.Marshal(map[string]any{
 		"otel":   map[string]any{"enabled": true, "endpoint": collector.URL},
 		"agents": map[string]any{"worker": map[string]any{"description": "Read-only inspection", "model": "openai:gpt-5.5", "allowed_tools": []string{"read"}, "prompt": "read-only worker"}},
-		"mcp":    map[string]any{"enable": false}, "lsp": map[string]any{"enable": false},
+		"mcp":    map[string]any{"servers": map[string]any{}},
 	})
 	if err := os.WriteFile(cfgPath, cfg, 0600); err != nil {
 		t.Fatal(err)

@@ -57,7 +57,7 @@ func TestTeeHandlerCapturesHiddenDebugRecords(t *testing.T) {
 		slog.NewJSONHandler(&diagnostics, &slog.HandlerOptions{Level: slog.LevelDebug}),
 	))
 
-	logger.Debug("child noise", Category("lsp"), slog.String("stream", "serena"))
+	logger.Debug("child noise", Category("mcp"), slog.String("stream", "example"))
 
 	if display.Len() != 0 {
 		t.Fatalf("display log = %q, want hidden debug record", display.String())
@@ -66,7 +66,7 @@ func TestTeeHandlerCapturesHiddenDebugRecords(t *testing.T) {
 	if err := json.Unmarshal(diagnostics.Bytes(), &record); err != nil {
 		t.Fatalf("diagnostic log did not decode: %q: %v", diagnostics.String(), err)
 	}
-	if record["msg"] != "child noise" || record["level"] != "DEBUG" || record["category"] != "lsp" || record["stream"] != "serena" {
+	if record["msg"] != "child noise" || record["level"] != "DEBUG" || record["category"] != "mcp" || record["stream"] != "example" {
 		t.Fatalf("diagnostic record = %+v", record)
 	}
 }

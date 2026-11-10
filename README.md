@@ -23,7 +23,8 @@ popular agentic coding tools. You are in full control.
 Harness is an unrestricted agent CLI with two model backends: `local` calls
 provider APIs directly through an in-process runtime; `remote` (the default)
 uses the standalone model proxy and the same runtime. Local mode needs no proxy
-listener or subprocess. Optional local MCP and native LSP remain independent.
+listener or subprocess. Optional named MCP services can mix local commands and
+HTTP endpoints.
 
 For credential-separated deployment, run the model and MCP proxies outside the
 agent's sandbox[^1], as illustrated below. Local mode does not provide that
@@ -159,8 +160,7 @@ configure the default target as `model` in `~/.config/harness/config.json` or wi
 - Plan with a read-only agent, then use an approved
   [implementation handoff](docs/usage.md#planning-and-implementation-handoff).
 - Inspect local images and use the built-in, delegated, and background
-  [tool set](docs/tools.md), with optional [MCP](docs/mcp.md) and
-  [LSP](docs/lsp.md) integrations.
+  [tool set](docs/tools.md), with optional [MCP integrations](docs/mcp.md).
 
 ## Documentation
 
@@ -172,8 +172,7 @@ User guides:
   authentication, metrics, retries, tracing, and diagnostics.
 - [Tools](docs/tools.md): built-in tools, rich image results, delegation,
   background jobs, truncation, and tool artifacts.
-- [MCP](docs/mcp.md): configuring and running `harness-mcp-proxy`.
-- [LSP](docs/lsp.md): optional code intelligence tools, including independent Serena support.
+- [MCP](docs/mcp.md): named local/HTTP services and the optional standalone proxy.
 
 Engineering references:
 

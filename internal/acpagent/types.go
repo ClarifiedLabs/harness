@@ -10,8 +10,8 @@ import (
 )
 
 // SessionConfig is the validated construction input for one root Harness
-// conversation. MCPServers contains only stdio definitions. A Factory owns
-// attaching those servers to the new root session.
+// conversation. MCPServers contains only stdio and HTTP definitions; legacy SSE
+// is not supported. A Factory owns attaching those servers to the new root session.
 type SessionConfig struct {
 	SessionID  acp.SessionID
 	CWD        string
@@ -71,7 +71,8 @@ type Options struct {
 // ServerOptions is an alias retained for symmetry with the MCP server API.
 type ServerOptions = Options
 
-// cloneMCPServers detaches Factory input from the decoder's request storage.
+// cloneMCPServers copies stdio argument/environment slices, HTTP header slices,
+// and server metadata to detach Factory input from the decoder's request storage.
 func cloneMCPServers(in []acp.MCPServer) []acp.MCPServer {
 	out := make([]acp.MCPServer, len(in))
 	for i, server := range in {

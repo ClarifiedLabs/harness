@@ -38,6 +38,7 @@ type Daemon struct {
 
 	supervisors []*Supervisor
 	registry    *Registry
+	ready       chan struct{} // initialized before Run, closed after all initial attempts
 }
 
 // DaemonOptions supplies optional HTTP authentication and metrics dependencies.
@@ -67,6 +68,7 @@ func NewDaemonWithOptions(cfg Config, logger *slog.Logger, options DaemonOptions
 		logger:  logger,
 		apiKeys: apiKeys,
 		metrics: registerRegistryMetrics(options.Metrics),
+		ready:   make(chan struct{}),
 	}
 }
 
@@ -101,8 +103,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 }
 
 // RunStdio serves the aggregated tool surface over conn (stdin/stdout) as a
-// single MCP server, instead of HTTP. A locally-spawned proxy uses this so
-// harness can host local MCP services (e.g. the LSP shim) over a stdio child.
+// single MCP server, instead of HTTP. It can be embedded over an in-process
+// connection or hosted as a locally-spawned proxy.
 // Unlike HTTP, the stdio peer is bidirectional, so ListChanged is advertised and
 // tools/list_changed is pushed to the connected session. It returns nil on a
 // clean client disconnect or ctx cancel. The caller MUST keep logs off stdout
@@ -133,6 +135,20 @@ func (d *Daemon) RunStdio(ctx context.Context, conn io.ReadWriteCloser) error {
 	return nil
 }
 
+// WaitReady waits until every downstream supervisor has finished its first
+// connection attempt, including successful servers with no tools and failed
+// attempts. It does not require all servers to be healthy. Call it after
+// launching Run or RunStdio; it is safe before their goroutine starts building
+// supervisors. The caller's context bounds the wait without stopping the daemon.
+func (d *Daemon) WaitReady(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-d.ready:
+		return nil
+	}
+}
+
 // buildSupervisors constructs (but does not start) a supervisor for each server,
 // wiring the injected spawn/sleep hooks. The registry assigns each one's
 // onToolsChanged before startSupervisors launches the run loops.
@@ -156,6 +172,12 @@ func (d *Daemon) startSupervisors(ctx context.Context) {
 	for _, sup := range d.supervisors {
 		sup.Start(ctx)
 	}
+	go func() {
+		for _, sup := range d.supervisors {
+			<-sup.initialDone
+		}
+		close(d.ready)
+	}()
 }
 
 // shutdown tears down all supervisors concurrently (bounded).

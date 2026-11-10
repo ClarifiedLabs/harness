@@ -14,8 +14,8 @@ cost-budget semantics live in
 as this service without a proxy listener, internal HTTP/wire serialization,
 proxy subprocess, or metrics endpoint. It does not load the proxy API-key file
 or run its key watcher. Provider credentials live in the Harness process; local
-mode still makes outbound provider connections. Configured local MCP children
-and native LSP are unaffected. See [backend selection](usage.md#model-backends).
+mode still makes outbound provider connections. Configured MCP services are
+independent of model backend selection. See [backend selection](usage.md#model-backends).
 
 The standalone binary remains the deployment option for a shared service and
 process-level credential separation. Remote mode (the Harness default) uses

@@ -173,8 +173,11 @@ func TestInitializeNegotiatesV1AndAdvertisesOnlyImplementedCapabilities(t *testi
 	if capabilities.SessionCapabilities.Close == nil {
 		t.Fatal("session/close capability not advertised")
 	}
+	if !capabilities.MCPCapabilities.HTTP {
+		t.Fatal("HTTP MCP capability not advertised")
+	}
 	if capabilities.LoadSession || capabilities.PromptCapabilities.Image || capabilities.PromptCapabilities.Audio ||
-		capabilities.PromptCapabilities.EmbeddedContext || capabilities.MCPCapabilities.HTTP || capabilities.MCPCapabilities.SSE ||
+		capabilities.PromptCapabilities.EmbeddedContext || capabilities.MCPCapabilities.SSE ||
 		capabilities.SessionCapabilities.List != nil || capabilities.SessionCapabilities.Delete != nil ||
 		capabilities.SessionCapabilities.Resume != nil || capabilities.SessionCapabilities.AdditionalDirectories != nil {
 		t.Fatalf("unimplemented capability advertised: %+v", capabilities)
@@ -185,7 +188,7 @@ func TestInitializeNegotiatesV1AndAdvertisesOnlyImplementedCapabilities(t *testi
 	}
 }
 
-func TestSessionNewValidatesCWDStdioMCPAndSingleActiveSession(t *testing.T) {
+func TestSessionNewValidatesCWDMixedMCPAndSingleActiveSession(t *testing.T) {
 	factory := &queuedFactory{roots: []RootSession{&fakeRoot{}, &fakeRoot{}}}
 	connection := newTestConnection(t, factory)
 	initialize(t, connection.client, acp.ProtocolVersion)
@@ -193,9 +196,19 @@ func TestSessionNewValidatesCWDStdioMCPAndSingleActiveSession(t *testing.T) {
 	for name, request := range map[string]acp.NewSessionRequest{
 		"relative cwd": {CWD: "relative", MCPServers: []acp.MCPServer{}},
 		"missing cwd":  {CWD: t.TempDir() + "/missing", MCPServers: []acp.MCPServer{}},
-		"http MCP": {CWD: t.TempDir(), MCPServers: []acp.MCPServer{{
-			Type: acp.MCPTransportHTTP, Name: "remote", URL: "https://example.test/mcp", Headers: []acp.HTTPHeader{},
+		"legacy SSE MCP": {CWD: t.TempDir(), MCPServers: []acp.MCPServer{{
+			Type: acp.MCPTransportSSE, Name: "remote", URL: "https://example.test/sse", Headers: []acp.HTTPHeader{},
 		}}},
+		"relative HTTP URL": {CWD: t.TempDir(), MCPServers: []acp.MCPServer{{
+			Type: acp.MCPTransportHTTP, Name: "remote", URL: "/mcp", Headers: []acp.HTTPHeader{},
+		}}},
+		"HTTP header injection": {CWD: t.TempDir(), MCPServers: []acp.MCPServer{{
+			Type: acp.MCPTransportHTTP, Name: "remote", URL: "https://example.test/mcp", Headers: []acp.HTTPHeader{{Name: "X-Test", Value: "ok\r\nbad"}},
+		}}},
+		"HTTP header limit": {CWD: t.TempDir(), MCPServers: []acp.MCPServer{{
+			Type: acp.MCPTransportHTTP, Name: "remote", URL: "https://example.test/mcp", Headers: make([]acp.HTTPHeader, acp.MaxCollectionItems+1),
+		}}},
+		"MCP server limit":     {CWD: t.TempDir(), MCPServers: make([]acp.MCPServer, acp.MaxCollectionItems+1)},
 		"additional directory": {CWD: t.TempDir(), AdditionalDirectories: []string{t.TempDir()}, MCPServers: []acp.MCPServer{}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -205,9 +218,16 @@ func TestSessionNewValidatesCWDStdioMCPAndSingleActiveSession(t *testing.T) {
 		})
 	}
 
+	if configs := factory.snapshot(); len(configs) != 0 {
+		t.Fatalf("invalid requests reached factory: %+v", configs)
+	}
+
 	cwd := t.TempDir()
-	mcpServer := acp.MCPServer{Type: acp.MCPTransportStdio, Name: "files", Command: "/bin/echo", Args: []string{"one"}, Env: []acp.EnvVariable{{Name: "A", Value: "B"}}}
-	created := newSession(t, connection.client, cwd, []acp.MCPServer{mcpServer})
+	mcpServers := []acp.MCPServer{
+		{Type: acp.MCPTransportStdio, Name: "files", Command: "/bin/echo", Args: []string{"one"}, Env: []acp.EnvVariable{{Name: "A", Value: "B"}}},
+		{Type: acp.MCPTransportHTTP, Name: "remote", URL: "https://example.test/mcp", Headers: []acp.HTTPHeader{{Name: "Authorization", Value: "Bearer token"}}, Meta: json.RawMessage(`{"source":"client"}`)},
+	}
+	created := newSession(t, connection.client, cwd, mcpServers)
 	if created.SessionID == "" {
 		t.Fatal("empty session id")
 	}
@@ -215,7 +235,7 @@ func TestSessionNewValidatesCWDStdioMCPAndSingleActiveSession(t *testing.T) {
 		t.Fatalf("second session code = %d, want %d", got.Code, jsonrpc.CodeInvalidRequest)
 	}
 	configs := factory.snapshot()
-	if len(configs) != 1 || configs[0].SessionID != created.SessionID || configs[0].CWD != cwd || !reflect.DeepEqual(configs[0].MCPServers, []acp.MCPServer{mcpServer}) {
+	if len(configs) != 1 || configs[0].SessionID != created.SessionID || configs[0].CWD != cwd || !reflect.DeepEqual(configs[0].MCPServers, mcpServers) {
 		t.Fatalf("factory configs = %+v", configs)
 	}
 }

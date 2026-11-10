@@ -29,7 +29,7 @@ func writeConfig(t *testing.T, body string) string {
 
 func load(t *testing.T, args []string, env map[string]string, path string) Result {
 	t.Helper()
-	result, err := Load(LoadOptions{Args: args, LookupEnv: lookup(env), DefaultConfigPath: path, Defaults: RuntimeDefaults{ModelProxyURL: "http://model", MCPProxyURL: "http://mcp", HistoryPath: "/state/history", Agent: "auto"}})
+	result, err := Load(LoadOptions{Args: args, LookupEnv: lookup(env), DefaultConfigPath: path, Defaults: RuntimeDefaults{ModelProxyURL: "http://model", HistoryPath: "/state/history", Agent: "auto"}})
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -219,7 +219,6 @@ func TestExampleConfigStrictlyLoads(t *testing.T) {
 		DefaultConfigPath: path,
 		Defaults: RuntimeDefaults{
 			ModelProxyURL: "http://127.0.0.1:8765",
-			MCPProxyURL:   "http://127.0.0.1:8766",
 			HistoryPath:   "/tmp/harness-history",
 			Agent:         "auto",
 		},
@@ -507,7 +506,7 @@ func TestEveryPresentSourceIsValidated(t *testing.T) {
 	}
 
 	badLocal := writeConfig(t, `{"mcp":{"local":{"enable":true,"command":""}}}`)
-	_, err = Load(LoadOptions{LookupEnv: lookup(map[string]string{"HARNESS_MCP_LOCAL_ENABLE": "false"}), DefaultConfigPath: badLocal})
+	_, err = Load(LoadOptions{LookupEnv: lookup(nil), DefaultConfigPath: badLocal})
 	if err == nil || !strings.Contains(err.Error(), "mcp.local.command") {
 		t.Fatalf("hidden invalid local MCP error=%v", err)
 	}
@@ -550,14 +549,14 @@ func TestExplicitEmptySourceSemantics(t *testing.T) {
 
 func TestRuntimeDefaultsAreDerived(t *testing.T) {
 	result := load(t, nil, nil, "")
-	checks := map[string]string{"model_proxy_url": "http://model", "mcp.proxy": "http://mcp", "histfile": "/state/history", "agent": "auto", "handoff_agent": "auto"}
+	checks := map[string]string{"model_proxy_url": "http://model", "histfile": "/state/history", "agent": "auto", "handoff_agent": "auto"}
 	for key, want := range checks {
 		if result.Sources[key].Kind != configmeta.SourceDerived {
 			t.Errorf("%s source=%+v", key, result.Sources[key])
 		}
 		_ = want
 	}
-	if result.Config.ModelProxyURL != "http://model" || result.Config.MCP.Proxy != "http://mcp" || result.Config.HistFile != "/state/history" || result.Config.Agent != "auto" || result.Config.HandoffAgent != "auto" {
+	if result.Config.ModelProxyURL != "http://model" || result.Config.HistFile != "/state/history" || result.Config.Agent != "auto" || result.Config.HandoffAgent != "auto" {
 		t.Fatalf("defaults=%+v", result.Config)
 	}
 	result, err := Load(LoadOptions{LookupEnv: lookup(nil), Defaults: RuntimeDefaults{TmuxActive: true}})
@@ -704,39 +703,24 @@ func TestLoadParsedRunOptionsAreSeparateAndRepeatable(t *testing.T) {
 
 func TestStructuredSettingsAndInterpolation(t *testing.T) {
 	path := writeConfig(t, `{
-		"agents":{"review":{"description":"Review","prompt":"do it"}},
-		"mcp":{"enable":true,"headers":{"Authorization":"Bearer ${TOKEN}"},"disabled_servers":["browser"],"local":{"enable":true,"command":"proxy","args":["serve"],"env":{"KEY":"${MISSING:-fallback}"}}},
-		"lsp":{"enable":true,"tools":["definition"],"servers":{"go":{"languages":["go"],"root_markers":["go.mod"],"command":["gopls"],"extensions":[".go"],"env":{"SECRET":"value"},"initialization_options":{"x":true}}},"serena":{"enable":true,"command":"uvx","args":["serena"],"env":{"TOKEN":"${TOKEN}"}}}
-	}`)
-	result := load(t, nil, map[string]string{"TOKEN": "secret"}, path)
-	if !result.Config.MCP.Enable || result.Config.MCP.Headers["Authorization"] != "Bearer secret" || result.Config.MCP.Local.Env["KEY"] != "fallback" || !result.Config.LSP.Enable || result.Config.LSP.Servers["go"].Command[0] != "gopls" || result.Config.LSP.Serena.Env["TOKEN"] != "secret" {
+ "agents":{"review":{"description":"Review","prompt":"do it"}},
+ "mcp":{"servers":{"remote":{"url":"https://example.test/mcp","headers":{"Authorization":"Bearer ${TOKEN}"},"auth":{"type":"token_command","command":"${AUTH_COMMAND}","args":["${TOKEN}"]}},"local":{"command":"${COMMAND}","args":["${ARG}"],"env":{"KEY":"${MISSING:-fallback}"}}},"disabled_servers":["browser"],"max_tools":25}
+ }`)
+	result := load(t, nil, map[string]string{"TOKEN": "secret", "COMMAND": "proxy", "ARG": "serve", "AUTH_COMMAND": "get-token"}, path)
+	remote, local := result.Config.MCP.Servers["remote"], result.Config.MCP.Servers["local"]
+	if remote.Headers["Authorization"] != "Bearer secret" || local.Env["KEY"] != "fallback" || local.Command != "proxy" || local.Args[0] != "serve" || remote.Auth.Command != "get-token" || remote.Auth.Args[0] != "secret" || result.Config.MCP.MaxTools != 25 {
 		t.Fatalf("structured=%+v", result.Config)
 	}
-	for _, key := range []string{"agents", "mcp.headers", "mcp.disabled_servers", "mcp.local.args", "mcp.local.env", "lsp.tools", "lsp.servers", "lsp.serena.args", "lsp.serena.env"} {
+	if remote.Type != "" {
+		t.Fatalf("transport inference should remain runtime-owned: %+v", remote)
+	}
+	for _, key := range []string{"agents", "mcp.servers", "mcp.servers.remote", "mcp.servers.local", "mcp.disabled_servers", "mcp.max_tools"} {
 		if result.Sources[key].Kind != configmeta.SourceFile {
 			t.Errorf("%s source=%+v", key, result.Sources[key])
 		}
 	}
-}
-
-func TestLSPPrewarmDefaultsAndOverride(t *testing.T) {
-	// Default is true when nothing is configured.
-	result := load(t, nil, nil, "")
-	if !result.Config.LSP.Prewarm {
-		t.Fatalf("lsp.prewarm default = false, want true")
-	}
-	// Config file can disable it.
-	result = load(t, nil, nil, writeConfig(t, `{"lsp":{"prewarm":false}}`))
-	if result.Config.LSP.Prewarm {
-		t.Fatalf("lsp.prewarm from file = true, want false")
-	}
-	if got := result.Sources["lsp.prewarm"]; got.Kind != configmeta.SourceFile {
-		t.Fatalf("lsp.prewarm source = %+v, want file", got)
-	}
-	// Env var overrides the file.
-	result = load(t, nil, map[string]string{"HARNESS_LSP_PREWARM": "true"}, writeConfig(t, `{"lsp":{"prewarm":false}}`))
-	if !result.Config.LSP.Prewarm {
-		t.Fatalf("lsp.prewarm env override = false, want true")
+	if result.Config.MCP.ServerConfigDirs["local"] != filepath.Dir(path) {
+		t.Fatalf("dirs=%v", result.Config.MCP.ServerConfigDirs)
 	}
 }
 
@@ -771,7 +755,7 @@ func TestSnapshotDoesNotAliasResolvedConfig(t *testing.T) {
 }
 
 func TestProjectionRedactsAndIsVersioned(t *testing.T) {
-	path := writeConfig(t, `{"model_proxy_api_key":"model-secret-value","mcp":{"api_key":"mcp-secret-value","headers":{"Authorization":"header-secret-value"},"local":{"env":{"TOKEN":"local-env-secret-value"}}},"lsp":{"servers":{"go":{"languages":[],"root_markers":[],"command":["gopls"],"extensions":[],"env":{"TOKEN":"server-env-secret-value"},"initialization_options":{"apiToken":"lsp-init-secret-value"}}}}}`)
+	path := writeConfig(t, `{"model_proxy_api_key":"model-secret-value","mcp":{"servers":{"remote":{"url":"https://example.test/mcp","headers":{"Authorization":"header-secret-value"},"auth":{"type":"oauth2","client_secret":"auth-secret-value"}},"local":{"command":"proxy","env":{"TOKEN":"local-env-secret-value"}}}}}`)
 	result := load(t, nil, nil, path)
 	projection := Project(result, true)
 	encoded, err := json.Marshal(projection)
@@ -779,7 +763,7 @@ func TestProjectionRedactsAndIsVersioned(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(encoded)
-	for _, secret := range []string{"model-secret-value", "mcp-secret-value", "header-secret-value", "local-env-secret-value", "server-env-secret-value", "lsp-init-secret-value"} {
+	for _, secret := range []string{"model-secret-value", "header-secret-value", "local-env-secret-value", "auth-secret-value"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("projection leaked %q: %s", secret, text)
 		}

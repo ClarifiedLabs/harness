@@ -38,6 +38,42 @@ func configCommandEnv(t *testing.T, args []string, values map[string]string) (en
 	}, &stdout, &stderr
 }
 
+func TestRunConfigMigrate(t *testing.T) {
+	const original = `{"mcp":{"enable":false,"proxy":"https://example.test/mcp","api_key":"saved-secret"}}`
+	path := writeMainConfig(t, original)
+	for i := 0; i < 2; i++ {
+		env, stdout, stderr := configCommandEnv(t, []string{"config", "migrate", "-config", path}, nil)
+		if code := run(env); code != ui.ExitOK {
+			t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+		}
+		want := "config migrated:"
+		if i == 1 {
+			want = "already up to date:"
+		}
+		if !strings.Contains(stdout.String(), want) || strings.Contains(stdout.String()+stderr.String(), "saved-secret") {
+			t.Fatalf("stdout=%s stderr=%s", stdout.String(), stderr.String())
+		}
+	}
+	backup, err := os.ReadFile(path + ".pre-mcp-migration.bak")
+	if err != nil || string(backup) != original {
+		t.Fatalf("backup=%q err=%v", backup, err)
+	}
+	result, err := config.Load(config.LoadOptions{Args: []string{"-config", path}, LookupEnv: func(string) (string, bool) { return "", false }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Config.MCP.Servers["shared"].IsEnabled() {
+		t.Fatal("migration enabled disabled proxy")
+	}
+}
+
+func TestRunConfigMigrateNoFile(t *testing.T) {
+	env, _, stderr := configCommandEnv(t, []string{"config", "migrate"}, nil)
+	if code := run(env); code != ui.ExitUsage || !strings.Contains(stderr.String(), "no config file") {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+}
+
 func TestRunConfigListFormatsCatalogWithoutLoadingConfiguration(t *testing.T) {
 	for _, format := range []string{"text", "json", "markdown"} {
 		t.Run(format, func(t *testing.T) {
@@ -71,7 +107,7 @@ func TestRunConfigShowResolvesPrecedenceSourcesAndRedaction(t *testing.T) {
 	configPath := writeMainConfig(t, `{
 		"max_turns": 3,
 		"model_proxy_api_key": "file-secret",
-		"mcp": {"headers": {"Authorization": "Bearer secret"}}
+		"mcp": {"servers": {"remote": {"url": "https://example.com/mcp", "headers": {"Authorization": "Bearer secret"}}}}
 	}`)
 	env, stdout, stderr := configCommandEnv(t,
 		[]string{"config", "show", "-config", configPath, "-format", "json", "-sources", "-max-turns", "9"},
@@ -100,9 +136,17 @@ func TestRunConfigShowResolvesPrecedenceSourcesAndRedaction(t *testing.T) {
 	if !ok {
 		t.Fatalf("mcp = %T, want object", projection.Values["mcp"])
 	}
-	headers, ok := mcp["headers"].(map[string]any)
+	servers, ok := mcp["servers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp.servers = %T, want object", mcp["servers"])
+	}
+	remote, ok := servers["remote"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcp.servers.remote = %T, want object", servers["remote"])
+	}
+	headers, ok := remote["headers"].(map[string]any)
 	if !ok || headers["Authorization"] != "<redacted>" {
-		t.Fatalf("mcp.headers = %#v, want redacted values", mcp["headers"])
+		t.Fatalf("mcp.servers.remote.headers = %#v, want redacted values", remote["headers"])
 	}
 	if source := projection.Sources["max_turns"]; source != (configmeta.Source{Kind: configmeta.SourceFlag, Name: "--max-turns"}) {
 		t.Fatalf("max_turns source = %+v", source)

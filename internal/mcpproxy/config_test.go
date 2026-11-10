@@ -340,6 +340,49 @@ func TestLoadConfigBadServerName(t *testing.T) {
 	}
 }
 
+func TestServerNameNamespaceValidation(t *testing.T) {
+	for _, validate := range []struct {
+		name string
+		fn   func(string, ServerConfig, string) (ResolvedServer, error)
+	}{
+		{"ResolveServer", ResolveServer},
+		{"ValidateServer", ValidateServer},
+	} {
+		t.Run(validate.name, func(t *testing.T) {
+			for _, name := range []string{"a__b", "__a", "a__", "a___b", "a_", "_", "_a", "a_b", "a-b"} {
+				t.Run(name, func(t *testing.T) {
+					server, err := validate.fn(name, ServerConfig{Command: "bin"}, "")
+					if strings.Contains(name, "__") {
+						if err == nil || !strings.Contains(err.Error(), `must not contain "__"`) {
+							t.Fatalf("validation = (%+v, %v), want namespace separator error", server, err)
+						}
+					} else if strings.HasSuffix(name, "_") {
+						if err == nil || !strings.Contains(err.Error(), "must not end with an underscore") {
+							t.Fatalf("validation = (%+v, %v), want ambiguous boundary error", server, err)
+						}
+					} else if err != nil || server.Name != name {
+						t.Fatalf("validation = (%+v, %v), want accepted name %q", server, err, name)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestLoadConfigRejectsNamespaceSeparatorInServerNames(t *testing.T) {
+	path := writeConfig(t, `{"mcpServers":{"a__b":{"command":"bin"},"a_b":{"command":"bin"},"a-b":{"command":"bin"}}}`)
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Servers) != 2 || cfg.Servers[0].Name != "a-b" || cfg.Servers[1].Name != "a_b" {
+		t.Fatalf("servers = %+v, want only a-b and a_b", cfg.Servers)
+	}
+	if len(cfg.Warnings) != 1 || !strings.Contains(cfg.Warnings[0], `server "a__b" skipped: name must not contain "__"`) {
+		t.Fatalf("warnings = %v, want namespace separator warning", cfg.Warnings)
+	}
+}
+
 func TestLoadConfigMissingDefaultIsEmpty(t *testing.T) {
 	// Empty path => valid empty config.
 	cfg, err := LoadConfig("")

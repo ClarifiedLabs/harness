@@ -380,13 +380,14 @@ func TestSupervisorHTTPSecondExpiryPropagates(t *testing.T) {
 }
 
 func TestSupervisorHTTPLazyReconnect(t *testing.T) {
-	// The eager connect at Start fails (first initialize 400); a later CallTool
-	// must lazily connect and succeed.
+	// The eager connect at Start fails (first initialize 400); hold background
+	// retries in backoff so a later CallTool must lazily connect and succeed.
 	fake := &fakeHTTPMCP{failInits: 1}
 	srv := httptest.NewServer(fake.handler())
 	defer srv.Close()
 
 	sup := newHTTPSupervisor(t, srv.URL)
+	sup.sleep = func(ctx context.Context, _ time.Duration) { <-ctx.Done() }
 	ctx := t.Context()
 	sup.Start(ctx)
 	defer sup.Shutdown(context.Background())

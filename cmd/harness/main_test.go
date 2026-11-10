@@ -988,24 +988,6 @@ func TestRunVersionFlag(t *testing.T) {
 	}
 }
 
-func TestRunLSPVersionSubcommand(t *testing.T) {
-	var out, errw bytes.Buffer
-	code := run(environment{
-		args:   []string{"lsp", "version"},
-		stdin:  strings.NewReader(""),
-		stdout: &out,
-		stderr: &errw,
-		getenv: func(string) string { return "" },
-		now:    func() time.Time { return time.Date(2026, 6, 9, 12, 0, 0, 0, time.UTC) },
-	})
-	if code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if !strings.Contains(out.String(), "harness lsp") {
-		t.Fatalf("stdout = %q, want harness lsp version line", out.String())
-	}
-}
-
 func TestRunOneShotImageFlagSendsImage(t *testing.T) {
 	fp := llmtest.New("fake", llmtest.Step{Stop: llm.StopEndTurn})
 	path := writeMainPNG(t)
@@ -5066,7 +5048,7 @@ func TestRunDelegateUsesSwitchedModelAndAgent(t *testing.T) {
 
 func TestRunQuietSuppressesBracketedStatusButNotDiagnostics(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.json")
-	if err := os.WriteFile(cfgPath, []byte(`{"mcp":{"enable":true,"proxy":"localhost:1"}}`), 0o644); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(`{"mcp":{"servers":{"missing":{"command":"/nonexistent/harness-mcp-fixture"}}}}`), 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
 	fp := llmtest.New("fake", okStepWithUsage(1, 1))
@@ -5493,21 +5475,16 @@ func TestRunDelegateNamedAgentUsesDefinition(t *testing.T) {
 	}
 }
 
-// TestResolveDelegateLaunchToleratesPendingMCPTool guards the async-discovery
-// window: a named delegate to a subagent that explicitly whitelists a remote mcp__
-// tool must not fail while discovery is still pending. The delegate launch routes
-// through the same pending filter as startup, so the not-yet-registered tool is
-// dropped rather than erroring catalog.Subset.
-func TestResolveDelegateLaunchToleratesPendingMCPTool(t *testing.T) {
+// TestResolveDelegateLaunchToleratesUnavailableMCPTool checks that named delegates
+// omit unavailable MCP tools rather than rejecting a configured whitelist.
+func TestResolveDelegateLaunchToleratesUnavailableMCPTool(t *testing.T) {
 	catalog := tools.CatalogWithOptions(tools.Options{})
 	agents := map[string]agentdef.Definition{
 		"worker": {Name: "worker", AllowedTools: []string{"read", "mcp__remote__do"}},
 	}
-	// Discovery still pending (not applied): the undiscovered mcp__ name is tolerated.
-	pending := &asyncMCPRegistration{results: make(chan asyncMCPResult, 1)}
 	rt := delegate.Runtime{Agent: "worker", System: "sys", ToolNames: []string{"read"}}
 
-	launch, err := resolveDelegateLaunch(rt, "worker", agents, catalog, pending, modelproxy.Catalog{}, nil, func(s string) string { return s }, config.Config{})
+	launch, err := resolveDelegateLaunch(rt, "worker", agents, catalog, modelproxy.Catalog{}, nil, func(s string) string { return s }, config.Config{})
 	if err != nil {
 		t.Fatalf("delegate to subagent with not-yet-discovered MCP tool should not fail: %v", err)
 	}
@@ -5602,67 +5579,6 @@ func TestRunREPLToolsCommandListsTools(t *testing.T) {
 	}
 	if !strings.Contains(out, "delegate") || !strings.Contains(out, "Run a child agent") {
 		t.Errorf("/tools output missing delegate, got:\n%s", out)
-	}
-}
-
-func TestRunREPLLogsLSPRegistrationOnlyWhenEnabled(t *testing.T) {
-	for _, tt := range []struct {
-		name    string
-		config  string
-		wantLog bool
-	}{
-		{name: "disabled"},
-		{name: "enabled", config: `{"lsp":{"enable":true,"prewarm":false}}`, wantLog: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			args := []string{"-model", "claude-opus-4-8"}
-			if tt.config != "" {
-				args = append(args, "-config", writeMainConfig(t, tt.config))
-			}
-			fp := llmtest.New("fake")
-			env, _, errw, _ := fakeProviderEnv(t, args, fp, "/exit\n")
-			if code := run(env); code != ui.ExitOK {
-				t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-			}
-			if got := strings.Contains(errw.String(), "lsp: registered"); got != tt.wantLog {
-				t.Fatalf("registration log present = %v, want %v; errw=%q", got, tt.wantLog, errw.String())
-			}
-		})
-	}
-}
-
-func TestRunREPLLSPToggleChangesModelToolSurfaceAndHint(t *testing.T) {
-	fp := llmtest.New("fake", okStepWithUsage(1, 1), okStepWithUsage(1, 1))
-	env, _, errw, _ := fakeProviderEnv(t,
-		[]string{"-model", "claude-opus-4-8"},
-		fp,
-		"/lsp enable\nfirst\n/lsp disable\nsecond\n/exit\n",
-	)
-	if code := run(env); code != ui.ExitOK {
-		t.Fatalf("exit code = %d, want 0; errw=%q", code, errw.String())
-	}
-	if len(fp.Requests) != 2 {
-		t.Fatalf("model requests = %d, want 2", len(fp.Requests))
-	}
-	firstNames := toolNames(fp.Requests[0])
-	if !slices.Contains(firstNames, "lsp_definition") || !slices.Contains(firstNames, "lsp_diagnostics") {
-		t.Fatalf("enabled request missing expanded LSP tools: %v", firstNames)
-	}
-	if secondNames := toolNames(fp.Requests[1]); slices.Contains(secondNames, "lsp_definition") {
-		t.Fatalf("disabled request still exposes LSP tools: %v", secondNames)
-	}
-	firstSystem := fp.Requests[0].System
-	if !strings.Contains(firstSystem, "lsp_* server commands found for:") {
-		t.Fatalf("enabled request missing LSP runtime hint: %q", firstSystem)
-	}
-	secondSystem := fp.Requests[1].System
-	if strings.Contains(secondSystem, "lsp_* server commands found for:") {
-		t.Fatalf("disabled request retained LSP runtime hint: %q", secondSystem)
-	}
-	for _, spec := range fp.Requests[0].Tools {
-		if spec.Name == "lsp_definition" && !strings.Contains(string(spec.Parameters), `"description":"1-based`) {
-			t.Fatalf("LSP schema guidance not disclosed to model: %s", spec.Parameters)
-		}
 	}
 }
 

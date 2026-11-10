@@ -1,23 +1,95 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"harness/internal/config"
 
 	"harness/internal/llm"
 	"harness/internal/session"
 )
 
 func TestBenchmarkEnvironmentDisablesIntegrations(t *testing.T) {
-	t.Setenv("HARNESS_LSP_SERENA_ENABLE", "true")
-	env := benchmarkEnvironment()
-	for _, key := range []string{"HARNESS_MCP_ENABLE", "HARNESS_LSP_ENABLE", "HARNESS_LSP_SERENA_ENABLE"} {
-		if got := envValue(env, key); got != "false" {
-			t.Fatalf("%s = %q, want \"false\"", key, got)
-		}
+	keys := []string{
+		"HARNESS_MCP_ENABLE", "HARNESS_MCP_PROXY", "HARNESS_MCP_PROXY_API_KEY",
+		"HARNESS_MCP_LOCAL_ENABLE", "HARNESS_LSP_ENABLE", "HARNESS_LSP_PREWARM",
+		"HARNESS_LSP_SERENA_ENABLE",
+	}
+	for _, value := range []string{"true", "false", ""} {
+		t.Run("value="+value, func(t *testing.T) {
+			for _, key := range keys {
+				t.Setenv(key, value)
+			}
+			t.Setenv("HARNESS_MODEL_PROXY_URL", "http://model.example")
+			env := benchmarkEnvironment()
+			for _, item := range env {
+				if strings.HasPrefix(item, "HARNESS_MCP_") || strings.HasPrefix(item, "HARNESS_LSP_") {
+					t.Fatalf("retired integration variable passed to child: %q", item)
+				}
+			}
+			if got := envValue(env, "HARNESS_MODEL_PROXY_URL"); got != "http://model.example" {
+				t.Fatalf("model proxy URL = %q, want inherited value", got)
+			}
+			if got := envValue(env, "NO_COLOR"); got != "1" {
+				t.Fatalf("NO_COLOR = %q, want 1", got)
+			}
+		})
+	}
+}
+
+func TestExecuteOneUsesIsolatedEmptyConfig(t *testing.T) {
+	dir := t.TempDir()
+	harness := filepath.Join(dir, "harness")
+	// Echo the actual child arguments; no model or session fixture is needed.
+	if err := os.WriteFile(harness, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HARNESS_CONFIG", filepath.Join(dir, "host-config.json"))
+	record, err := executeOne(context.Background(), runConfig{
+		Harness: harness, Model: "example:model", ProbeCount: 11, ProbeBytes: 5000,
+		Timeout: 5 * time.Second,
+	}, dir, matrixEntry{Policy: "disabled", Repetition: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ExitCode != 0 {
+		t.Fatalf("child exit code = %d", record.ExitCode)
+	}
+	stdout, err := os.ReadFile(record.StdoutPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := strings.Split(string(stdout), "\n")
+	if len(args) < 2 || args[0] != "-config" {
+		t.Fatalf("child args missing explicit config: %q", stdout)
+	}
+	data, err := os.ReadFile(args[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "{}\n" {
+		t.Fatalf("isolated config = %q, want empty object", data)
+	}
+	result, err := config.Load(config.LoadOptions{
+		Args: []string{"-config", args[1]},
+		LookupEnv: func(key string) (string, bool) {
+			if key == "HARNESS_CONFIG" {
+				return os.LookupEnv(key)
+			}
+			return "", false
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ConfigPath != args[1] || len(result.Config.MCP.Servers) != 0 {
+		t.Fatalf("config isolation failed: path=%q servers=%v", result.ConfigPath, result.Config.MCP.Servers)
 	}
 }
 
