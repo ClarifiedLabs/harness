@@ -76,7 +76,7 @@ the `.rpm` packages are GPG-signed in `build-linux` before attestation and
 upload, so the GitHub release assets, `checksums.txt`, attestations, and the
 package repositories
 below all serve identical signed files. RPMs are signed with the packages key
-on every run, including dry runs, so `release-ci` exercises the real signing
+on every run, including dry runs, so `main` exercises the real signing
 path; only the macOS `.pkg` stays unsigned in dry runs, keeping Apple
 Developer ID and notarization secrets exclusive to tag builds. Homebrew
 formulae are split into
@@ -179,9 +179,10 @@ temporary directory) cannot interfere with source builds.
 
 ## CI Dry Runs
 
-Push a branch named `release-ci` or under `release-ci/`, or run the `release`
-workflow manually, to exercise the release workflow without publishing. Dry-run
-builds use version `v0.0.0` and the pushed commit archive as the Homebrew source.
+Every push to the default branch (`main`) exercises the full release workflow
+without publishing. You can also run the `release` workflow manually on a
+branch for a dry run. Only `v*` tags enable actual release publishing. Dry-run
+builds use version `v0.0.0` and the selected commit archive as the Homebrew source.
 They build and upload the normal workflow artifacts, build container images
 without pushing them, generate checksums, build Homebrew bottles from a local
 tap, and dry-run the Homebrew formula merge.

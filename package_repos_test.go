@@ -78,7 +78,7 @@ func TestReleaseWorkflowPublishesPackageRepos(t *testing.T) {
 	}
 
 	// build-linux imports the signing key and signs RPMs on every run so
-	// release-ci exercises the production signing path.
+	// default-branch CI exercises the production signing path.
 	buildLinuxStart := strings.Index(text, "\n  build-linux:\n")
 	if buildLinuxStart < 0 {
 		t.Fatal("release workflow should define a build-linux job")
