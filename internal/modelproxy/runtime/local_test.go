@@ -30,6 +30,12 @@ func TestLocalRemotePreparedRequestAndAttemptParity(t *testing.T) {
 	}}
 	h, _ := attemptProxy(t, "openai", p)
 	defer h.Close()
+	// Reproduce a UTC host's Local-vs-UTC representation difference without
+	// changing the process-wide time.Local used by other tests.
+	snapshot := *h.Runtime.snapshot.Load()
+	snapshot.catalog = modelproxy.CloneCatalog(snapshot.catalog)
+	snapshot.catalog.Pricing.SourceDate = snapshot.catalog.Pricing.SourceDate.In(time.FixedZone("test UTC", 0))
+	h.Runtime.snapshot.Store(&snapshot)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 	remote, err := proxyclient.New(srv.URL, srv.Client())
@@ -68,8 +74,18 @@ func TestLocalRemotePreparedRequestAndAttemptParity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if localCatalog.Pricing == nil || remoteCatalog.Pricing == nil {
+		t.Fatal("missing catalog pricing metadata")
+	}
+	// JSON preserves instants, not time.Time's internal location representation.
+	if !localCatalog.Pricing.SourceDate.Equal(remoteCatalog.Pricing.SourceDate) ||
+		!localCatalog.Pricing.ExpiresAt.Equal(remoteCatalog.Pricing.ExpiresAt) {
+		t.Fatalf("catalog pricing timestamps differ: local=%+v remote=%+v", localCatalog.Pricing, remoteCatalog.Pricing)
+	}
+	localCatalog.Pricing.SourceDate = remoteCatalog.Pricing.SourceDate
+	localCatalog.Pricing.ExpiresAt = remoteCatalog.Pricing.ExpiresAt
 	if !reflect.DeepEqual(localCatalog, remoteCatalog) {
-		t.Fatal("catalog parity mismatch")
+		t.Fatalf("catalog parity mismatch: local=%+v remote=%+v", localCatalog, remoteCatalog)
 	}
 	localCatalog.Targets[0].ID = "mutated"
 	fresh, _ := h.Runtime.Catalog(context.Background())
