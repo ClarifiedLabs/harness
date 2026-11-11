@@ -13595,38 +13595,6 @@
           "output": 0.3174
         }
       },
-      "bytedance-seed/seed-2.0-code": {
-        "id": "bytedance-seed/seed-2.0-code",
-        "name": "Seed-2.0-Code",
-        "release_date": "2026-02-14",
-        "last_updated": "2026-02-14",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 131072
-        },
-        "cost": {
-          "input": 0.529,
-          "output": 3.174
-        }
-      },
       "bytedance-seed/seed-2.0-lite": {
         "id": "bytedance-seed/seed-2.0-lite",
         "name": "Seed-2.0-Lite",
@@ -43295,6 +43263,43 @@
           "cache_write": 12.5
         }
       },
+      "anthropic/claude-fable-5.2": {
+        "id": "anthropic/claude-fable-5.2",
+        "name": "Claude Fable 5.2",
+        "release_date": "2026-11-09",
+        "last_updated": "2026-11-09",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 8,
+          "output": 40,
+          "cache_read": 0.2,
+          "cache_write": 10
+        }
+      },
       "anthropic/claude-haiku-4.5": {
         "id": "anthropic/claude-haiku-4.5",
         "name": "Claude Haiku 4.5 (latest)",
@@ -44595,7 +44600,7 @@
         "cost": {
           "input": 0.1,
           "output": 0.4,
-          "cache_read": 0.025
+          "cache_read": 0.03
         }
       },
       "openai/gpt-4o": {
@@ -66494,12 +66499,12 @@
           "output": 65536
         },
         "cost": {
-          "input": 2,
-          "output": 10,
-          "cache_read": 0.1,
-          "cache_write": 0.1875,
-          "reasoning": 10,
-          "input_audio": 2
+          "input": 4,
+          "output": 20,
+          "cache_read": 0.2,
+          "cache_write": 0.375,
+          "reasoning": 20,
+          "input_audio": 4
         }
       },
       "google/gemini-flash-latest": {
@@ -70186,7 +70191,7 @@
         "cost": {
           "input": 0.15,
           "output": 0.6,
-          "cache_read": 0.015
+          "cache_read": 0.003
         }
       },
       "qwen/deepseek-v4.1-flash-1017": {
@@ -70219,7 +70224,7 @@
         "cost": {
           "input": 0.15,
           "output": 0.6,
-          "cache_read": 0.015
+          "cache_read": 0.003
         }
       },
       "qwen/qwen-max": {
@@ -79788,6 +79793,42 @@
           "cache_write": 12.5
         }
       },
+      "claude-fable-5.2": {
+        "id": "claude-fable-5.2",
+        "name": "Claude Fable 5.2",
+        "release_date": "2026-11-09",
+        "last_updated": "2026-11-09",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 8,
+          "output": 40,
+          "cache_read": 0.2,
+          "cache_write": 10
+        }
+      },
       "claude-haiku-4.5": {
         "id": "claude-haiku-4.5",
         "name": "Claude Haiku 4.5 (latest)",
@@ -80307,6 +80348,39 @@
         "name": "Gemini 4 Argon",
         "release_date": "2026-10-13",
         "last_updated": "2026-10-13",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.1
+        }
+      },
+      "gemini-4-carbon": {
+        "id": "gemini-4-carbon",
+        "name": "Gemini 4 Carbon",
+        "release_date": "2026-11-10",
+        "last_updated": "2026-11-10",
         "modalities": {
           "input": [
             "text",
@@ -95592,7 +95666,7 @@
         },
         "cost": {
           "input": 1,
-          "output": 4.9,
+          "output": 4.396,
           "cache_read": 0.14
         }
       },
@@ -95623,7 +95697,7 @@
         },
         "cost": {
           "input": 0.175,
-          "output": 0.45,
+          "output": 0.5,
           "cache_read": 0.03
         }
       }
@@ -101964,9 +102038,9 @@
           "cache_write": 2.5
         }
       },
-      "baidu/ernie-5.5-flash-preview": {
-        "id": "baidu/ernie-5.5-flash-preview",
-        "name": "Baidu: ERNIE-5.5-Flash-Preview",
+      "baidu/ernie-5.5-flash-preview:free": {
+        "id": "baidu/ernie-5.5-flash-preview:free",
+        "name": "Baidu: ERNIE-5.5-Flash-Preview (free)",
         "release_date": "2026-11-10",
         "last_updated": "2026-11-10",
         "modalities": {
@@ -101986,11 +102060,6 @@
         "limit": {
           "context": 1024000,
           "output": 921600
-        },
-        "cost": {
-          "input": 0.28,
-          "output": 1.13,
-          "cache_read": 0.028
         }
       },
       "baidu/ernie-light-dt-1.0-intl": {
@@ -102025,68 +102094,6 @@
           "cache_read": 0.113
         }
       },
-      "bytedance-seed/seed-1.6": {
-        "id": "bytedance-seed/seed-1.6",
-        "name": "ByteDance Seed: Seed 1.6 (retires Nov 11)",
-        "release_date": "2025-10-15",
-        "last_updated": "2025-10-15",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "none",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 32768
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2
-        }
-      },
-      "bytedance-seed/seed-1.6-flash": {
-        "id": "bytedance-seed/seed-1.6-flash",
-        "name": "ByteDance Seed: Seed 1.6 Flash (retires Nov 11)",
-        "release_date": "2025-08-28",
-        "last_updated": "2025-08-28",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "none",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 32768
-        },
-        "cost": {
-          "input": 0.075,
-          "output": 0.3
-        }
-      },
       "bytedance-seed/seed-2-1-turbo": {
         "id": "bytedance-seed/seed-2-1-turbo",
         "name": "ByteDance Seed: Seed 2.1 Turbo",
@@ -102116,39 +102123,6 @@
         "cost": {
           "input": 0.5,
           "output": 2.5
-        }
-      },
-      "bytedance-seed/seed-2.0-code": {
-        "id": "bytedance-seed/seed-2.0-code",
-        "name": "Seed 2.0 Code",
-        "release_date": "2026-02-14",
-        "last_updated": "2026-02-14",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "none",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 131072
-        },
-        "cost": {
-          "input": 0.5,
-          "output": 3
         }
       },
       "bytedance-seed/seed-2.0-lite": {
@@ -102599,13 +102573,13 @@
           }
         ],
         "limit": {
-          "context": 1048575,
-          "output": 943717
+          "context": 1048576,
+          "output": 393216
         },
         "cost": {
-          "input": 0.091,
-          "output": 0.182,
-          "cache_read": 0.0182
+          "input": 0.09,
+          "output": 0.18,
+          "cache_read": 0.018
         }
       },
       "deepseek/deepseek-v4-flash-0731": {
@@ -103665,11 +103639,11 @@
           "output": 943718
         },
         "cost": {
-          "input": 4,
-          "output": 20,
-          "cache_read": 0.2,
-          "cache_write": 0.375,
-          "reasoning": 20
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.1,
+          "cache_write": 0.1875,
+          "reasoning": 10
         }
       },
       "google/gemini-nano-banana-2.1": {
@@ -103875,9 +103849,9 @@
           "output": 128000
         },
         "cost": {
-          "input": 0.011,
-          "output": 0.033,
-          "cache_read": 0.005
+          "input": 0.022,
+          "output": 0.065,
+          "cache_read": 0.011
         }
       },
       "google/gemma-4-31b-it": {
@@ -104262,6 +104236,36 @@
           "input": 0.05,
           "output": 0.4,
           "cache_read": 0.005
+        }
+      },
+      "kt/midm-k-3.0-pro": {
+        "id": "kt/midm-k-3.0-pro",
+        "name": "KT: Mi:dm K 3.0 Pro",
+        "release_date": "2026-11-05",
+        "last_updated": "2026-11-05",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 261795,
+          "output": 235615
+        },
+        "cost": {
+          "input": 0.2,
+          "output": 0.8,
+          "cache_read": 0.04
         }
       },
       "liquid/lfm-2.5-2.6b": {
@@ -104948,13 +104952,13 @@
           }
         ],
         "limit": {
-          "context": 65536,
-          "output": 58982
+          "context": 200000,
+          "output": 128000
         },
         "cost": {
-          "input": 0.3,
-          "output": 1.2,
-          "cache_read": 0.06
+          "input": 0.27,
+          "output": 1.08,
+          "cache_read": 0.027
         }
       },
       "minimax/minimax-m2.7": {
@@ -105048,9 +105052,9 @@
           "output": 524288
         },
         "cost": {
-          "input": 0.15,
-          "output": 0.6,
-          "cache_read": 0.015
+          "input": 0.075,
+          "output": 0.3,
+          "cache_read": 0.0075
         }
       },
       "mistralai/codestral-2508": {
@@ -105826,6 +105830,36 @@
         "cost": {
           "input": 0.9,
           "output": 1.9
+        }
+      },
+      "motif-technologies/motif-3": {
+        "id": "motif-technologies/motif-3",
+        "name": "Motif Technologies: Motif 3",
+        "release_date": "2026-11-02",
+        "last_updated": "2026-11-02",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 235929
+        },
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache_read": 0.06
         }
       },
       "nex-agi/nex-n2.5-mini": {
@@ -108383,25 +108417,6 @@
           "output": 0.4
         }
       },
-      "qwen/qwen-2.5-7b-instruct": {
-        "id": "qwen/qwen-2.5-7b-instruct",
-        "name": "Qwen: Qwen2.5 7B Instruct",
-        "release_date": "2024-10-16",
-        "last_updated": "2024-10-16",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "limit": {
-          "context": 32768,
-          "output": 29491
-        },
-        "cost": {
-          "input": 0.1,
-          "output": 0.2
-        }
-      },
       "qwen/qwen-2.5-coder-32b-instruct": {
         "id": "qwen/qwen-2.5-coder-32b-instruct",
         "name": "Qwen2.5 Coder 32B Instruct",
@@ -110828,7 +110843,7 @@
         "cost": {
           "input": 0.1,
           "output": 0.28,
-          "cache_read": 0.003
+          "cache_read": 0.0028
         }
       },
       "xiaomi/mimo-v2.6-pro": {
@@ -111190,7 +111205,7 @@
           }
         ],
         "limit": {
-          "context": 202752,
+          "context": 202745,
           "output": 131072
         },
         "cost": {
@@ -111769,7 +111784,7 @@
         },
         "cost": {
           "input": 0.1824,
-          "output": 9.3388,
+          "output": 11.0055,
           "cache_read": 0.18
         }
       },
@@ -118693,138 +118708,6 @@
           "output": 0.1
         }
       },
-      "seed-1-6-250615": {
-        "id": "seed-1-6-250615",
-        "name": "Seed 1.6 (250615)",
-        "release_date": "2025-06-25",
-        "last_updated": "2025-06-25",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 8192
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05
-        }
-      },
-      "seed-1-6-250915": {
-        "id": "seed-1-6-250915",
-        "name": "Seed 1.6 (250915)",
-        "release_date": "2025-09-15",
-        "last_updated": "2025-09-15",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 8192
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05
-        }
-      },
-      "seed-1-6-flash-250715": {
-        "id": "seed-1-6-flash-250715",
-        "name": "Seed 1.6 Flash (250715)",
-        "release_date": "2025-07-26",
-        "last_updated": "2025-07-26",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 8192
-        },
-        "cost": {
-          "input": 0.07,
-          "output": 0.3,
-          "cache_read": 0.015
-        }
-      },
-      "seed-1-8-251228": {
-        "id": "seed-1-8-251228",
-        "name": "Seed 1.8 (251228)",
-        "release_date": "2025-12-18",
-        "last_updated": "2025-12-18",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 8192
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05
-        }
-      },
       "seed-2-0-code-preview-260328": {
         "id": "seed-2-0-code-preview-260328",
         "name": "Seed 2.0 Code Preview (260328)",
@@ -123368,32 +123251,6 @@
           "cache_read": 0.3
         }
       },
-      "bytedance/deepseek-v3.2": {
-        "id": "bytedance/deepseek-v3.2",
-        "name": "DeepSeek V3.2 (ByteDance)",
-        "release_date": "2025-12-01",
-        "last_updated": "2025-12-01",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 131072,
-          "output": 32768
-        },
-        "cost": {
-          "input": 0.28,
-          "output": 0.42,
-          "cache_read": 0.056
-        }
-      },
       "bytedance/deepseek-v4-flash": {
         "id": "bytedance/deepseek-v4-flash",
         "name": "DeepSeek V4 Flash (ByteDance)",
@@ -123499,32 +123356,6 @@
           "cache_read": 0.044
         }
       },
-      "bytedance/glm-4.7": {
-        "id": "bytedance/glm-4.7",
-        "name": "GLM-4.7 (ByteDance)",
-        "release_date": "2025-12-22",
-        "last_updated": "2025-12-22",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 200000,
-          "output": 128000
-        },
-        "cost": {
-          "input": 0.6,
-          "output": 2.2,
-          "cache_read": 0.11
-        }
-      },
       "bytedance/glm-5.2": {
         "id": "bytedance/glm-5.2",
         "name": "GLM-5.2 (ByteDance)",
@@ -123558,169 +123389,6 @@
           "input": 1.4,
           "output": 4.4,
           "cache_read": 0.26
-        }
-      },
-      "bytedance/gpt-oss-120b": {
-        "id": "bytedance/gpt-oss-120b",
-        "name": "GPT OSS 120B (ByteDance)",
-        "release_date": "2025-08-05",
-        "last_updated": "2025-08-05",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 128000,
-          "output": 32000
-        },
-        "cost": {
-          "input": 0.1,
-          "output": 0.5,
-          "cache_read": 0.02
-        }
-      },
-      "bytedance/seed-1-6-250615": {
-        "id": "bytedance/seed-1-6-250615",
-        "name": "Seed 1.6 (250615) (ByteDance)",
-        "release_date": "2025-06-25",
-        "last_updated": "2025-06-25",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 256000
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05
-        }
-      },
-      "bytedance/seed-1-6-250915": {
-        "id": "bytedance/seed-1-6-250915",
-        "name": "Seed 1.6 (250915) (ByteDance)",
-        "release_date": "2025-09-15",
-        "last_updated": "2025-09-15",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 256000
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05
-        }
-      },
-      "bytedance/seed-1-6-flash-250715": {
-        "id": "bytedance/seed-1-6-flash-250715",
-        "name": "Seed 1.6 Flash (250715) (ByteDance)",
-        "release_date": "2025-07-26",
-        "last_updated": "2025-07-26",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 256000
-        },
-        "cost": {
-          "input": 0.07,
-          "output": 0.3,
-          "cache_read": 0.015
-        }
-      },
-      "bytedance/seed-1-8-251228": {
-        "id": "bytedance/seed-1-8-251228",
-        "name": "Seed 1.8 (251228) (ByteDance)",
-        "release_date": "2025-12-18",
-        "last_updated": "2025-12-18",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 256000
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05
         }
       },
       "bytedance/seed-2-0-code-preview-260328": {
@@ -137480,13 +137148,13 @@
           }
         ],
         "limit": {
-          "context": 1048576,
+          "context": 1000000,
           "output": 384000
         },
         "cost": {
-          "input": 0.035,
-          "output": 0.07,
-          "cache_read": 0.007
+          "input": 0.13,
+          "output": 0.26,
+          "cache_read": 0.028
         }
       },
       "deepseek/deepseek-v4-flash-0731-fast": {
@@ -150780,27 +150448,6 @@
           "cache_write": 2.5
         }
       },
-      "arcee-ai/trinity-large-thinking": {
-        "id": "arcee-ai/trinity-large-thinking",
-        "name": "Trinity Large Thinking",
-        "release_date": "2026-04-01",
-        "last_updated": "2026-05-28",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "limit": {
-          "context": 262144,
-          "output": 80000
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 0.9,
-          "cache_read": 0.125
-        }
-      },
       "auto-model": {
         "id": "auto-model",
         "name": "Auto model",
@@ -150874,6 +150521,38 @@
           "input": 9.996,
           "output": 19.992,
           "cache_read": 4.998
+        }
+      },
+      "baidu/ernie-light-dt-1.0-intl": {
+        "id": "baidu/ernie-light-dt-1.0-intl",
+        "name": "ERNIE Light DT 1.0 (Intl)",
+        "release_date": "2026-11-11",
+        "last_updated": "2026-11-11",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1024000,
+          "output": 131072
+        },
+        "cost": {
+          "input": 1.3,
+          "output": 4.5,
+          "cache_read": 0.13
         }
       },
       "baseten/Kimi-K2-Instruct-FP4": {
@@ -151413,8 +151092,8 @@
         },
         "cost": {
           "input": 0.65868,
-          "output": 1.97604,
-          "cache_read": 0.020958
+          "output": 4.0139,
+          "cache_read": 0.105
         }
       },
       "deepseek/deepseek-v3.2": {
@@ -151488,7 +151167,7 @@
         "cost": {
           "input": 0.14,
           "output": 0.28,
-          "cache_read": 0.0028
+          "cache_read": 0.028
         }
       },
       "deepseek/deepseek-v4-flash-0423": {
@@ -151713,7 +151392,7 @@
         "cost": {
           "input": 0.14,
           "output": 0.28,
-          "cache_read": 0.0028
+          "cache_read": 0.028
         }
       },
       "deepseek/deepseek-v4-pro": {
@@ -151742,9 +151421,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.7,
-          "output": 1.4,
-          "cache_read": 0.07
+          "input": 0.86979,
+          "output": 1.77565,
+          "cache_read": 0.08873
         }
       },
       "deepseek/deepseek-v4-pro-0813": {
@@ -151775,8 +151454,8 @@
         },
         "cost": {
           "input": 0.65868,
-          "output": 1.97604,
-          "cache_read": 0.020958
+          "output": 4.1267,
+          "cache_read": 0.0921
         }
       },
       "deepseek/deepseek-v4-pro-0813:thinking": {
@@ -151807,8 +151486,8 @@
         },
         "cost": {
           "input": 0.65868,
-          "output": 1.97604,
-          "cache_read": 0.020958
+          "output": 4.0139,
+          "cache_read": 0.105
         }
       },
       "deepseek/deepseek-v4-pro:thinking": {
@@ -151837,9 +151516,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.7,
-          "output": 1.4,
-          "cache_read": 0.07
+          "input": 0.95124,
+          "output": 1.79607,
+          "cache_read": 0.17925
         }
       },
       "deepseek/deepseek-v4.1-flash": {
@@ -151875,6 +151554,72 @@
           "cache_read": 0.004
         }
       },
+      "deepseek/deepseek-v4.1-flash-0910-uncensored": {
+        "id": "deepseek/deepseek-v4.1-flash-0910-uncensored",
+        "name": "DeepSeek V4.1 Flash 0910 Uncensored",
+        "release_date": "2026-10-27",
+        "last_updated": "2026-10-27",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 524288,
+          "output": 32768
+        },
+        "cost": {
+          "input": 0.33,
+          "output": 1.32,
+          "cache_read": 0.00825
+        }
+      },
+      "deepseek/deepseek-v4.1-flash-0910-uncensored:thinking": {
+        "id": "deepseek/deepseek-v4.1-flash-0910-uncensored:thinking",
+        "name": "DeepSeek V4.1 Flash 0910 Uncensored Thinking",
+        "release_date": "2026-10-27",
+        "last_updated": "2026-10-27",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 524288,
+          "output": 32768
+        },
+        "cost": {
+          "input": 0.33,
+          "output": 1.32,
+          "cache_read": 0.00825
+        }
+      },
       "deepseek/deepseek-v4.1-flash-1017": {
         "id": "deepseek/deepseek-v4.1-flash-1017",
         "name": "DeepSeek V4.1 Flash 1017",
@@ -151908,6 +151653,72 @@
           "cache_read": 0.0042
         }
       },
+      "deepseek/deepseek-v4.1-flash-1017-uncensored": {
+        "id": "deepseek/deepseek-v4.1-flash-1017-uncensored",
+        "name": "DeepSeek V4.1 Flash 1017 Uncensored",
+        "release_date": "2026-10-27",
+        "last_updated": "2026-10-27",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.33,
+          "output": 1.32,
+          "cache_read": 0.011
+        }
+      },
+      "deepseek/deepseek-v4.1-flash-1017-uncensored:thinking": {
+        "id": "deepseek/deepseek-v4.1-flash-1017-uncensored:thinking",
+        "name": "DeepSeek V4.1 Flash 1017 Uncensored Thinking",
+        "release_date": "2026-10-27",
+        "last_updated": "2026-10-27",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "high",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.33,
+          "output": 1.32,
+          "cache_read": 0.011
+        }
+      },
       "deepseek/deepseek-v4.1-flash-1017:thinking": {
         "id": "deepseek/deepseek-v4.1-flash-1017:thinking",
         "name": "DeepSeek V4.1 Flash 1017 Thinking",
@@ -151939,6 +151750,72 @@
           "input": 0.1,
           "output": 0.6,
           "cache_read": 0.0042
+        }
+      },
+      "deepseek/deepseek-v4.1-flash-uncensored": {
+        "id": "deepseek/deepseek-v4.1-flash-uncensored",
+        "name": "DeepSeek V4.1 Flash Uncensored",
+        "release_date": "2026-10-01",
+        "last_updated": "2026-10-01",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.33,
+          "output": 1.32,
+          "cache_read": 0.00825
+        }
+      },
+      "deepseek/deepseek-v4.1-flash-uncensored:thinking": {
+        "id": "deepseek/deepseek-v4.1-flash-uncensored:thinking",
+        "name": "DeepSeek V4.1 Flash Uncensored Thinking",
+        "release_date": "2026-10-01",
+        "last_updated": "2026-10-01",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "none",
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.33,
+          "output": 1.32,
+          "cache_read": 0.00825
         }
       },
       "deepseek/deepseek-v4.1-flash:thinking": {
@@ -153761,6 +153638,41 @@
           "cache_write": 0.1875
         }
       },
+      "google/gemini-4-carbon": {
+        "id": "google/gemini-4-carbon",
+        "name": "Gemini 4 Carbon",
+        "release_date": "2026-11-10",
+        "last_updated": "2026-11-10",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 32768
+        },
+        "cost": {
+          "input": 2,
+          "output": 10,
+          "cache_read": 0.1
+        }
+      },
       "google/gemini-flash-latest": {
         "id": "google/gemini-flash-latest",
         "name": "Gemini Flash Latest",
@@ -153893,9 +153805,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 0.016,
-          "output": 0.048,
-          "cache_read": 0.008
+          "input": 0.012,
+          "output": 0.036,
+          "cache_read": 0.006
         }
       },
       "google/gemma-4-26b-a4b-it-cybersecurity": {
@@ -153938,9 +153850,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 0.016,
-          "output": 0.048,
-          "cache_read": 0.008
+          "input": 0.012,
+          "output": 0.036,
+          "cache_read": 0.006
         }
       },
       "google/gemma-4-31b-it": {
@@ -154068,7 +153980,7 @@
           }
         ],
         "limit": {
-          "context": 524288,
+          "context": 1048576,
           "output": 235929
         },
         "cost": {
@@ -155011,6 +154923,44 @@
           "input": 0.085,
           "output": 0.46,
           "cache_read": 0.0425
+        }
+      },
+      "meta/muse-ember": {
+        "id": "meta/muse-ember",
+        "name": "Muse Ember",
+        "release_date": "2026-11-11",
+        "last_updated": "2026-11-11",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "video",
+            "audio",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 1048576
+        },
+        "cost": {
+          "input": 0.1,
+          "output": 0.5,
+          "cache_read": 0.004
         }
       },
       "meta/muse-glimmer-30b": {
@@ -156293,9 +156243,9 @@
           "output": 65536
         },
         "cost": {
-          "input": 0.3895,
-          "output": 1.64,
-          "cache_read": 0.0656
+          "input": 0.88,
+          "output": 4.13,
+          "cache_read": 0.231
         }
       },
       "moonshotai/kimi-k2.7-code": {
@@ -158421,7 +158371,7 @@
         "cost": {
           "input": 0.03,
           "output": 0.15,
-          "cache_read": 0.03
+          "cache_read": 0.015
         }
       },
       "openai/gpt-oss-20b": {
@@ -158450,9 +158400,9 @@
           "output": 16384
         },
         "cost": {
-          "input": 0.02,
-          "output": 0.03,
-          "cache_read": 0.018
+          "input": 0.018,
+          "output": 0.09,
+          "cache_read": 0.009
         }
       },
       "openai/gpt-oss-safeguard-20b": {
@@ -160562,7 +160512,7 @@
         },
         "reasoning": true,
         "limit": {
-          "context": 524288,
+          "context": 1048576,
           "output": 32768
         },
         "cost": {
@@ -160694,7 +160644,7 @@
         },
         "reasoning": true,
         "limit": {
-          "context": 524288,
+          "context": 1048576,
           "output": 32768
         },
         "cost": {
@@ -165302,33 +165252,6 @@
         "cost": {
           "input": 0.01,
           "output": 0.01
-        }
-      },
-      "qwen/qwen3.5-397b-a17b": {
-        "id": "qwen/qwen3.5-397b-a17b",
-        "name": "Qwen3.5 397B-A17B",
-        "release_date": "2026-02-15",
-        "last_updated": "2026-02-15",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 65536
-        },
-        "cost": {
-          "input": 0.5,
-          "output": 3.3,
-          "cache_read": 0.25
         }
       },
       "qwen/qwen3.7-max": {
@@ -173030,6 +172953,42 @@
           "output": 50,
           "cache_read": 0.25,
           "cache_write": 12.5
+        }
+      },
+      "anthropic/claude-fable-5.2": {
+        "id": "anthropic/claude-fable-5.2",
+        "name": "Claude Fable 5.2",
+        "release_date": "2026-11-09",
+        "last_updated": "2026-11-09",
+        "modalities": {
+          "input": [
+            "text",
+            "image",
+            "pdf"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 8,
+          "output": 40,
+          "cache_read": 0.2,
+          "cache_write": 10
         }
       },
       "anthropic/claude-haiku-4.5": {
@@ -186993,9 +186952,9 @@
           "cache_write": 2.5
         }
       },
-      "baidu/ernie-5.5-flash-preview": {
-        "id": "baidu/ernie-5.5-flash-preview",
-        "name": "ERNIE-5.5-Flash-Preview",
+      "baidu/ernie-5.5-flash-preview:free": {
+        "id": "baidu/ernie-5.5-flash-preview:free",
+        "name": "ERNIE-5.5-Flash-Preview (free)",
         "release_date": "2026-11-10",
         "last_updated": "2026-11-10",
         "modalities": {
@@ -187015,11 +186974,6 @@
         "limit": {
           "context": 1024000,
           "output": 921600
-        },
-        "cost": {
-          "input": 0.28,
-          "output": 1.13,
-          "cache_read": 0.028
         }
       },
       "baidu/ernie-light-dt-1.0-intl": {
@@ -187054,74 +187008,6 @@
           "cache_read": 0.113
         }
       },
-      "bytedance-seed/seed-1.6": {
-        "id": "bytedance-seed/seed-1.6",
-        "name": "Seed 1.6",
-        "release_date": "2025-10-15",
-        "last_updated": "2025-10-15",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 32768
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "tiers": [
-            {
-              "threshold": 128000,
-              "input": 0.5,
-              "output": 4
-            }
-          ]
-        }
-      },
-      "bytedance-seed/seed-1.6-flash": {
-        "id": "bytedance-seed/seed-1.6-flash",
-        "name": "Seed 1.6 Flash",
-        "release_date": "2025-08-28",
-        "last_updated": "2025-08-28",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 32768
-        },
-        "cost": {
-          "input": 0.075,
-          "output": 0.3,
-          "tiers": [
-            {
-              "threshold": 128000,
-              "input": 0.1,
-              "output": 0.8
-            }
-          ]
-        }
-      },
       "bytedance-seed/seed-2-1-turbo": {
         "id": "bytedance-seed/seed-2-1-turbo",
         "name": "Seed 2.1 Turbo",
@@ -187147,46 +187033,6 @@
         "cost": {
           "input": 0.5,
           "output": 2.5
-        }
-      },
-      "bytedance-seed/seed-2.0-code": {
-        "id": "bytedance-seed/seed-2.0-code",
-        "name": "Seed 2.0 Code",
-        "release_date": "2026-02-14",
-        "last_updated": "2026-02-14",
-        "modalities": {
-          "input": [
-            "text",
-            "image",
-            "video"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "effort",
-            "values": [
-              "none",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 131072
-        },
-        "cost": {
-          "input": 0.5,
-          "output": 3,
-          "tiers": [
-            {
-              "threshold": 128000,
-              "input": 1,
-              "output": 6
-            }
-          ]
         }
       },
       "bytedance-seed/seed-2.0-lite": {
@@ -187620,12 +187466,12 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 943717
+          "output": 393216
         },
         "cost": {
-          "input": 0.091,
-          "output": 0.182,
-          "cache_read": 0.0182
+          "input": 0.09,
+          "output": 0.18,
+          "cache_read": 0.018
         }
       },
       "deepseek/deepseek-v4-flash-0731": {
@@ -187719,9 +187565,9 @@
           "output": 384000
         },
         "cost": {
-          "input": 0.894012,
-          "output": 1.788024,
-          "cache_read": 0.074501
+          "input": 0.88044,
+          "output": 1.76088,
+          "cache_read": 0.07337
         }
       },
       "deepseek/deepseek-v4-pro-0813": {
@@ -187784,9 +187630,9 @@
           "output": 943718
         },
         "cost": {
-          "input": 0.3,
-          "output": 1.2,
-          "cache_read": 0.006
+          "input": 0.051,
+          "output": 0.567,
+          "cache_read": 0.018
         }
       },
       "deepseek/deepseek-v4.1-flash-1017": {
@@ -188852,7 +188698,7 @@
         },
         "cost": {
           "input": 0.08,
-          "output": 0.45,
+          "output": 0.35,
           "cache_read": 0.04
         }
       },
@@ -189203,6 +189049,32 @@
           "input": 0.03,
           "output": 0.15,
           "cache_read": 0.03
+        }
+      },
+      "kt/midm-k-3.0-pro": {
+        "id": "kt/midm-k-3.0-pro",
+        "name": "Mi:dm K 3.0 Pro",
+        "release_date": "2026-11-05",
+        "last_updated": "2026-11-05",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          }
+        ],
+        "limit": {
+          "context": 261795,
+          "output": 235615
+        },
+        "cost": {
+          "input": 0.2,
+          "output": 0.8,
+          "cache_read": 0.04
         }
       },
       "liquid/lfm-2.5-2.6b": {
@@ -189866,12 +189738,12 @@
         "reasoning": true,
         "limit": {
           "context": 200000,
-          "output": 58982
+          "output": 128000
         },
         "cost": {
-          "input": 0.3,
-          "output": 1.2,
-          "cache_read": 0.06
+          "input": 0.27,
+          "output": 1.08,
+          "cache_read": 0.027
         }
       },
       "minimax/minimax-m2.7": {
@@ -190701,6 +190573,32 @@
           "output": 1.9
         }
       },
+      "motif-technologies/motif-3": {
+        "id": "motif-technologies/motif-3",
+        "name": "Motif 3",
+        "release_date": "2026-11-02",
+        "last_updated": "2026-11-02",
+        "modalities": {
+          "input": [
+            "text"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 235929
+        },
+        "cost": {
+          "input": 0.3,
+          "output": 1.2,
+          "cache_read": 0.06
+        }
+      },
       "nex-agi/nex-n2.5-mini": {
         "id": "nex-agi/nex-n2.5-mini",
         "name": "Nex-N2.5-Mini",
@@ -190900,7 +190798,7 @@
           }
         ],
         "limit": {
-          "context": 1048576,
+          "context": 262144,
           "output": 16384
         },
         "cost": {
@@ -193376,25 +193274,6 @@
         "cost": {
           "input": 0.36,
           "output": 0.4
-        }
-      },
-      "qwen/qwen-2.5-7b-instruct": {
-        "id": "qwen/qwen-2.5-7b-instruct",
-        "name": "Qwen2.5 7B Instruct",
-        "release_date": "2024-10-16",
-        "last_updated": "2024-10-16",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "limit": {
-          "context": 32768,
-          "output": 29491
-        },
-        "cost": {
-          "input": 0.1,
-          "output": 0.2
         }
       },
       "qwen/qwen-2.5-coder-32b-instruct": {
@@ -195873,27 +195752,6 @@
           "cache_read": 0.036
         }
       },
-      "xingchen-agi/xing4.0-29b-a4b:free": {
-        "id": "xingchen-agi/xing4.0-29b-a4b:free",
-        "name": "Xing4.0 29B A4B (free)",
-        "release_date": "2026-10-16",
-        "last_updated": "2026-10-16",
-        "modalities": {
-          "input": [
-            "text"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 262144,
-          "output": 235929
-        }
-      },
       "z-ai/glm-4.5": {
         "id": "z-ai/glm-4.5",
         "name": "GLM-4.5",
@@ -196151,9 +196009,9 @@
           "output": 131072
         },
         "cost": {
-          "input": 1.4,
-          "output": 4.4,
-          "cache_read": 0.26
+          "input": 1.33,
+          "output": 4.18,
+          "cache_read": 0.247
         }
       },
       "z-ai/glm-5.2": {
@@ -196741,7 +196599,7 @@
         },
         "cost": {
           "input": 0.1824,
-          "output": 9.3388,
+          "output": 11.0055,
           "cache_read": 0.18
         }
       },
@@ -208731,6 +208589,39 @@
           "output": 50
         }
       },
+      "anthropic/claude-fable-5.2": {
+        "id": "anthropic/claude-fable-5.2",
+        "name": "Claude Fable 5.2",
+        "release_date": "2026-11-09",
+        "last_updated": "2026-11-09",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1000000,
+          "output": 128000
+        },
+        "cost": {
+          "input": 8,
+          "output": 40
+        }
+      },
       "anthropic/claude-opus-4.6": {
         "id": "anthropic/claude-opus-4.6",
         "name": "Claude Opus 4.6",
@@ -209022,7 +208913,7 @@
         ],
         "limit": {
           "context": 1048576,
-          "output": 943717
+          "output": 393216
         },
         "cost": {
           "input": 0.44,
@@ -209365,6 +209256,39 @@
         "name": "Gemini 4 Argon",
         "release_date": "2026-10-13",
         "last_updated": "2026-10-13",
+        "modalities": {
+          "input": [
+            "audio",
+            "image",
+            "text",
+            "video"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "effort",
+            "values": [
+              "low",
+              "medium",
+              "high"
+            ]
+          }
+        ],
+        "limit": {
+          "context": 1048576,
+          "output": 943718
+        },
+        "cost": {
+          "input": 2,
+          "output": 10
+        }
+      },
+      "google/gemini-4-carbon": {
+        "id": "google/gemini-4-carbon",
+        "name": "Gemini 4 Carbon",
+        "release_date": "2026-11-10",
+        "last_updated": "2026-11-10",
         "modalities": {
           "input": [
             "audio",
@@ -243129,6 +243053,32 @@
           "output": 3.6
         }
       },
+      "alibaba/qwen3.6-35b-a3b": {
+        "id": "alibaba/qwen3.6-35b-a3b",
+        "name": "Qwen 3.6 35B A3B",
+        "release_date": "2026-04-17",
+        "last_updated": "2026-04-17",
+        "modalities": {
+          "input": [
+            "text",
+            "image"
+          ]
+        },
+        "reasoning": true,
+        "reasoning_options": [
+          {
+            "type": "toggle"
+          }
+        ],
+        "limit": {
+          "context": 262144,
+          "output": 65536
+        },
+        "cost": {
+          "input": 0.375,
+          "output": 2.25
+        }
+      },
       "alibaba/qwen3.6-plus": {
         "id": "alibaba/qwen3.6-plus",
         "name": "Qwen 3.6 Plus",
@@ -243393,7 +243343,7 @@
         },
         "cost": {
           "input": 0.06,
-          "output": 2.3,
+          "output": 2.2,
           "cache_read": 0.059
         }
       },
@@ -244762,85 +244712,6 @@
           "output": 0
         }
       },
-      "bytedance/seed-1.6": {
-        "id": "bytedance/seed-1.6",
-        "name": "Seed 1.6",
-        "release_date": "2025-10-15",
-        "last_updated": "2025-10-15",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 32000
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05,
-          "tiers": [
-            {
-              "threshold": 128001,
-              "input": 0.5,
-              "output": 4,
-              "cache_read": 0.05
-            }
-          ]
-        }
-      },
-      "bytedance/seed-1.8": {
-        "id": "bytedance/seed-1.8",
-        "name": "Seed 1.8",
-        "release_date": "2025-12-28",
-        "last_updated": "2025-12-28",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        },
-        "reasoning": true,
-        "reasoning_options": [
-          {
-            "type": "toggle"
-          },
-          {
-            "type": "effort",
-            "values": [
-              "minimal",
-              "low",
-              "medium",
-              "high"
-            ]
-          }
-        ],
-        "limit": {
-          "context": 256000,
-          "output": 32768
-        },
-        "cost": {
-          "input": 0.25,
-          "output": 2,
-          "cache_read": 0.05,
-          "tiers": [
-            {
-              "threshold": 128001,
-              "input": 0.5,
-              "output": 4,
-              "cache_read": 0.05
-            }
-          ]
-        }
-      },
       "bytedance/seed-2.1-turbo": {
         "id": "bytedance/seed-2.1-turbo",
         "name": "Seed 2.1 Turbo",
@@ -244942,18 +244813,6 @@
         "name": "Seedance v1.0 Pro Fast",
         "release_date": "2025-10-24",
         "last_updated": "2025-10-31",
-        "modalities": {
-          "input": [
-            "text",
-            "image"
-          ]
-        }
-      },
-      "bytedance/seedance-v1.5-pro": {
-        "id": "bytedance/seedance-v1.5-pro",
-        "name": "Seedance v1.5 Pro",
-        "release_date": "2025-12-16",
-        "last_updated": "2025-12-16",
         "modalities": {
           "input": [
             "text",
