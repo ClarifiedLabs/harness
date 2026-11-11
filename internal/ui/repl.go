@@ -4200,6 +4200,7 @@ type preparedPrompt struct {
 	images          []inputimage.Loaded
 	promptContext   []string
 	skillInjections int
+	skillNames      []string
 }
 
 func cloneRequestContext(contexts []string) []string {
@@ -4409,9 +4410,10 @@ func (app *App) prepareAPIContinuation() (func(), bool) {
 
 func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnBlock bool) (preparedPrompt, error) {
 	var skillInjections int
+	var skillNames []string
 	if opts.resolveSkillMentions {
-		var ok bool
-		prompt, skillInjections, ok = app.resolveSkillMentionContext(prompt)
+		res, ok := app.resolveSkillMentionDetails(prompt)
+		prompt, skillInjections, skillNames = res.Prompt, res.Injected, res.Names
 		if !ok {
 			if app.Renderer != nil && stopProgressOnBlock {
 				app.Renderer.StopProgress()
@@ -4451,7 +4453,7 @@ func (app *App) preparePrompt(prompt string, opts promptOptions, stopProgressOnB
 		images = app.attachPromptImageReferences(prompt, images, pendingUnsupportedNotice)
 	}
 	promptContext := append([]string(nil), promptHook.AdditionalContext...)
-	return preparedPrompt{prompt: prompt, images: images, promptContext: promptContext, skillInjections: skillInjections}, nil
+	return preparedPrompt{prompt: prompt, images: images, promptContext: promptContext, skillInjections: skillInjections, skillNames: skillNames}, nil
 }
 
 func (app *App) prepareSteerInput(prompt string, opts promptOptions) (agent.SteerInput, error) {
@@ -4463,7 +4465,7 @@ func (app *App) prepareSteerInput(prompt string, opts promptOptions) (agent.Stee
 		Text:             prepared.prompt,
 		Images:           imageBlocks(prepared.images),
 		RequestContext:   prepared.promptContext,
-		DeliveryMetadata: skillInjectionMetadata(prepared.skillInjections),
+		DeliveryMetadata: []any{steerDelivery{text: prompt, images: len(prepared.images), skills: prepared.skillNames}},
 	}, nil
 }
 
@@ -6116,7 +6118,19 @@ func (s *accumulatingSink) notice(msg string) {
 // the transcript: the dim line renders above the live status line and is
 // recorded as a sessionrec Display line via notice.
 func (s *accumulatingSink) steerDelivered(input agent.SteerInput) {
-	s.notice("[steer sent: " + submissionPreview(input.Text, 0) + "]")
+	hasPreview := false
+	for _, item := range input.DeliveryMetadata {
+		if delivery, ok := item.(steerDelivery); ok {
+			hasPreview = true
+			s.notice("[steer sent: " + submissionPreview(delivery.text, delivery.images) + "]")
+			for _, name := range delivery.skills {
+				s.notice("[skill injected: " + name + "]")
+			}
+		}
+	}
+	if !hasPreview {
+		s.notice("[steer sent: " + submissionPreview(input.Text, len(input.Images)) + "]")
+	}
 	for range skillInjectionsFromMetadata(input.DeliveryMetadata) {
 		if s.otel != nil {
 			s.otel.RecordSkill("explicit", "injected")

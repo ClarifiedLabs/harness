@@ -258,26 +258,23 @@ func TestResolveSkillMentionsSkillScheme(t *testing.T) {
 	}
 }
 
-func TestResolveSkillMentionsPlainNameFallback(t *testing.T) {
-	commit := testSkill(t, "commit", "Create commits", "COMMIT BODY")
-	review := testSkill(t, "review", "Review changes", "REVIEW BODY")
-	available := map[string]skills.Skill{"commit": commit, "review": review}
-
-	res := resolveSkillMentions("please (review), then commit.", available)
-	if res.Injected != 2 {
-		t.Fatalf("plain-name injections = %d, want 2: %+v", res.Injected, res)
+func TestResolveSkillMentionsBareNamesDoNotActivate(t *testing.T) {
+	skill := testSkill(t, "tests", "Test code", "TEST BODY")
+	available := map[string]skills.Skill{"tests": skill}
+	for _, prompt := range []string{"tests", "could our tests be hanging?", "please (tests), then tests.", "tests-extra"} {
+		t.Run(prompt, func(t *testing.T) {
+			res := resolveSkillMentions(prompt, available)
+			if res.Injected != 0 || res.Prompt != prompt || res.Unknown != "" {
+				t.Fatalf("bare names must remain literal: %+v", res)
+			}
+		})
 	}
-	if strings.Index(res.Prompt, "<name>review</name>") > strings.Index(res.Prompt, "<name>commit</name>") {
-		t.Fatalf("plain names should preserve prompt order:\n%s", res.Prompt)
-	}
-
-	res = resolveSkillMentions("commitment should not trigger", available)
-	if res.Injected != 0 {
-		t.Fatalf("plain name must be word bounded: %+v", res)
-	}
-
-	res = resolveSkillMentions("$commit then commit", available)
-	if res.Injected != 1 {
-		t.Fatalf("explicit and plain aliases should dedupe: %+v", res)
+	for _, prompt := range []string{"$tests then tests", "skill://tests", "skill://tests/SKILL.md", skill.Location, "$tests skill://tests"} {
+		t.Run(prompt, func(t *testing.T) {
+			res := resolveSkillMentions(prompt, available)
+			if res.Injected != 1 || !slices.Equal(res.Names, []string{"tests"}) || !strings.HasSuffix(res.Prompt, "\n\n"+prompt) {
+				t.Fatalf("explicit references must inject once and preserve text: %+v", res)
+			}
+		})
 	}
 }

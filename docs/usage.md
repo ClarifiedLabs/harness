@@ -1838,17 +1838,19 @@ Lines starting with `/` are commands; `//` sends a literal leading slash. At an
 interactive TTY prompt, lines starting with `!` run a local shell command and
 return to the prompt without contacting the model; `!!` sends a literal leading
 `!`. In one-shot mode, initial `-i` prompts, non-TTY/scripted input, pasted text, and edited prompts,
-`!text` is literal prompt text. In a normal typed prompt, `$name`, an exact
-word-bounded plain skill name, `skill://name`, or `…/SKILL.md` mentions the
+`!text` is literal prompt text. In a normal typed prompt, `$name`,
+`skill://name`, or `…/SKILL.md` explicitly mentions the
 named skill anywhere in the text. Harness reads that skill's complete
 `SKILL.md`, wraps it in a Codex-style `<skill>` envelope, and prepends it to the
 user prompt. That enriched prompt is persisted as one ordinary user-role
 transcript message; the body is not request-only context and is not reinjected
-on later requests. A failed read aborts before model work. Re-mention a skill to
-inject its current contents again on a later turn. If the model selects a skill
+on later requests. A failed read prints a warning and omits that skill's block;
+the prompt still runs. Re-mention a skill to inject its current contents again
+on a later turn. If the model selects a skill
 implicitly, its `read` of `SKILL.md` remains an ordinary persisted tool result;
 Harness does not replace it with a receipt or pin the body. `$$` escapes a
-literal `$`.
+literal `$`. Bare skill names in prose do not trigger automatic injection;
+the model can still select relevant skills using their catalog descriptions.
 
 In terminals that support bracketed paste, pasted text fills the normal prompt
 or active-turn steering input for review and is submitted as one literal message
@@ -2047,7 +2049,9 @@ active-turn cancellation gestures.
   `[queued for next prompt: …]` line. The first means steering was accepted for
   the active prompt, not that it has reached the model: a prompt that ends before
   its next model request still recovers that input as the next prompt. When the
-  agent actually injects an accepted steer, it prints `[steer sent: …]`; queued
+  agent actually injects an accepted steer, it prints `[steer sent: …]` using
+  the original submitted text, with separate
+  `[skill injected: name]` notices for any explicitly injected skills; queued
   input is instead echoed in the normal prompt line when its own prompt starts.
 - An accepted steer also releases any blocked `background_jobs` wait from that
   prompt. The selected jobs keep running; once its completion or original timeout

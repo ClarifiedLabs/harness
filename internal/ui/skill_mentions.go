@@ -13,6 +13,7 @@ import (
 type skillMentionResolution struct {
 	Prompt   string
 	Injected int
+	Names    []string
 	Unknown  string
 	// Warnings names selected skills whose SKILL.md could not be read.
 	// Read failures are non-fatal: the prompt runs without those blocks.
@@ -53,6 +54,9 @@ func entryMatchesPath(skill skills.Skill, raw string) bool {
 		return false
 	}
 	cleanNorm := filepath.Clean(normalizeSkillPath(norm))
+	if strings.HasPrefix(norm, "skill://") && cleanNorm == skill.Name {
+		return true
+	}
 	if filepath.Clean(skill.Location) == cleanNorm {
 		return true
 	}
@@ -105,21 +109,12 @@ func resolveSkillMentions(prompt string, available map[string]skills.Skill) skil
 		}
 		i = end - 1
 	}
-	// Add path/scheme mentions and exact, word-bounded plain names. Explicit
-	// `$name` selections above remain primary; seen also acts as the blocked plain
-	// name set so aliases do not activate the same skill twice.
+	// Add explicit path/scheme mentions, deduplicating against $name selections.
 	for _, raw := range extractSkillTokens(prompt) {
 		if strings.HasPrefix(raw, "$") {
 			continue
 		}
 		tok := stripTrailingPunct(raw)
-		if skill, ok := available[tok]; ok {
-			if !seen[skill.Name] {
-				selected = append(selected, skill)
-				seen[skill.Name] = true
-			}
-			continue
-		}
 		if !pathIsSkill(tok) {
 			continue
 		}
@@ -133,8 +128,8 @@ func resolveSkillMentions(prompt string, available map[string]skills.Skill) skil
 		}
 	}
 	if len(selected) > 0 {
-		prefix, injected, warnings := explicitSkillPrefix(selected)
-		return skillMentionResolution{Prompt: prefix + resolvedPrompt, Injected: injected, Warnings: warnings}
+		prefix, names, warnings := explicitSkillPrefix(selected)
+		return skillMentionResolution{Prompt: prefix + resolvedPrompt, Injected: len(names), Names: names, Warnings: warnings}
 	}
 	if name, ok := standaloneUnknownSkillMention(prompt); ok {
 		return skillMentionResolution{Prompt: resolvedPrompt, Unknown: name}
@@ -215,9 +210,9 @@ func unescapeDollarEscapes(prompt string) string {
 
 // explicitSkillPrefix builds injection blocks from the readable skills and
 // reports one warning per unreadable skill instead of failing the whole
-// prompt. injected counts the blocks actually built, so a fully unreadable
+// prompt. names lists the blocks actually built, so a fully unreadable
 // selection yields an empty prefix and no separator.
-func explicitSkillPrefix(selected []skills.Skill) (prefix string, injected int, warnings []string) {
+func explicitSkillPrefix(selected []skills.Skill) (prefix string, names []string, warnings []string) {
 	blocks := make([]string, 0, len(selected))
 	for _, skill := range selected {
 		body, err := skill.Read()
@@ -226,41 +221,44 @@ func explicitSkillPrefix(selected []skills.Skill) (prefix string, injected int, 
 			continue
 		}
 		blocks = append(blocks, skills.InjectionBlock(skill.Name, skill.Location, body))
+		names = append(names, skill.Name)
 	}
 	if len(blocks) == 0 {
-		return "", 0, warnings
+		return "", nil, warnings
 	}
-	return strings.Join(blocks, "\n\n") + "\n\n", len(blocks), warnings
+	return strings.Join(blocks, "\n\n") + "\n\n", names, warnings
 }
 
 func (app *App) resolveSkillMentionContext(prompt string) (string, int, bool) {
+	res, ok := app.resolveSkillMentionDetails(prompt)
+	return res.Prompt, res.Injected, ok
+}
+
+func (app *App) resolveSkillMentionDetails(prompt string) (skillMentionResolution, bool) {
 	res := resolveSkillMentions(prompt, app.Skills)
 	if res.Unknown != "" {
 		fmt.Fprintf(app.Errw, "unknown skill %q; type /skills\n", res.Unknown)
-		return res.Prompt, 0, false
+		return res, false
 	}
 	for _, warning := range res.Warnings {
 		fmt.Fprintf(app.Errw, "warning: skill not injected: %s\n", warning)
 	}
-	return res.Prompt, res.Injected, true
+	return res, true
 }
 
-type skillInjectionDelivery struct {
-	count int
-}
-
-func skillInjectionMetadata(count int) []any {
-	if count == 0 {
-		return nil
-	}
-	return []any{skillInjectionDelivery{count: count}}
+// steerDelivery keeps UI-only details alongside prepared model text, including
+// when the agent combines multiple queued inputs.
+type steerDelivery struct {
+	text   string
+	images int
+	skills []string
 }
 
 func skillInjectionsFromMetadata(metadata []any) int {
 	var count int
 	for _, item := range metadata {
-		if delivery, ok := item.(skillInjectionDelivery); ok {
-			count += delivery.count
+		if delivery, ok := item.(steerDelivery); ok {
+			count += len(delivery.skills)
 		}
 	}
 	return count

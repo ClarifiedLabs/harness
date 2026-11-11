@@ -2376,9 +2376,13 @@ One signal receiver plus a per-prompt `context.CancelFunc`:
   `@~/path` expands through the current user's home directory; relative `@file`
   references in the config file resolve from that config file's directory.
   `-no-env` drops the env block.
-- Explicit mentions are resolved before provider work: `$skillName`, exact
-  word-bounded plain names, and `skill://` / `…/SKILL.md` path mentions
+- Explicit mentions are resolved before provider work: `$skillName`
+  and `skill://` / `…/SKILL.md` path mentions
   (punctuation-tolerant, `$$` escapes to literal `$`) each select their skill.
+  Bare names do not activate skills; relevance-based selection remains the
+  model’s responsibility using the catalog. Steer delivery metadata retains the
+  original input and names of successfully injected skills for separate display
+  notices, without exposing that metadata to the model.
   Harness reads the complete `SKILL.md`, wraps it as
   `<skill>\n<name>…</name>\n<path>…</path>\n\n{body}\n</skill>`, and prepends
   the block to the user's text. Multiple selected skills are separated by a

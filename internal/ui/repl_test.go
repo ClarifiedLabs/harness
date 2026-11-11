@@ -9470,3 +9470,53 @@ func TestGoalReminderSurvivesTranscriptRewrite(t *testing.T) {
 		t.Fatalf("post-rewrite goal context = %q", after)
 	}
 }
+
+func TestSteerDeliveryPreservesOriginalPreviewsAndReportsInjectedSkills(t *testing.T) {
+	var out, errw bytes.Buffer
+	app := newTestApp(t, &out, &errw, llmtest.New("fake"))
+	app.Skills = map[string]skills.Skill{
+		"tests":   testSkill(t, "tests", "Test code", "TEST BODY"),
+		"missing": {Name: "missing", Location: filepath.Join(t.TempDir(), "missing", "SKILL.md")},
+	}
+	first, err := app.prepareSteerInput("$tests $missing inspect the hang", promptOptions{resolveSkillMentions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.prepareSteerInput("could our tests be hanging?", promptOptions{resolveSkillMentions: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first.Text, "<skill>\n") || !strings.HasSuffix(first.Text, "$tests $missing inspect the hang") {
+		t.Fatalf("prepared model text = %q", first.Text)
+	}
+	if second.Text != "could our tests be hanging?" {
+		t.Fatalf("bare name expanded: %q", second.Text)
+	}
+	// Match the agent's queue-drain combination of text and opaque metadata.
+	combined := agent.SteerInput{
+		Text:             first.Text + "\n\n" + second.Text,
+		DeliveryMetadata: append(first.DeliveryMetadata, second.DeliveryMetadata...),
+	}
+	if got := skillInjectionsFromMetadata(combined.DeliveryMetadata); got != 1 {
+		t.Fatalf("injections = %d", got)
+	}
+	sink := newAccumulatingSink(app.Renderer, app, 1)
+	sink.turn = 1
+	sink.Emit(agent.Event{Kind: agent.EventSteerDelivered, Steer: &combined})
+	raw, err := os.ReadFile(filepath.Join(app.SessionPath, "raw.ndjson"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, output := range []string{errw.String(), string(raw)} {
+		for _, want := range []string{"[steer sent: $tests $missing inspect the hang]", "[skill injected: tests]", "[steer sent: could our tests be hanging?]"} {
+			if strings.Count(output, want) != 1 {
+				t.Fatalf("expected one %q in %s", want, output)
+			}
+		}
+		for _, unwanted := range []string{"[steer sent: <skill>]", "[skill injected: missing]"} {
+			if strings.Contains(output, unwanted) {
+				t.Fatalf("unexpected %q in %s", unwanted, output)
+			}
+		}
+	}
+}
