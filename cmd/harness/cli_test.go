@@ -29,7 +29,7 @@ func TestCommandCatalogHandlersStayInSync(t *testing.T) {
 	}
 }
 
-func TestSessionResumeFlagsTrackRootFlagsExceptResume(t *testing.T) {
+func TestSessionResumeFlagsTrackRootFlags(t *testing.T) {
 	want := make([]any, 0)
 	for _, flag := range config.CLIFlags() {
 		if flag.ID != "resume" {
@@ -40,9 +40,11 @@ func TestSessionResumeFlagsTrackRootFlagsExceptResume(t *testing.T) {
 	if !ok {
 		t.Fatal("session.resume command is missing")
 	}
-	got := make([]any, len(command.Flags))
-	for i, flag := range command.Flags {
-		got[i] = flag
+	var got []any
+	for _, flag := range command.Flags {
+		if flag.ID != "repo" {
+			got = append(got, flag)
+		}
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("session.resume flags drifted from root flags except resume\n got: %#v\nwant: %#v", got, want)

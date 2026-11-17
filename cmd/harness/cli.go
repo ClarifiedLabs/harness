@@ -164,7 +164,8 @@ func acpServeCLIFlags() []cli.Flag {
 
 func sessionResumeCLIFlags() []cli.Flag {
 	rootFlags := config.CLIFlags()
-	flags := make([]cli.Flag, 0, len(rootFlags)-1)
+	flags := make([]cli.Flag, 0, len(rootFlags))
+	flags = append(flags, boolCLIFlag("repo", []string{"repo"}, "show sessions from the current Git repository, including linked worktrees"))
 	for _, flag := range rootFlags {
 		if flag.ID != "resume" {
 			flags = append(flags, flag)

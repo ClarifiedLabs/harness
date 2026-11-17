@@ -84,11 +84,12 @@ hysteresis instead of re-compacting after each small result. Reported input
 counts cache-read/cache-write tokens because cached context still occupies the
 window. The trigger runs after a prompt and proactively between turns, before
 the next request when tool results balloon the estimate. Also manual
-`/compact`. The estimate side is the last **measured** input tokens
-(`lastInput`) plus a bytes/4 estimate of only the messages appended since that
-measurement (the append boundary), so the trigger tracks real usage instead of
-re-estimating the whole transcript; the raw bytes/4 estimate is reserved for
-the degradation ladder. `compact_auto_enabled: false` gates the proactive,
+`/compact`. The estimate uses the last **measured** input count plus a local
+estimate of the messages appended after the transcript position that count
+covers. Responses with missing or output-only usage leave both the count and
+its position in place, so the estimate includes retained output from those
+responses. Without a measurement, the trigger estimates the full active
+transcript locally. `compact_auto_enabled: false` gates the proactive,
 exact-count, and post-prompt checks only; explicit compaction and the single
 provider-overflow recovery retry remain enabled. The terminal warning follows
 the configured trigger and is suppressed with automatic compaction.

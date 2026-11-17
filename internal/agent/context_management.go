@@ -102,7 +102,7 @@ func (a *Agent) contextManagementContext() string {
 		return recovery
 	}
 	tokens := a.estimateContext(nil).Total
-	tokens = max(tokens, a.triggerTokens(a.measuredInput, a.measuredBoundary))
+	tokens = max(tokens, a.triggerTokens())
 	remaining := max(0, a.contextRemaining(tokens))
 	m.SetContextBudget(remaining, a.contextSoftLimit())
 	text := memoryGuidance

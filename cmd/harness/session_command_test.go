@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -256,6 +257,7 @@ func TestRootInvocationForResumePreservesRootFlagOccurrences(t *testing.T) {
 		"--config=",
 		"--image=low:a.png",
 		"--image=high:b.png",
+		"--repo",
 		"source path",
 	})
 	if err != nil {
@@ -266,7 +268,8 @@ func TestRootInvocationForResumePreservesRootFlagOccurrences(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := root.Flags.Occurrences()
-	want := append(invocation.Flags.Occurrences(), cli.Occurrence{ID: "resume", Name: "resume", Value: "selected path"})
+	want := invocation.Flags.Occurrences()
+	want[len(want)-1] = cli.Occurrence{ID: "resume", Name: "resume", Value: "selected path"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("forwarded occurrences = %#v, want %#v", got, want)
 	}
@@ -375,6 +378,96 @@ func TestRunSessionResumePickerSelectionsUseStderr(t *testing.T) {
 				t.Fatalf("picker/resume stdout=%q", stdout.String())
 			}
 		})
+	}
+}
+
+func TestRunSessionResumeRepositoryPicker(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is required for linked worktrees")
+	}
+	for _, name := range []string{"GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE"} {
+		t.Setenv(name, "")
+		if err := os.Unsetenv(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	repo, otherRepo := t.TempDir(), t.TempDir()
+	git(repo, "init", "--quiet")
+	git(repo, "-c", "user.name=Harness Tests", "-c", "user.email=harness@example.test",
+		"-c", "commit.gpgsign=false", "commit", "--allow-empty", "--quiet", "-m", "Initial commit")
+	git(otherRepo, "init", "--quiet")
+	linked := filepath.Join(t.TempDir(), "linked worktree")
+	git(repo, "worktree", "add", "--quiet", "--detach", linked)
+	subdir := filepath.Join(repo, "packages", "demo")
+	if err := os.MkdirAll(subdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(subdir)
+
+	fp := llmtest.New("fake", okStep())
+	env, stdout, stderr, _ := fakeProviderEnv(t, []string{
+		"session", "resume", "--repo", "-model", "claude-opus-4-8", "-p", "continue",
+	}, fp, "/linked worktree\n1\n")
+	root := session.DefaultRoot(stateDir(env.getenv))
+	for i, fixture := range []struct{ name, dir, prompt string }{
+		{"main", repo, "main branch history"},
+		{"local", subdir, "local directory history"},
+		{"linked", linked, "linked branch history"},
+		{"unrelated", otherRepo, "unrelated repository history"},
+		{"removed", filepath.Join(repo, "removed"), "removed directory history"},
+	} {
+		seed := session.Session{
+			Provider: "anthropic", Model: "claude-opus-4-8", CWD: fixture.dir,
+			Created: time.Unix(int64(i+1), 0),
+			Messages: []llm.Message{
+				{Role: llm.RoleUser, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: fixture.prompt}}},
+				{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Kind: llm.BlockText, Text: "prior reply"}}},
+			},
+		}
+		path := filepath.Join(root, fixture.name)
+		if err := seed.Save(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := session.AppendEvent(path, session.Event{Type: session.EventUser, Text: "initial prompt"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if code := run(env); code != ui.ExitOK {
+		t.Fatalf("resume --repo exit=%d stderr=%q", code, stderr.String())
+	}
+	picker := stderr.String()
+	for _, want := range []string{"Sessions 1-3 of 3", "cwd: " + linked, `matching "linked worktree"`} {
+		if !strings.Contains(picker, want) {
+			t.Errorf("picker missing %q in %q", want, picker)
+		}
+	}
+	for _, excluded := range []string{"unrelated", "removed"} {
+		if strings.Contains(picker, filepath.Join(root, excluded)) {
+			t.Errorf("picker included %q in %q", excluded, picker)
+		}
+	}
+	if len(fp.Requests) != 1 || len(fp.Requests[0].Messages) == 0 ||
+		fp.Requests[0].Messages[0].Content[0].Text != "linked branch history" {
+		t.Fatalf("wrong session resumed: %+v", fp.Requests)
+	}
+	if strings.Contains(stdout.String(), "Sessions") || !strings.Contains(stdout.String(), "ok") {
+		t.Fatalf("picker/resume stdout=%q", stdout.String())
+	}
+}
+
+func TestRunSessionResumeRepoRequiresRepository(t *testing.T) {
+	t.Chdir(t.TempDir())
+	env, _, stderr, _ := sessionCommandEnv(t, []string{"session", "resume", "--repo"}, "")
+	if code := run(env); code != ui.ExitRuntime || !strings.Contains(stderr.String(), "find Git repository") {
+		t.Fatalf("resume outside Git exit=%d stderr=%q", code, stderr.String())
 	}
 }
 

@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -53,6 +55,7 @@ type Summary struct {
 type ListOptions struct {
 	CWD           string
 	All           bool
+	Repository    bool // match the Git common directory shared by linked worktrees
 	IncludePrompt bool
 	ProbeActivity bool
 }
@@ -73,15 +76,8 @@ func List(root string, opts ListOptions) (summaries []Summary, skipped []error, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("session: resolve list root: %w", err)
 	}
-	entries, err := os.ReadDir(root)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil, nil
-	}
-	if err != nil {
-		return nil, nil, fmt.Errorf("session: read sessions root %s: %w", root, err)
-	}
-
-	var wantedCWD string
+	var wantedCWD, wantedRepo string
+	var repos map[string]string
 	if !opts.All {
 		if opts.CWD == "" {
 			return nil, nil, nil
@@ -90,6 +86,21 @@ func List(root string, opts ListOptions) (summaries []Summary, skipped []error, 
 		if err != nil {
 			return nil, nil, fmt.Errorf("session: resolve working directory %s: %w", opts.CWD, err)
 		}
+		if opts.Repository {
+			wantedRepo, err = gitCommonDir(wantedCWD)
+			if err != nil {
+				return nil, nil, fmt.Errorf("session: find Git repository for %s: %w", wantedCWD, err)
+			}
+			repos = map[string]string{wantedCWD: wantedRepo}
+		}
+	}
+
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, nil
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("session: read sessions root %s: %w", root, err)
 	}
 
 	for _, entry := range entries {
@@ -131,7 +142,21 @@ func List(root string, opts ListOptions) (summaries []Summary, skipped []error, 
 				skipped = append(skipped, fmt.Errorf("%s: resolve persisted working directory %q: %w", statePath, summary.CWD, cwdErr))
 				continue
 			}
-			if persistedCWD == "" || persistedCWD != wantedCWD {
+			if persistedCWD == "" {
+				continue
+			}
+			if wantedRepo != "" {
+				repo, known := repos[persistedCWD]
+				if !known {
+					// A saved CWD may have been removed or may never have been
+					// in a Git repository. It cannot match the current repo.
+					repo, _ = gitCommonDir(persistedCWD)
+					repos[persistedCWD] = repo
+				}
+				if repo != wantedRepo {
+					continue
+				}
+			} else if persistedCWD != wantedCWD {
 				continue
 			}
 		}
@@ -161,6 +186,30 @@ func List(root string, opts ListOptions) (summaries []Summary, skipped []error, 
 		return summaries[i].Created.After(summaries[j].Created)
 	})
 	return summaries, skipped, nil
+}
+
+func gitCommonDir(dir string) (string, error) {
+	cmd := exec.Command("git", "rev-parse", "--path-format=absolute", "--git-common-dir")
+	cmd.Dir = dir
+	// Resolve the supplied directory even when Harness was invoked with a
+	// Git environment that pins the caller's repository.
+	for _, entry := range cmd.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch strings.ToUpper(key) {
+		case "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE":
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	out, err := cmd.Output()
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && len(exitErr.Stderr) > 0 {
+			return "", fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exitErr.Stderr)))
+		}
+		return "", err
+	}
+	return filepath.EvalSymlinks(strings.TrimRight(string(out), "\r\n"))
 }
 
 func readSessionSummaryState(dir, path string, before os.FileInfo) (Summary, error) {

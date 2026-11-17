@@ -63,7 +63,7 @@ func runSessionResume(env environment, invocation cli.Invocation) int {
 	if sessionResumeRootInformational(invocation) {
 		return runRootForResume(env, invocation, "")
 	}
-	source, code := pickSessionSource(env)
+	source, code := pickSessionSource(env, cliBool(invocation.Flags, "repo"))
 	if code != ui.ExitOK {
 		return code
 	}
@@ -78,7 +78,7 @@ func runRootForResume(env environment, invocation cli.Invocation, source string)
 	return runRoot(env, rootInvocation)
 }
 
-func pickSessionSource(env environment) (string, int) {
+func pickSessionSource(env environment, repo bool) (string, int) {
 	if env.stdinPiped {
 		return "", fail(env.stderr, ui.ExitUsage, "session resume requires an explicit session path when stdin is piped")
 	}
@@ -88,6 +88,7 @@ func pickSessionSource(env environment) (string, int) {
 	}
 	summaries, skipped, err := session.List(session.DefaultRoot(stateDir(env.lookup)), session.ListOptions{
 		CWD:           cwd,
+		Repository:    repo,
 		IncludePrompt: true,
 		ProbeActivity: true,
 	})
@@ -96,11 +97,14 @@ func pickSessionSource(env environment) (string, int) {
 		return "", fail(env.stderr, ui.ExitRuntime, "session resume: %v", err)
 	}
 	if len(summaries) == 0 {
+		if repo {
+			return "", fail(env.stderr, ui.ExitRuntime, "no recorded sessions for the Git repository at %s; use `harness session ls -a` or pass an explicit session path", cwd)
+		}
 		return "", fail(env.stderr, ui.ExitRuntime, "no recorded sessions for working directory %s; use `harness session ls -a` or pass an explicit session path", cwd)
 	}
 	entries := make([]sessionPickerEntry, len(summaries))
 	for i, summary := range summaries {
-		entries[i] = sessionPickerEntry{Summary: summary}
+		entries[i] = sessionPickerEntry{Summary: summary, showCWD: repo}
 	}
 	if env.stdin == nil {
 		return "", fail(env.stderr, ui.ExitUsage, "session resume: picker has no input reader")
@@ -146,6 +150,9 @@ func sessionResumeRootInformational(invocation cli.Invocation) bool {
 func rootInvocationForResume(env environment, invocation cli.Invocation, source string) (cli.Invocation, error) {
 	argv := make([]string, 0, invocation.Flags.Len()+1)
 	for _, occurrence := range invocation.Flags.Occurrences() {
+		if occurrence.ID == "repo" {
+			continue
+		}
 		argv = append(argv, "--"+occurrence.Name+"="+occurrence.Value)
 	}
 	argv = append(argv, "--resume="+source)
@@ -207,12 +214,17 @@ func sessionPromptPreview(prompt string) string {
 
 type sessionPickerEntry struct {
 	session.Summary
+	showCWD bool
 }
 
 func (entry sessionPickerEntry) PickerID() string { return entry.Path }
 
 func (entry sessionPickerEntry) PickerName() string {
-	return strings.TrimSpace(filepath.Base(entry.Path) + " " + entry.InitialPrompt)
+	name := filepath.Base(entry.Path) + " " + entry.InitialPrompt
+	if entry.showCWD {
+		name += " " + entry.CWD
+	}
+	return strings.TrimSpace(name)
 }
 
 func sessionPickerPageSize(env environment) int {
@@ -239,7 +251,11 @@ func printSessionPickerPage(w io.Writer, entries []sessionPickerEntry, page, pag
 			endTime = "-"
 		}
 		fmt.Fprintf(w, "%*d. prompt: %s\n", numberWidth, i+1, sessionPromptPreview(summary.InitialPrompt))
-		fmt.Fprintf(w, "%sstart: %s · end: %s · session: %s\n", indent, formatSessionTime(summary.Created), endTime, summary.Path)
+		fmt.Fprintf(w, "%sstart: %s · end: %s · session: %s", indent, formatSessionTime(summary.Created), endTime, summary.Path)
+		if entries[i].showCWD {
+			fmt.Fprintf(w, " · cwd: %s", summary.CWD)
+		}
+		fmt.Fprintln(w)
 	}
 }
 

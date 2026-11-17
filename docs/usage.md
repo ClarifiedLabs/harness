@@ -969,10 +969,11 @@ environment variables, JSON paths, types, and defaults. The concise
   OpenAI/OpenRouter Chat Completions; then the coarse byte-based heuristic.
   Once a turn reports real usage, the *reported* context (`turn_attempt_start`
   and `/context`) anchors to that actual input (uncached plus cache read/write)
-  plus a local estimate of only the messages appended since — count APIs can
-  systematically miss provider-billed opaque replay state such as thinking
-  signatures. Compaction or retention resets the anchor until the next measured
-  turn. In the byte heuristic, opaque payloads (thinking signatures,
+  plus a local estimate of the messages appended since the measurement. This
+  includes messages from later responses that omit input usage. Count APIs can
+  miss provider-billed opaque replay state such as thinking signatures.
+  Compaction, retention rewrites, and model or provider changes clear the
+  measurement. In the byte heuristic, opaque payloads (thinking signatures,
   encrypted/redacted reasoning, interaction steps) are weighted separately from
   prose (8 vs 4 bytes/token) because base64-style blobs tokenize much coarser.
 
@@ -2291,7 +2292,7 @@ Inspect saved sessions with:
 
 ```sh
 harness session ls [-a|--all] [-l|--long]
-harness session resume [root-options] [--] [session-dir]
+harness session resume [--repo] [root-options] [--] [session-dir]
 harness session replay [-f|--follow] [-q|--quiet] [--color-theme dark|light] [--config path] ~/.local/state/harness/sessions/20260611T123456Z
 harness session timings ~/.local/state/harness/sessions/20260611T123456Z
 harness session stats [--format text|json] ~/.local/state/harness/sessions/20260611T123456Z
@@ -2324,9 +2325,16 @@ authoritative race-safe decision.
 
 `session resume <session-dir>` forwards the source path, including paths outside
 the default root, through the normal root resume flow. With no path, it opens a
-searchable, paged picker over the same-working-directory sessions. Each entry
-shows its prompt first, followed by an aligned start/end/session detail row on
-stderr, leaving stdout available for resumed text or JSON output. Sessions saved
+searchable, paged picker over the same-working-directory sessions.
+`harness session resume --repo` expands the picker to sessions from the current
+Git repository, including its subdirectories and linked worktrees. It requires
+Git and an existing working directory in the repository for each candidate.
+The picker shows and searches those directories alongside the existing prompt
+and session name. A resumed session runs in the directory where you invoked
+Harness, as it does when you pass an explicit path.
+
+Each picker entry shows its prompt first, followed by a start/end/session
+detail row on stderr, leaving stdout available for resumed text or JSON output. Sessions saved
 with an unsupported schema version are skipped silently; malformed or unreadable
 sessions still produce warnings. Active sessions remain selectable, but may then
 fail the normal final resume lock. Piped stdin requires an explicit source path so

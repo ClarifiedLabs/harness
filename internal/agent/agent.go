@@ -503,8 +503,8 @@ type Agent struct {
 	// input (uncached + cache read/write) and the transcript length it
 	// measured, so the next reported context estimate can anchor to actuals
 	// instead of a count-API/byte estimate that may systematically miss opaque
-	// replay state. Zeroed whenever compaction or retention rewrites the
-	// transcript outside a run's own tracking.
+	// replay state. Cleared when the input shape changes enough to invalidate
+	// the measurement, such as after a compaction or a model switch.
 	measuredInput             int
 	measuredBoundary          int
 	retentionPolicy           RetentionPolicy
@@ -658,6 +658,7 @@ func (a *Agent) SetProvider(provider llm.Provider) {
 		a.compactionRuntimeVersion++
 		a.observedContextWindow = 0
 		a.retentionEpochArmed = true
+		a.clearMeasuredContext()
 		a.resetResponseState()
 	}
 }
@@ -665,6 +666,9 @@ func (a *Agent) SetProvider(provider llm.Provider) {
 // SetModel replaces the model id stamped onto subsequent requests. contextWindow
 // is the same override as Options.ContextWindow: zero means use the registry.
 func (a *Agent) SetModel(model string, contextWindow int) {
+	if a.model != model {
+		a.clearMeasuredContext()
+	}
 	a.model = model
 	a.execution.Identity.Model = model
 	a.contextWindow = contextWindow
@@ -778,6 +782,7 @@ func (a *Agent) SetTranscript(msgs []llm.Message) {
 	a.transcript = msgs
 	a.validatedPrefix = 0 // resumed/replaced content must be fully re-validated (r62)
 	a.retentionEpochArmed = true
+	a.clearMeasuredContext()
 	a.resetResponseState()
 }
 
@@ -928,7 +933,7 @@ func (a *Agent) ContextRequestWithContext(extraContext []string) llm.Request {
 		Tools:            a.toolSpecs,
 		ServerTools:      a.serverTools,
 		RequestContext:   extraContext,
-	}, a.window()), a.measuredInput, a.measuredBoundary)
+	}, a.window()))
 	return llm.Request{
 		Model:                a.model,
 		NativeSteering:       a.nativeSteeringEnabled(),
@@ -1166,19 +1171,13 @@ func (a *Agent) EstimateContext() ContextEstimate {
 // byte estimate of only the messages appended since (boundary..end). Using the
 // real measurement for the bulk and estimating just the delta is far more
 // accurate than a whole-request byte/4 estimate, especially with images (r44).
-// With no prior measurement (boundary 0, lastInput 0) it degrades to a full
-// transcript estimate.
-func (a *Agent) triggerTokens(lastInput, boundary int) int {
-	if lastInput <= 0 {
+// With no prior measurement it degrades to a full transcript estimate.
+func (a *Agent) triggerTokens() int {
+	if a.measuredInput == 0 {
 		return estimateTokens(a.providerVisibleMessages(a.transcript))
 	}
-	if boundary < 0 {
-		boundary = 0
-	}
-	if boundary > len(a.transcript) {
-		boundary = len(a.transcript)
-	}
-	return lastInput + estimateTokens(a.providerVisibleMessages(a.transcript[boundary:]))
+	boundary := min(a.measuredBoundary, len(a.transcript))
+	return a.measuredInput + estimateTokens(a.providerVisibleMessages(a.transcript[boundary:]))
 }
 
 // anchorContextEstimate anchors the reported context total to the last
@@ -1191,11 +1190,11 @@ func (a *Agent) triggerTokens(lastInput, boundary int) int {
 // (fresh run, or after a compaction/retention reset) the estimate passes
 // through unchanged. Per-section (system/tools/messages) estimates and the
 // payload breakdown stay estimator-based; only the reported total anchors.
-func (a *Agent) anchorContextEstimate(est ContextEstimate, lastInput, boundary int) ContextEstimate {
-	if lastInput <= 0 {
+func (a *Agent) anchorContextEstimate(est ContextEstimate) ContextEstimate {
+	if a.measuredInput == 0 {
 		return est
 	}
-	est.Total = a.triggerTokens(lastInput, boundary)
+	est.Total = a.triggerTokens()
 	est.Source = ContextEstimateSourceResponseUsageDelta
 	return est
 }
@@ -1225,7 +1224,8 @@ func (a *Agent) estimateContextForTranscript(extraContext []string, transcript [
 type turnResult struct {
 	contextPrefix   []llm.Message
 	deliveredSteers []SteerInput
-	contextInput    *int
+	contextInput    int
+	measuredPrefix  int // contextPrefix messages covered by contextInput
 	asyncResults    map[string]asyncReadResult
 	text            string
 	citations       []llm.URLCitation
@@ -1294,6 +1294,7 @@ func (c *turnAttemptCoordinator) request(ctx context.Context, req llm.Request, e
 
 func (c *turnAttemptCoordinator) rerun(ctx context.Context, previous turnResult, req llm.Request, estimate ContextEstimate) (turnResult, error) {
 	if err := c.agent.retryWait(ctx, req.Purpose, 0, c.retryReason, ctx.Err); err != nil {
+		previous.contextInput = 0 // this result did not measure the rebuilt request
 		return previous, err
 	}
 	c.abandon(previous)
@@ -1824,10 +1825,6 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 
 	var total llm.Usage
 	var maintenanceTotal llm.Usage
-	// Seed the measurement anchor from the previous prompt's final measured
-	// turn so the reported context and the r44 trigger stay anchored to
-	// actuals across prompts; compaction/retention resets below clear it.
-	lastInput := a.measuredInput // input tokens the final measured turn reported (drives the trigger)
 	var lastContext ContextEstimate
 	turns := 0
 	compactionsAtStart := a.compactions
@@ -1836,8 +1833,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	var guard turnGuard
 	a.failGuard = newFailureGuard()
 	defer func() { a.failGuard = nil }()
-	var wastedTotal llm.Usage            // tokens spent on retried-and-discarded turn attempts (r51+r52)
-	appendBoundary := a.measuredBoundary // transcript length measured by lastInput (drives the r44 trigger)
+	var wastedTotal llm.Usage // tokens spent on retried-and-discarded turn attempts (r51+r52)
 	var steerContext []string
 	forcePromptWorkSynthesis := false
 	outputContinuations := 0
@@ -1954,10 +1950,6 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		return nil
 	}
 	defer func() {
-		// Persist the measurement anchor for the next prompt and for /context;
-		// it stays zero after a compaction/retention reset until the next
-		// measured turn.
-		a.measuredInput, a.measuredBoundary = lastInput, appendBoundary
 		reason := terminationReason
 		if retErr != nil {
 			reason = TerminationError
@@ -2021,16 +2013,11 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		// Live-transcript retention (design §12, r9+r20): shrink stale large
 		// tool outputs and aged images before building the request, so they are
 		// not re-sent verbatim every turn. Pure local edit, invariant-preserving.
-		// Request-only context guidance uses the same latest provider usage
-		// anchor as this loop, including during a single long prompt.
-		if a.contextManager() != nil {
-			a.measuredInput, a.measuredBoundary = lastInput, appendBoundary
-		}
 		localRetention := a.estimateContext(nil)
 		retentionDecision := localRetention
-		if anchored := a.triggerTokens(lastInput, appendBoundary); anchored > retentionDecision.Total {
+		if anchored := a.triggerTokens(); anchored > retentionDecision.Total {
 			retentionDecision.Total = anchored
-			if lastInput > 0 {
+			if a.measuredInput > 0 {
 				retentionDecision.Source = ContextEstimateSourceResponseUsageDelta
 			}
 		}
@@ -2048,14 +2035,13 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if retention.changed {
 			retention.event.ResponseStateReset = a.responseState.PreviousResponseID != ""
 			retention.event.ContinuationStateReset = continuationPresent
-			retention.event.MeasurementAnchorReset = lastInput > 0
+			retention.event.MeasurementAnchorReset = a.measuredInput > 0
 			a.resetResponseState()
 			// The last provider measurement describes the pre-retention
 			// transcript. Do not combine it with a delta from the rewritten
 			// transcript when evaluating compaction; restart from a full local
 			// estimate just as a successful compaction does.
-			lastInput = 0
-			appendBoundary = 0
+			a.clearMeasuredContext()
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
 			if initialPromptPending && promptIndex < len(a.transcript) {
@@ -2070,17 +2056,15 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		baseRequestContext := appendPromptContext(extraContext, steerContext)
 		requestContext := a.requestContext(baseRequestContext, sink)
 		modelReq := a.modelRequest(requestContext)
-		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+		lastContext = a.anchorContextEstimate(modelReq.estimate)
 		// Proactive trigger (spec §4): a turn whose tool results balloon the
 		// context compacts before the next request, not after the turn. The
 		// trigger leans on the last real input count plus an estimate of only the
 		// messages appended since it was measured (r44), not a whole-request byte
 		// estimate.
-		if a.autoCompactionEnabled() && a.overThreshold(a.triggerTokens(lastInput, appendBoundary)) {
+		if a.autoCompactionEnabled() && a.overThreshold(a.triggerTokens()) {
 			// Only reset the trigger state when compaction actually rewrote the
-			// transcript. A no-op compaction that reset lastInput/appendBoundary
-			// would force a full-transcript re-estimate every turn with zero
-			// progress (no-op churn).
+			// transcript. A no-op keeps the measurement for the current window.
 			compUsage, changed, err := a.compactTriggered(ctx, sink, "auto")
 			if compUsage != (llm.Usage{}) {
 				total = llm.AddUsage(total, compUsage)
@@ -2088,13 +2072,9 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				reportMaintenance(sink, "compaction", compUsage)
 			}
 			if err == nil && changed {
-				// The old reported count no longer describes the compacted
-				// transcript and would re-trigger every turn.
-				lastInput = 0
-				appendBoundary = 0
 				requestContext = a.requestContext(baseRequestContext, sink)
 				modelReq = a.modelRequest(requestContext)
-				lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+				lastContext = a.anchorContextEstimate(modelReq.estimate)
 			}
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
@@ -2108,7 +2088,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			modelReq = a.modelRequest(requestContext)
 		}
 		modelReq = a.countModelRequestInput(ctx, modelReq)
-		lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+		lastContext = a.anchorContextEstimate(modelReq.estimate)
 		if a.autoCompactionEnabled() && a.overThreshold(modelReq.estimate.Total) {
 			compUsage, changed, err := a.compactTriggered(ctx, sink, "input-count")
 			if compUsage != (llm.Usage{}) {
@@ -2117,24 +2097,19 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				reportMaintenance(sink, "compaction", compUsage)
 			}
 			if err == nil && changed {
-				lastInput = 0
-				appendBoundary = 0
 				requestContext = a.requestContext(baseRequestContext, sink)
 				if err := a.validateRetainedTranscript("after input-count compaction"); err != nil {
 					return err
 				}
 				modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-				lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+				lastContext = a.anchorContextEstimate(modelReq.estimate)
 			}
 		}
 		if err := a.validateRetainedTranscript("before model request"); err != nil {
 			return err
 		}
 
-		// The request we are about to send reflects the current transcript;
-		// remember its length so the next trigger only re-estimates what gets
-		// appended after the response we are about to measure.
-		appendBoundary = len(a.transcript)
+		requestBoundary := len(a.transcript)
 		// RequestContext above may have drained a just-completed delegate report.
 		// Fold its usage before the provider call and remember whether older
 		// join-required work is still running during this parent model round.
@@ -2150,12 +2125,10 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		checkpoint(PromptCheckpointRequestBoundary)
 		attempts := newTurnAttemptCoordinator(a, sink, turns+1)
 		res, err := attempts.request(ctx, modelReq.request, lastContext)
-		rerun := func(refreshBoundary bool) {
+		rerun := func() {
 			modelReq = a.countModelRequestInput(ctx, a.modelRequest(requestContext))
-			if refreshBoundary {
-				appendBoundary = len(a.transcript)
-			}
-			lastContext = a.anchorContextEstimate(modelReq.estimate, lastInput, appendBoundary)
+			requestBoundary = len(a.transcript)
+			lastContext = a.anchorContextEstimate(modelReq.estimate)
 			res, err = attempts.rerun(ctx, res, modelReq.request, lastContext)
 		}
 		if err != nil && !res.hasPartialOutput() {
@@ -2174,10 +2147,6 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 				if cerr != nil {
 					err = cerr
 				} else {
-					if changed {
-						lastInput = 0
-						appendBoundary = 0
-					}
 					if verr := a.validateRetainedTranscript("after context-overflow compaction"); verr != nil {
 						err = verr
 					} else {
@@ -2185,7 +2154,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 							refreshed := a.requestContext(baseRequestContext, sink)
 							requestContext = appendMissingRequestContext(requestContext, refreshed)
 						}
-						rerun(true)
+						rerun()
 					}
 				}
 			}
@@ -2193,13 +2162,13 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 		if err != nil && modelReq.request.StoreResponse && !res.hasPartialOutput() && storeResponseRejected(err) {
 			a.SetResponsesStateful(false)
 			emitNotice(sink, NoticeResponsesStateDisabledRejected)
-			rerun(false)
+			rerun()
 		}
 		if err != nil && modelReq.usedPrevious && !res.hasPartialOutput() && previousResponseRejected(err) {
 			a.resetResponseState()
 			emitNotice(sink, NoticeResponsesStateResetUnavailable)
 			a.noteContinuationFailure(sink)
-			rerun(false)
+			rerun()
 		}
 		if err != nil &&
 			!res.hasPartialOutput() &&
@@ -2209,27 +2178,27 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			if a.discardCurrentNativeCompaction() {
 				notifyTranscriptRewritten(sink)
 			}
-			lastInput = 0
-			appendBoundary = 0
+			a.clearMeasuredContext()
 			emitNotice(sink, NoticeNativeCompactionReplayDisabled)
-			rerun(false)
+			rerun()
 		}
 		if err != nil &&
 			!res.hasPartialOutput() &&
 			hasProviderOwnedReasoning(modelReq.request.Messages) &&
 			invalidEncryptedContent(err) {
 			a.disableCurrentReasoningReplay()
+			a.clearMeasuredContext()
 			emitNotice(sink, NoticeReasoningReplayDisabled)
-			rerun(false)
+			rerun()
 		}
 		wasted := attempts.wasted
 		wastedTotal = llm.AddUsage(wastedTotal, wasted)
 		total = llm.AddUsage(total, llm.AddUsage(res.usage, wasted))
-		// Context-size signal, not billing: cached tokens occupy the window too.
-		lastInput = res.usage.InputTokens + res.usage.CacheReadTokens +
-			res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
-		if res.contextInput != nil {
-			lastInput = *res.contextInput
+		// Only advance the boundary when the response measured this input.
+		// Otherwise the previous count still covers its original prefix.
+		if res.contextInput > 0 {
+			a.measuredInput = res.contextInput
+			a.measuredBoundary = requestBoundary + res.measuredPrefix
 		}
 
 		if err != nil {
@@ -2298,7 +2267,6 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 
 		completeTurn()
 		a.transcript = append(a.transcript, res.contextPrefix...)
-		appendBoundary += len(res.contextPrefix)
 		if len(res.contextPrefix) > 0 {
 			if err := a.validateTranscript("after native steering"); err != nil {
 				return err
@@ -2405,7 +2373,7 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 
 		checkpoint(PromptCheckpointToolDispatch)
 		executionCalls := executionToolCalls(res.toolCalls)
-		liveInputTokens := a.toolDispatchLiveInputTokens(lastInput, appendBoundary, lastContext)
+		liveInputTokens := a.toolDispatchLiveInputTokens(requestBoundary, modelReq.estimate)
 		if manager := a.continuityManager(); manager != nil {
 			manager.SetContextBudget(max(0, a.contextRemaining(liveInputTokens)), a.contextSoftLimit())
 		}
@@ -2549,7 +2517,6 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 			if changed, err := a.applyContextEpoch(ctx, sink); err != nil {
 				emitNotice(sink, "[work context checkpoint failed; continuing current context: "+err.Error()+"]")
 			} else if changed {
-				lastInput, appendBoundary = 0, 0
 				lastContext = a.estimateContext(nil)
 				checkpoint(PromptCheckpointClosedTurn)
 			}
@@ -2591,15 +2558,13 @@ func (a *Agent) runPromptLoopWithContext(ctx context.Context, promptIndex int, i
 	// error never fails the prompt — the warning was already reported and
 	// the transcript was kept intact.
 	lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
-	compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(lastInput, appendBoundary), sink)
+	compUsage, changed, err := a.MaybeCompact(ctx, a.triggerTokens(), sink)
 	if compUsage != (llm.Usage{}) {
 		total = llm.AddUsage(total, compUsage)
 		maintenanceTotal = llm.AddUsage(maintenanceTotal, compUsage)
 		reportMaintenance(sink, "compaction", compUsage)
 	}
 	if err == nil && changed {
-		lastInput = 0
-		appendBoundary = 0
 		lastContext = a.estimateContext(a.estimateRequestContext(appendPromptContext(extraContext, steerContext), sink))
 	}
 	if err := a.validateTranscript("after prompt"); err != nil {
@@ -2981,17 +2946,11 @@ func withReadResultBatchBudget(ctx context.Context, maxBytes int, reserveHookCon
 // toolDispatchLiveInputTokens combines the current request's full estimate with
 // the assistant message appended after it when provider usage is unavailable.
 // With measured usage, triggerTokens keeps the actual-input-plus-delta path.
-func (a *Agent) toolDispatchLiveInputTokens(lastInput, boundary int, requestEstimate ContextEstimate) int {
-	if lastInput > 0 {
-		return a.triggerTokens(lastInput, boundary)
+func (a *Agent) toolDispatchLiveInputTokens(requestBoundary int, requestEstimate ContextEstimate) int {
+	if a.measuredInput > 0 {
+		return a.triggerTokens()
 	}
-	if boundary < 0 {
-		boundary = 0
-	}
-	if boundary > len(a.transcript) {
-		boundary = len(a.transcript)
-	}
-	return requestEstimate.Total + estimateTokens(a.providerVisibleMessages(a.transcript[boundary:]))
+	return requestEstimate.Total + estimateTokens(a.providerVisibleMessages(a.transcript[requestBoundary:]))
 }
 
 // readResultBatchByteBudget reserves the next response's resolved output
@@ -3991,6 +3950,7 @@ func (a *Agent) streamWithRetry(ctx context.Context, req llm.Request, sink Event
 			res.content = nil
 			res.toolCalls = nil
 			res.usage = llm.Usage{}
+			res.contextInput = 0
 			return res, wasted, serr
 		}
 	}
@@ -4153,7 +4113,19 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 	res.modelCall = call
 	bridge := a.newNativeSteerBridge(ctx, req)
 	var previousUsage llm.Usage
+	var reportedUsage llm.Usage
+	recordContextInput := func() {
+		// Cached tokens occupy context too. A usage report containing only
+		// output or spend supplies no measurement of the request's input.
+		input := reportedUsage.InputTokens + reportedUsage.CacheReadTokens +
+			reportedUsage.CacheWriteTokens + reportedUsage.CacheWrite1hTokens
+		if input > 0 {
+			res.contextInput = input
+			res.measuredPrefix = len(res.contextPrefix)
+		}
+	}
 	defer func() {
+		recordContextInput()
 		prefixLen, hadText := len(res.contextPrefix), res.text != ""
 		bridge.finish(&res, &retErr, sink)
 		if hadText && res.text == "" && len(res.contextPrefix) > prefixLen {
@@ -4161,8 +4133,6 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 			// while moving pending steering into history instead of retrying.
 			call.Retain()
 		}
-		currentInput := res.usage.InputTokens + res.usage.CacheReadTokens + res.usage.CacheWriteTokens + res.usage.CacheWrite1hTokens
-		res.contextInput = &currentInput
 		res.usage = llm.AddUsage(previousUsage, res.usage)
 	}()
 	reads := a.newAsyncReads(ctx, req)
@@ -4177,6 +4147,9 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 
 	for ev, err := range a.provider.Stream(ctx, req) {
 		call.ObserveStream(ev)
+		if ev.HasReportedUsage() {
+			reportedUsage = mergeUsage(reportedUsage, *ev.Usage)
+		}
 		if err != nil {
 			if ev.Usage != nil {
 				res.usage = mergeUsage(res.usage, *ev.Usage)
@@ -4201,6 +4174,8 @@ func (a *Agent) stream(ctx context.Context, req llm.Request, sink EventSink) (re
 			if ev.LiveSteer.Status == "applied" {
 				if ev.LiveSteer.Boundary {
 					call.Retain()
+					recordContextInput()
+					reportedUsage = llm.Usage{}
 					if ev.Usage != nil {
 						res.usage = mergeUsage(res.usage, *ev.Usage)
 					}

@@ -134,7 +134,7 @@ func TestNativeCompactionKeepsSemanticTranscriptAndReplaysCanonicalWindow(t *tes
 		checkpoint.Content[0].Kind != llm.BlockProviderCompaction {
 		t.Fatalf("checkpoint = %+v", checkpoint)
 	}
-	if got, want := a.triggerTokens(0, 0), estimateTokens(a.providerVisibleMessages(transcript)); got != want {
+	if got, want := a.triggerTokens(), estimateTokens(a.providerVisibleMessages(transcript)); got != want {
 		t.Fatalf("post-compaction trigger estimate = %d, want provider-visible %d", got, want)
 	} else if got >= estimateTokens(transcript) {
 		t.Fatalf("post-compaction trigger still counts preserved semantic history: visible=%d full=%d", got, estimateTokens(transcript))

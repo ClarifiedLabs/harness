@@ -6438,6 +6438,80 @@ func TestReportedContextAnchorsToMeasuredUsage(t *testing.T) {
 	}
 }
 
+func TestContextMeasurementSurvivesResponsesWithoutInputUsage(t *testing.T) {
+	synthetic := false
+	fp := llmtest.New("fake",
+		llmtest.Step{
+			Events: []llm.StreamEvent{textDelta("measured")},
+			Stop:   llm.StopEndTurn,
+			Usage:  llm.Usage{InputTokens: 800, CacheReadTokens: 100, CacheWriteTokens: 50, CacheWrite1hTokens: 50},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("unmeasured answer")}, Stop: llm.StopEndTurn},
+		llmtest.Step{
+			Events: []llm.StreamEvent{
+				{Kind: llm.EventUsage, Usage: &llm.Usage{InputTokens: 42}, UsageReported: &synthetic},
+				textDelta("answer with output-only usage"),
+			},
+			Stop:  llm.StopEndTurn,
+			Usage: llm.Usage{OutputTokens: 7},
+		},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("retained partial answer")}, Err: context.Canceled},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("measured again")}, Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 1200}},
+	)
+	a := newAgent(fp, &tools.Registry{}, Options{DisableAutoCompaction: true})
+	for i, tc := range []struct {
+		prompt string
+		err    error
+		count  int
+	}{
+		{"first prompt", nil, 1000},
+		{"prompt with missing usage", nil, 1000},
+		{"prompt with output-only usage", nil, 1000},
+		{"interrupted prompt", context.Canceled, 1000},
+		{"next measured prompt", nil, 1200},
+	} {
+		sink := &recordSink{}
+		if err := a.RunPrompt(context.Background(), tc.prompt, sink); !errors.Is(err, tc.err) {
+			t.Fatalf("prompt %d: got %v, want %v", i, err, tc.err)
+		}
+		boundary := 1
+		if tc.count == 1200 {
+			boundary = len(fp.Requests[i].Messages)
+		}
+		if got := a.measuredBoundary; got != boundary {
+			t.Fatalf("prompt %d: measured boundary = %d, want %d", i, got, boundary)
+		}
+		want := tc.count + estimateTokens(a.Transcript()[boundary:])
+		if got := a.ContextRequest().EstimatedInputTokens; got != want {
+			t.Fatalf("prompt %d: /context = %d, want %d", i, got, want)
+		}
+	}
+}
+
+func TestUnmeasuredResponseCanTriggerCompactionFromLastMeasurement(t *testing.T) {
+	fp := llmtest.New("fake",
+		llmtest.Step{Events: []llm.StreamEvent{textDelta("measured")}, Stop: llm.StopEndTurn, Usage: llm.Usage{InputTokens: 4800}},
+		llmtest.Step{Events: []llm.StreamEvent{textDelta(strings.Repeat("unmeasured answer ", 100))}, Stop: llm.StopEndTurn},
+		summaryStep("Earlier work summarized.", 100, 10),
+	)
+	a := newAgent(fp, &tools.Registry{}, Options{
+		ContextWindow: 10_000, CompactTriggerPercent: 50, CompactKeepTurns: 1,
+		RetentionPolicy: RetentionPolicyDisabled,
+	})
+	sink := &recordSink{}
+	for _, prompt := range []string{"first prompt", "continue"} {
+		if err := a.RunPrompt(context.Background(), prompt, sink); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(fp.Requests) != 3 || fp.Requests[2].Purpose != llm.RequestPurposeCompaction {
+		t.Fatalf("want one post-prompt compaction request, got %d requests and %d compactions", len(fp.Requests), a.compactions)
+	}
+	if a.measuredInput != 0 || a.measuredBoundary != 0 || a.compactions != 1 {
+		t.Fatalf("after compaction: measured count=%d boundary=%d compactions=%d", a.measuredInput, a.measuredBoundary, a.compactions)
+	}
+}
+
 // TestMeasuredAnchorClearsAfterCompaction pins the fallback half of WI-2: a
 // compaction that rewrites the transcript clears the measured anchor, so the
 // reported context returns to the local estimate until the next measured turn

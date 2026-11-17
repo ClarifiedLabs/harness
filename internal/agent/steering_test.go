@@ -14,8 +14,9 @@ import (
 
 type liveFakeProvider struct {
 	*llmtest.FakeProvider
-	incoming chan llm.SteerSubmission
-	start    func()
+	incoming   chan llm.SteerSubmission
+	start      func()
+	finalUsage *llm.Usage
 }
 
 func (p *liveFakeProvider) Steer(ctx context.Context, input llm.SteerSubmission) error {
@@ -48,40 +49,55 @@ func (p *liveFakeProvider) Stream(ctx context.Context, req llm.Request) iter.Seq
 		if !yield(llm.StreamEvent{Kind: llm.EventTextDelta, Text: "updated"}, nil) {
 			return
 		}
-		yield(llm.StreamEvent{Kind: llm.EventDone, ResponseID: "second", StopReason: llm.StopEndTurn, Usage: &llm.Usage{InputTokens: 120, OutputTokens: 12}}, nil)
+		yield(llm.StreamEvent{Kind: llm.EventDone, ResponseID: "second", StopReason: llm.StopEndTurn, Usage: p.finalUsage}, nil)
 	}
 }
+
 func TestNativeSteeringPreservesOrderAndUsesFinalContextSize(t *testing.T) {
-	p := &liveFakeProvider{FakeProvider: llmtest.New("astra"), incoming: make(chan llm.SteerSubmission)}
-	a := newAgent(p, tools.Default(), Options{Model: "astra", Registry: llm.NewRegistry(map[string]llm.ModelInfo{"astra": {NativeSteering: true, ContextWindow: 100000}}), AstraNativeSteering: true, ResponsesStateful: true, Steer: true})
-	p.start = func() {
-		if !a.Steer("new constraint") {
-			t.Error("steer rejected")
-		}
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	sink := &recordSink{}
-	if err := a.RunPrompt(ctx, "initial objective", sink); err != nil {
-		t.Fatal(err)
-	}
-	messages := a.Transcript()
-	if len(messages) != 4 || messages[1].Content[0].Text != "original" || messages[2].Origin != llm.MessageOriginSteer || messages[2].Content[0].Text != "new constraint" || messages[3].Content[0].Text != "updated" {
-		t.Fatalf("transcript: %+v", messages)
-	}
-	if err := llm.ValidateTranscript(messages); err != nil {
-		t.Fatal(err)
-	}
-	if a.measuredInput != 120 {
-		t.Fatalf("active context measured %d, want 120", a.measuredInput)
-	}
-	if got := sink.promptUsage[0].Usage.InputTokens; got != 220 {
-		t.Fatalf("billed input=%d, want 220", got)
-	}
-	if len(a.nativePending) != 0 || len(a.DrainSteerContents()) != 0 {
-		t.Fatal("applied input remained queued")
+	for _, tc := range []struct {
+		name       string
+		finalUsage *llm.Usage
+		measured   int
+		boundary   int
+		billed     int
+	}{
+		{"final usage reported", &llm.Usage{InputTokens: 120, OutputTokens: 12}, 120, 3, 220},
+		{"final usage missing", nil, 100, 1, 100},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := &liveFakeProvider{FakeProvider: llmtest.New("astra"), incoming: make(chan llm.SteerSubmission), finalUsage: tc.finalUsage}
+			a := newAgent(p, tools.Default(), Options{Model: "astra", Registry: llm.NewRegistry(map[string]llm.ModelInfo{"astra": {NativeSteering: true, ContextWindow: 100000}}), AstraNativeSteering: true, ResponsesStateful: true, Steer: true})
+			p.start = func() {
+				if !a.Steer("new constraint") {
+					t.Error("steer rejected")
+				}
+			}
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			sink := &recordSink{}
+			if err := a.RunPrompt(ctx, "initial objective", sink); err != nil {
+				t.Fatal(err)
+			}
+			messages := a.Transcript()
+			if len(messages) != 4 || messages[1].Content[0].Text != "original" || messages[2].Origin != llm.MessageOriginSteer || messages[2].Content[0].Text != "new constraint" || messages[3].Content[0].Text != "updated" {
+				t.Fatalf("transcript: %+v", messages)
+			}
+			if err := llm.ValidateTranscript(messages); err != nil {
+				t.Fatal(err)
+			}
+			if a.measuredInput != tc.measured || a.measuredBoundary != tc.boundary {
+				t.Fatalf("active context measurement = %d at %d, want %d at %d", a.measuredInput, a.measuredBoundary, tc.measured, tc.boundary)
+			}
+			if got := sink.promptUsage[0].Usage.InputTokens; got != tc.billed {
+				t.Fatalf("billed input = %d, want %d", got, tc.billed)
+			}
+			if len(a.nativePending) != 0 || len(a.DrainSteerContents()) != 0 {
+				t.Fatal("applied input remained queued")
+			}
+		})
 	}
 }
+
 func TestPendingNativeSteeringResumesBeforeNewUserInputOnce(t *testing.T) {
 	a := newAgent(llmtest.New("fake"), tools.Default(), Options{Steer: true})
 	a.SetTranscript(makeTurns(1))
