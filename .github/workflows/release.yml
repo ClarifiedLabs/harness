@@ -568,18 +568,8 @@ jobs:
           curl -fsSL -o "${RUNNER_TEMP}/source.tar.gz" "$SOURCE_URL"
           SOURCE_SHA256="$(shasum -a 256 "${RUNNER_TEMP}/source.tar.gz" | awk '{print $1}')"
           SOURCE_URL="$SOURCE_URL" SOURCE_SHA256="$SOURCE_SHA256" scripts/release/homebrew-formula.sh
-          cd "$TAP_DIR"
-          shopt -s nullglob
-          bottle_jsons=("${GITHUB_WORKSPACE}"/bottles/*.json)
-          shopt -u nullglob
-          if [[ ${#bottle_jsons[@]} -eq 0 ]]; then
-            echo "no bottle JSON artifacts found" >&2
-            exit 1
-          fi
-          for bottle_json in "${bottle_jsons[@]}"; do
-            brew bottle --merge --write --no-commit "$bottle_json"
-          done
-          git diff -- Formula
+          scripts/release/homebrew-bottles.sh "${GITHUB_WORKSPACE}/bottles"
+          git -C "$TAP_DIR" diff -- Formula
           echo "Dry run only: would update ClarifiedLabs/homebrew-tap for ${TAG}"
 
   homebrew-publish:
@@ -645,17 +635,7 @@ jobs:
           curl -fsSL -o "${RUNNER_TEMP}/source.tar.gz" "$SOURCE_URL"
           SOURCE_SHA256="$(shasum -a 256 "${RUNNER_TEMP}/source.tar.gz" | awk '{print $1}')"
           SOURCE_URL="$SOURCE_URL" SOURCE_SHA256="$SOURCE_SHA256" scripts/release/homebrew-formula.sh
-          cd "$TAP_DIR"
-          shopt -s nullglob
-          bottle_jsons=("${GITHUB_WORKSPACE}"/bottles/*.json)
-          shopt -u nullglob
-          if [[ ${#bottle_jsons[@]} -eq 0 ]]; then
-            echo "no bottle JSON artifacts found" >&2
-            exit 1
-          fi
-          for bottle_json in "${bottle_jsons[@]}"; do
-            brew bottle --merge --write --no-commit "$bottle_json"
-          done
+          scripts/release/homebrew-bottles.sh "${GITHUB_WORKSPACE}/bottles"
 
       - name: Commit tap update
         env:
