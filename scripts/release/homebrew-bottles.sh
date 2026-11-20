@@ -30,7 +30,9 @@ for formula in "${formulas[@]}"; do
       echo "Invalid or missing bottle metadata: $metadata" >&2
       exit 1
     fi
-    if ! (cd "$bottles_dir" && printf '%s  %s\n' "$checksum" "$archive" | sha256sum --check --status); then
+    # Hash stdin: some sha256sum implementations lack GNU's --status.
+    if ! digest="$(sha256sum < "${bottles_dir}/${archive}")" ||
+      [[ "${digest%%[[:space:]]*}" != "$checksum" ]]; then
       echo "Missing or mismatched bottle archive: $archive" >&2
       exit 1
     fi

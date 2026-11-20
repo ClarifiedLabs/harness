@@ -45,10 +45,15 @@ func TestHomebrewFormulaeDisableGoWorkspace(t *testing.T) {
 func TestHomebrewBottleMerge(t *testing.T) {
 	// The release jobs run on Linux with these tools preinstalled. Keep the
 	// regression test runnable without installing Homebrew or building bottles.
-	for _, tool := range []string{"bash", "jq", "sha256sum"} {
+	for _, tool := range []string{"bash", "jq"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			t.Skipf("%s is required", tool)
 		}
+	}
+
+	sha256sum, err := exec.LookPath("sha256sum")
+	if err != nil {
+		t.Skip("sha256sum is required")
 	}
 
 	for _, tc := range []struct {
@@ -57,6 +62,7 @@ func TestHomebrewBottleMerge(t *testing.T) {
 		{"all platforms", ""},
 		{"missing metadata", "Invalid or missing bottle metadata"},
 		{"bad archive", "Missing or mismatched bottle archive"},
+		{"checksum command failure", "Missing or mismatched bottle archive"},
 		{"incomplete merge", "Merged formulas do not advertise the expected bottle platforms and checksums"},
 		{"incorrect merged hash", "Merged formulas do not advertise the expected bottle platforms and checksums"},
 	} {
@@ -117,6 +123,18 @@ func TestHomebrewBottleMerge(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			// This sha256sum accepts stdin but rejects GNU-only options.
+			write(filepath.Join(root, "sha256sum"), []byte(`#!/usr/bin/env bash
+set -euo pipefail
+if (( $# != 0 )); then
+  echo "usage: sha256sum [-bctwz] [files ...]" >&2
+  exit 1
+fi
+"$REAL_SHA256SUM"
+if [[ "$FAIL_CHECKSUM" == "true" ]]; then
+  exit 1
+fi
+`), 0o755)
 			write(filepath.Join(root, "brew"), []byte(`#!/usr/bin/env bash
 set -euo pipefail
 case "$1" in
@@ -135,7 +153,8 @@ esac
 			cmd := exec.Command("bash", "scripts/release/homebrew-bottles.sh", dumpDir)
 			cmd.Env = append(os.Environ(), "PATH="+root+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"TAP_DIR="+root, "TAG=v0.5.67", "GITHUB_REPOSITORY=ClarifiedLabs/harness",
-				"CALL_MARKER="+filepath.Join(root, "merged"), "MOCK_BREW_INFO="+string(encoded))
+				"CALL_MARKER="+filepath.Join(root, "merged"), "MOCK_BREW_INFO="+string(encoded),
+				"REAL_SHA256SUM="+sha256sum, fmt.Sprintf("FAIL_CHECKSUM=%t", tc.name == "checksum command failure"))
 			output, err := cmd.CombinedOutput()
 			if tc.wantError == "" {
 				if err != nil {
