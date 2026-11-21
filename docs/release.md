@@ -175,8 +175,11 @@ The tap repository must already exist with an initialized default branch. No
 formula file is required ahead of time; the release workflow writes the formula
 files, verifies each platform archive against its bottle metadata, and merges
 all platform metadata together. Both publishing and the dry run check that
-each merged formula advertises the expected three platforms and their exact
-checksums. Go builds in the binary formulae
+each merged formula advertises the expected three platforms, checksums, and
+download URLs. Build artifacts retain Homebrew's local double-hyphen names for
+the tap merge. The release job stages each archive under Homebrew's public
+filename from the bottle JSON before generating `checksums.txt`. The workflow
+also checks that the published URLs resolve before pushing the tap update. Go builds in the binary formulae
 set `GOWORK=off` so unrelated workspaces (including a `go.work` in a parent
 temporary directory) cannot interfere with source builds.
 
