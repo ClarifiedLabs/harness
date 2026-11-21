@@ -390,6 +390,11 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Stage Homebrew release bottle filenames
+        env:
+          TAG: ${{ env.RELEASE_VERSION }}
+        run: scripts/release/homebrew-bottles.sh --stage-release dist
+
       - name: Generate checksums
         run: scripts/release/checksums.sh
 
@@ -479,6 +484,11 @@ jobs:
           pattern: homebrew-bottle-*
           path: dist
           merge-multiple: true
+
+      - name: Stage Homebrew release bottle filenames
+        env:
+          TAG: ${{ env.RELEASE_VERSION }}
+        run: scripts/release/homebrew-bottles.sh --stage-release dist
 
       - name: Generate checksums
         run: scripts/release/checksums.sh
@@ -629,6 +639,7 @@ jobs:
         env:
           TAG: ${{ env.RELEASE_VERSION }}
           SOURCE_REF: ${{ env.RELEASE_SOURCE_REF }}
+          VERIFY_RELEASE_DOWNLOADS: "1"
         run: |
           cd source
           SOURCE_URL="https://github.com/${GITHUB_REPOSITORY}/archive/${SOURCE_REF}.tar.gz"
